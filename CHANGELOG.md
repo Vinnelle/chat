@@ -6,6 +6,10 @@
 - On Linux, `:update` saved the new binary as `chat (deleted)` instead of replacing
   `chat` when the executable had been replaced (for example rebuilt) while chat was running.
 
+### Added
+- `/port [N]` shows this session's UDP port, or moves the session to port `N` without
+  leaving it (`0` picks a free one). Connected peers follow the new port automatically.
+
 ## 0.1.1
 
 ### Added
