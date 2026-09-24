@@ -513,3 +513,77 @@ int platform_spawn_thread(void (*fn)(void *), void *arg) {
     CloseHandle(h);
     return 0;
 }
+
+int platform_remove(const char *utf8_path) {
+    wchar_t wp[1400];
+    if (!to_wide(utf8_path, wp, 1400)) return -1;
+    return DeleteFileW(wp) ? 0 : -1;
+}
+
+int platform_exe_path(char *out, size_t cap) {
+    wchar_t w[1024];
+    DWORD n = GetModuleFileNameW(NULL, w, 1024);
+    if (n == 0 || n >= 1024) return -1;
+    if (WideCharToMultiByte(CP_UTF8, 0, w, -1, out, (int)cap, NULL, NULL) <= 0) return -1;
+    for (char *p = out; *p; p++) if (*p == '\\') *p = '/';
+    return 0;
+}
+
+static int append_quoted(wchar_t *cmd, size_t cap, size_t *pos, const char *arg) {
+    wchar_t w[1400];
+    if (!to_wide(arg, w, 1400)) return -1;
+    size_t need = 3 + wcslen(w) * 2;
+    if (*pos + need + 1 >= cap) return -1;
+    if (*pos) cmd[(*pos)++] = L' ';
+    cmd[(*pos)++] = L'"';
+    size_t slashes = 0;
+    for (const wchar_t *c = w; *c; c++) {
+        if (*c == L'\\') { slashes++; cmd[(*pos)++] = L'\\'; continue; }
+        if (*c == L'"') { while (slashes--) cmd[(*pos)++] = L'\\'; cmd[(*pos)++] = L'\\'; }
+        slashes = 0;
+        cmd[(*pos)++] = *c;
+    }
+    while (slashes--) cmd[(*pos)++] = L'\\';
+    cmd[(*pos)++] = L'"';
+    cmd[*pos] = L'\0';
+    return 0;
+}
+
+int platform_run_quiet(const char *const argv[]) {
+    wchar_t cmd[8192];
+    size_t pos = 0;
+    cmd[0] = L'\0';
+    for (int i = 0; argv[i]; i++)
+        if (append_quoted(cmd, sizeof cmd / sizeof cmd[0], &pos, argv[i]) != 0) return -1;
+
+    SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, TRUE };
+    HANDLE nul = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             &sa, OPEN_EXISTING, 0, NULL);
+    if (nul == INVALID_HANDLE_VALUE) return -1;
+    STARTUPINFOW si;
+    memset(&si, 0, sizeof si);
+    si.cb = sizeof si;
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = si.hStdOutput = si.hStdError = nul;
+    PROCESS_INFORMATION pi;
+    BOOL ok = CreateProcessW(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    CloseHandle(nul);
+    if (!ok) return -1;
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return code == 0 ? 0 : -1;
+}
+
+int platform_replace_exe(const char *new_path, const char *exe_path) {
+    wchar_t wnew[1400], wexe[1400], wold[1400];
+    char old[1100];
+    snprintf(old, sizeof old, "%s.old", exe_path);
+    if (!to_wide(new_path, wnew, 1400) || !to_wide(exe_path, wexe, 1400) || !to_wide(old, wold, 1400)) return -1;
+    DeleteFileW(wold);
+    if (!MoveFileExW(wexe, wold, MOVEFILE_REPLACE_EXISTING)) return -1;
+    if (!MoveFileExW(wnew, wexe, 0)) { MoveFileExW(wold, wexe, 0); return -1; }
+    return 0;
+}

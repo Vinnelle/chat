@@ -8,6 +8,7 @@
 #include "platform.h"
 #include "tui.h"
 #include "util.h"
+#include "update.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -47,7 +48,7 @@ static const char *USAGE =
     "The input line is a small vim: it starts in INSERT (type immediately, as always); Esc\n"
     "drops to NORMAL for h/l cursor movement, i/a/I/A back to INSERT, x to delete a character.\n"
     "':' from NORMAL opens a command line: :new :join :close (:bd/:bw) :nick NAME :sign\n"
-    ":copyid :verify NICK :net :peers :colour :notify :help :q :qa\n"
+    ":copyid :verify NICK :net :peers :colour :notify :update :help :q :qa\n"
     "\n"
     "  --nick      display name; a random one (\"swift-otter42\"-style) is assigned if\n"
     "              omitted - /nick or :nick renames it anytime, shared by every session\n"
@@ -436,7 +437,7 @@ static void colon_first_word(const char *cmd, char *out, size_t out_cap) {
 static int colon_word_is_known(const char *cmd) {
     static const char *known[] = { "q", "quit", "close", "bd", "bw", "qa", "qall", "quitall",
                                     "new", "join", "nick", "sign", "copyid", "verify", "netverbose",
-                                    "net", "peers", "colour", "color", "notify", "help" };
+                                    "net", "peers", "colour", "color", "notify", "update", "help" };
     char word[16]; colon_first_word(cmd, word, sizeof word);
     for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++)
         if (strcmp(word, known[i]) == 0) return 1;
@@ -494,11 +495,14 @@ static void run_colon_command(const char *cmd) {
         run_session_slash("/colour", arg);
     } else if (strcmp(word, "notify") == 0) {
         run_session_slash("/notify", arg);
+    } else if (strcmp(word, "update") == 0) {
+        if (update_start() == 0) push_log("* update: checking GitHub for a newer release (v" CHAT_VERSION " here)...");
+        else push_log("* update: already running");
     } else if (strcmp(word, "help") == 0) {
         run_session_slash("/help", NULL);
     } else {
         push_log("* unknown command: %s (try :new :join :close :nick :sign :copyid :verify "
-                  ":netverbose :net :peers :colour :notify :help :q :qa)", word);
+                  ":netverbose :net :peers :colour :notify :update :help :q :qa)", word);
     }
 }
 
@@ -929,6 +933,9 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
         for (int i = 0; i < MAX_SESSIONS; i++)
             if (g_app.used[i]) chat_tick(&g_app.sessions[i].engine, now_seconds());
 
+        char update_msg[UPDATE_MSG_MAX];
+        if (update_poll(update_msg, sizeof update_msg)) push_log("%s", update_msg);
+
         if (term_resized()) g_app.dirty = 1;
         if (now >= next_ui_tick) { next_ui_tick = now + 1.0; g_app.dirty = 1; }
         if (g_app.dirty) { render(); g_app.dirty = 0; g_app.input_dirty = 0; }
@@ -1068,7 +1075,7 @@ int main(int argc, char **argv) {
             if (strncmp(v, "pgp:", 4) == 0) { copy_str(identity_arg, "pgp", sizeof identity_arg); copy_str(pgp_key_path, v + 4, sizeof pgp_key_path); }
             else copy_str(identity_arg, v, sizeof identity_arg);
         } else if (strcmp(key, "version") == 0) {
-            printf("chat, built %s (wire: hybrid X25519+ML-KEM-768, chunked handshake)\n", CHAT_BUILD_STAMP);
+            printf("chat " CHAT_VERSION ", built %s (wire: hybrid X25519+ML-KEM-768, chunked handshake)\n", CHAT_BUILD_STAMP);
             return 0;
         } else if (strcmp(key, "h") == 0 || strcmp(key, "help") == 0 || strcmp(key, "?") == 0) {
             fputs(USAGE, stdout);
@@ -1081,6 +1088,7 @@ int main(int argc, char **argv) {
     }
 
     platform_harden_process();
+    update_cleanup_stale();
 
     crypto_setup();
     net_startup();

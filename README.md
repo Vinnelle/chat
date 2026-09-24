@@ -27,6 +27,15 @@ Use `/verify NICK` (or `:verify NICK`) to compare a peer's identity out-of-band.
 
 > **Note:** the cryptography here has not been independently audited.
 
+## Download
+
+Prebuilt Linux and Windows x86_64 binaries are on the
+[releases page](https://github.com/Vinnelle/chat/releases), with a `SHA256SUMS` file:
+
+```sh
+sha256sum -c --ignore-missing SHA256SUMS
+```
+
 ## Build
 
 Requires CMake ≥ 3.15 and a C compiler. libsodium (1.0.20) and liboqs (0.16.0, ML-KEM-768
@@ -71,7 +80,15 @@ at the bottom. The input line is a small vim: it starts in INSERT; Esc drops to 
 | `Ctrl+C` | quit (every session leaves cleanly first) |
 
 Commands work typed (`/peers`, `/nick`, `/verify NICK`, `/net`, `/help`, ...) or as `:`
-commands (`:new`, `:join`, `:sign`, `:copyid`, `:q`, `:qa`, ...).
+commands (`:new`, `:join`, `:sign`, `:copyid`, `:update`, `:q`, `:qa`, ...).
+
+### Updating
+
+`:update` checks the [latest GitHub release](https://github.com/Vinnelle/chat/releases/latest).
+If it is newer than the running build, chat downloads the binary for your platform, checks
+its SHA-256 against the release's `SHA256SUMS`, and replaces the executable in place.
+Restart chat to run the new version. It needs `curl` on `PATH` (built into Windows 10+) and
+write access to the folder that holds the executable.
 
 ### Options
 

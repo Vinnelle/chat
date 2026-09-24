@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Copyright (C) 2026 finlay@tuta.com
 cmake_minimum_required(VERSION 3.15)
-project(chat C)
+project(chat VERSION 0.1.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -73,6 +73,7 @@ add_executable(chat
     src/age.c
     src/pgp.c
     src/tui.c
+    src/update.c
     src/${CHAT_OS}/net.c
     src/${CHAT_OS}/platform.c
 )
@@ -81,6 +82,7 @@ add_custom_target(build_stamp ALL
     COMMAND ${CMAKE_COMMAND} -DOUT=${CMAKE_BINARY_DIR}/build_stamp.h -P ${CMAKE_SOURCE_DIR}/cmake/stamp.cmake
     BYPRODUCTS ${CMAKE_BINARY_DIR}/build_stamp.h)
 add_dependencies(chat libsodium_ext liboqs_ext build_stamp)
+target_compile_definitions(chat PRIVATE CHAT_VERSION="${PROJECT_VERSION}")
 target_include_directories(chat PRIVATE src src/${CHAT_OS} ${CMAKE_BINARY_DIR} ${SODIUM_INCLUDE_DIRS} ${OQS_INCLUDE_DIRS})
 target_link_libraries(chat PRIVATE ${SODIUM_STATIC_LIB} ${OQS_STATIC_LIB})
 

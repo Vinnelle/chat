@@ -201,7 +201,7 @@ static int normal_feed(tui_input_t *in, const tui_key_t *key) {
 }
 
 static const char *CMD_WORDS[] = { "new", "join", "close", "nick", "sign", "copyid", "verify", "netverbose",
-                                    "net", "peers", "colour", "color", "notify", "help",
+                                    "net", "peers", "colour", "color", "notify", "update", "help",
                                     "quit", "quitall", "q", "qa", "qall", "bd", "bw" };
 #define N_CMD_WORDS (int)(sizeof(CMD_WORDS) / sizeof(CMD_WORDS[0]))
 

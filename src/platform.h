@@ -57,4 +57,12 @@ FILE *platform_fopen(const char *utf8_path, const char *mode);
 
 FILE *platform_fopen_private(const char *utf8_path, const char *mode);
 
+int platform_remove(const char *utf8_path);
+
+int platform_exe_path(char *out, size_t cap);
+
+int platform_run_quiet(const char *const argv[]);
+
+int platform_replace_exe(const char *new_path, const char *exe_path);
+
 #endif

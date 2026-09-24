@@ -351,3 +351,36 @@ int platform_spawn_thread(void (*fn)(void *), void *arg) {
     pthread_detach(t);
     return 0;
 }
+
+int platform_remove(const char *utf8_path) {
+    return unlink(utf8_path);
+}
+
+int platform_exe_path(char *out, size_t cap) {
+    ssize_t n = readlink("/proc/self/exe", out, cap - 1);
+    if (n <= 0 || (size_t)n >= cap - 1) return -1;
+    out[n] = '\0';
+    return 0;
+}
+
+int platform_run_quiet(const char *const argv[]) {
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_addopen(&fa, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+    posix_spawn_file_actions_adddup2(&fa, STDOUT_FILENO, STDERR_FILENO);
+    pid_t pid;
+    int status = -1;
+    int rc = posix_spawnp(&pid, argv[0], &fa, NULL, (char *const *)argv, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    if (rc != 0) return -1;
+    while (waitpid(pid, &status, 0) < 0) if (errno != EINTR) return -1;
+    return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : -1;
+}
+
+int platform_replace_exe(const char *new_path, const char *exe_path) {
+    struct stat st;
+    mode_t mode = (stat(exe_path, &st) == 0) ? (st.st_mode & 07777) : 0755;
+    if (chmod(new_path, mode | 0100) != 0) return -1;
+    return rename(new_path, exe_path);
+}
