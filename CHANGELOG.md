@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2
+
+### Fixed
+- On Linux, `:update` saved the new binary as `chat (deleted)` instead of replacing
+  `chat` when the executable had been replaced (for example rebuilt) while chat was running.
+
 ## 0.1.1
 
 ### Added
