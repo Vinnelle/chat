@@ -4,6 +4,8 @@ A serverless, end-to-end encrypted group chat for the terminal. No accounts, no 
 peers find each other over the BitTorrent DHT (internet) and UDP broadcast (LAN), then
 talk directly. Nothing touches disk unless you ask.
 
+> This README was written by AI.
+
 Written in C, cross-platform (Linux and Windows), and links only static crypto libraries.
 
 ## Security
