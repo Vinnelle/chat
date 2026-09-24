@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Copyright (C) 2026 finlay@tuta.com
 cmake_minimum_required(VERSION 3.15)
-project(chat VERSION 0.1.0 LANGUAGES C)
+project(chat VERSION 0.1.1 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -66,6 +66,7 @@ set(OQS_STATIC_LIB ${OQS_PREFIX}/install/lib/liboqs.a)
 add_executable(chat
     src/main.c
     src/chat.c
+    src/cmd.c
     src/dht.c
     src/bencode.c
     src/crypto.c

@@ -7,6 +7,10 @@
 #include <stdio.h>
 #include <stdarg.h>
 
+#ifndef CHAT_VERSION
+#define CHAT_VERSION "0.0.0"
+#endif
+
 #define CHROME_WASH_BG  "\x1b[48;2;236;234;240m"
 #define CHROME_WASH_FG  "\x1b[38;2;95;93;108m"
 #define CHROME_DIM_FG   "\x1b[38;2;150;148;162m"
@@ -117,6 +121,15 @@ void tui_input_clear(tui_input_t *in) {
     in->cmd_len = 0; in->cmd[0] = '\0';
 }
 
+static const char *mode_name(tui_input_mode_t mode) {
+    switch (mode) {
+        case TUI_IMODE_NORMAL:  return "NORMAL";
+        case TUI_IMODE_COMMAND: return "COMMAND";
+        case TUI_IMODE_INSERT:
+        default:                return "INSERT";
+    }
+}
+
 static int step_left(const tui_input_t *in, int pos) {
     if (pos > 0) { pos--; while (pos > 0 && (in->buf[pos] & 0xc0) == 0x80) pos--; }
     return pos;
@@ -132,6 +145,17 @@ static void normal_clamp(tui_input_t *in) {
     if (in->cursor > last) in->cursor = last;
 }
 
+static void enter_normal(tui_input_t *in) {
+    in->mode = TUI_IMODE_NORMAL;
+    in->cmd_len = 0; in->cmd[0] = '\0';
+    normal_clamp(in);
+}
+
+static void enter_command(tui_input_t *in) {
+    in->mode = TUI_IMODE_COMMAND;
+    in->cmd_len = 0; in->cmd[0] = '\0';
+}
+
 static void delete_at_cursor(tui_input_t *in) {
     if (in->cursor >= in->len) return;
     int fwd = step_right(in, in->cursor) - in->cursor;
@@ -140,8 +164,38 @@ static void delete_at_cursor(tui_input_t *in) {
     in->buf[in->len] = '\0';
 }
 
+// Start of the "@prefix" word ending at the cursor, or -1. Only offered at the end of the line.
+static int mention_start(const tui_input_t *in) {
+    if (!in->mention || in->cursor != in->len) return -1;
+    int i = in->cursor;
+    while (i > 0 && in->buf[i - 1] != ' ' && in->buf[i - 1] != '@') i--;
+    if (i == 0 || in->buf[i - 1] != '@' || i == in->cursor) return -1;
+    if (i >= 2 && in->buf[i - 2] != ' ') return -1;
+    return i;
+}
+
+static const char *mention_suggestion(const tui_input_t *in) {
+    int start = mention_start(in);
+    if (start < 0) return NULL;
+    const char *nick = in->mention(in->buf + start);
+    if (!nick || strlen(nick) <= (size_t)(in->cursor - start)) return NULL;
+    return nick;
+}
+
 static int insert_feed(tui_input_t *in, const tui_key_t *key) {
     switch (key->type) {
+        case TUI_KEY_TAB: {
+            const char *nick = mention_suggestion(in);
+            if (!nick) return 0;
+            int start = mention_start(in);
+            size_t nlen = strlen(nick);
+            if ((size_t)start + nlen + 1 >= sizeof in->buf) return 1;
+            memcpy(in->buf + start, nick, nlen);
+            in->buf[start + nlen] = ' ';
+            in->len = in->cursor = start + (int)nlen + 1;
+            in->buf[in->len] = '\0';
+            return 1;
+        }
         case TUI_KEY_CHAR: {
             if (in->len + key->ch_len >= (int)sizeof(in->buf)) return 1;
             memmove(in->buf + in->cursor + key->ch_len, in->buf + in->cursor, (size_t)(in->len - in->cursor));
@@ -166,8 +220,8 @@ static int insert_feed(tui_input_t *in, const tui_key_t *key) {
         case TUI_KEY_HOME: in->cursor = 0; return 1;
         case TUI_KEY_END:  in->cursor = in->len; return 1;
         case TUI_KEY_ESCAPE:
-            in->mode = TUI_IMODE_NORMAL;
-            normal_clamp(in);
+            if (!in->modal) return 0;
+            enter_normal(in);
             return 1;
         default: return 0;
     }
@@ -186,7 +240,7 @@ static int normal_feed(tui_input_t *in, const tui_key_t *key) {
             case 'x': delete_at_cursor(in); normal_clamp(in); return 1;
             case '0': in->cursor = 0; return 1;
             case '$': in->cursor = in->len; normal_clamp(in); return 1;
-            case ':': in->mode = TUI_IMODE_COMMAND; in->cmd_len = 0; in->cmd[0] = '\0'; return 1;
+            case ':': enter_command(in); return 1;
             default: return 1;
         }
     }
@@ -200,19 +254,11 @@ static int normal_feed(tui_input_t *in, const tui_key_t *key) {
     }
 }
 
-static const char *CMD_WORDS[] = { "new", "join", "close", "nick", "sign", "copyid", "verify", "netverbose",
-                                    "net", "peers", "colour", "color", "notify", "update", "help",
-                                    "quit", "quitall", "q", "qa", "qall", "bd", "bw" };
-#define N_CMD_WORDS (int)(sizeof(CMD_WORDS) / sizeof(CMD_WORDS[0]))
-
-static const char *cmd_suggestion(const char *typed) {
-    if (!typed[0] || strchr(typed, ' ')) return NULL;
-    size_t tlen = strlen(typed);
-    for (int i = 0; i < N_CMD_WORDS; i++)
-        if (strlen(CMD_WORDS[i]) > tlen && strncmp(CMD_WORDS[i], typed, tlen) == 0) return CMD_WORDS[i];
-    return NULL;
+static const char *cmd_suggestion(const tui_input_t *in) {
+    return in->complete ? in->complete(in->cmd) : NULL;
 }
 
+// COMMAND mode owns every key except Enter, which the caller handles to run the line.
 static int command_feed(tui_input_t *in, const tui_key_t *key) {
     switch (key->type) {
         case TUI_KEY_CHAR:
@@ -222,28 +268,32 @@ static int command_feed(tui_input_t *in, const tui_key_t *key) {
             in->cmd[in->cmd_len] = '\0';
             return 1;
         case TUI_KEY_TAB: {
-            const char *sug = cmd_suggestion(in->cmd);
-            if (!sug) return 0;
+            const char *sug = cmd_suggestion(in);
+            if (!sug) return 1;
             size_t slen = strlen(sug);
+            if (slen >= sizeof in->cmd) return 1;
             memcpy(in->cmd, sug, slen + 1);
             in->cmd_len = (int)slen;
             return 1;
         }
         case TUI_KEY_BACKSPACE:
-            if (in->cmd_len == 0) { in->mode = TUI_IMODE_NORMAL; return 1; }
+            if (in->cmd_len == 0) { enter_normal(in); return 1; }
             in->cmd_len--;
             while (in->cmd_len > 0 && (in->cmd[in->cmd_len] & 0xc0) == 0x80) in->cmd_len--;
             in->cmd[in->cmd_len] = '\0';
             return 1;
         case TUI_KEY_ESCAPE:
-            in->mode = TUI_IMODE_NORMAL;
-            in->cmd_len = 0; in->cmd[0] = '\0';
+            enter_normal(in);
             return 1;
-        default: return 0;
+        case TUI_KEY_ENTER:
+            return 0;
+        default:
+            return 1;
     }
 }
 
 int tui_input_feed(tui_input_t *in, const tui_key_t *key) {
+    if (!in->modal) return insert_feed(in, key);
     switch (in->mode) {
         case TUI_IMODE_INSERT:  return insert_feed(in, key);
         case TUI_IMODE_NORMAL:  return normal_feed(in, key);
@@ -425,6 +475,18 @@ static int draw_identity_gap(wbuf_t *w, tui_identity_badge_t badge, int color_en
     return used;
 }
 
+static int draw_version_gap(wbuf_t *w, int room) {
+    const char *v = "v" CHAT_VERSION;
+    int vlen = (int)strlen(v);
+    if (vlen + 1 > room) { v++; vlen--; }
+    if (vlen + 1 > room) return 0;
+    int trail = vlen + 2 <= room;
+    wapp_pad(w, 0, room - vlen - trail);
+    wapp(w, "\x1b[2m%s\x1b[22m", v);
+    if (trail) wapp(w, " ");
+    return room;
+}
+
 static void draw_input(wbuf_t *w, int rows, int cols, int pane_x,
                        const char *nick, const char *mode_prompt,
                        const tui_input_t *input, int color_enabled, int mask_input,
@@ -435,13 +497,14 @@ static void draw_input(wbuf_t *w, int rows, int cols, int pane_x,
     int used = 0;
 
     wapp(w, color_enabled ? STATUS_CHIP_BG STATUS_CHIP_FG : "\x1b[7m");
-    const char *name = input->mode == TUI_IMODE_NORMAL ? "NORMAL" : input->mode == TUI_IMODE_COMMAND ? "COMMAND" : "INSERT";
+    const char *name = mode_name(input->mode);
     wapp(w, " %s ", name);
     used += (int)strlen(name) + 2;
     wapp(w, color_enabled ? STATUS_BAR_BG STATUS_BAR_FG : "\x1b[7m");
 
     int align_to = pane_x - 1;
     used += draw_identity_gap(w, identity_badge, color_enabled, align_to - used);
+    used += draw_version_gap(w, align_to - used);
     if (align_to > used) { wapp_pad(w, used, align_to); used = align_to; }
 
     int cursor_used;
@@ -454,7 +517,7 @@ static void draw_input(wbuf_t *w, int rows, int cols, int pane_x,
         used += cmd_shown;
         cursor_used = used;
 
-        const char *sug = cmd_suggestion(input->cmd);
+        const char *sug = cmd_suggestion(input);
         if (sug) {
             const char *rest = sug + input->cmd_len;
             int room2 = cols - used;
@@ -481,9 +544,10 @@ static void draw_input(wbuf_t *w, int rows, int cols, int pane_x,
             int room = cols - used;
             for (int i = 0; i < input->len && i < room; i++) { wapp(w, "\xe2\x80\xa2"); used++; }
         } else if (show_hint) {
-            const char *hint = input->mode == TUI_IMODE_NORMAL
-                ? "i insert \xc2\xb7 a append \xc2\xb7 h/l move \xc2\xb7 0/$ ends \xc2\xb7 x del \xc2\xb7 : cmd"
-                : "Esc: normal mode";
+            const char *hint = !input->modal ? "Enter confirm \xc2\xb7 Esc cancel"
+                : input->mode == TUI_IMODE_NORMAL
+                ? "i/a/I/A insert \xc2\xb7 h/l move \xc2\xb7 0/$ ends \xc2\xb7 x del \xc2\xb7 : command"
+                : "type to chat \xc2\xb7 /help commands \xc2\xb7 Esc normal mode";
             int room = cols - used;
             if (room > 0) {
                 wapp(w, "\x1b[2m");
@@ -497,6 +561,19 @@ static void draw_input(wbuf_t *w, int rows, int cols, int pane_x,
             wapp_trunc(w, input->buf, room);
             int shown = input->len < room ? input->len : room;
             used += shown;
+
+            const char *nick = input->mode == TUI_IMODE_INSERT ? mention_suggestion(input) : NULL;
+            if (nick) {
+                const char *rest = nick + (input->cursor - mention_start(input));
+                int room2 = cols - used;
+                if (room2 > 0) {
+                    wapp(w, "\x1b[2m");
+                    wapp_trunc(w, rest, room2);
+                    wapp(w, "\x1b[22m");
+                    int rl = utf8_cols(rest);
+                    used += rl < room2 ? rl : room2;
+                }
+            }
         }
 
         cursor_used = show_hint ? content_start : content_start + input->cursor;

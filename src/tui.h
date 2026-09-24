@@ -78,6 +78,8 @@ size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out);
 
 typedef enum { TUI_IMODE_INSERT = 0, TUI_IMODE_NORMAL, TUI_IMODE_COMMAND } tui_input_mode_t;
 
+typedef const char *(*tui_complete_fn)(const char *typed);
+
 typedef struct {
     char buf[600];
     int len;
@@ -85,8 +87,15 @@ typedef struct {
     tui_input_mode_t mode;
     char cmd[64];
     int cmd_len;
+    // modal: Esc enters NORMAL and ':' opens COMMAND. Off for one-shot prompts, where Esc
+    // is left to the caller (cancel). complete: Tab completion for the COMMAND line.
+    // mention: given the text after an '@' being typed, returns the full nick or NULL.
+    int modal;
+    tui_complete_fn complete;
+    tui_complete_fn mention;
 } tui_input_t;
 
+// Empties the line and returns to INSERT; keeps modal and complete.
 void tui_input_clear(tui_input_t *in);
 
 int tui_input_feed(tui_input_t *in, const tui_key_t *key);

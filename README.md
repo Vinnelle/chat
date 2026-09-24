@@ -25,7 +25,7 @@ Optional **identity signing** lets peers verify who they're talking to:
 - `age` — same, plus an `age1...` recipient string others can `age -r` encrypt files to
 - `pgp:KEYFILE` — sign with an unencrypted armored EdDSA secret key exported from real gpg
 
-Use `/verify NICK` (or `:verify NICK`) to compare a peer's identity out-of-band.
+Use `/verify NICK` to compare a peer's identity out-of-band.
 
 > **Note:** the cryptography here has not been independently audited.
 
@@ -69,24 +69,44 @@ chat [--nick NAME] [--colour NAME|#HEX] [--nodht] [--identity native|age|pgp:KEY
 
 On a real terminal, `chat` opens a full-screen UI: a session list on the left (switch with
 Tab / Shift+Tab), the selected conversation and its console filling the rest, an input line
-at the bottom. The input line is a small vim: it starts in INSERT; Esc drops to NORMAL
-(h/l move, i/a/I/A insert, x delete); `:` opens a command line.
+at the bottom.
 
 | Key | Action |
 | --- | --- |
 | `Ctrl+N` | create a new session (asks for a password) |
 | `Ctrl+J` | join an existing session (id, then password) |
-| `Ctrl+W` | leave/close the current session |
+| `Ctrl+W` | leave the current session |
 | `Tab` / `Shift+Tab` | next / previous session |
 | `Ctrl+B` / `Ctrl+O` / `Ctrl+T` | toggle sidebar / console / chat pane |
 | `Ctrl+C` | quit (every session leaves cleanly first) |
 
-Commands work typed (`/peers`, `/nick`, `/verify NICK`, `/net`, `/help`, ...) or as `:`
-commands (`:new`, `:join`, `:sign`, `:copyid`, `:update`, `:q`, `:qa`, ...).
+The input line is a small vim. It starts in INSERT, where Enter sends. `Esc` drops to NORMAL
+(`h`/`l` move, `0`/`$` ends, `x` delete, `i`/`a`/`I`/`A` back to INSERT); `:` opens
+COMMAND (`Tab` completes, `Enter` runs, `Esc` cancels). Password and session-id prompts are
+plain fields: `Enter` confirms, `Esc` cancels, and your draft comes back afterwards.
+
+Typing `@` and the start of a nick shows the rest of the name dimmed; `Tab` completes it.
+
+Every command works as `/name` in INSERT or `:name` in COMMAND. `/help` lists them all.
+
+| Command | Action |
+| --- | --- |
+| `/new`, `/join` | create / join a session (same as `Ctrl+N` / `Ctrl+J`) |
+| `/quit` (`/q`) | leave this session; quits when none is open |
+| `/quitall` (`/qa`) | leave every session and quit |
+| `/nick [NAME]` | show or change your nickname in every session |
+| `/colour [NAME\|#HEX]` | show or change your colour |
+| `/sign` | set up, replace or turn off your signing key |
+| `/verify NICK` | show a peer's identity fingerprint |
+| `/peers` | who is online, with verify codes |
+| `/notify [all\|mentions\|none]` | show or change desktop notifications |
+| `/net`, `/netverbose [on\|off]` | network report / per-packet logging |
+| `/copyid` | copy the session id to the clipboard |
+| `/update` | install the latest release |
 
 ### Updating
 
-`:update` checks the [latest GitHub release](https://github.com/Vinnelle/chat/releases/latest).
+`/update` checks the [latest GitHub release](https://github.com/Vinnelle/chat/releases/latest).
 If it is newer than the running build, chat downloads the binary for your platform, checks
 its SHA-256 against the release's `SHA256SUMS`, and replaces the executable in place.
 Restart chat to run the new version. It needs `curl` on `PATH` (built into Windows 10+) and

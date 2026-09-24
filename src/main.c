@@ -30,28 +30,29 @@ static const char *USAGE =
     "\n"
     "  Ctrl+N   create a new session (asks for a password; blank is fine, still encrypts)\n"
     "  Ctrl+J   join an existing session (asks for its id, then its password)\n"
-    "  /new /join   the same two, typed - for a terminal where the shortcuts don't arrive\n"
-    "  Ctrl+W   leave/close the session you're currently looking at\n"
+    "  Ctrl+W   leave the session you're currently looking at\n"
     "  Tab      next session       Shift+Tab   previous session\n"
-    "\n"
-    "Each session has two sections: the conversation, and a console above it for everything\n"
-    "that isn't chat - people joining and leaving, the internet lookup, /command output. A\n"
-    "session you joined is locked (the prompt says \"connecting\") until someone answers.\n"
-    "\n"
     "  Ctrl+B   hide/show the session sidebar   Ctrl+O   hide/show the console\n"
     "  Ctrl+T   hide/show the chat (hide two of the three and the last one fills the screen)\n"
-    "  Esc      leave INSERT for NORMAL (see below); a second Esc cancels a prompt/menu/browser\n"
     "  Ctrl+C   quit chat (every open session leaves cleanly first)\n"
-    "  /peers /net /netverbose on|off /colour /nick /verify NICK /notify /help   typed into\n"
-    "  any session - every one also works as a ':' command below (:peers, :net, ...)\n"
     "\n"
-    "The input line is a small vim: it starts in INSERT (type immediately, as always); Esc\n"
-    "drops to NORMAL for h/l cursor movement, i/a/I/A back to INSERT, x to delete a character.\n"
-    "':' from NORMAL opens a command line: :new :join :close (:bd/:bw) :nick NAME :sign\n"
-    ":copyid :verify NICK :net :peers :colour :notify :update :help :q :qa\n"
+    "Each session has two sections: the conversation, and a console above it for everything\n"
+    "that isn't chat - people joining and leaving, the internet lookup, command output. A\n"
+    "session you joined is locked (the prompt says \"connecting\") until someone answers.\n"
+    "\n"
+    "The input line is a small vim. It starts in INSERT: type and press Enter to send.\n"
+    "  Esc      INSERT -> NORMAL: h/l move, 0/$ ends, x delete, i/a/I/A back to INSERT\n"
+    "  :        NORMAL -> COMMAND: type a command, Tab completes, Enter runs, Esc cancels\n"
+    "The password and session-id prompts are plain fields: Enter confirms, Esc cancels,\n"
+    "and whatever you were typing before comes back afterwards.\n"
+    "\n"
+    "Commands are the same whether typed as /name in INSERT or :name in COMMAND:\n"
+    "  /new /join /quit (/q) /quitall (/qa) /nick [NAME] /sign /copyid /update\n"
+    "  /peers /verify NICK /colour [NAME|#HEX] /notify [all|mentions|none] /net\n"
+    "  /netverbose [on|off] /help   - /help lists them all with a line each\n"
     "\n"
     "  --nick      display name; a random one (\"swift-otter42\"-style) is assigned if\n"
-    "              omitted - /nick or :nick renames it anytime, shared by every session\n"
+    "              omitted - /nick renames it anytime, shared by every session\n"
     "  --colour    your display colour in every session; random by default (--color too)\n"
     "  --nodht     skip internet discovery, use LAN broadcast only\n"
     "  --identity  native: a fresh Ed25519 identity, used to sign every session you join.\n"
@@ -59,7 +60,7 @@ static const char *USAGE =
     "              encrypt files to. pgp:KEYFILE: import an UNENCRYPTED armored EdDSA\n"
     "              secret key from real gpg and sign with it instead. There's no prompt\n"
     "              for this at startup anymore - chat opens unsigned by default, and\n"
-    "              :sign (or /sign) sets one up whenever you actually want it,\n"
+    "              /sign sets one up whenever you actually want it,\n"
     "              live, without restarting: browse for a key file, paste one directly\n"
     "              (never written to disk), or turn signing off again.\n"
     "  --simple    skip the full-screen UI even on a real terminal: plain \"[HH:MM] ...\"\n"
@@ -85,10 +86,10 @@ typedef struct {
 } session_slot_t;
 
 typedef enum {
-    MODE_ONBOARD_IDENTITY,
-    MODE_ONBOARD_PGP_CHOICE,
-    MODE_ONBOARD_PGP_BROWSE,
-    MODE_ONBOARD_PGP_PASTE,
+    MODE_SIGN_CHOICE,
+    MODE_SIGN_PGP_CHOICE,
+    MODE_SIGN_PGP_BROWSE,
+    MODE_SIGN_PGP_PASTE,
     MODE_CHAT,
     MODE_NEW_PASSWORD,
     MODE_JOIN_ID,
@@ -122,6 +123,7 @@ typedef struct {
 
     tui_scrollback_t log;
     tui_input_t input;
+    tui_input_t saved_input;
     browser_t browser;
     char paste_buf[16384];
     size_t paste_len;
@@ -138,11 +140,12 @@ static app_t g_app;
 static volatile sig_atomic_t g_interrupted = 0;
 static void on_sigint(int sig) { (void)sig; g_interrupted = 1; }
 
+// App-level notes go wherever the user is looking: the selected session's console, else the startup log.
 static void push_log(const char *fmt, ...) {
     char msg[256];
     va_list ap; va_start(ap, fmt); vsnprintf(msg, sizeof msg, fmt, ap); va_end(ap);
     char hhmm[6]; current_hhmm(hhmm);
-    tui_scrollback_push(&g_app.log, hhmm, msg, NULL, 0, 0);
+    tui_scrollback_push(g_app.selected ? &g_app.selected->console : &g_app.log, hhmm, msg, NULL, 0, 0);
     g_app.dirty = 1;
 }
 
@@ -235,11 +238,6 @@ static session_slot_t *start_session(const char *session_name, const char *passw
 
     char pw[256];
     copy_str(pw, password, sizeof pw);
-    if (g_app.mode == MODE_NEW_PASSWORD || g_app.mode == MODE_JOIN_PASSWORD) {
-        crypto_wipe(g_app.input.buf, sizeof g_app.input.buf);
-        tui_input_clear(&g_app.input);
-        g_app.mode = MODE_CHAT;
-    }
 
     s->initialising = 1;
     g_app.used[idx] = 1;
@@ -300,9 +298,9 @@ static void show_identity_result(void) {
     }
 }
 
-static void begin_identity_stage(void) {
-    g_app.mode = MODE_ONBOARD_IDENTITY;
-    tui_input_clear(&g_app.input);
+static void begin_sign(void) {
+    g_app.mode = MODE_SIGN_CHOICE;
+    g_app.dirty = 1;
     if (g_app.identity_source == IDENT_NONE) {
         push_log("* no signing identity set. add one? [n] no  [a] age  [p] pgp (Esc cancels, keeps it off)");
     } else {
@@ -326,17 +324,14 @@ static void identity_chosen(void) {
                         ? "* signing stays off for sessions you open from now on"
                         : "* signing key set - it applies to sessions you open from now on");
     g_app.mode = MODE_CHAT;
-
-    g_app.input.mode = TUI_IMODE_NORMAL;
     g_app.dirty = 1;
 }
 
 static void finish_onboarding(void) {
     g_app.mode = MODE_CHAT;
-    g_app.input.mode = TUI_IMODE_NORMAL;
 
     push_log("* ready. Ctrl+N (or /new) creates a session, Ctrl+J (or /join) joins one, "
-             ":sign adds a signing key so others can verify you");
+             "/sign adds a signing key so others can verify you, /help lists everything");
     if (g_app.pending_auto_session[0]) {
         start_session(g_app.pending_auto_session, g_app.pending_auto_password, 0,
                       g_app.pending_auto_port, g_app.pending_auto_peers, g_app.pending_auto_n_peers);
@@ -395,7 +390,7 @@ static int browser_load(browser_t *b, const char *path) {
 static void begin_pgp_browse(void) {
     const char *home = platform_home_dir();
     if (!home || browser_load(&g_app.browser, home) != 0) browser_load(&g_app.browser, "/");
-    g_app.mode = MODE_ONBOARD_PGP_BROWSE;
+    g_app.mode = MODE_SIGN_PGP_BROWSE;
     g_app.dirty = 1;
 }
 
@@ -403,7 +398,7 @@ static void begin_pgp_paste(void) {
     g_app.paste_len = 0;
     g_app.paste_buf[0] = '\0';
     copy_str(g_app.paste_status, "pasting (0 bytes so far, Esc to cancel)", sizeof g_app.paste_status);
-    g_app.mode = MODE_ONBOARD_PGP_PASTE;
+    g_app.mode = MODE_SIGN_PGP_PASTE;
     push_log("paste your armored PGP private key now - it's picked up automatically once the END line arrives");
 }
 
@@ -420,100 +415,233 @@ static void try_load_pgp_from_browser(void) {
     g_app.dirty = 1;
 }
 
-static void begin_new_session_prompt(void) {
-    g_app.mode = MODE_NEW_PASSWORD; tui_input_clear(&g_app.input); g_app.dirty = 1;
-}
-static void begin_join_session_prompt(void) {
-    g_app.mode = MODE_JOIN_ID; tui_input_clear(&g_app.input); g_app.dirty = 1;
-}
-
-static void colon_first_word(const char *cmd, char *out, size_t out_cap) {
-    const char *sp = strchr(cmd, ' ');
-    size_t wlen = sp ? (size_t)(sp - cmd) : strlen(cmd);
-    if (wlen >= out_cap) wlen = out_cap - 1;
-    memcpy(out, cmd, wlen); out[wlen] = '\0';
+// New/join prompts borrow the input line: the draft is stashed and comes back when the prompt ends.
+static void begin_prompt(app_mode_t mode) {
+    g_app.saved_input = g_app.input;
+    tui_input_clear(&g_app.input);
+    g_app.input.modal = 0;
+    g_app.mode = mode;
+    g_app.dirty = 1;
 }
 
-static int colon_word_is_known(const char *cmd) {
-    static const char *known[] = { "q", "quit", "close", "bd", "bw", "qa", "qall", "quitall",
-                                    "new", "join", "nick", "sign", "copyid", "verify", "netverbose",
-                                    "net", "peers", "colour", "color", "notify", "update", "help" };
-    char word[16]; colon_first_word(cmd, word, sizeof word);
-    for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++)
-        if (strcmp(word, known[i]) == 0) return 1;
-    return 0;
+static void end_prompt(void) {
+    crypto_wipe(g_app.input.buf, sizeof g_app.input.buf);
+    crypto_wipe(g_app.pending_session_id, sizeof g_app.pending_session_id);
+    g_app.input = g_app.saved_input;
+    crypto_wipe(&g_app.saved_input, sizeof g_app.saved_input);
+    g_app.mode = MODE_CHAT;
+    g_app.dirty = 1;
 }
 
-static void run_session_slash(const char *slash, const char *arg) {
-    if (!g_app.selected) { push_log("* no session selected - :%s needs one you're in", slash + 1); return; }
-    char line[16 + MAX_NICK + MAX_TEXT];
-    if (arg && *arg) snprintf(line, sizeof line, "%s %s", slash, arg);
-    else copy_str(line, slash, sizeof line);
-    chat_submit_line(&g_app.selected->engine, line, now_seconds());
+static cmd_result_t app_new(void *ctx, const char *arg) {
+    (void)ctx; (void)arg;
+    begin_prompt(MODE_NEW_PASSWORD);
+    return CMD_OK;
 }
 
-static void run_colon_command(const char *cmd) {
-    char word[16]; colon_first_word(cmd, word, sizeof word);
-    const char *arg = strchr(cmd, ' ');
-    while (arg && *arg == ' ') arg++;
+static cmd_result_t app_join(void *ctx, const char *arg) {
+    (void)ctx; (void)arg;
+    begin_prompt(MODE_JOIN_ID);
+    return CMD_OK;
+}
 
-    if (word[0] == '\0') return;
-    if (strcmp(word, "q") == 0 || strcmp(word, "quit") == 0) {
+static cmd_result_t app_quit(void *ctx, const char *arg) {
+    (void)ctx; (void)arg;
+    if (g_app.selected) close_session(g_app.selected);
+    else g_interrupted = 1;
+    return CMD_OK;
+}
 
-        if (g_app.selected) close_session(g_app.selected);
-        else g_interrupted = 1;
-    } else if (strcmp(word, "close") == 0 || strcmp(word, "bd") == 0 || strcmp(word, "bw") == 0) {
-        if (g_app.selected) close_session(g_app.selected);
-        else push_log("* no session to close");
-    } else if (strcmp(word, "qa") == 0 || strcmp(word, "qall") == 0 || strcmp(word, "quitall") == 0) {
-        g_interrupted = 1;
-    } else if (strcmp(word, "new") == 0) {
-        begin_new_session_prompt();
-    } else if (strcmp(word, "join") == 0) {
-        begin_join_session_prompt();
-    } else if (strcmp(word, "nick") == 0) {
-        if (!arg || !*arg) { push_log("* usage: :nick NAME"); return; }
-        char cleaned[MAX_NICK + 1];
-        clean_text(arg, cleaned, MAX_NICK);
-        copy_str(g_app.nick, cleaned[0] ? cleaned : "anon", sizeof g_app.nick);
-        for (int i = 0; i < MAX_SESSIONS; i++)
-            if (g_app.used[i]) chat_set_nick(&g_app.sessions[i].engine, g_app.nick);
-        g_app.dirty = 1;
-    } else if (strcmp(word, "sign") == 0) {
-        begin_identity_stage();
-    } else if (strcmp(word, "copyid") == 0) {
-        copy_session_id(g_app.selected);
-    } else if (strcmp(word, "verify") == 0) {
-        run_session_slash("/verify", arg);
-    } else if (strcmp(word, "netverbose") == 0) {
-        run_session_slash("/netverbose", arg);
-    } else if (strcmp(word, "net") == 0) {
-        run_session_slash("/net", NULL);
-    } else if (strcmp(word, "peers") == 0) {
-        run_session_slash("/peers", NULL);
-    } else if (strcmp(word, "colour") == 0 || strcmp(word, "color") == 0) {
-        run_session_slash("/colour", arg);
-    } else if (strcmp(word, "notify") == 0) {
-        run_session_slash("/notify", arg);
-    } else if (strcmp(word, "update") == 0) {
-        if (update_start() == 0) push_log("* update: checking GitHub for a newer release (v" CHAT_VERSION " here)...");
-        else push_log("* update: already running");
-    } else if (strcmp(word, "help") == 0) {
-        run_session_slash("/help", NULL);
-    } else {
-        push_log("* unknown command: %s (try :new :join :close :nick :sign :copyid :verify "
-                  ":netverbose :net :peers :colour :notify :update :help :q :qa)", word);
+static cmd_result_t app_quitall(void *ctx, const char *arg) {
+    (void)ctx; (void)arg;
+    g_interrupted = 1;
+    return CMD_OK;
+}
+
+static cmd_result_t app_nick(void *ctx, const char *arg) {
+    (void)ctx;
+    if (!*arg) { push_log("* current nickname: %s. usage: /nick NAME", g_app.nick); return CMD_OK; }
+    char cleaned[MAX_NICK + 1];
+    clean_text(arg, cleaned, MAX_NICK);
+    copy_str(g_app.nick, cleaned[0] ? cleaned : "anon", sizeof g_app.nick);
+    int any = 0;
+    for (int i = 0; i < MAX_SESSIONS; i++)
+        if (g_app.used[i]) { chat_set_nick(&g_app.sessions[i].engine, g_app.nick); any = 1; }
+    if (!any) push_log("* your nickname is now %s", g_app.nick);
+    g_app.dirty = 1;
+    return CMD_OK;
+}
+
+static cmd_result_t app_sign(void *ctx, const char *arg) {
+    (void)ctx; (void)arg;
+    begin_sign();
+    return CMD_OK;
+}
+
+static cmd_result_t app_copyid(void *ctx, const char *arg) {
+    (void)ctx; (void)arg;
+    copy_session_id(g_app.selected);
+    return CMD_OK;
+}
+
+static cmd_result_t app_update(void *ctx, const char *arg) {
+    (void)ctx; (void)arg;
+    if (update_start() == 0) push_log("* update: checking GitHub for a newer release (v" CHAT_VERSION " here)...");
+    else push_log("* update: already running");
+    return CMD_OK;
+}
+
+static cmd_result_t app_help(void *ctx, const char *arg);
+
+// Checked before CHAT_COMMANDS, so entries here shadow the per-session ones of the same name.
+static const command_t APP_COMMANDS[] = {
+    { "help",    NULL,                  NULL,     "list commands and keys",                          app_help },
+    { "new",     NULL,                  NULL,     "create a session (Ctrl+N)",                       app_new },
+    { "join",    NULL,                  NULL,     "join a session by id (Ctrl+J)",                   app_join },
+    { "quit",    "q exit close bd bw",  NULL,     "leave this session (Ctrl+W); quits if none open", app_quit },
+    { "quitall", "qa qall",             NULL,     "leave every session and quit (Ctrl+C)",           app_quitall },
+    { "nick",    NULL,                  "[NAME]", "show or change your nickname everywhere",         app_nick },
+    { "sign",    NULL,                  NULL,     "set up, replace or turn off your signing key",    app_sign },
+    { "copyid",  NULL,                  NULL,     "copy this session's id to the clipboard",         app_copyid },
+    { "update",  NULL,                  NULL,     "install the latest release from GitHub",          app_update },
+    { NULL, NULL, NULL, NULL, NULL }
+};
+
+static const command_t *const ALL_COMMANDS[] = { APP_COMMANDS, CHAT_COMMANDS, NULL };
+
+static cmd_result_t app_help(void *ctx, const char *arg) {
+    (void)ctx; (void)arg;
+    push_log("* commands - type /name in INSERT, or Esc then :name. anything else is sent to the room:");
+    for (const command_t *const *t = ALL_COMMANDS; *t; t++) {
+        for (const command_t *cmd = *t; cmd->name; cmd++) {
+            if (*t != APP_COMMANDS && cmd_find(APP_COMMANDS, cmd->name)) continue;
+            char line[160]; cmd_format_help(cmd, '/', line, sizeof line);
+            push_log("%s", line);
+        }
     }
+    push_log("* keys: Ctrl+N new  Ctrl+J join  Ctrl+W close  Tab/Shift+Tab switch  "
+             "Ctrl+B/Ctrl+O/Ctrl+T sidebar/console/chat  Ctrl+C quit");
+    return CMD_OK;
+}
+
+static const char *complete_command(const char *typed) { return cmd_complete(ALL_COMMANDS, typed); }
+
+// First online peer whose nick starts with typed, ignoring case.
+static int nick_has_prefix(const char *nick, const char *typed) {
+    for (; *typed; nick++, typed++)
+        if (tolower((unsigned char)*nick) != tolower((unsigned char)*typed)) return 0;
+    return 1;
+}
+
+static const char *complete_mention(const char *typed) {
+    if (g_app.mode != MODE_CHAT || !g_app.selected || g_app.selected->initialising) return NULL;
+    chat_t *e = &g_app.selected->engine;
+    for (int i = 0; i < MAX_PEERS + MAX_PENDING_PEERS; i++) {
+        peer_t *p = &e->peers[i];
+        if (p->used && p->ok && nick_has_prefix(p->nick, typed)) return p->nick;
+    }
+    return NULL;
+}
+
+static int is_command(const char *line) {
+    char word[CMD_WORD_MAX]; cmd_parse(line, word);
+    return cmd_find(APP_COMMANDS, word) || cmd_find(CHAT_COMMANDS, word);
+}
+
+// Runs "name args" typed after '/' or ':'; both prefixes reach the same commands.
+static void run_command(const char *line) {
+    char word[CMD_WORD_MAX];
+    const char *arg = cmd_parse(line, word);
+    if (!word[0]) return;
+    const command_t *cmd = cmd_find(APP_COMMANDS, word);
+    if (cmd) { cmd->run(NULL, arg); return; }
+    if (!cmd_find(CHAT_COMMANDS, word)) { push_log("* unknown command %s - try /help", word); return; }
+    if (!g_app.selected) {
+        push_log("* /%s needs a session - Ctrl+N (or /new) creates one, Ctrl+J (or /join) joins one", word);
+        return;
+    }
+    if (chat_run_command(&g_app.selected->engine, line) == CMD_QUIT) close_session(g_app.selected);
+}
+
+static void submit_prompt(void) {
+    tui_input_t *input = &g_app.input;
+    switch (g_app.mode) {
+        case MODE_NEW_PASSWORD: {
+            char session_id[MAX_SESSION_NAME + 1], pw[sizeof input->buf];
+            random_session_id(session_id, 10);
+            copy_str(pw, input->buf, sizeof pw);
+            end_prompt();
+            start_session(session_id, pw, 1, 0, NULL, 0);
+            crypto_wipe(pw, sizeof pw);
+            break;
+        }
+        case MODE_JOIN_ID:
+            if (input->len == 0) break;
+            copy_str(g_app.pending_session_id, input->buf, sizeof g_app.pending_session_id);
+            tui_input_clear(input);
+            g_app.mode = MODE_JOIN_PASSWORD;
+            g_app.dirty = 1;
+            break;
+        case MODE_JOIN_PASSWORD: {
+            char session_id[MAX_SESSION_NAME + 1], pw[sizeof input->buf];
+            copy_str(session_id, g_app.pending_session_id, sizeof session_id);
+            copy_str(pw, input->buf, sizeof pw);
+            end_prompt();
+            start_session(session_id, pw, 0, 0, NULL, 0);
+            crypto_wipe(pw, sizeof pw);
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+static void submit_chat_line(void) {
+    tui_input_t *input = &g_app.input;
+    g_app.dirty = 1;
+
+    if (input->mode == TUI_IMODE_COMMAND) {
+        char line[sizeof input->cmd];
+        copy_str(line, input->cmd, sizeof line);
+        input->mode = TUI_IMODE_NORMAL;
+        input->cmd_len = 0; input->cmd[0] = '\0';
+        run_command(line);
+        return;
+    }
+
+    const char *text = input->buf;
+    while (*text == ' ') text++;
+    if (text[0] == '/' || (text[0] == ':' && is_command(text + 1))) {
+        char line[sizeof input->buf];
+        copy_str(line, text + 1, sizeof line);
+        tui_input_clear(input);
+        run_command(line);
+        return;
+    }
+    if (!text[0]) return;
+    if (!g_app.selected) {
+        push_log("* no session yet - Ctrl+N (or /new) creates one, Ctrl+J (or /join) joins one");
+        tui_input_clear(input);
+        return;
+    }
+    if (!session_ready(g_app.selected)) {
+        console_note(g_app.selected, g_app.selected->initialising
+            ? "* still initialising - hold on a moment"
+            : "* not connected yet - chat opens once someone answers (your text is kept; Ctrl+W leaves)");
+        return;
+    }
+    chat_send_text(&g_app.selected->engine, input->buf, now_seconds());
+    tui_input_clear(input);
 }
 
 static void handle_key(const tui_key_t *key) {
     tui_input_t *input = &g_app.input;
 
-    if (g_app.mode == MODE_ONBOARD_PGP_PASTE) {
+    if (g_app.mode == MODE_SIGN_PGP_PASTE) {
         if (key->type == TUI_KEY_ESCAPE) {
             crypto_wipe(g_app.paste_buf, sizeof g_app.paste_buf);
             g_app.paste_len = 0;
-            g_app.mode = MODE_ONBOARD_PGP_CHOICE;
+            g_app.mode = MODE_SIGN_PGP_CHOICE;
             g_app.dirty = 1;
             return;
         }
@@ -549,7 +677,7 @@ static void handle_key(const tui_key_t *key) {
         return;
     }
 
-    if (g_app.mode == MODE_ONBOARD_PGP_BROWSE) {
+    if (g_app.mode == MODE_SIGN_PGP_BROWSE) {
         switch (key->type) {
             case TUI_KEY_UP:
                 if (g_app.browser.selected > 0) { g_app.browser.selected--; g_app.dirty = 1; }
@@ -581,7 +709,7 @@ static void handle_key(const tui_key_t *key) {
                 return;
             }
             case TUI_KEY_ESCAPE:
-                g_app.mode = MODE_ONBOARD_PGP_CHOICE;
+                g_app.mode = MODE_SIGN_PGP_CHOICE;
                 g_app.dirty = 1;
                 return;
             default:
@@ -589,11 +717,10 @@ static void handle_key(const tui_key_t *key) {
         }
     }
 
-    if (g_app.mode == MODE_ONBOARD_IDENTITY) {
+    if (g_app.mode == MODE_SIGN_CHOICE) {
 
         if (key->type == TUI_KEY_ESCAPE) {
             g_app.mode = MODE_CHAT;
-            g_app.input.mode = TUI_IMODE_NORMAL;
             g_app.dirty = 1;
         } else if (key->type == TUI_KEY_CHAR && tolower((unsigned char)key->ch[0]) == 'n') {
             g_app.identity_source = IDENT_NONE;
@@ -604,14 +731,14 @@ static void handle_key(const tui_key_t *key) {
             show_identity_result();
             identity_chosen();
         } else if (key->type == TUI_KEY_CHAR && tolower((unsigned char)key->ch[0]) == 'p') {
-            g_app.mode = MODE_ONBOARD_PGP_CHOICE;
+            g_app.mode = MODE_SIGN_PGP_CHOICE;
             push_log("[f] browse for a key file   [p] paste key text   (Esc to go back)");
         }
         return;
     }
 
-    if (g_app.mode == MODE_ONBOARD_PGP_CHOICE) {
-        if (key->type == TUI_KEY_ESCAPE) { begin_identity_stage(); return; }
+    if (g_app.mode == MODE_SIGN_PGP_CHOICE) {
+        if (key->type == TUI_KEY_ESCAPE) { begin_sign(); return; }
         if (key->type == TUI_KEY_CHAR && tolower((unsigned char)key->ch[0]) == 'f') { begin_pgp_browse(); return; }
         if (key->type == TUI_KEY_CHAR && tolower((unsigned char)key->ch[0]) == 'p') { begin_pgp_paste(); return; }
         return;
@@ -619,118 +746,23 @@ static void handle_key(const tui_key_t *key) {
 
     if (tui_input_feed(input, key)) { g_app.input_dirty = 1; return; }
 
+    if (g_app.mode != MODE_CHAT) {
+        if (key->type == TUI_KEY_ESCAPE) end_prompt();
+        else if (key->type == TUI_KEY_ENTER) submit_prompt();
+        return;
+    }
+
     switch (key->type) {
-        case TUI_KEY_ESCAPE:
-            if (g_app.mode == MODE_NEW_PASSWORD || g_app.mode == MODE_JOIN_ID || g_app.mode == MODE_JOIN_PASSWORD) {
-                crypto_wipe(input->buf, sizeof input->buf);
-                tui_input_clear(input);
-                crypto_wipe(g_app.pending_session_id, sizeof g_app.pending_session_id);
-                g_app.mode = MODE_CHAT;
-                g_app.dirty = 1;
-            }
-            break;
-
-        case TUI_KEY_TAB:
-            if (g_app.mode == MODE_CHAT) select_step(1);
-            break;
-        case TUI_KEY_BACKTAB:
-            if (g_app.mode == MODE_CHAT) select_step(-1);
-            break;
-        case TUI_KEY_NEW_SESSION:
-            if (g_app.mode == MODE_CHAT) { g_app.mode = MODE_NEW_PASSWORD; tui_input_clear(input); g_app.dirty = 1; }
-            break;
-        case TUI_KEY_JOIN_SESSION:
-            if (g_app.mode == MODE_CHAT) { g_app.mode = MODE_JOIN_ID; tui_input_clear(input); g_app.dirty = 1; }
-            break;
-        case TUI_KEY_CLOSE_SESSION:
-            if (g_app.mode == MODE_CHAT && g_app.selected) close_session(g_app.selected);
-            break;
-
-        case TUI_KEY_TOGGLE_SIDEBAR:
-            if (g_app.mode == MODE_CHAT) { g_app.show_sidebar = !g_app.show_sidebar; g_app.dirty = 1; }
-            break;
-        case TUI_KEY_TOGGLE_CONSOLE:
-            if (g_app.mode == MODE_CHAT) { g_app.show_console = !g_app.show_console; g_app.dirty = 1; }
-            break;
-        case TUI_KEY_TOGGLE_CHAT:
-            if (g_app.mode == MODE_CHAT) { g_app.show_chat = !g_app.show_chat; g_app.dirty = 1; }
-            break;
-
-        case TUI_KEY_ENTER:
-            switch (g_app.mode) {
-                case MODE_CHAT:
-
-                    if (input->mode == TUI_IMODE_COMMAND) {
-                        run_colon_command(input->cmd);
-
-                        if (input->mode == TUI_IMODE_COMMAND) {
-                            input->mode = TUI_IMODE_NORMAL;
-                            input->cmd_len = 0; input->cmd[0] = '\0';
-                        }
-                        break;
-                    }
-
-                    if (input->buf[0] == ':' && input->len > 1 && colon_word_is_known(input->buf + 1)) {
-                        run_colon_command(input->buf + 1);
-                        tui_input_clear(input);
-                        g_app.dirty = 1;
-                        break;
-                    }
-
-                    if (strcmp(input->buf, "/new") == 0) { begin_new_session_prompt(); break; }
-                    if (strcmp(input->buf, "/join") == 0) { begin_join_session_prompt(); break; }
-                    if (strcmp(input->buf, "/sign") == 0) { begin_identity_stage(); break; }
-                    if (strcmp(input->buf, "/copyid") == 0) { copy_session_id(g_app.selected); tui_input_clear(input); break; }
-                    if (!g_app.selected && input->len > 0) {
-                        push_log("* no session yet - Ctrl+N (or /new) creates one, Ctrl+J (or /join) joins one");
-                        tui_input_clear(input); g_app.dirty = 1; break;
-                    }
-                    if (g_app.selected && input->len > 0) {
-
-                        if (input->buf[0] != '/' && !session_ready(g_app.selected)) {
-                            console_note(g_app.selected, g_app.selected->initialising
-                                ? "* still initialising - hold on a moment"
-                                : "* not connected yet - chat opens once someone answers (your text is kept; Ctrl+W leaves)");
-                            break;
-                        }
-                        double now = now_seconds();
-                        if (chat_submit_line(&g_app.selected->engine, input->buf, now) == 0)
-                            close_session(g_app.selected);
-                    }
-                    tui_input_clear(input);
-                    g_app.dirty = 1;
-                    break;
-                case MODE_NEW_PASSWORD: {
-                    char session_id[MAX_SESSION_NAME + 1];
-                    random_session_id(session_id, 10);
-                    start_session(session_id, input->buf, 1, 0, NULL, 0);
-                    crypto_wipe(input->buf, sizeof input->buf);
-                    tui_input_clear(input);
-                    g_app.mode = MODE_CHAT;
-                    break;
-                }
-                case MODE_JOIN_ID:
-                    if (input->len > 0) {
-                        copy_str(g_app.pending_session_id, input->buf, sizeof g_app.pending_session_id);
-                        tui_input_clear(input);
-                        g_app.mode = MODE_JOIN_PASSWORD;
-                        g_app.dirty = 1;
-                    }
-                    break;
-                case MODE_JOIN_PASSWORD:
-                    start_session(g_app.pending_session_id, input->buf, 0, 0, NULL, 0);
-                    crypto_wipe(input->buf, sizeof input->buf);
-                    crypto_wipe(g_app.pending_session_id, sizeof g_app.pending_session_id);
-                    tui_input_clear(input);
-                    g_app.mode = MODE_CHAT;
-                    break;
-                default:
-                    break;
-            }
-            break;
-
-        default:
-            break;
+        case TUI_KEY_TAB:            select_step(1); break;
+        case TUI_KEY_BACKTAB:        select_step(-1); break;
+        case TUI_KEY_NEW_SESSION:    begin_prompt(MODE_NEW_PASSWORD); break;
+        case TUI_KEY_JOIN_SESSION:   begin_prompt(MODE_JOIN_ID); break;
+        case TUI_KEY_CLOSE_SESSION:  if (g_app.selected) close_session(g_app.selected); break;
+        case TUI_KEY_TOGGLE_SIDEBAR: g_app.show_sidebar = !g_app.show_sidebar; g_app.dirty = 1; break;
+        case TUI_KEY_TOGGLE_CONSOLE: g_app.show_console = !g_app.show_console; g_app.dirty = 1; break;
+        case TUI_KEY_TOGGLE_CHAT:    g_app.show_chat = !g_app.show_chat; g_app.dirty = 1; break;
+        case TUI_KEY_ENTER:          submit_chat_line(); break;
+        default: break;
     }
 }
 
@@ -738,14 +770,14 @@ static const char *current_prompt(int *mask) {
     const char *mode_prompt = NULL;
     *mask = 0;
     switch (g_app.mode) {
-        case MODE_ONBOARD_IDENTITY: mode_prompt = "[n/a/p]"; break;
-        case MODE_ONBOARD_PGP_CHOICE: mode_prompt = "[f/p]"; break;
+        case MODE_SIGN_CHOICE: mode_prompt = "[n/a/p]"; break;
+        case MODE_SIGN_PGP_CHOICE: mode_prompt = "[f/p]"; break;
         case MODE_NEW_PASSWORD:    mode_prompt = "create password"; *mask = 1; break;
         case MODE_JOIN_ID:         mode_prompt = "session id"; break;
         case MODE_JOIN_PASSWORD:   mode_prompt = "password"; *mask = 1; break;
         default: break;
     }
-    if (g_app.mode == MODE_ONBOARD_PGP_PASTE) mode_prompt = g_app.paste_status;
+    if (g_app.mode == MODE_SIGN_PGP_PASTE) mode_prompt = g_app.paste_status;
 
     if (g_app.mode == MODE_CHAT && g_app.selected && !session_ready(g_app.selected))
         mode_prompt = g_app.selected->initialising ? "initialising" : "connecting";
@@ -816,7 +848,7 @@ static void render(void) {
 
     int rows_n, cols_n; term_get_size(&rows_n, &cols_n);
 
-    if (g_app.mode == MODE_ONBOARD_PGP_BROWSE) {
+    if (g_app.mode == MODE_SIGN_PGP_BROWSE) {
         tui_render_list(rows_n, cols_n, rows, n, sel, g_app.browser.path,
                          g_app.browser.items, g_app.browser.n_items, g_app.browser.selected,
                          "up/down move  Enter open/select  Backspace up a dir  Esc cancel",
@@ -875,6 +907,9 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
     signal(SIGINT, on_sigint);
 
     tui_input_clear(&g_app.input);
+    g_app.input.modal = 1;
+    g_app.input.complete = complete_command;
+    g_app.input.mention = complete_mention;
     g_app.dirty = 1;
 
     if (explicit_session) {
@@ -888,7 +923,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
 
     if (!g_app.nick[0]) {
         random_nickname(g_app.nick, sizeof g_app.nick);
-        push_log("welcome to chat. you're %s for now - /nick NAME or :nick NAME renames you anytime",
+        push_log("welcome to chat. you're %s for now - /nick NAME renames you anytime",
                  g_app.nick);
     }
 
@@ -944,6 +979,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
 
     for (int i = 0; i < MAX_SESSIONS; i++) if (g_app.used[i]) close_session(&g_app.sessions[i]);
     crypto_wipe(&g_app.input, sizeof g_app.input);
+    crypto_wipe(&g_app.saved_input, sizeof g_app.saved_input);
     crypto_wipe(g_app.paste_buf, sizeof g_app.paste_buf);
     crypto_wipe(g_app.pending_auto_password, sizeof g_app.pending_auto_password);
     tui_scrollback_clear(&g_app.log);

@@ -6,6 +6,7 @@
 #include "net.h"
 #include "crypto.h"
 #include "dht.h"
+#include "cmd.h"
 #include <stdint.h>
 #include <stdio.h>
 
@@ -223,7 +224,14 @@ void chat_shutdown(chat_t *c);
 void chat_tick(chat_t *c, double now);
 void chat_on_socket_readable(chat_t *c, sock_t which, double now);
 
+// Plain-mode entry point: "/name args" runs a command, anything else is sent. Returns 0 on /quit.
 int chat_submit_line(chat_t *c, const char *line, double now);
+
+// Runs "name args" (no leading '/') from CHAT_COMMANDS against this session.
+cmd_result_t chat_run_command(chat_t *c, const char *line);
+void chat_send_text(chat_t *c, const char *text, double now);
+
+extern const command_t CHAT_COMMANDS[];
 
 void chat_set_nick(chat_t *c, const char *nick);
 

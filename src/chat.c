@@ -924,6 +924,11 @@ const char *chat_verify_label(verify_state_t s) {
     }
 }
 
+static void send_to_live_peers(chat_t *c, const char *msg) {
+    for (int i = 0; i < c->peer_hi; i++)
+        if (c->peers[i].used && c->peers[i].ok) send_peer(c, &c->peers[i], msg);
+}
+
 void chat_set_nick(chat_t *c, const char *nick) {
     char clean[MAX_NICK + 1];
     clean_text(nick, clean, MAX_NICK);
@@ -931,8 +936,7 @@ void chat_set_nick(chat_t *c, const char *nick) {
     ui_print(c, "* your nickname is now %s", c->nick);
     char msg[8 + MAX_NICK];
     snprintf(msg, sizeof msg, "n\t%s", c->nick);
-    for (int i = 0; i < c->peer_hi; i++)
-        if (c->peers[i].used && c->peers[i].ok) send_peer(c, &c->peers[i], msg);
+    send_to_live_peers(c, msg);
 }
 
 void chat_set_identity(chat_t *c, identity_source_t source, const identity_keypair_t *idkp) {
@@ -944,131 +948,199 @@ void chat_set_identity(chat_t *c, identity_source_t source, const identity_keypa
         if (c->peers[i].used && c->peers[i].ok) send_k_now(c, &c->peers[i]);
 }
 
+static cmd_result_t cmd_help(void *ctx, const char *arg) {
+    chat_t *c = ctx; (void)arg;
+    ui_print(c, "* commands - anything not starting with / is sent to the room:");
+    for (const command_t *cmd = CHAT_COMMANDS; cmd->name; cmd++) {
+        char line[160]; cmd_format_help(cmd, '/', line, sizeof line);
+        ui_print(c, "%s", line);
+    }
+    return CMD_OK;
+}
+
+static cmd_result_t cmd_peers(void *ctx, const char *arg) {
+    chat_t *c = ctx; (void)arg;
+    char out[2048]; size_t pos = (size_t)snprintf(out, sizeof out, "* online: %s (you), ", c->nick);
+    int n = 0;
+    for (int i = 0; i < c->peer_hi; i++) {
+        peer_t *p = &c->peers[i];
+        if (!p->used || !p->ok) continue;
+        char idhex[9]; hex_encode(p->id, 4, idhex);
+        char vfyhex[VERIFY_LEN * 2 + 1]; hex_encode(p->vfy, VERIFY_LEN, vfyhex);
+        pos += (size_t)snprintf(out + pos, sizeof(out) - pos, "%s%s#%s (verify %s, %s%s)", n ? ", " : "",
+                                 p->nick, idhex, vfyhex, chat_verify_label(p->identity_state),
+                                 p->persists ? ", logging" : "");
+        n++;
+    }
+    if (n == 0) ui_print(c, "* nobody else yet");
+    else ui_print(c, "%s", out);
+    return CMD_OK;
+}
+
+static cmd_result_t cmd_verify(void *ctx, const char *arg) {
+    chat_t *c = ctx;
+    if (!*arg) {
+        ui_print(c, "* usage: /verify NICK - shows their identity fingerprint to read out and compare");
+        return CMD_OK;
+    }
+    int found = 0;
+    for (int i = 0; i < c->peer_hi; i++) {
+        peer_t *p = &c->peers[i];
+        if (!p->used || !p->ok || !nick_ieq(p->nick, arg)) continue;
+        found = 1;
+        char idhex[9]; hex_encode(p->id, 4, idhex);
+        if (p->identity_source == IDENT_NONE) {
+            ui_print(c, "* %s#%s presented no identity - nothing to verify", p->nick, idhex);
+        } else {
+            char fphex[ID_FP_LEN * 2 + 1]; hex_encode(p->identity_fp, ID_FP_LEN, fphex);
+            ui_print(c, "* %s#%s fingerprint %s (%s) - read it out over another channel to be sure it's really them",
+                     p->nick, idhex, fphex, chat_verify_label(p->identity_state));
+        }
+    }
+    if (!found) ui_print(c, "* no online peer named '%s'", arg);
+    return CMD_OK;
+}
+
+static cmd_result_t cmd_nick(void *ctx, const char *arg) {
+    chat_t *c = ctx;
+    if (!*arg) ui_print(c, "* current nickname: %s. usage: /nick NAME", c->nick);
+    else chat_set_nick(c, arg);
+    return CMD_OK;
+}
+
+static cmd_result_t cmd_colour(void *ctx, const char *arg) {
+    chat_t *c = ctx;
+    if (!*arg) {
+        char list[512]; size_t pos = 0;
+        for (int i = 0; i < COLOR_PALETTE_N; i++)
+            pos += (size_t)snprintf(list + pos, sizeof(list) - pos, "%s%s", i ? ", " : "", COLOR_PALETTE[i].name);
+        char cur[7]; color_to_hex(c->my_color, cur);
+        ui_print(c, "* current colour: #%s. usage: /colour NAME|#RRGGBB. names: %s", cur, list);
+        return CMD_OK;
+    }
+    uint8_t rgb[3];
+    if (parse_color(arg, rgb) != 0) {
+        ui_print(c, "* unknown colour '%s' - try a name or #RRGGBB", arg);
+        return CMD_OK;
+    }
+    memcpy(c->my_color, rgb, 3);
+    char hex[7]; color_to_hex(rgb, hex);
+    ui_print_colored(c, c->my_color, "* your colour is now #%s", hex);
+    char msg[10]; snprintf(msg, sizeof msg, "c\t%s", hex);
+    send_to_live_peers(c, msg);
+    return CMD_OK;
+}
+
+static cmd_result_t cmd_notify(void *ctx, const char *arg) {
+    static const char *const names[] = { "none", "mentions", "all" };
+    chat_t *c = ctx;
+    for (int m = NOTIFY_NONE; m <= NOTIFY_ALL; m++) {
+        if (strcmp(arg, names[m]) != 0) continue;
+        c->notify_mode = (notify_mode_t)m;
+        ui_print(c, "* notifications: %s", names[m]);
+        return CMD_OK;
+    }
+    ui_print(c, "* notifications: %s. usage: /notify all|mentions|none", names[c->notify_mode]);
+    return CMD_OK;
+}
+
+static cmd_result_t cmd_net(void *ctx, const char *arg) {
+    (void)arg;
+    net_report(ctx);
+    return CMD_OK;
+}
+
+static cmd_result_t cmd_netverbose(void *ctx, const char *arg) {
+    chat_t *c = ctx;
+    if (strcmp(arg, "on") == 0) {
+        c->net_verbose = 1;
+        ui_print(c, "* net verbose logging: on - every handshake packet now gets its own console line");
+    } else if (strcmp(arg, "off") == 0) {
+        c->net_verbose = 0;
+        ui_print(c, "* net verbose logging: off");
+    } else {
+        ui_print(c, "* net verbose logging: %s. usage: /netverbose on|off", c->net_verbose ? "on" : "off");
+    }
+    return CMD_OK;
+}
+
+static cmd_result_t cmd_quit(void *ctx, const char *arg) {
+    (void)ctx; (void)arg;
+    return CMD_QUIT;
+}
+
+const command_t CHAT_COMMANDS[] = {
+    { "help",       NULL,     NULL,              "list commands",                                   cmd_help },
+    { "peers",      NULL,     NULL,              "who is online, with verify codes",                cmd_peers },
+    { "verify",     NULL,     "NICK",            "show a peer's identity fingerprint",              cmd_verify },
+    { "nick",       NULL,     "[NAME]",          "show or change your nickname",                    cmd_nick },
+    { "colour",     "color",  "[NAME|#RRGGBB]",  "show or change your colour",                      cmd_colour },
+    { "notify",     NULL,     "[all|mentions|none]", "show or change desktop notifications",        cmd_notify },
+    { "net",        NULL,     NULL,              "network report and diagnosis",                    cmd_net },
+    { "netverbose", NULL,     "[on|off]",        "log every handshake packet",                      cmd_netverbose },
+    { "quit",       "q exit", NULL,              "leave the session",                               cmd_quit },
+    { NULL, NULL, NULL, NULL, NULL }
+};
+
+cmd_result_t chat_run_command(chat_t *c, const char *line_in) {
+    char line[MAX_TEXT + 1];
+    clean_text(line_in, line, MAX_TEXT);
+    char word[CMD_WORD_MAX];
+    const char *arg = cmd_parse(line, word);
+    const command_t *cmd = cmd_find(CHAT_COMMANDS, word);
+    if (!cmd) {
+        ui_print(c, "* unknown command /%s - try /help", word);
+        return CMD_UNKNOWN;
+    }
+    return cmd->run(c, arg);
+}
+
+void chat_send_text(chat_t *c, const char *text_in, double now) {
+    char line[MAX_TEXT + 1];
+    clean_text(text_in, line, MAX_TEXT);
+    if (!line[0]) return;
+    if (!chat_ready(c)) {
+        ui_print(c, "* not connected yet - message not sent, chat opens once someone answers");
+        return;
+    }
+    char mid[9]; gen_mid(mid);
+    seen_add(c, mid);
+    char myidhex[33]; hex_encode(c->my_id, ID_LEN, myidhex);
+    char text[16 + MAX_NICK + MAX_TEXT + 32];
+    snprintf(text, sizeof text, "m\t%s\t%s\t%s\t%s", mid, myidhex, c->nick, line);
+    char who[MAX_NICK + 8]; snprintf(who, sizeof who, "%s (you)", c->nick);
+    ui_chat(c, c->my_color, 0, who, line);
+    int sent = 0;
+    for (int i = 0; i < c->peer_hi; i++) {
+        peer_t *p = &c->peers[i];
+        if (!p->used || !p->ok) continue;
+        for (int s = 0; s < MAX_PENDING_MSGS; s++) {
+            if (!c->pending[s].used) {
+                c->pending[s].used = 1;
+                strcpy(c->pending[s].mid, mid);
+                c->pending[s].peer_slot = i;
+                uint32_t idx;
+                if (frame_for_peer(c, p, text, c->pending[s].frame, sizeof c->pending[s].frame,
+                                    &c->pending[s].frame_len, &idx) != 0) {
+                    c->pending[s].used = 0;
+                    break;
+                }
+                c->pending[s].tries = 1;
+                c->pending[s].next_retry = now + 1 + jitter(0.5);
+                net_send(c->sock, c->pending[s].frame, c->pending[s].frame_len, p->addr);
+                sent++;
+                break;
+            }
+        }
+    }
+    if (!sent) ui_print(c, "* nobody else is here yet, message not delivered");
+}
+
 int chat_submit_line(chat_t *c, const char *line_in, double now) {
     char line[MAX_TEXT + 1];
     clean_text(line_in, line, MAX_TEXT);
-    if (!line[0]) return 1;
-    if (strcmp(line, "/quit") == 0 || strcmp(line, "/exit") == 0 || strcmp(line, "/q") == 0) return 0;
-    if (strcmp(line, "/net") == 0) {
-        net_report(c);
-    } else if (strncmp(line, "/netverbose", 11) == 0 && (line[11] == '\0' || line[11] == ' ')) {
-        const char *arg = strchr(line, ' ');
-        while (arg && *arg == ' ') arg++;
-        if (!arg || !*arg) ui_print(c, "* net verbose logging: %s. usage: /netverbose on|off", c->net_verbose ? "on" : "off");
-        else if (strcmp(arg, "on") == 0) { c->net_verbose = 1; ui_print(c, "* net verbose logging: on - every handshake packet now gets its own console line"); }
-        else if (strcmp(arg, "off") == 0) { c->net_verbose = 0; ui_print(c, "* net verbose logging: off"); }
-        else ui_print(c, "* usage: /netverbose on|off");
-    } else if (strcmp(line, "/help") == 0) {
-        ui_print(c, "* /peers  /net  /netverbose on|off  /colour [name|#hex]  /nick NAME  /verify NICK  /notify all|mentions|none  /quit. Anything else is sent to the room.");
-    } else if (strncmp(line, "/verify", 7) == 0 && (line[7] == '\0' || line[7] == ' ')) {
-        const char *arg = strchr(line, ' ');
-        while (arg && *arg == ' ') arg++;
-        if (!arg || !*arg) {
-            ui_print(c, "* usage: /verify NICK - shows their identity fingerprint to read out and compare");
-        } else {
-            int found = 0;
-            for (int i = 0; i < c->peer_hi; i++) {
-                peer_t *p = &c->peers[i];
-                if (!p->used || !p->ok || !nick_ieq(p->nick, arg)) continue;
-                found = 1;
-                char idhex[9]; hex_encode(p->id, 4, idhex);
-                if (p->identity_source == IDENT_NONE) {
-                    ui_print(c, "* %s#%s presented no identity - nothing to verify", p->nick, idhex);
-                } else {
-                    char fphex[ID_FP_LEN * 2 + 1]; hex_encode(p->identity_fp, ID_FP_LEN, fphex);
-                    ui_print(c, "* %s#%s fingerprint %s (%s) - read it out over another channel to be sure it's really them",
-                             p->nick, idhex, fphex, chat_verify_label(p->identity_state));
-                }
-            }
-            if (!found) ui_print(c, "* no online peer named '%s'", arg);
-        }
-    } else if (strncmp(line, "/nick", 5) == 0 && (line[5] == '\0' || line[5] == ' ')) {
-        const char *arg = strchr(line, ' ');
-        while (arg && *arg == ' ') arg++;
-        if (!arg || !*arg) ui_print(c, "* current nickname: %s. usage: /nick NAME", c->nick);
-        else chat_set_nick(c, arg);
-    } else if (strcmp(line, "/peers") == 0) {
-        char out[2048]; size_t pos = (size_t)snprintf(out, sizeof out, "* online: %s (you), ", c->nick);
-        int n = 0;
-        for (int i = 0; i < c->peer_hi; i++) {
-            peer_t *p = &c->peers[i];
-            if (!p->used || !p->ok) continue;
-            char idhex[9]; hex_encode(p->id, 4, idhex);
-            char vfyhex[VERIFY_LEN * 2 + 1]; hex_encode(p->vfy, VERIFY_LEN, vfyhex);
-            pos += (size_t)snprintf(out + pos, sizeof(out) - pos, "%s%s#%s (verify %s, %s%s)", n ? ", " : "",
-                                     p->nick, idhex, vfyhex, chat_verify_label(p->identity_state),
-                                     p->persists ? ", logging" : "");
-            n++;
-        }
-        if (n == 0) ui_print(c, "* nobody else yet");
-        else ui_print(c, "%s", out);
-    } else if (strncmp(line, "/colour", 7) == 0 || strncmp(line, "/color", 6) == 0) {
-        const char *arg = strchr(line, ' ');
-        while (arg && *arg == ' ') arg++;
-        if (!arg || !*arg) {
-            char list[512]; size_t pos = 0;
-            for (int i = 0; i < COLOR_PALETTE_N; i++)
-                pos += (size_t)snprintf(list + pos, sizeof(list) - pos, "%s%s", i ? ", " : "", COLOR_PALETTE[i].name);
-            char cur[7]; color_to_hex(c->my_color, cur);
-            ui_print(c, "* current colour: #%s. names: %s. or /colour #RRGGBB", cur, list);
-        } else {
-            uint8_t rgb[3];
-            if (parse_color(arg, rgb) != 0) {
-                ui_print(c, "* unknown colour '%s' - try a name or #RRGGBB", arg);
-            } else {
-                memcpy(c->my_color, rgb, 3);
-                char hex[7]; color_to_hex(rgb, hex);
-                ui_print_colored(c, c->my_color, "* your colour is now #%s", hex);
-                char msg[10]; snprintf(msg, sizeof msg, "c\t%s", hex);
-                for (int i = 0; i < c->peer_hi; i++)
-                    if (c->peers[i].used && c->peers[i].ok) send_peer(c, &c->peers[i], msg);
-            }
-        }
-    } else if (strncmp(line, "/notify", 7) == 0) {
-        const char *arg = strchr(line, ' ');
-        while (arg && *arg == ' ') arg++;
-        if (arg && strcmp(arg, "all") == 0) { c->notify_mode = NOTIFY_ALL; ui_print(c, "* notifications: all messages"); }
-        else if (arg && strcmp(arg, "mentions") == 0) { c->notify_mode = NOTIFY_MENTIONS; ui_print(c, "* notifications: @mentions only"); }
-        else if (arg && strcmp(arg, "none") == 0) { c->notify_mode = NOTIFY_NONE; ui_print(c, "* notifications: off"); }
-        else ui_print(c, "* usage: /notify all|mentions|none");
-    } else if (line[0] == '/') {
-        ui_print(c, "* unknown command, try /help");
-    } else if (!chat_ready(c)) {
-
-        ui_print(c, "* not connected yet - message not sent, chat opens once someone answers");
-    } else {
-        char mid[9]; gen_mid(mid);
-        seen_add(c, mid);
-        char myidhex[33]; hex_encode(c->my_id, ID_LEN, myidhex);
-        char text[16 + MAX_NICK + MAX_TEXT + 32];
-        snprintf(text, sizeof text, "m\t%s\t%s\t%s\t%s", mid, myidhex, c->nick, line);
-        char who[MAX_NICK + 8]; snprintf(who, sizeof who, "%s (you)", c->nick);
-        ui_chat(c, c->my_color, 0, who, line);
-        int sent = 0;
-        for (int i = 0; i < c->peer_hi; i++) {
-            peer_t *p = &c->peers[i];
-            if (!p->used || !p->ok) continue;
-            for (int s = 0; s < MAX_PENDING_MSGS; s++) {
-                if (!c->pending[s].used) {
-                    c->pending[s].used = 1;
-                    strcpy(c->pending[s].mid, mid);
-                    c->pending[s].peer_slot = i;
-                    uint32_t idx;
-                    if (frame_for_peer(c, p, text, c->pending[s].frame, sizeof c->pending[s].frame,
-                                        &c->pending[s].frame_len, &idx) != 0) {
-                        c->pending[s].used = 0;
-                        break;
-                    }
-                    c->pending[s].tries = 1;
-                    c->pending[s].next_retry = now + 1 + jitter(0.5);
-                    net_send(c->sock, c->pending[s].frame, c->pending[s].frame_len, p->addr);
-                    sent++;
-                    break;
-                }
-            }
-        }
-        if (!sent) ui_print(c, "* nobody else is here yet, message not delivered");
-    }
+    if (line[0] == '/') return chat_run_command(c, line + 1) != CMD_QUIT;
+    chat_send_text(c, line, now);
     return 1;
 }
 
