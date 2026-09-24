@@ -1064,6 +1064,39 @@ static cmd_result_t cmd_netverbose(void *ctx, const char *arg) {
     return CMD_OK;
 }
 
+static cmd_result_t cmd_port(void *ctx, const char *arg) {
+    chat_t *c = ctx;
+    if (!arg[0]) {
+        ui_print(c, "* udp port: %u. usage: /port N (0 picks a free one)", (unsigned)c->port);
+        return CMD_OK;
+    }
+    char *end;
+    long want = strtol(arg, &end, 10);
+    if (*end || want < 0 || want > 65535) {
+        ui_print(c, "* not a port: %s. usage: /port N (0-65535, 0 picks a free one)", arg);
+        return CMD_OK;
+    }
+    if (want != 0 && want == c->port) {
+        ui_print(c, "* already on udp port %u", (unsigned)c->port);
+        return CMD_OK;
+    }
+    uint16_t got = 0;
+    sock_t s = net_udp_open((uint16_t)want, NET_DUAL, &got);
+    if (s == SOCK_INVALID) {
+        ui_print(c, "* cannot bind udp port %ld - staying on %u", want, (unsigned)c->port);
+        return CMD_OK;
+    }
+    net_close(c->sock);
+    c->sock = s;
+    c->port = got;
+    // Peers follow the source address of our next hi; the DHT re-announces from the new socket.
+    c->next_alive = 0;
+    c->next_lan = 0;
+    if (c->dht_on) { c->dht.my_port = got; c->dht.next_lookup = 0; }
+    ui_print(c, "* now on udp port %u", (unsigned)got);
+    return CMD_OK;
+}
+
 static cmd_result_t cmd_quit(void *ctx, const char *arg) {
     (void)ctx; (void)arg;
     return CMD_QUIT;
@@ -1078,6 +1111,7 @@ const command_t CHAT_COMMANDS[] = {
     { "notify",     NULL,     "[all|mentions|none]", "show or change desktop notifications",        cmd_notify },
     { "net",        NULL,     NULL,              "network report and diagnosis",                    cmd_net },
     { "netverbose", NULL,     "[on|off]",        "log every handshake packet",                      cmd_netverbose },
+    { "port",       NULL,     "[N]",             "show or change this session's udp port",          cmd_port },
     { "quit",       "q exit", NULL,              "leave the session",                               cmd_quit },
     { NULL, NULL, NULL, NULL, NULL }
 };

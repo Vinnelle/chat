@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- `/port [N]` shows this session's UDP port, or moves the session to port `N` without
+  leaving it (`0` picks a free one). Connected peers follow the new port automatically.
+
 ## 0.1.2
 
 ### Fixed

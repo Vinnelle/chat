@@ -101,6 +101,7 @@ Every command works as `/name` in INSERT or `:name` in COMMAND. `/help` lists th
 | `/peers` | who is online, with verify codes |
 | `/notify [all\|mentions\|none]` | show or change desktop notifications |
 | `/net`, `/netverbose [on\|off]` | network report / per-packet logging |
+| `/port [N]` | show or change this session's UDP port (`0` picks a free one) |
 | `/copyid` | copy the session id to the clipboard |
 | `/update` | install the latest release |
 
