@@ -1,0 +1,117 @@
+name: build
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - asset: chat-linux-x86_64
+            dir: build
+            bin: chat
+            cmake_args: ''
+          - asset: chat-windows-x86_64.exe
+            dir: build-win
+            bin: chat.exe
+            cmake_args: -DCMAKE_TOOLCHAIN_FILE=cmake/zig-windows.cmake
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up zig
+        if: matrix.dir == 'build-win'
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Read version
+        id: version
+        run: |
+          v=$(sed -n 's/^project(chat VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Configure
+        run: cmake -B ${{ matrix.dir }} ${{ matrix.cmake_args }}
+
+      - name: Build
+        run: cmake --build ${{ matrix.dir }} -j "$(nproc)"
+
+      - name: Rename binary
+        run: |
+          mkdir dist
+          cp ${{ matrix.dir }}/${{ matrix.bin }} dist/${{ matrix.asset }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}-${{ steps.version.outputs.version }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches CMakeLists.txt version
+        id: version
+        run: |
+          v=$(sed -n 's/^project(chat VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          if [ "$GITHUB_REF_NAME" != "v$v" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match project version $v in CMakeLists.txt"
+            exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Write SHA256SUMS
+        working-directory: dist
+        run: |
+          sha256sum chat-linux-x86_64 chat-windows-x86_64.exe > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Write release notes
+        run: |
+          awk -v v="${{ steps.version.outputs.version }}" '
+            $0 == "## " v { on = 1; next }
+            on && /^## / { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::error::CHANGELOG.md has no section for ${{ steps.version.outputs.version }}"
+            exit 1
+          fi
+          {
+            echo 'Verify a manual download with `sha256sum -c --ignore-missing SHA256SUMS`.'
+            echo
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+          } >> notes.md
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            --verify-tag \
+            dist/chat-linux-x86_64 dist/chat-windows-x86_64.exe dist/SHA256SUMS
