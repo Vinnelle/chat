@@ -360,6 +360,11 @@ int platform_exe_path(char *out, size_t cap) {
     ssize_t n = readlink("/proc/self/exe", out, cap - 1);
     if (n <= 0 || (size_t)n >= cap - 1) return -1;
     out[n] = '\0';
+    // The kernel appends " (deleted)" once the file we were started from is replaced
+    // (e.g. rebuilt); the path without it is where the executable now lives.
+    static const char suffix[] = " (deleted)";
+    size_t slen = sizeof suffix - 1;
+    if ((size_t)n > slen && strcmp(out + n - slen, suffix) == 0) out[n - slen] = '\0';
     return 0;
 }
 
