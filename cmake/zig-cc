@@ -1,0 +1,7 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 finlay@tuta.com
+# Cross C compiler for Windows using zig's bundled mingw-w64: zig-cc, zig-ar and zig-ranlib
+# exist because autotools (libsodium) and CMake (liboqs) both want a single compiler path,
+# and "zig cc" is a subcommand. Set ZIG to the zig binary if it isn't on PATH.
+exec "${ZIG:-zig}" cc -target "${ZIG_TARGET:-x86_64-windows-gnu}" "$@"

@@ -1,0 +1,18 @@
+# Build output
+/build/
+/build-win/
+build_stamp.h
+*.o
+*.a
+*.obj
+*.exe
+
+# Fetched dependencies (libsodium, liboqs)
+*-ext/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
