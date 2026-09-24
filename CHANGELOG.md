@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.3
 
 ### Added
 - `/port [N]` shows this session's UDP port, or moves the session to port `N` without
