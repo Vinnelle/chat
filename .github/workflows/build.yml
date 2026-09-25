@@ -23,14 +23,21 @@ jobs:
             dir: build-win
             bin: chat.exe
             cmake_args: -DCMAKE_TOOLCHAIN_FILE=cmake/zig-windows.cmake
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
+        env:
+          ZIG_VERSION: 0.16.0
+          ZIG_SHA256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+        run: |
+          name=zig-x86_64-linux-$ZIG_VERSION
+          curl -fsSL -o "$RUNNER_TEMP/$name.tar.xz" "https://ziglang.org/download/$ZIG_VERSION/$name.tar.xz"
+          echo "$ZIG_SHA256  $RUNNER_TEMP/$name.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/$name.tar.xz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/$name" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/$name/zig" version
 
       - name: Read version
         id: version
@@ -51,7 +58,7 @@ jobs:
           cp ${{ matrix.dir }}/${{ matrix.bin }} dist/${{ matrix.asset }}
           if [ "${{ matrix.dir }}" = build-static ]; then strip dist/${{ matrix.asset }}; fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.asset }}-${{ steps.version.outputs.version }}
           path: dist/${{ matrix.asset }}
@@ -60,11 +67,11 @@ jobs:
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Check tag matches CMakeLists.txt version
         id: version
@@ -76,7 +83,7 @@ jobs:
           fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
