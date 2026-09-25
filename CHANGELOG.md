@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.4
+
+### Added
+- `--update` installs the latest release from the shell and exits, without opening chat.
+  It exits with status 1 if the update fails, so `sudo chat --update` works for a copy
+  in a system folder.
+
+### Changed
+- The Linux release binary is statically linked against musl, so it runs on any x86_64
+  Linux distribution without depending on the system's glibc version.
+- Building with [just](https://github.com/casey/just) is supported: `just build`,
+  `just run`, and `just dist` for release binaries.
+- chat is deliberately not packaged, to leave no trace beyond the executable. The README
+  explains where to keep it so updates keep working.
+
 ## 0.1.3
 
 ### Added

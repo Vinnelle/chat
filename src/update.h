@@ -11,6 +11,8 @@ int update_start(void);
 
 int update_poll(char *msg, size_t cap);
 
+int update_run(char *msg, size_t cap);
+
 void update_cleanup_stale(void);
 
 #endif

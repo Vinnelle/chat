@@ -33,6 +33,7 @@
 enum { UPD_IDLE = 0, UPD_RUNNING = 1, UPD_DONE = 2 };
 static int g_state = UPD_IDLE;
 static char g_msg[UPDATE_MSG_MAX];
+static int g_ok;
 
 static int fetch(const char *url, const char *out_path, int api) {
     const char *argv[] = {
@@ -142,6 +143,11 @@ static void finish(const char *fmt, const char *arg) {
     __atomic_store_n(&g_state, UPD_DONE, __ATOMIC_RELEASE);
 }
 
+static void succeed(const char *fmt, const char *arg) {
+    g_ok = 1;
+    finish(fmt, arg);
+}
+
 static void update_thread(void *unused) {
     (void)unused;
 #ifndef UPDATE_ASSET
@@ -164,7 +170,7 @@ static void update_thread(void *unused) {
     int ok = json && parse_tag(json, tag, sizeof tag) == 0;
     free(json);
     if (!ok) { finish("* update: GitHub's reply had no usable release tag%s", ""); return; }
-    if (!version_newer(tag, CHAT_VERSION)) { finish("* update: already up to date (v" CHAT_VERSION ", latest is %s)", tag); return; }
+    if (!version_newer(tag, CHAT_VERSION)) { succeed("* update: already up to date (v" CHAT_VERSION ", latest is %s)", tag); return; }
 
     snprintf(url, sizeof url, "https://github.com/" UPDATE_REPO "/releases/download/%s/SHA256SUMS", tag);
     if (fetch(url, tmp_sums, 0) != 0) {
@@ -197,7 +203,7 @@ static void update_thread(void *unused) {
         finish("* update: verified %s but could not replace the executable (permissions?)", tag);
         return;
     }
-    finish("* update: installed %s (SHA-256 verified) - restart chat to run it", tag);
+    succeed("* update: installed %s (SHA-256 verified) - restart chat to run it", tag);
 #endif
 }
 
@@ -217,6 +223,13 @@ int update_poll(char *msg, size_t cap) {
     copy_str(msg, g_msg, cap);
     __atomic_store_n(&g_state, UPD_IDLE, __ATOMIC_RELEASE);
     return 1;
+}
+
+int update_run(char *msg, size_t cap) {
+    g_ok = 0;
+    update_thread(NULL);
+    update_poll(msg, cap);
+    return g_ok ? 0 : -1;
 }
 
 void update_cleanup_stale(void) {
