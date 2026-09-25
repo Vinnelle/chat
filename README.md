@@ -5,6 +5,7 @@ peers find each other over the BitTorrent DHT (internet) and UDP broadcast (LAN)
 talk directly. Nothing touches disk unless you ask.
 
 > This README was written by AI.
+
 > Eventually, I will rewrite this myself, when I have more time.
 
 Written in C, cross-platform (Linux and Windows), and links only static crypto libraries.
