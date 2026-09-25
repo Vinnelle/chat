@@ -16,9 +16,9 @@ jobs:
       matrix:
         include:
           - asset: chat-linux-x86_64
-            dir: build
+            dir: build-static
             bin: chat
-            cmake_args: ''
+            cmake_args: -DCMAKE_TOOLCHAIN_FILE=cmake/zig-linux-musl.cmake
           - asset: chat-windows-x86_64.exe
             dir: build-win
             bin: chat.exe
@@ -28,7 +28,6 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up zig
-        if: matrix.dir == 'build-win'
         uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
@@ -50,6 +49,7 @@ jobs:
         run: |
           mkdir dist
           cp ${{ matrix.dir }}/${{ matrix.bin }} dist/${{ matrix.asset }}
+          if [ "${{ matrix.dir }}" = build-static ]; then strip dist/${{ matrix.asset }}; fi
 
       - uses: actions/upload-artifact@v4
         with:

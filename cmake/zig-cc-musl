@@ -1,0 +1,5 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 finlay@tuta.com
+# zig-cc pinned to static musl, so libsodium's autotools get the target without an env var.
+ZIG_TARGET=x86_64-linux-musl exec "$(dirname "$0")/zig-cc" "$@"

@@ -1,6 +1,8 @@
 # Build output
 /build/
 /build-win/
+/build-static/
+/dist/
 build_stamp.h
 *.o
 *.a

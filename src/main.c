@@ -21,6 +21,7 @@
 static const char *USAGE =
     "usage: chat [--nick NAME] [--colour NAME|#HEX] [--nodht] [--identity native|age|pgp:KEYFILE]\n"
     "            [--simple] [--session ID --port UDP_PORT --peer HOST:PORT ...]\n"
+    "       chat --update | --version\n"
     "\n"
     "With a real terminal, chat opens a full-screen UI: sessions you've joined or created\n"
     "sit in a list on the left (switch with Tab/Shift+Tab), the selected one's messages and\n"
@@ -68,6 +69,8 @@ static const char *USAGE =
     "              terminals; this is also the automatic fallback when stdout isn't a tty.\n"
     "  --session   also join this session immediately at startup (needs --port; \"chat\n"
     "              --session ID\" alone still opens straight into the TUI to join by hand)\n"
+    "  --update    install the latest release from GitHub and exit, without opening chat\n"
+    "  --version   print the version and exit\n"
     "\n"
     "encrypted with X25519 + ML-KEM-768 (hybrid, post-quantum) + XChaCha20-Poly1305 + a\n"
     "per-message forward-secrecy ratchet. Nothing is ever written to disk unless you ask\n"
@@ -1083,7 +1086,7 @@ int main(int argc, char **argv) {
     char explicit_session[MAX_SESSION_NAME + 1] = "";
     uint16_t explicit_port = 0;
     char peer_args[16][256]; int n_peer_args = 0;
-    int dht_on = 1, has_color = 0, force_simple = 0;
+    int dht_on = 1, has_color = 0, force_simple = 0, do_update = 0;
     uint8_t color[3] = {0, 0, 0};
 
     for (int i = 1; i < argc; i++) {
@@ -1110,6 +1113,8 @@ int main(int argc, char **argv) {
             char *v = argv[++i];
             if (strncmp(v, "pgp:", 4) == 0) { copy_str(identity_arg, "pgp", sizeof identity_arg); copy_str(pgp_key_path, v + 4, sizeof pgp_key_path); }
             else copy_str(identity_arg, v, sizeof identity_arg);
+        } else if (strcmp(key, "update") == 0) {
+            do_update = 1;
         } else if (strcmp(key, "version") == 0) {
             printf("chat " CHAT_VERSION ", built %s (wire: hybrid X25519+ML-KEM-768, chunked handshake)\n", CHAT_BUILD_STAMP);
             return 0;
@@ -1127,6 +1132,17 @@ int main(int argc, char **argv) {
     update_cleanup_stale();
 
     crypto_setup();
+
+    if (do_update) {
+        printf("chat: checking GitHub for a newer release (v" CHAT_VERSION " here)...\n");
+        fflush(stdout);
+        char msg[UPDATE_MSG_MAX];
+        int rc = update_run(msg, sizeof msg);
+        const char *text = strncmp(msg, "* update: ", 10) == 0 ? msg + 10 : msg;
+        fprintf(rc == 0 ? stdout : stderr, "chat: %s\n", text);
+        return rc == 0 ? 0 : 1;
+    }
+
     net_startup();
 
     int interactive = !force_simple && term_is_tty() && term_stdout_is_tty() && term_ansi_ok();

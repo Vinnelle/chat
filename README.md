@@ -38,6 +38,38 @@ Prebuilt Linux and Windows x86_64 binaries are on the
 sha256sum -c --ignore-missing SHA256SUMS
 ```
 
+## Installation
+
+chat is deliberately not packaged or installable. The point is to leave no trace: apart
+from the executable itself, nothing should persist on the machine. A package manager would
+record the install and add files outside your control, so no packages (AUR or otherwise)
+are provided.
+
+Where you keep the executable is up to you. The recommended place is a user-owned folder
+on your `PATH`, such as `~/.local/bin`, because updating replaces the executable in place
+and needs write access to its folder. Some systems already have an unrelated program called
+`chat` (for example the modem dialer from `ppp`), so rename the file if it would clash:
+
+```sh
+install -Dm755 chat-linux-x86_64 ~/.local/bin/chat   # or another name, e.g. ~/.local/bin/e2chat
+```
+
+If you put it in a system folder such as `/usr/local/bin` or `/usr/bin` instead, you will
+most likely need root to update it:
+
+```sh
+sudo chat --update
+```
+
+This may differ on your system, and it doesn't matter if you never intend to update.
+
+Opt-in persistence may be added later, for example:
+
+- **chat history**, with other members of the session told that you are saving it
+- **config**, so options like nick and colour survive a restart
+
+Both would stay off unless you turn them on.
+
 ## Build
 
 Requires CMake ≥ 3.15 and a C compiler. libsodium (1.0.20) and liboqs (0.16.0, ML-KEM-768
@@ -58,6 +90,23 @@ mingw-w64), so libsodium's autotools and liboqs's CMake share one compiler path.
 ```sh
 cmake -B build-win -DCMAKE_TOOLCHAIN_FILE=cmake/zig-windows.cmake
 cmake --build build-win
+```
+
+### With just
+
+A [`justfile`](justfile) wraps the commands above:
+
+```sh
+just build              # native binary in build/
+just build-win          # Windows binary in build-win/ (needs zig)
+just run --nick you     # build, then run
+just clean              # remove build directories
+```
+
+### Releases
+
+```sh
+just dist               # static musl Linux + Windows binaries and SHA256SUMS in dist/ (needs zig)
 ```
 
 ## Usage
@@ -107,10 +156,11 @@ Every command works as `/name` in INSERT or `:name` in COMMAND. `/help` lists th
 
 ### Updating
 
-`/update` checks the [latest GitHub release](https://github.com/Vinnelle/chat/releases/latest).
-If it is newer than the running build, chat downloads the binary for your platform, checks
-its SHA-256 against the release's `SHA256SUMS`, and replaces the executable in place.
-Restart chat to run the new version. It needs `curl` on `PATH` (built into Windows 10+) and
+`/update` inside chat, or `chat --update` from the shell without opening chat, checks the
+[latest GitHub release](https://github.com/Vinnelle/chat/releases/latest). If it is newer
+than the running build, chat downloads the binary for your platform, checks its SHA-256
+against the release's `SHA256SUMS`, and replaces the executable in place. Restart chat to
+run the new version. `chat --update` exits with status 1 if the update failed. It needs `curl` on `PATH` (built into Windows 10+) and
 write access to the folder that holds the executable.
 
 ### Options
@@ -123,6 +173,8 @@ write access to the folder that holds the executable.
 | `--identity ...` | `native`, `age`, or `pgp:KEYFILE` (see [Security](#security)) |
 | `--simple` | Plain `[HH:MM] ...` lines, one session, stdin — the automatic fallback when stdout isn't a tty |
 | `--session ID` | Join a session at startup (with `--port`, `--peer`) |
+| `--update` | Install the latest release and exit, without opening chat (see [Updating](#updating)) |
+| `--version` | Print the version and exit |
 
 ## License
 
