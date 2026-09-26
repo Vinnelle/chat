@@ -109,6 +109,7 @@ A [`justfile`](justfile) wraps the commands above:
 just build              # native binary in build/
 just build-win          # Windows binary in build-win/ (needs zig)
 just run --nick you     # build, then run
+just test-build         # build, then keep a copy as test-builds/chat-<build id>
 just clean              # remove build directories
 ```
 

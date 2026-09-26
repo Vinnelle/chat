@@ -80,7 +80,7 @@ add_executable(chat
 )
 
 add_custom_target(build_stamp ALL
-    COMMAND ${CMAKE_COMMAND} -DOUT=${CMAKE_BINARY_DIR}/build_stamp.h -P ${CMAKE_SOURCE_DIR}/cmake/stamp.cmake
+    COMMAND ${CMAKE_COMMAND} -DOUT=${CMAKE_BINARY_DIR}/build_stamp.h -DSRC=${CMAKE_SOURCE_DIR} -P ${CMAKE_SOURCE_DIR}/cmake/stamp.cmake
     BYPRODUCTS ${CMAKE_BINARY_DIR}/build_stamp.h)
 add_dependencies(chat libsodium_ext liboqs_ext build_stamp)
 target_compile_definitions(chat PRIVATE CHAT_VERSION="${PROJECT_VERSION}")
