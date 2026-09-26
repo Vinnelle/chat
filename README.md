@@ -29,14 +29,21 @@ Optional **identity signing** lets peers verify who they're talking to:
 
 Use `/verify NICK` to compare a peer's identity out-of-band.
 
+Each peer rekeys every few minutes. Before it does, it announces its new key over the current
+encrypted session, so a room member sitting between two peers can't swap in its own key at a
+rekey. If a peer drops and comes back, chat tells you its verify code changed.
+
 > **Note:** the cryptography here has not been independently audited.
 
 ## Download
 
 Prebuilt Linux and Windows x86_64 binaries are on the
-[releases page](https://github.com/Vinnelle/chat/releases), with a `SHA256SUMS` file:
+[releases page](https://github.com/Vinnelle/chat/releases), with a `SHA256SUMS` file and its
+[minisign](https://jedisct1.github.io/minisign/) signature. Check the signature against
+[`minisign.pub`](minisign.pub), then the hashes:
 
 ```sh
+minisign -Vm SHA256SUMS -p minisign.pub
 sha256sum -c --ignore-missing SHA256SUMS
 ```
 
@@ -109,7 +116,13 @@ just clean              # remove build directories
 
 ```sh
 just dist               # static musl Linux + Windows binaries and SHA256SUMS in dist/ (needs zig)
+just release            # dist, then sign SHA256SUMS and publish the GitHub release (needs minisign, gh)
 ```
+
+Releases are signed offline with the release key, never in CI, so someone who takes over the
+GitHub account still can't publish an update that chat will install. `just keygen` makes the
+key: commit `minisign.pub`, and keep the secret key backed up and off GitHub. Tag and push
+`vVERSION` before `just release`.
 
 ## Usage
 
@@ -160,9 +173,11 @@ Every command works as `/name` in INSERT or `:name` in COMMAND. `/help` lists th
 
 `/update` inside chat, or `chat --update` from the shell without opening chat, checks the
 [latest GitHub release](https://github.com/Vinnelle/chat/releases/latest). If it is newer
-than the running build, chat downloads the binary for your platform, checks its SHA-256
-against the release's `SHA256SUMS`, and replaces the executable in place. Restart chat to
-run the new version. `chat --update` exits with status 1 if the update failed. It needs `curl` on `PATH` (built into Windows 10+) and
+than the running build, chat checks that the release's `SHA256SUMS` carries a valid signature
+from the release key built into chat, downloads the binary for your platform, checks its
+SHA-256 against `SHA256SUMS`, and replaces the executable in place. A release without a valid
+signature is refused. Restart chat to
+run the new version. `chat --update` exits with status 1 if the update failed. It needs `curl` (on `PATH` on Linux; on Windows, the one built into Windows 10+ in `System32`) and
 write access to the folder that holds the executable.
 
 ### Options

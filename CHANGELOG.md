@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.1.5
+
+### Security
+- `/peers` could overflow a stack buffer once about 25 peers were online.
+- A room member could make a message appear to come from someone else. A message now shows
+  the nick of the peer that sent it. A message passed on for a peer you aren't connected to
+  shows as `nick (via relayer)`. A passed-on copy of a message from a peer you are connected
+  to is ignored, because that peer's own copy arrives directly.
+- Nicks can no longer contain `(`, `)`, `#`, `:` or `@`, so a nick can't fake "(verified)",
+  "(you)" or an id. The sidebar shortens a long nick instead of hiding a peer's status.
+- chat warns when a peer's signing identity changes, disappears or stops verifying after a
+  re-handshake.
+- Peer addresses shared by other peers must be IP addresses. Before, a room member could
+  make everyone look up any hostname.
+- The PGP key browser hides file names that contain terminal control characters.
+- On Windows, `/update` runs `curl.exe` from `System32` only. Before, a `curl.exe` in the
+  same folder as `chat.exe` or in the current folder would run instead.
+- `/update` makes curl ignore `.curlrc`.
+- The peer verify code is 16 hex digits instead of 8. The first 8 still match the code that
+  older versions show.
+- Hardening against outsiders who replay recorded packets or send junk: re-handshakes with
+  new keys, or from a new address mid-handshake, must answer a cookie first. A replayed
+  `kx` can no longer lock in bad keys. Junk packets from unknown addresses cost less CPU.
+- Releases are signed. `/update` and `--update` install a release only if its `SHA256SUMS`
+  carries a valid minisign signature from the release key built into chat, made for that
+  release's tag. Control of the GitHub account alone is no longer enough to push an update.
+- Before a peer rekeys, it announces its new key over the current session. A new key that a
+  peer never announced is refused, so a room member between two peers can't swap in its own
+  key at a rekey. This works between peers that both run this version.
+- When a peer drops and comes back, chat says if its verify code changed.
+- Nicks that look alike (case, `l`/`I`/`1`, `0`/`O`, Cyrillic or Greek letters, fullwidth
+  forms) show with `#` and the peer's id. Invisible characters are removed from nicks.
+- Candidate addresses from the DHT and from other peers are rate-limited, at most 4 per
+  host, so chat can't be used to flood an address with handshake traffic.
+- `--simple` without `--session` on a non-terminal starts a new random session instead of
+  joining the fixed `lobby` session, which anyone could join.
+
+### Changed
+- `/peers` prints one line per peer.
+- Releases are built and published with `just release`. CI builds every push but no longer
+  publishes releases.
+
 ## 0.1.4
 
 ### Added

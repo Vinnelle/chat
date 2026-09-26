@@ -374,6 +374,8 @@ static void path_parent(char *p) {
 static void browser_add(void *ctx, const char *name, int is_dir) {
     browser_t *b = ctx;
     if (b->n_items >= MAX_DIR_ITEMS) return;
+    // Names go straight to the terminal; one carrying escape sequences could drive it.
+    if (has_control_chars(name)) return;
     if (strcmp(name, "..") == 0 && path_is_root(b->path)) return;
     tui_list_item_t *item = &b->items[b->n_items++];
     copy_str(item->label, name, sizeof item->label);
@@ -464,9 +466,7 @@ static cmd_result_t app_quitall(void *ctx, const char *arg) {
 static cmd_result_t app_nick(void *ctx, const char *arg) {
     (void)ctx;
     if (!*arg) { push_log("* current nickname: %s. usage: /nick NAME", g_app.nick); return CMD_OK; }
-    char cleaned[MAX_NICK + 1];
-    clean_text(arg, cleaned, MAX_NICK);
-    copy_str(g_app.nick, cleaned[0] ? cleaned : "anon", sizeof g_app.nick);
+    chat_clean_nick(arg, g_app.nick);
     int any = 0;
     for (int i = 0; i < MAX_SESSIONS; i++)
         if (g_app.used[i]) { chat_set_nick(&g_app.sessions[i].engine, g_app.nick); any = 1; }
@@ -866,11 +866,29 @@ static void render(void) {
         snprintf(peer_rows[n_peers].label, sizeof peer_rows[0].label, "%s (you)", e->nick);
         memcpy(peer_rows[n_peers].color, e->my_color, 3);
         n_peers++;
+        int pane_x, pane_rows;
+        int sbw = tui_pane_geometry(rows_n, cols_n, &pane_x, &pane_rows);
         for (int i = 0; i < MAX_PEERS + MAX_PENDING_PEERS && n_peers < MAX_PEERS + MAX_PENDING_PEERS + 1; i++) {
             peer_t *p = &e->peers[i];
             if (!p->used || !p->ok) continue;
-            snprintf(peer_rows[n_peers].label, sizeof peer_rows[0].label, "%s (%s)",
-                     p->nick, chat_verify_label(p->identity_state));
+            // Cut the nick, never the status, so a long or lookalike nick can't push the real one out of view.
+            char name[CHAT_NAME_LEN]; chat_peer_name(e, p, name);
+            char *tag = strchr(name, '#');   // nicks can't hold '#': this is the id added to tell lookalikes apart
+            char status[64];
+            snprintf(status, sizeof status, "%s (%s)", tag ? tag : "", chat_verify_label(p->identity_state));
+            if (tag) *tag = '\0';
+            int room = sbw - 2 - (int)strlen(status);
+            size_t nlen = strlen(name);
+            if (room < 0) room = 0;
+            if (nlen > (size_t)room) {
+                nlen = (size_t)room;
+                while (nlen > 0 && ((unsigned char)name[nlen] & 0xc0) == 0x80) nlen--;
+            }
+            char *label = peer_rows[n_peers].label;
+            size_t cap = sizeof peer_rows[0].label;
+            if (nlen > cap - 1) nlen = cap - 1;
+            memcpy(label, name, nlen);
+            copy_str(label + nlen, status, cap - nlen);
             memcpy(peer_rows[n_peers].color, p->color, 3);
             n_peers++;
         }
@@ -1027,7 +1045,10 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
         if (line[0]) copy_str(o.session_name, line, sizeof o.session_name);
         else { random_session_id(o.session_name, 10); o.created = 1; printf("new session id: %s  (share this and the password)\n", o.session_name); }
     } else {
-        copy_str(o.session_name, "lobby", sizeof o.session_name);
+        // No fixed default: a well-known id with a blank password would be a room anyone can join.
+        random_session_id(o.session_name, 10);
+        o.created = 1;
+        printf("new session id: %s  (share this and the password)\n", o.session_name);
     }
 
     if (password) copy_str(o.password, password, sizeof o.password);
@@ -1155,7 +1176,7 @@ int main(int argc, char **argv) {
         const named_color_t *pick = &COLOR_PALETTE[r % COLOR_PALETTE_N];
         g_app.color[0] = pick->r; g_app.color[1] = pick->g; g_app.color[2] = pick->b;
     }
-    copy_str(g_app.nick, nick_arg, sizeof g_app.nick);
+    if (nick_arg[0]) chat_clean_nick(nick_arg, g_app.nick);
 
     addr_t peers[16]; int n_peers = 0;
     for (int i = 0; i < n_peer_args; i++) {

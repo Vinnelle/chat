@@ -94,6 +94,101 @@ static int nick_ieq(const char *a, const char *b) {
     return *a == '\0' && *b == '\0';
 }
 
+// Characters that render as nothing, or next to nothing.
+static int is_invisible(uint32_t cp) {
+    return cp == 0xad || cp == 0x34f || cp == 0x61c || cp == 0x115f || cp == 0x1160 || cp == 0x17b4
+        || cp == 0x17b5 || cp == 0x180e || (cp >= 0x200b && cp <= 0x200d) || (cp >= 0x2060 && cp <= 0x2064)
+        || cp == 0x3164 || cp == 0xfeff || cp == 0xffa0 || (cp >= 0xfe00 && cp <= 0xfe0f)
+        || (cp >= 0xe0000 && cp <= 0xe007f);
+}
+
+// Fullwidth ASCII, and other brackets and marks that pass for the ones the UI uses, as plain ASCII.
+static uint32_t fold_punct(uint32_t cp) {
+    if (cp >= 0xff01 && cp <= 0xff5e) return cp - 0xff01 + 0x21;
+    switch (cp) {
+        case 0x207d: case 0x208d: case 0x2768: case 0x276a: case 0x27ee: case 0x2985: case 0xfe59: case 0xff5f:
+            return '(';
+        case 0x207e: case 0x208e: case 0x2769: case 0x276b: case 0x27ef: case 0x2986: case 0xfe5a: case 0xff60:
+            return ')';
+        case 0xfe5f: return '#';
+        case 0x2d0: case 0x2236: case 0xa789: case 0xfe13: case 0xfe55: return ':';
+        case 0xfe6b: return '@';
+        default: return cp;
+    }
+}
+
+// Letters from other scripts that look like Latin ones.
+static const struct { uint16_t cp; char ascii; } LOOKALIKES[] = {
+    { 0x0131, 'i' }, { 0x0261, 'g' }, { 0x0391, 'A' }, { 0x0392, 'B' }, { 0x0395, 'E' }, { 0x0396, 'Z' },
+    { 0x0397, 'H' }, { 0x0399, 'I' }, { 0x039a, 'K' }, { 0x039c, 'M' }, { 0x039d, 'N' }, { 0x039f, 'O' },
+    { 0x03a1, 'P' }, { 0x03a4, 'T' }, { 0x03a5, 'Y' }, { 0x03a7, 'X' }, { 0x03b1, 'a' }, { 0x03b9, 'i' },
+    { 0x03ba, 'k' }, { 0x03bd, 'v' }, { 0x03bf, 'o' }, { 0x03c1, 'p' }, { 0x03c5, 'u' }, { 0x0405, 'S' },
+    { 0x0406, 'I' }, { 0x0408, 'J' }, { 0x0410, 'A' }, { 0x0412, 'B' }, { 0x0415, 'E' }, { 0x041a, 'K' },
+    { 0x041c, 'M' }, { 0x041d, 'H' }, { 0x041e, 'O' }, { 0x0420, 'P' }, { 0x0421, 'C' }, { 0x0422, 'T' },
+    { 0x0425, 'X' }, { 0x0430, 'a' }, { 0x0435, 'e' }, { 0x043a, 'k' }, { 0x043e, 'o' }, { 0x0440, 'p' },
+    { 0x0441, 'c' }, { 0x0443, 'y' }, { 0x0445, 'x' }, { 0x0455, 's' }, { 0x0456, 'i' }, { 0x0458, 'j' },
+    { 0x04ae, 'Y' }, { 0x04bb, 'h' }, { 0x04c0, 'I' }, { 0x0501, 'd' }, { 0x051b, 'q' }, { 0x051d, 'w' },
+    { 0x217c, 'l' },
+};
+
+// What a nick looks like, for comparing: lookalikes as Latin, i/I/1/| as l, 0 as o, case and
+// invisible characters ignored.
+static void nick_skeleton(const char *nick, char *out, size_t cap) {
+    size_t n = strlen(nick), i = 0, o = 0;
+    while (i < n) {
+        size_t adv;
+        uint32_t cp = fold_punct(utf8_decode(nick, n, i, &adv));
+        i += adv;
+        if (is_invisible(cp)) continue;
+        for (size_t k = 0; k < sizeof LOOKALIKES / sizeof LOOKALIKES[0]; k++)
+            if (LOOKALIKES[k].cp == cp) { cp = (uint32_t)LOOKALIKES[k].ascii; break; }
+        if (cp < 0x80) cp = (uint32_t)tolower((int)cp);
+        if (cp == 'i' || cp == '|' || cp == '1') cp = 'l';
+        else if (cp == '0') cp = 'o';
+        char enc[4];
+        size_t len = utf8_put(cp, enc);
+        if (o + len >= cap) break;
+        memcpy(out + o, enc, len);
+        o += len;
+    }
+    out[o] = '\0';
+}
+
+void chat_clean_nick(const char *in, char out[MAX_NICK + 1]) {
+    char tmp[MAX_NICK + 1], kept[MAX_NICK + 1];
+    clean_text(in, tmp, MAX_NICK);
+    size_t n = strlen(tmp), i = 0, o = 0;
+    while (i < n) {
+        size_t adv;
+        uint32_t cp = utf8_decode(tmp, n, i, &adv);
+        uint32_t f = fold_punct(cp);
+        if (!is_invisible(cp) && !(f < 0x80 && strchr("()#:@", (int)f))) {
+            if (f != cp) kept[o++] = (char)f;
+            else { memcpy(kept + o, tmp + i, adv); o += adv; }
+        }
+        i += adv;
+    }
+    kept[o] = '\0';
+    clean_text(kept, out, MAX_NICK);
+    if (!out[0]) copy_str(out, "anon", MAX_NICK + 1);
+}
+
+void chat_peer_name(const chat_t *c, const peer_t *p, char out[CHAT_NAME_LEN]) {
+    char mine[4 * MAX_NICK + 1], other[4 * MAX_NICK + 1];
+    nick_skeleton(p->nick, mine, sizeof mine);
+    nick_skeleton(c->nick, other, sizeof other);
+    int clash = strcmp(mine, other) == 0;
+    for (int i = 0; i < c->peer_hi && !clash; i++) {
+        const peer_t *q = &c->peers[i];
+        if (q == p || !q->used || !q->ok) continue;
+        nick_skeleton(q->nick, other, sizeof other);
+        clash = strcmp(mine, other) == 0;
+    }
+    if (!clash) { copy_str(out, p->nick, CHAT_NAME_LEN); return; }
+    char idhex[9]; hex_encode(p->id, 4, idhex);
+    snprintf(out, CHAT_NAME_LEN, "%s#%s", p->nick, idhex);
+}
+
 static int has_mention(const char *text, const char *nick) {
     size_t nlen = strlen(nick);
     if (nlen == 0) return 0;
@@ -205,13 +300,13 @@ static double cover_interval(chat_t *c) {
     return COVER_INTERVAL * (scale > 1.0 ? scale : 1.0);
 }
 
-static int frame_for_peer(chat_t *c, peer_t *p, const char *text, uint8_t *frame, size_t frame_cap,
-                           size_t *len, uint32_t *index) {
-    (void)c;
+static ratchet_t *send_chain_for(peer_t *p) {
+    if (!p->send_chain.started && p->old_until > 0.0 && p->old_send.started) return &p->old_send;
+    return &p->send_chain;
+}
 
-    ratchet_t *chain = &p->send_chain;
-    if (!chain->started && p->old_until > 0.0 && p->old_send.started) chain = &p->old_send;
-
+static int frame_on_chain(ratchet_t *chain, const char *text, uint8_t *frame, size_t frame_cap,
+                          size_t *len, uint32_t *index) {
     uint32_t idx = chain->index;
     ratchet_t advanced;
     uint8_t mk[32];
@@ -226,9 +321,14 @@ static int frame_for_peer(chat_t *c, peer_t *p, const char *text, uint8_t *frame
     return rc;
 }
 
-static void send_peer(chat_t *c, peer_t *p, const char *text) {
+static int frame_for_peer(peer_t *p, const char *text, uint8_t *frame, size_t frame_cap,
+                          size_t *len, uint32_t *index) {
+    return frame_on_chain(send_chain_for(p), text, frame, frame_cap, len, index);
+}
+
+static void send_peer_on(chat_t *c, peer_t *p, ratchet_t *chain, const char *text) {
     uint8_t frame[512]; size_t len; uint32_t idx;
-    if (frame_for_peer(c, p, text, frame, sizeof frame, &len, &idx) != 0) return;
+    if (frame_on_chain(chain, text, frame, sizeof frame, &len, &idx) != 0) return;
     net_send(c->sock, frame, len, p->addr);
     crypto_wipe(frame, sizeof frame);
 
@@ -236,12 +336,21 @@ static void send_peer(chat_t *c, peer_t *p, const char *text) {
     p->next_cover = now_seconds() + iv + jitter(iv * 0.25);
 }
 
+static void send_peer(chat_t *c, peer_t *p, const char *text) { send_peer_on(c, p, send_chain_for(p), text); }
+
 static void add_candidate(chat_t *c, addr_t a) {
     if (a.port == 0) return;
     for (int i = 0; i < c->n_self_addrs; i++) if (addr_equal(c->self_addrs[i], a)) return;
     for (int i = 0; i < c->peer_hi; i++)
         if (c->peers[i].used && addr_equal(c->peers[i].addr, a)) return;
-    for (int i = 0; i < MAX_CANDS; i++) if (c->cands[i].used && addr_equal(c->cands[i].addr, a)) return;
+    int same_host = 0;
+    for (int i = 0; i < MAX_CANDS; i++) {
+        if (!c->cands[i].used) continue;
+        addr_t b = c->cands[i].addr;
+        if (addr_equal(b, a)) return;
+        if (b.is_v6 == a.is_v6 && memcmp(b.ip, a.ip, a.is_v6 ? 16 : 4) == 0) same_host++;
+    }
+    if (same_host >= CAND_PER_HOST) return;
     for (int i = 0; i < MAX_CANDS; i++) {
         if (!c->cands[i].used) {
             c->cands[i].used = 1;
@@ -282,14 +391,16 @@ static void build_k_message(chat_t *c, peer_t *p, char *out, size_t out_cap) {
         identity_sign(&c->identity, c->keys.pub, c->my_id, p->pub, p->id, sig);
         hex_encode(sig, ID_SIGN_LEN, sighex);
     }
-    snprintf(out, out_cap, "k\t%s\t%s\t%d\t%d\t%s\t%s", c->nick, colorhex, c->persist, idtype, idpubhex, sighex);
+    snprintf(out, out_cap, "k\t%s\t%s\t%dr\t%d\t%s\t%s", c->nick, colorhex, c->persist, idtype, idpubhex, sighex);
 }
 
 static void send_k_now(chat_t *c, peer_t *p) {
-    char k[8 + MAX_NICK + 8 + 4 + 4 + 65 + 129];
+    char k[8 + MAX_NICK + 8 + 5 + 4 + 65 + 129];
     build_k_message(c, p, k, sizeof k);
     send_peer(c, p, k);
 }
+
+static void finish_kem_decap(chat_t *c, peer_t *p, const uint8_t ct[KEM_CT_LEN]);
 
 static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
                          const uint8_t their_pub[PUB_LEN], const uint8_t their_kem_pub[KEM_PUB_LEN],
@@ -300,6 +411,21 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
     if (p && memcmp(p->pub, their_pub, PUB_LEN) == 0 && p->keygen == c->keygen) {
         if (!p->ok) p->addr = addr;
         return p;
+    }
+    // A room member in the middle could swap in its own key at a rekey. A peer that announces
+    // rekeys told us its new key over the current session, which the middle can't touch, so a
+    // new key it never announced is refused. After a short grace (the rk may still be on its
+    // way) that gets a warning.
+    if (p && p->ok && p->announces_rekey && memcmp(p->pub, their_pub, PUB_LEN) != 0
+        && !(p->next_pub_set && memcmp(p->next_pub, their_pub, PUB_LEN) == 0)) {
+        if (p->rk_refused_since == 0.0) p->rk_refused_since = now;
+        if (now - p->rk_refused_since > 10.0 && now >= p->next_rk_warn) {
+            char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
+            p->next_rk_warn = now + 30.0;
+            ui_print(c, "* warning: a new key for %s arrived that %s never announced - refused. Someone may be "
+                        "intercepting; if it continues, compare /peers verify codes over another channel", name, name);
+        }
+        return NULL;
     }
     if (pending_peer_count(c) >= MAX_PENDING_PEERS || live_count(c) >= MAX_PEERS) return NULL;
     uint8_t shared[32];
@@ -350,6 +476,7 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
         slot->old_recv = carry.recv_chain;
         slot->old_until = now + REKEY_OVERLAP;
         slot->next_cover = carry.next_cover;
+        slot->announces_rekey = carry.announces_rekey;
     }
 
     if (memcmp(c->my_id, peer_id, ID_LEN) < 0) {
@@ -363,20 +490,34 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
         crypto_wipe(prk, sizeof prk);
     } else {
         memcpy(slot->prk_partial, prk_partial, 32);
+        if (rejoin && carry.kx_early) finish_kem_decap(c, slot, carry.kem_ct);
     }
     *fresh = 1;
     return slot;
 }
 
+static int we_initiate(const chat_t *c, const peer_t *p) { return memcmp(c->my_id, p->id, ID_LEN) < 0; }
+
 static void finish_kem_decap(chat_t *c, peer_t *p, const uint8_t ct[KEM_CT_LEN]) {
-    if (p->send_chain.started) return;
+    // The initiator's chains come from its own encapsulation; only the responder takes a kx.
+    if (we_initiate(c, p)) return;
+    if (p->chain_confirmed) {
+        // The initiator may send its kx while our side of the re-handshake still waits on a cookie.
+        if (memcmp(p->kem_ct, ct, KEM_CT_LEN) != 0) { memcpy(p->kem_ct, ct, KEM_CT_LEN); p->kx_early = 1; }
+        return;
+    }
+    // A recorded kx can be replayed, so a different one may replace it until the peer's frames
+    // prove which chains are right.
+    if (p->send_chain.started && memcmp(p->kem_ct, ct, KEM_CT_LEN) == 0) return;
     uint8_t kem_ss[KEM_SS_LEN];
     if (kem_decapsulate(&c->kem_keys, ct, kem_ss) != 0) return;
+    memcpy(p->kem_ct, ct, KEM_CT_LEN);
     uint8_t prk[32];
     session_prk_finish(p->prk_partial, kem_ss, prk);
     ratchet_seed(prk, c->keys.pub, &p->send_chain);
     ratchet_seed(prk, p->pub, &p->recv_chain);
-    if (!p->vfy_set) { session_verify_code(prk, p->vfy); p->vfy_set = 1; }
+    // vfy_set is left to the first frame that opens on these chains.
+    if (!p->vfy_set) session_verify_code(prk, p->vfy);
     crypto_wipe(prk, sizeof prk);
     crypto_wipe(kem_ss, sizeof kem_ss);
     send_k_now(c, p);
@@ -392,8 +533,9 @@ static void connect_peer(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
         send_room(c, c->hi_msg, addr, c->sock);
     }
     if (p->send_chain.started) {
-
-        if (fresh) send_kx(c, p, addr);
+        // Keep offering the kx until the peer's frames show it took it: the first copy may be lost,
+        // or reach the peer before its side of the re-handshake is ready.
+        if (we_initiate(c, p) && (fresh || !p->chain_confirmed)) send_kx(c, p, p->addr);
         send_k_now(c, p);
     }
 
@@ -431,21 +573,32 @@ static void introduce(chat_t *c, peer_t *newp) {
 
 static void drop_peer(chat_t *c, peer_t *p, const char *why) {
     int was_ok = p->ok;
-    char nick[MAX_NICK + 1]; strcpy(nick, p->nick);
+    char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
+    if (was_ok && p->vfy_set) {
+        int g = c->gone_head;
+        c->gone[g].used = 1;
+        memcpy(c->gone[g].id, p->id, ID_LEN);
+        memcpy(c->gone[g].vfy, p->vfy, VERIFY_LEN);
+        c->gone_head = (g + 1) % (int)(sizeof c->gone / sizeof c->gone[0]);
+    }
     forget_peer(c, p);
-    if (was_ok) ui_print(c, "* %s %s (%d online)", nick, why, live_count(c) + 1);
+    if (was_ok) ui_print(c, "* %s %s (%d online)", name, why, live_count(c) + 1);
 }
 
 static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
     char *f[MAX_FIELDS];
     int n = split_tabs(plain, f, MAX_FIELDS);
     if (n == 7 && strcmp(f[0], "k") == 0) {
-        char clean[MAX_NICK + 1];
-        clean_text(f[1], clean, MAX_NICK);
-        strcpy(p->nick, clean[0] ? clean : "anon");
+        chat_clean_nick(f[1], p->nick);
+        identity_source_t had_source = p->identity_source;
+        verify_state_t had_state = p->identity_state;
+        uint8_t had_pub[ID_SIGN_PUB_LEN];
+        memcpy(had_pub, p->identity_pub, ID_SIGN_PUB_LEN);
         uint8_t rgb[3];
         if (parse_color(f[2], rgb) == 0) memcpy(p->color, rgb, 3);
+        // f[3] is the logging flag, then capability letters older builds ignore: "r" = sends rk.
         p->persists = (f[3][0] == '1');
+        p->announces_rekey = strchr(f[3], 'r') != NULL;
         int idtype = atoi(f[4]);
         size_t idpub_len = strlen(f[5]), sig_len = strlen(f[6]);
         if (idtype > IDENT_NONE && idtype <= IDENT_PGP && idpub_len == 64 && sig_len == 128) {
@@ -463,36 +616,72 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         } else {
             p->identity_source = IDENT_NONE; p->identity_state = VERIFY_UNVERIFIED;
         }
+        // A re-handshake (rekey, rejoin) re-sends k: say so when the identity behind it moves.
+        if (had_source != IDENT_NONE) {
+            char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
+            if (p->identity_source == IDENT_NONE) {
+                ui_print(c, "* warning: %s no longer presents a signing identity", name);
+            } else if (memcmp(had_pub, p->identity_pub, ID_SIGN_PUB_LEN) != 0) {
+                char fphex[ID_FP_LEN * 2 + 1]; hex_encode(p->identity_fp, ID_FP_LEN, fphex);
+                ui_print(c, "* warning: %s now presents a different signing identity (fingerprint %s) - /verify it again",
+                         name, fphex);
+            } else if (p->identity_state == VERIFY_FAILED && had_state != VERIFY_FAILED) {
+                ui_print(c, "* warning: %s's identity signature is now invalid", name);
+            }
+        }
+    } else if (n == 2 && strcmp(f[0], "rk") == 0) {
+        // The key this peer will re-handshake with next, sent over the session we already trust.
+        uint8_t next[PUB_LEN];
+        if (hex_decode(f[1], PUB_LEN * 2, next) == 0) {
+            memcpy(p->next_pub, next, PUB_LEN);
+            p->next_pub_set = 1;
+            p->rk_refused_since = 0.0;
+        }
     } else if (n == 2 && strcmp(f[0], "c") == 0) {
         uint8_t rgb[3];
         if (parse_color(f[1], rgb) == 0) memcpy(p->color, rgb, 3);
     } else if (n == 2 && strcmp(f[0], "n") == 0) {
-        char clean[MAX_NICK + 1];
-        clean_text(f[1], clean, MAX_NICK);
-        strcpy(p->nick, clean[0] ? clean : "anon");
+        chat_clean_nick(f[1], p->nick);
     } else if (n == 2 && strcmp(f[0], "px") == 0) {
         char *item = strtok(f[1], ",");
         int cnt = 0;
         while (item && cnt < 12) {
             addr_t a;
-            if (addr_parse_hostport(item, &a) == 0) add_candidate(c, a);
+            // Numeric only: a hostname here would have us resolve whatever a peer names.
+            if (addr_parse_ip_port(item, &a) == 0) add_candidate(c, a);
             item = strtok(NULL, ",");
             cnt++;
         }
     } else if (n == 5 && strcmp(f[0], "m") == 0) {
         char ack[16]; snprintf(ack, sizeof ack, "a\t%s", f[1]);
         send_peer(c, p, ack);
+        // Only p itself is authenticated here. f[2] and f[3] (origin id, nick) are whatever p says.
+        uint8_t origin[ID_LEN];
+        if (hex_decode(f[2], ID_LEN * 2, origin) != 0) return;
+        int direct = memcmp(origin, p->id, ID_LEN) == 0;
+        if (!direct) {
+            if (memcmp(origin, c->my_id, ID_LEN) == 0) return;
+            // The origin is connected to us, so its own copy will come: a relayed one could be forged.
+            peer_t *op = find_peer_by_id(c, origin);
+            if (op && op->ok) return;
+        }
         if (seen_has(c, f[1])) return;
         seen_add(c, f[1]);
-        char nick[MAX_NICK + 1], text[MAX_TEXT + 1];
-        clean_text(f[3], nick, MAX_NICK);
+        char nick[MAX_NICK + 1], text[MAX_TEXT + 1], via[CHAT_NAME_LEN];
+        if (direct) copy_str(nick, p->nick, sizeof nick);
+        else chat_clean_nick(f[3], nick);
         clean_text(f[4], text, MAX_TEXT);
         int mentioned = has_mention(text, c->nick);
-        ui_chat(c, p->color, mentioned, nick[0] ? nick : "anon", text);
+        char shown[MAX_NICK + CHAT_NAME_LEN + 24];
+        chat_peer_name(c, p, via);
+        // A relayed nick is only the relayer's word, so it always carries the origin's id.
+        if (direct) copy_str(shown, via, sizeof shown);
+        else snprintf(shown, sizeof shown, "%s#%.8s (via %s)", nick, f[2], via);
+        ui_chat(c, direct ? p->color : NULL, mentioned, shown, text);
         if (c->notify && (c->notify_mode == NOTIFY_ALL || (c->notify_mode == NOTIFY_MENTIONS && mentioned)))
-            c->notify(c->ui, nick[0] ? nick : "anon", text, mentioned);
+            c->notify(c->ui, shown, text, mentioned);
         char rejoin[16 + MAX_NICK + MAX_TEXT + 32];
-        snprintf(rejoin, sizeof rejoin, "m\t%s\t%s\t%s\t%s", f[1], f[2], f[3], f[4]);
+        snprintf(rejoin, sizeof rejoin, "m\t%s\t%s\t%s\t%s", f[1], f[2], nick, text);
         for (int i = 0; i < c->peer_hi; i++) {
             peer_t *q = &c->peers[i];
             if (!q->used || !q->ok || q == p) continue;
@@ -533,9 +722,13 @@ static void on_room(chat_t *c, char *plain, addr_t addr, double now) {
             char shortid[9]; hex_encode(peer_id, 4, shortid);
             ui_print(c, "* hi from %s, peer %s%s", addr_str, shortid, existing ? " (known)" : " (new)");
         }
-        if (existing) {
+        // Anyone who recorded a hi can replay it from anywhere. Take one on trust only if it changes
+        // nothing; new keys, or a new address mid-handshake, must answer a cookie first.
+        int trusted = existing && existing->keygen == c->keygen && memcmp(existing->pub, pub, PUB_LEN) == 0
+                      && (existing->ok || addr_equal(existing->addr, addr));
+        if (trusted) {
             connect_peer(c, peer_id, addr, pub, kem_pub, now);
-        } else if (!(c->once && c->once_used)) {
+        } else if (existing || !(c->once && c->once_used)) {
             uint8_t cookie[COOKIE_LEN];
             cookie_compute(c->cookie_secret, addr_str, peer_id, pub, cookie);
             char cookiehex[33]; hex_encode(cookie, COOKIE_LEN, cookiehex);
@@ -651,14 +844,19 @@ static void on_packet(chat_t *c, uint8_t *data, size_t len, addr_t addr, double 
     on_frame(c, data, len, addr, now);
 }
 
-static int peer_try_unseal(peer_t *p, const uint8_t *data, size_t len, uint32_t index,
+static int in_window(const ratchet_t *r, uint32_t index, uint32_t max_skip) {
+    return r->started && index >= r->index && index - r->index <= max_skip;
+}
+
+static int peer_try_unseal(peer_t *p, const uint8_t *data, size_t len, uint32_t index, uint32_t max_skip,
                             uint8_t *plain, size_t plain_cap, size_t *plain_len, int *on_old) {
     uint8_t mk[32];
     ratchet_t advanced;
     *on_old = 0;
-    int got = ratchet_peek(&p->recv_chain, index, mk, &advanced) == 0
+    int got = in_window(&p->recv_chain, index, max_skip)
+               && ratchet_peek(&p->recv_chain, index, mk, &advanced) == 0
                && session_unseal(mk, index, data, len, plain, plain_cap, plain_len) == 0;
-    if (!got && p->old_until > 0.0
+    if (!got && p->old_until > 0.0 && in_window(&p->old_recv, index, max_skip)
         && ratchet_peek(&p->old_recv, index, mk, &advanced) == 0
         && session_unseal(mk, index, data, len, plain, plain_cap, plain_len) == 0) {
         got = 1;
@@ -685,19 +883,23 @@ static void on_frame(chat_t *c, uint8_t *data, size_t len, addr_t addr, double n
         int hit = -1, fast = -1, on_old = 0;
         for (int i = 0; i < c->peer_hi; i++)
             if (c->peers[i].used && addr_equal(c->peers[i].addr, addr)) { fast = i; break; }
-        if (fast >= 0 && peer_try_unseal(&c->peers[fast], data, len, index, plain, sizeof plain - 1,
-                                          &plain_len, &on_old))
+        if (fast >= 0 && peer_try_unseal(&c->peers[fast], data, len, index, RATCHET_MAX_SKIP, plain,
+                                          sizeof plain - 1, &plain_len, &on_old))
             hit = fast;
         if (hit < 0) {
             for (int i = 0; i < c->peer_hi; i++) {
                 if (i == fast || !c->peers[i].used) continue;
-                if (peer_try_unseal(&c->peers[i], data, len, index, plain, sizeof plain - 1,
+                if (peer_try_unseal(&c->peers[i], data, len, index, ROAM_MAX_SKIP, plain, sizeof plain - 1,
                                      &plain_len, &on_old)) { hit = i; break; }
             }
         }
         if (hit >= 0) {
             peer_t *p = &c->peers[hit];
-            if (!on_old && p->old_until > 0.0) rekey_drop_overlap(p);
+            if (!on_old) {
+                if (p->old_until > 0.0) rekey_drop_overlap(p);
+                p->chain_confirmed = 1;
+                p->vfy_set = 1;
+            }
             c->st.session_ok++;
             plain[plain_len] = '\0';
             if (!addr_equal(p->addr, addr)) p->addr = addr;
@@ -705,6 +907,7 @@ static void on_frame(chat_t *c, uint8_t *data, size_t len, addr_t addr, double n
             int was_pending = !p->ok;
             p->ok = 1;
             on_session(c, p, (char *)plain, now);
+            if (!p->used) return;
             if (was_pending) {
                 c->st.connects++;
 
@@ -719,8 +922,20 @@ static void on_frame(chat_t *c, uint8_t *data, size_t len, addr_t addr, double n
                     case VERIFY_UNVERIFIED:
                     default:               idlabel = " (unverified)"; break;
                 }
-                ui_print_colored(c, p->color, "* %s%s%s joined (%d online)", p->nick, idlabel,
+                char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
+                ui_print_colored(c, p->color, "* %s%s%s joined (%d online)", name, idlabel,
                                   p->persists ? " [logging chat locally]" : "", live_count(c) + 1);
+                // A peer that dropped and came back ran a fresh handshake, with nothing tying it to
+                // the one that may have been verified. Someone who forced the drop could be in it.
+                for (size_t g = 0; g < sizeof c->gone / sizeof c->gone[0]; g++) {
+                    if (!c->gone[g].used || memcmp(c->gone[g].id, p->id, ID_LEN) != 0) continue;
+                    c->gone[g].used = 0;
+                    if (memcmp(c->gone[g].vfy, p->vfy, VERIFY_LEN) == 0) continue;
+                    char was[VERIFY_LEN * 2 + 1], now_hex[VERIFY_LEN * 2 + 1];
+                    hex_encode(c->gone[g].vfy, VERIFY_LEN, was); hex_encode(p->vfy, VERIFY_LEN, now_hex);
+                    ui_print(c, "* %s reconnected with a new verify code (was %s, now %s) - if you had compared "
+                                "codes with them, compare the new one", name, was, now_hex);
+                }
                 introduce(c, p);
             }
             return;
@@ -763,6 +978,13 @@ static int pending_any(const chat_t *c) {
     return 0;
 }
 
+static void send_rk(chat_t *c, peer_t *p, ratchet_t *chain) {
+    char pubhex[PUB_LEN * 2 + 1]; hex_encode(c->keys.pub, PUB_LEN, pubhex);
+    char rk[8 + PUB_LEN * 2];
+    snprintf(rk, sizeof rk, "rk\t%s", pubhex);
+    send_peer_on(c, p, chain, rk);
+}
+
 static void session_rekey(chat_t *c, double now) {
     crypto_wipe(&c->keys, sizeof c->keys);
     crypto_wipe(&c->kem_keys, sizeof c->kem_keys);
@@ -776,6 +998,8 @@ static void session_rekey(chat_t *c, double now) {
     for (int i = 0; i < c->peer_hi; i++) {
         peer_t *p = &c->peers[i];
         if (!p->used) continue;
+        // Announce the new key over the current session before the hi that uses it.
+        if (p->ok) { send_rk(c, p, send_chain_for(p)); p->next_rk = now + RK_RESEND; }
         send_room(c, c->hi_msg, p->addr, c->sock);
         p->hello_tries = 0;
         p->next_hello = now + retry_delay(0);
@@ -795,10 +1019,15 @@ void chat_tick(chat_t *c, double now) {
                       dht_queried_count(&c->dht), dht_found_count(&c->dht));
         }
     }
+    c->probe_tokens += (now - c->probe_at) * PROBE_RATE;
+    if (c->probe_tokens > PROBE_BURST) c->probe_tokens = PROBE_BURST;
+    c->probe_at = now;
     for (int i = 0; i < MAX_CANDS; i++) {
         cand_t *cd = &c->cands[i];
         if (!cd->used) continue;
         if (now >= cd->next_try) {
+            if (c->probe_tokens < 1.0) break;
+            c->probe_tokens -= 1.0;
             send_room(c, c->hi_msg, cd->addr, c->sock);
             cd->next_try = now + retry_delay(cd->tries);
             cd->tries++;
@@ -832,7 +1061,7 @@ void chat_tick(chat_t *c, double now) {
                 ui_print(c, "* hi retry -> pending peer %s at %s", shortid, as);
             }
 
-            if (p->send_chain.started) {
+            if (p->send_chain.started && we_initiate(c, p)) {
                 send_kx(c, p, p->addr);
                 if (c->net_verbose) ui_print(c, "* kx retry -> pending peer %s", shortid);
             }
@@ -858,6 +1087,13 @@ void chat_tick(chat_t *c, double now) {
         peer_t *p = &c->peers[i];
         if (!p->used) continue;
 
+        // Until the peer re-handshakes with our new key, keep announcing it on the chain it can still read.
+        if (p->ok && p->announces_rekey && c->keygen > 1 && now >= p->next_rk
+            && (p->keygen != c->keygen || !p->chain_confirmed)) {
+            p->next_rk = now + RK_RESEND;
+            if (p->keygen != c->keygen) send_rk(c, p, send_chain_for(p));
+            else if (p->old_until > 0.0 && p->old_send.started) send_rk(c, p, &p->old_send);
+        }
         if (p->old_until > 0.0 && now > p->old_until) rekey_drop_overlap(p);
         if (p->ok && now - p->seen > PEER_TIMEOUT) drop_peer(c, p, "timed out");
     }
@@ -930,9 +1166,7 @@ static void send_to_live_peers(chat_t *c, const char *msg) {
 }
 
 void chat_set_nick(chat_t *c, const char *nick) {
-    char clean[MAX_NICK + 1];
-    clean_text(nick, clean, MAX_NICK);
-    copy_str(c->nick, clean[0] ? clean : "anon", sizeof c->nick);
+    chat_clean_nick(nick, c->nick);
     ui_print(c, "* your nickname is now %s", c->nick);
     char msg[8 + MAX_NICK];
     snprintf(msg, sizeof msg, "n\t%s", c->nick);
@@ -960,20 +1194,17 @@ static cmd_result_t cmd_help(void *ctx, const char *arg) {
 
 static cmd_result_t cmd_peers(void *ctx, const char *arg) {
     chat_t *c = ctx; (void)arg;
-    char out[2048]; size_t pos = (size_t)snprintf(out, sizeof out, "* online: %s (you), ", c->nick);
     int n = 0;
     for (int i = 0; i < c->peer_hi; i++) {
         peer_t *p = &c->peers[i];
         if (!p->used || !p->ok) continue;
+        if (n++ == 0) ui_print(c, "* online: %s (you), and:", c->nick);
         char idhex[9]; hex_encode(p->id, 4, idhex);
         char vfyhex[VERIFY_LEN * 2 + 1]; hex_encode(p->vfy, VERIFY_LEN, vfyhex);
-        pos += (size_t)snprintf(out + pos, sizeof(out) - pos, "%s%s#%s (verify %s, %s%s)", n ? ", " : "",
-                                 p->nick, idhex, vfyhex, chat_verify_label(p->identity_state),
-                                 p->persists ? ", logging" : "");
-        n++;
+        ui_print(c, "*   %s#%s (verify %s, %s%s)", p->nick, idhex, vfyhex, chat_verify_label(p->identity_state),
+                 p->persists ? ", logging" : "");
     }
     if (n == 0) ui_print(c, "* nobody else yet");
-    else ui_print(c, "%s", out);
     return CMD_OK;
 }
 
@@ -1154,7 +1385,7 @@ void chat_send_text(chat_t *c, const char *text_in, double now) {
                 strcpy(c->pending[s].mid, mid);
                 c->pending[s].peer_slot = i;
                 uint32_t idx;
-                if (frame_for_peer(c, p, text, c->pending[s].frame, sizeof c->pending[s].frame,
+                if (frame_for_peer(p, text, c->pending[s].frame, sizeof c->pending[s].frame,
                                     &c->pending[s].frame_len, &idx) != 0) {
                     c->pending[s].used = 0;
                     break;
@@ -1183,7 +1414,7 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
     c->print = print;
     c->notify = notify;
     c->ui = ui;
-    copy_str(c->nick, o->nick, sizeof c->nick);
+    chat_clean_nick(o->nick, c->nick);
     copy_str(c->session_name, o->session_name, sizeof c->session_name);
     c->created = o->created;
     c->dht_on = o->dht_on;
@@ -1233,6 +1464,8 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
     }
     c->start = now_seconds();
     c->next_rekey = c->start + REKEY_INTERVAL + jitter(REKEY_INTERVAL * 0.2);
+    c->probe_tokens = PROBE_BURST;
+    c->probe_at = c->start;
 }
 
 void chat_shutdown(chat_t *c) {

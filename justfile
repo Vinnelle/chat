@@ -37,6 +37,44 @@ dist: build-static build-win
     cd dist && sha256sum chat-linux-x86_64 chat-windows-x86_64.exe > SHA256SUMS
     @echo "dist/ ready for v{{version}}"
 
+# minisign.pub gets committed; the password-protected secret key stays offline and backed up,
+# never in the repo. Set CHAT_SIGNING_KEY to keep it somewhere other than ~/.minisign.
+# Make the release signing key
+keygen:
+    #!/bin/sh
+    set -eu
+    key="${CHAT_SIGNING_KEY:-$HOME/.minisign/chat-release.key}"
+    if [ -e minisign.pub ] || [ -e "$key" ]; then echo "minisign.pub or $key already exists" >&2; exit 1; fi
+    mkdir -p "$(dirname "$key")"
+    minisign -G -p minisign.pub -s "$key"
+    echo "commit minisign.pub; back up $key somewhere safe"
+
+# Tag and push vVERSION first. Signing happens here, offline, so a compromised GitHub
+# account can't publish an update that chat will install.
+# Build, sign and publish this version's release (needs zig, minisign, gh)
+release:
+    #!/bin/sh
+    set -eu
+    key="${CHAT_SIGNING_KEY:-$HOME/.minisign/chat-release.key}"
+    test -e minisign.pub || { echo "no minisign.pub - run just keygen" >&2; exit 1; }
+    test -z "$(git status --porcelain)" || { echo "working tree not clean" >&2; exit 1; }
+    test "$(git rev-parse HEAD)" = "$(git rev-parse "v{{version}}^{commit}")" || { echo "HEAD is not tag v{{version}}" >&2; exit 1; }
+    just dist
+    minisign -S -s "$key" -m dist/SHA256SUMS -t "chat v{{version}}"
+    minisign -V -p minisign.pub -m dist/SHA256SUMS
+    awk -v v="{{version}}" '$0 == "## " v { on = 1; next } on && /^## / { exit } on { print }' CHANGELOG.md > dist/notes.md
+    grep -q '[^[:space:]]' dist/notes.md || { echo "CHANGELOG.md has no section for {{version}}" >&2; exit 1; }
+    {
+        echo
+        echo 'Check a download with `minisign -Vm SHA256SUMS -p minisign.pub`, then `sha256sum -c --ignore-missing SHA256SUMS`.'
+        echo
+        echo '```'
+        cat dist/SHA256SUMS
+        echo '```'
+    } >> dist/notes.md
+    gh release create "v{{version}}" --title "v{{version}}" --notes-file dist/notes.md --verify-tag \
+        dist/chat-linux-x86_64 dist/chat-windows-x86_64.exe dist/SHA256SUMS dist/SHA256SUMS.minisig
+
 # Remove build directories and release output
 clean:
     rm -rf build build-static build-win dist

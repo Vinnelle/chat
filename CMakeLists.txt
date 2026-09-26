@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Copyright (C) 2026 finlay@tuta.com
 cmake_minimum_required(VERSION 3.15)
-project(chat VERSION 0.1.4 LANGUAGES C)
+project(chat VERSION 0.1.5 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -84,6 +84,26 @@ add_custom_target(build_stamp ALL
     BYPRODUCTS ${CMAKE_BINARY_DIR}/build_stamp.h)
 add_dependencies(chat libsodium_ext liboqs_ext build_stamp)
 target_compile_definitions(chat PRIVATE CHAT_VERSION="${PROJECT_VERSION}")
+
+# /update installs only releases whose SHA256SUMS the key in minisign.pub signed (`just keygen`
+# makes one). Without the file the build still works, but refuses every update.
+set(CHAT_PUBKEY_FILE ${CMAKE_SOURCE_DIR}/minisign.pub)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CHAT_PUBKEY_FILE})
+if(EXISTS ${CHAT_PUBKEY_FILE})
+    file(STRINGS ${CHAT_PUBKEY_FILE} CHAT_PUBKEY_LINES)
+    list(LENGTH CHAT_PUBKEY_LINES CHAT_PUBKEY_N)
+    if(CHAT_PUBKEY_N LESS 2)
+        message(FATAL_ERROR "chat: minisign.pub should have a comment line and a key line")
+    endif()
+    list(GET CHAT_PUBKEY_LINES 1 CHAT_RELEASE_PUBKEY)
+    string(STRIP "${CHAT_RELEASE_PUBKEY}" CHAT_RELEASE_PUBKEY)
+    if(NOT CHAT_RELEASE_PUBKEY MATCHES "^RW[A-Za-z0-9+/]+$")
+        message(FATAL_ERROR "chat: minisign.pub's second line isn't a minisign public key")
+    endif()
+    target_compile_definitions(chat PRIVATE CHAT_RELEASE_PUBKEY="${CHAT_RELEASE_PUBKEY}")
+else()
+    message(WARNING "chat: no minisign.pub - this build will refuse every update (`just keygen` makes one)")
+endif()
 target_include_directories(chat PRIVATE src src/${CHAT_OS} ${CMAKE_BINARY_DIR} ${SODIUM_INCLUDE_DIRS} ${OQS_INCLUDE_DIRS})
 target_link_libraries(chat PRIVATE ${SODIUM_STATIC_LIB} ${OQS_STATIC_LIB})
 
