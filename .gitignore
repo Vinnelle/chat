@@ -3,6 +3,7 @@
 /build-win/
 /build-static/
 /dist/
+/test-builds/
 build_stamp.h
 *.o
 *.a

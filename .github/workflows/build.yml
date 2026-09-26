@@ -1,12 +1,12 @@
 name: build
 
-# Builds every push so breakage shows early. Releases are not published from here: `just release`
-# signs SHA256SUMS offline with the release key, which never touches GitHub.
+# Builds each newly published release, as a check that the tagged source builds on a clean
+# machine. The release itself comes from `just release`, which signs SHA256SUMS offline with the
+# release key, so the key never touches GitHub.
 
 on:
-  push:
-    branches: ['**']
-    tags: ['v*']
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:

@@ -27,6 +27,16 @@ all: build build-win
 run *args: build
     ./build/chat "$@"
 
+# Build, then keep a copy in test-builds/ named after its build id (the one `chat --version` shows)
+test-build: build
+    #!/bin/sh
+    set -eu
+    id=$(sed -n 's/^#define CHAT_BUILD_ID "\(.*\)"$/\1/p' build/build_stamp.h)
+    test -n "$id" || { echo "no CHAT_BUILD_ID in build/build_stamp.h" >&2; exit 1; }
+    mkdir -p test-builds
+    cp build/chat "test-builds/chat-$id"
+    echo "test-builds/chat-$id"
+
 # Put standalone release binaries and SHA256SUMS in dist/
 dist: build-static build-win
     rm -rf dist
@@ -59,6 +69,9 @@ release:
     test -e minisign.pub || { echo "no minisign.pub - run just keygen" >&2; exit 1; }
     test -z "$(git status --porcelain)" || { echo "working tree not clean" >&2; exit 1; }
     test "$(git rev-parse HEAD)" = "$(git rev-parse "v{{version}}^{commit}")" || { echo "HEAD is not tag v{{version}}" >&2; exit 1; }
+    if gh release view "v{{version}}" >/dev/null 2>&1; then
+        echo "release v{{version}} is already published - bump the version in CMakeLists.txt for a new one" >&2; exit 1
+    fi
     just dist
     minisign -S -s "$key" -m dist/SHA256SUMS -t "chat v{{version}}"
     minisign -V -p minisign.pub -m dist/SHA256SUMS
