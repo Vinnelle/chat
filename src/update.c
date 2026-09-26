@@ -36,8 +36,9 @@ static char g_msg[UPDATE_MSG_MAX];
 static int g_ok;
 
 static int fetch(const char *url, const char *out_path, int api) {
+    // -q must come first: it stops curl reading a .curlrc that could turn off TLS checks or add a proxy.
     const char *argv[] = {
-        "curl", "-fsL", "--proto", "=https", "--proto-redir", "=https", "--tlsv1.2",
+        "curl", "-q", "-fsL", "--proto", "=https", "--proto-redir", "=https", "--tlsv1.2",
         "--max-time", "300", "--max-filesize", UPDATE_MAX_BYTES,
         "-H", api ? "Accept: application/vnd.github+json" : "Accept: application/octet-stream",
         "-o", out_path, url, NULL
@@ -118,6 +119,64 @@ static int sums_lookup(const char *sums, const char *name, uint8_t hash[crypto_h
     return -1;
 }
 
+#ifdef CHAT_RELEASE_PUBKEY
+static const char RELEASE_PUBKEY[] = CHAT_RELEASE_PUBKEY;
+#else
+static const char RELEASE_PUBKEY[] = "";
+#endif
+
+// Checks a minisign signature (the SHA256SUMS.minisig next to SHA256SUMS) against the release key
+// built in from minisign.pub. The trusted comment must be "chat <tag>", so a signed SHA256SUMS from
+// an older release can't be passed off as a newer one.
+static int minisign_ok(const char *msg, size_t msg_len, const char *sig_text, const char *tag) {
+    uint8_t pk[2 + 8 + crypto_sign_PUBLICKEYBYTES];
+    if (base64_decode_strict(RELEASE_PUBKEY, strlen(RELEASE_PUBKEY), pk, sizeof pk) != (long)sizeof pk || memcmp(pk, "Ed", 2) != 0)
+        return -1;
+
+    // Four lines: untrusted comment, signature, trusted comment, global signature.
+    const char *lines[4]; size_t lens[4];
+    const char *p = sig_text;
+    for (int i = 0; i < 4; i++) {
+        const char *end = strchr(p, '\n');
+        size_t n = end ? (size_t)(end - p) : strlen(p);
+        if (n > 0 && p[n - 1] == '\r') n--;
+        lines[i] = p; lens[i] = n;
+        if (!end) { if (i < 3) return -1; } else p = end + 1;
+    }
+    static const char TC[] = "trusted comment: ";
+    if (lens[2] < sizeof TC - 1 || memcmp(lines[2], TC, sizeof TC - 1) != 0) return -1;
+    const char *comment = lines[2] + sizeof TC - 1;
+    size_t comment_len = lens[2] - (sizeof TC - 1);
+
+    char want[64];
+    int want_len = snprintf(want, sizeof want, "chat %s", tag);
+    if (want_len < 0 || (size_t)want_len != comment_len || memcmp(comment, want, comment_len) != 0) return -1;
+
+    uint8_t sig[2 + 8 + crypto_sign_BYTES], global[crypto_sign_BYTES];
+    if (base64_decode_strict(lines[1], lens[1], sig, sizeof sig) != (long)sizeof sig) return -1;
+    if (base64_decode_strict(lines[3], lens[3], global, sizeof global) != (long)sizeof global) return -1;
+    if (memcmp(sig + 2, pk + 2, 8) != 0) return -1;
+
+    const uint8_t *key = pk + 10, *s = sig + 10;
+    int ok;
+    if (memcmp(sig, "ED", 2) == 0) {
+        // minisign's default: the signature covers BLAKE2b-512 of the file.
+        uint8_t h[crypto_generichash_BYTES_MAX];
+        crypto_generichash(h, sizeof h, (const unsigned char *)msg, msg_len, NULL, 0);
+        ok = crypto_sign_verify_detached(s, h, sizeof h, key) == 0;
+    } else if (memcmp(sig, "Ed", 2) == 0) {
+        ok = crypto_sign_verify_detached(s, (const unsigned char *)msg, msg_len, key) == 0;
+    } else {
+        return -1;
+    }
+    if (!ok) return -1;
+
+    uint8_t signed_comment[crypto_sign_BYTES + 64];
+    memcpy(signed_comment, s, crypto_sign_BYTES);
+    memcpy(signed_comment + crypto_sign_BYTES, comment, comment_len);
+    return crypto_sign_verify_detached(global, signed_comment, crypto_sign_BYTES + comment_len, key) == 0 ? 0 : -1;
+}
+
 static int hash_file(const char *path, uint8_t out[crypto_hash_sha256_BYTES], long *size_out) {
     FILE *f = platform_fopen(path, "rb");
     if (!f) return -1;
@@ -150,13 +209,18 @@ static void succeed(const char *fmt, const char *arg) {
 
 static void update_thread(void *unused) {
     (void)unused;
-#ifndef UPDATE_ASSET
+#if !defined(UPDATE_ASSET)
     finish("* update: no release builds exist for this CPU architecture%s", "");
 #else
-    char exe[1024], tmp_json[1100], tmp_sums[1100], tmp_bin[1100], url[512];
+    if (!RELEASE_PUBKEY[0]) {
+        finish("* update: this build has no release signing key (minisign.pub), so it can't check a release%s", "");
+        return;
+    }
+    char exe[1024], tmp_json[1100], tmp_sums[1100], tmp_sig[1100], tmp_bin[1100], url[512];
     if (platform_exe_path(exe, sizeof exe) != 0) { finish("* update: could not locate the running executable%s", ""); return; }
     snprintf(tmp_json, sizeof tmp_json, "%s.release", exe);
     snprintf(tmp_sums, sizeof tmp_sums, "%s.sums", exe);
+    snprintf(tmp_sig, sizeof tmp_sig, "%s.sums.minisig", exe);
     snprintf(tmp_bin, sizeof tmp_bin, "%s.download", exe);
 
     if (fetch("https://api.github.com/repos/" UPDATE_REPO "/releases/latest", tmp_json, 1) != 0) {
@@ -178,10 +242,26 @@ static void update_thread(void *unused) {
         finish("* update: release %s has no SHA256SUMS - refusing to install it", tag);
         return;
     }
-    char *sums = slurp(tmp_sums, 1 << 16, NULL);
+    size_t sums_len = 0;
+    char *sums = slurp(tmp_sums, 1 << 16, &sums_len);
     platform_remove(tmp_sums);
+
+    // SHA256SUMS comes from the same place as the binary, so on its own it only catches corruption.
+    // The signature, made offline with the release key, is what vouches for it.
+    snprintf(url, sizeof url, "https://github.com/" UPDATE_REPO "/releases/download/%s/SHA256SUMS.minisig", tag);
+    char *sig = NULL;
+    if (fetch(url, tmp_sig, 0) == 0) sig = slurp(tmp_sig, 4096, NULL);
+    platform_remove(tmp_sig);
+    int signed_ok = sums && sig && minisign_ok(sums, sums_len, sig, tag) == 0;
+    free(sig);
+    if (!signed_ok) {
+        free(sums);
+        finish("* update: release %s has no valid release-key signature - refusing to install it", tag);
+        return;
+    }
+
     uint8_t want[crypto_hash_sha256_BYTES];
-    ok = sums && sums_lookup(sums, UPDATE_ASSET, want) == 0;
+    ok = sums_lookup(sums, UPDATE_ASSET, want) == 0;
     free(sums);
     if (!ok) { finish("* update: SHA256SUMS lists no " UPDATE_ASSET " for %s - nothing installed", tag); return; }
 
@@ -203,7 +283,7 @@ static void update_thread(void *unused) {
         finish("* update: verified %s but could not replace the executable (permissions?)", tag);
         return;
     }
-    succeed("* update: installed %s (SHA-256 verified) - restart chat to run it", tag);
+    succeed("* update: installed %s (signature and SHA-256 verified) - restart chat to run it", tag);
 #endif
 }
 

@@ -136,11 +136,12 @@ void net_wait(sock_t *socks, int *ready, int n, int timeout_ms) {
     for (int i = 0; i < m; i++) ready[i] = (pfds[i].revents & POLLIN) ? 1 : 0;
 }
 
-int addr_resolve_all(const char *host, uint16_t port, addr_t *out, int max) {
+static int resolve(const char *host, uint16_t port, addr_t *out, int max, int flags) {
     struct addrinfo hints, *res, *ai;
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_flags = flags;
     if (getaddrinfo(host, NULL, &hints, &res) != 0) return 0;
     int n = 0;
     for (ai = res; ai && n < max; ai = ai->ai_next) {
@@ -156,6 +157,14 @@ int addr_resolve_all(const char *host, uint16_t port, addr_t *out, int max) {
     }
     freeaddrinfo(res);
     return n;
+}
+
+int addr_resolve_all(const char *host, uint16_t port, addr_t *out, int max) {
+    return resolve(host, port, out, max, 0);
+}
+
+int addr_resolve_numeric(const char *host, uint16_t port, addr_t *out) {
+    return resolve(host, port, out, 1, AI_NUMERICHOST) == 1 ? 0 : -1;
 }
 
 void addr_to_string(addr_t a, char out[ADDR_STR_LEN]) {

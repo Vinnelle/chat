@@ -24,6 +24,13 @@
 #define LONELY_HINT_AFTER 15.0
 
 #define CAND_MAX_TRIES 12
+// A candidate hello is ~2.6 KB to an address nobody vouched for. These keep chat from being a
+// traffic reflector: few candidates per host, and a global rate.
+#define CAND_PER_HOST 4
+#define PROBE_RATE 4.0
+#define PROBE_BURST 16.0
+
+#define RK_RESEND 2.0
 #define HELLO_MAX_BACKOFF 5
 #define RETRY_BASE 2.0
 #define RETRY_CAP 32.0
@@ -35,6 +42,10 @@
 #define CHUNK_HDR 8
 #define CHUNK_PAYLOAD 1000
 #define CHUNK_MAX 4
+
+// Ratchet skip allowed when a frame arrives from an address that isn't the peer's. Trial decryption
+// runs against every peer, so the full RATCHET_MAX_SKIP here would let junk packets burn CPU.
+#define ROAM_MAX_SKIP 16
 
 #define REASM_SLOTS 32
 #define REASM_TTL 5.0
@@ -105,6 +116,18 @@ typedef struct {
     uint32_t keygen;
     double next_cover;
     int vfy_set;
+    // Set once a frame opens on the current recv_chain. Until then a replayed kx can't lock in bad chains.
+    int chain_confirmed;
+    // Responder only: kem_ct holds a kx that came before its re-handshake did, for do_hello to use.
+    int kx_early;
+
+    // The peer's k says it announces each new key over the current session ("rk") before it
+    // rekeys. For such a peer, a re-handshake with a key it never announced is refused.
+    int announces_rekey;
+    uint8_t next_pub[PUB_LEN];
+    int next_pub_set;
+    double rk_refused_since, next_rk_warn;
+    double next_rk;   // when to re-send our own rk until the peer re-handshakes with our new key
 
     ratchet_t old_send, old_recv;
     double old_until;
@@ -187,6 +210,13 @@ typedef struct {
     uint32_t seen_mids[2048];
     int seen_head, seen_count;
 
+    // Verify codes of peers that dropped: a peer that comes back gets a new one, and says so.
+    struct { int used; uint8_t id[ID_LEN]; uint8_t vfy[VERIFY_LEN]; } gone[16];
+    int gone_head;
+
+    // Token bucket for hellos to candidates, which come from the DHT and other peers unchecked.
+    double probe_tokens, probe_at;
+
     char my_idhex[ID_LEN * 2 + 1];
     char hi_msg[HANDSHAKE_BUF_LEN];
 
@@ -234,6 +264,16 @@ void chat_send_text(chat_t *c, const char *text, double now);
 extern const command_t CHAT_COMMANDS[];
 
 void chat_set_nick(chat_t *c, const char *nick);
+
+// Cleans a nick and drops the characters the UI puts around nicks ("(verified)", "#id", "name:"),
+// including lookalikes such as fullwidth brackets, and invisible characters, so no nick can fake
+// them. Never empty: falls back to "anon".
+void chat_clean_nick(const char *in, char out[MAX_NICK + 1]);
+
+// A peer's nick as shown, with "#" and its id prefix added when another peer's nick, or ours,
+// looks the same (case and common lookalike letters ignored).
+#define CHAT_NAME_LEN (MAX_NICK + 10)
+void chat_peer_name(const chat_t *c, const peer_t *p, char out[CHAT_NAME_LEN]);
 
 void chat_set_identity(chat_t *c, identity_source_t source, const identity_keypair_t *idkp);
 

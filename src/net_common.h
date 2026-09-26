@@ -112,7 +112,7 @@ int addr_resolve(const char *host, uint16_t port, addr_t *out) {
     return 0;
 }
 
-int addr_parse_hostport(const char *hostport, addr_t *out) {
+static int parse_hostport(const char *hostport, addr_t *out, int numeric) {
     char host[256];
     const char *portstr;
 
@@ -149,9 +149,13 @@ int addr_parse_hostport(const char *hostport, addr_t *out) {
         }
     }
 
-    if (addr_resolve(host, (uint16_t)port, out) != 0) return -1;
+    int rc = numeric ? addr_resolve_numeric(host, (uint16_t)port, out) : addr_resolve(host, (uint16_t)port, out);
+    if (rc != 0) return -1;
     if (out->is_v6) out->scope = scope;
     return 0;
 }
+
+int addr_parse_hostport(const char *hostport, addr_t *out) { return parse_hostport(hostport, out, 0); }
+int addr_parse_ip_port(const char *hostport, addr_t *out) { return parse_hostport(hostport, out, 1); }
 
 #endif

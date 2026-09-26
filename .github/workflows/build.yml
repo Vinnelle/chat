@@ -1,5 +1,8 @@
 name: build
 
+# Builds every push so breakage shows early. Releases are not published from here: `just release`
+# signs SHA256SUMS offline with the release key, which never touches GitHub.
+
 on:
   push:
     branches: ['**']
@@ -64,61 +67,3 @@ jobs:
           path: dist/${{ matrix.asset }}
           if-no-files-found: error
 
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Check tag matches CMakeLists.txt version
-        id: version
-        run: |
-          v=$(sed -n 's/^project(chat VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
-          if [ "$GITHUB_REF_NAME" != "v$v" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match project version $v in CMakeLists.txt"
-            exit 1
-          fi
-          echo "version=$v" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/download-artifact@v8
-        with:
-          path: dist
-          merge-multiple: true
-
-      - name: Write SHA256SUMS
-        working-directory: dist
-        run: |
-          sha256sum chat-linux-x86_64 chat-windows-x86_64.exe > SHA256SUMS
-          cat SHA256SUMS
-
-      - name: Write release notes
-        run: |
-          awk -v v="${{ steps.version.outputs.version }}" '
-            $0 == "## " v { on = 1; next }
-            on && /^## / { exit }
-            on { print }
-          ' CHANGELOG.md > notes.md
-          if ! grep -q '[^[:space:]]' notes.md; then
-            echo "::error::CHANGELOG.md has no section for ${{ steps.version.outputs.version }}"
-            exit 1
-          fi
-          {
-            echo 'Verify a manual download with `sha256sum -c --ignore-missing SHA256SUMS`.'
-            echo
-            echo '```'
-            cat dist/SHA256SUMS
-            echo '```'
-          } >> notes.md
-
-      - name: Publish release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
-            --notes-file notes.md \
-            --verify-tag \
-            dist/chat-linux-x86_64 dist/chat-windows-x86_64.exe dist/SHA256SUMS

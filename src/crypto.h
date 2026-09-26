@@ -13,7 +13,7 @@
 #define ROOM_KEY_LEN 32
 #define CHAIN_LEN 32
 
-#define VERIFY_LEN 4
+#define VERIFY_LEN 8
 #define FP_LEN 2
 #define DHT_INFOHASH_LEN 20
 #define COOKIE_LEN 16

@@ -550,6 +550,15 @@ static int append_quoted(wchar_t *cmd, size_t cap, size_t *pos, const char *arg)
 }
 
 int platform_run_quiet(const char *const argv[]) {
+    // Run argv[0] from System32 only. Left to search, CreateProcess tries the exe's own folder and the
+    // current folder first, so a curl.exe dropped next to chat.exe (say, in Downloads) would run.
+    wchar_t app[MAX_PATH + 64], name[64];
+    UINT sl = GetSystemDirectoryW(app, MAX_PATH);
+    if (sl == 0 || sl >= MAX_PATH || strpbrk(argv[0], "/\\:") || !to_wide(argv[0], name, 56)) return -1;
+    wcscat(app, L"\\");
+    wcscat(app, name);
+    wcscat(app, L".exe");
+
     wchar_t cmd[8192];
     size_t pos = 0;
     cmd[0] = L'\0';
@@ -566,7 +575,7 @@ int platform_run_quiet(const char *const argv[]) {
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdInput = si.hStdOutput = si.hStdError = nul;
     PROCESS_INFORMATION pi;
-    BOOL ok = CreateProcessW(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    BOOL ok = CreateProcessW(app, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
     CloseHandle(nul);
     if (!ok) return -1;
     WaitForSingleObject(pi.hProcess, INFINITE);

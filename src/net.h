@@ -34,8 +34,12 @@ void net_wait(sock_t *socks, int *ready, int n, int timeout_ms);
 #define ADDR_RESOLVE_MAX 8
 int addr_resolve_all(const char *host, uint16_t port, addr_t *out, int max);
 int addr_resolve(const char *host, uint16_t port, addr_t *out);
+// IP literals only; never touches DNS.
+int addr_resolve_numeric(const char *host, uint16_t port, addr_t *out);
 void addr_to_string(addr_t a, char out[ADDR_STR_LEN]);
 int addr_parse_hostport(const char *hostport, addr_t *out);
+// Like addr_parse_hostport, for addresses from the network: "IP:PORT" or "[IPv6]:PORT" only.
+int addr_parse_ip_port(const char *hostport, addr_t *out);
 int addr_equal(addr_t a, addr_t b);
 addr_t addr_broadcast_lan(uint16_t port);
 addr_t addr_loopback(uint16_t port);

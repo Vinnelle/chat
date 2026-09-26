@@ -25,6 +25,27 @@ size_t base64_encode(const uint8_t *in, size_t n, char *out) {
     return o;
 }
 
+long base64_decode_strict(const char *in, size_t inlen, uint8_t *out, size_t cap) {
+    if (inlen % 4 != 0) return -1;
+    size_t o = 0;
+    for (size_t i = 0; i < inlen; i += 4) {
+        uint32_t v = 0;
+        int pad = 0;
+        for (int k = 0; k < 4; k++) {
+            char ch = in[i + k];
+            const char *hit = ch ? strchr(B64CH, ch) : NULL;
+            if (ch == '=' && i + 4 == inlen && k >= 2 && (k == 3 || in[i + 3] == '=')) { pad++; v <<= 6; continue; }
+            if (!hit || pad) return -1;
+            v = (v << 6) | (uint32_t)(hit - B64CH);
+        }
+        for (int k = 0; k < 3 - pad; k++) {
+            if (o >= cap) return -1;
+            out[o++] = (uint8_t)(v >> (16 - 8 * k));
+        }
+    }
+    return (long)o;
+}
+
 void hex_encode(const uint8_t *in, size_t len, char *out) {
     for (size_t i = 0; i < len; i++) {
         out[i * 2] = HEXCH[in[i] >> 4];
@@ -67,12 +88,39 @@ static uint32_t utf8_next(const unsigned char *s, size_t n, size_t i, size_t *ad
     return cp;
 }
 
+uint32_t utf8_decode(const char *s, size_t n, size_t i, size_t *adv) {
+    return utf8_next((const unsigned char *)s, n, i, adv);
+}
+
+size_t utf8_put(uint32_t cp, char *out) {
+    if (cp < 0x80) { out[0] = (char)cp; return 1; }
+    if (cp < 0x800) { out[0] = (char)(0xc0 | (cp >> 6)); out[1] = (char)(0x80 | (cp & 0x3f)); return 2; }
+    if (cp < 0x10000) {
+        out[0] = (char)(0xe0 | (cp >> 12)); out[1] = (char)(0x80 | ((cp >> 6) & 0x3f));
+        out[2] = (char)(0x80 | (cp & 0x3f)); return 3;
+    }
+    out[0] = (char)(0xf0 | (cp >> 18)); out[1] = (char)(0x80 | ((cp >> 12) & 0x3f));
+    out[2] = (char)(0x80 | ((cp >> 6) & 0x3f)); out[3] = (char)(0x80 | (cp & 0x3f));
+    return 4;
+}
+
 static int is_stripped(uint32_t cp) {
     if (cp < 0x20 || cp == 0x7f) return 1;
     if (cp >= 0x80 && cp <= 0x9f) return 1;
     if (cp == 0x200e || cp == 0x200f) return 1;
     if (cp >= 0x202a && cp <= 0x202e) return 1;
     if (cp >= 0x2066 && cp <= 0x2069) return 1;
+    return 0;
+}
+
+int has_control_chars(const char *in) {
+    size_t n = strlen(in), i = 0;
+    const unsigned char *s = (const unsigned char *)in;
+    while (i < n) {
+        size_t adv;
+        if (is_stripped(utf8_next(s, n, i, &adv))) return 1;
+        i += adv;
+    }
     return 0;
 }
 
