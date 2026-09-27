@@ -143,6 +143,16 @@ static app_t g_app;
 static volatile sig_atomic_t g_interrupted = 0;
 static void on_sigint(int sig) { (void)sig; g_interrupted = 1; }
 
+// Ctrl+C, a kill or a closed terminal all end the main loop, so sessions say bye, keys are
+// wiped and the terminal is restored instead of the process just dying.
+static void catch_quit_signals(void) {
+    signal(SIGINT, on_sigint);
+    signal(SIGTERM, on_sigint);
+#ifdef SIGHUP
+    signal(SIGHUP, on_sigint);
+#endif
+}
+
 // App-level notes go wherever the user is looking: the selected session's console, else the startup log.
 static void push_log(const char *fmt, ...) {
     char msg[256];
@@ -265,9 +275,9 @@ static session_slot_t *start_session(const char *session_name, const char *passw
     if (g_app.identity_source != IDENT_NONE) o.identity = g_app.identity;
 
     chat_init(&s->engine, &o, session_print, session_notify, s);
-    crypto_wipe(o.password, sizeof o.password);
+    crypto_wipe(&o, sizeof o);
     if (s->engine.sock == SOCK_INVALID) {
-        crypto_wipe(&s->engine, sizeof s->engine);
+        chat_shutdown(&s->engine);
         tui_scrollback_clear(&s->console);
         g_app.used[idx] = 0;
         g_app.selected = NULL;
@@ -664,7 +674,10 @@ static void handle_key(const tui_key_t *key) {
         snprintf(g_app.paste_status, sizeof g_app.paste_status,
                  "pasting (%zu bytes so far, Esc to cancel)", g_app.paste_len);
         g_app.dirty = 1;
-        if (strstr(g_app.paste_buf, "-----END PGP PRIVATE KEY BLOCK-----")) {
+        // A paste arrives one key at a time: look only at the end, where the END line lands.
+        static const char end_line[] = "-----END PGP PRIVATE KEY BLOCK-----";
+        size_t el = sizeof end_line - 1;
+        if (g_app.paste_len >= el && memcmp(g_app.paste_buf + g_app.paste_len - el, end_line, el) == 0) {
             if (pgp_import_secret_key_text(g_app.paste_buf, &g_app.identity) == 0) {
                 g_app.identity_source = IDENT_PGP;
                 crypto_wipe(g_app.paste_buf, sizeof g_app.paste_buf);
@@ -877,16 +890,17 @@ static void render(void) {
             char status[64];
             snprintf(status, sizeof status, "%s (%s)", tag ? tag : "", chat_verify_label(p->identity_state));
             if (tag) *tag = '\0';
-            int room = sbw - 2 - (int)strlen(status);
-            size_t nlen = strlen(name);
-            if (room < 0) room = 0;
-            if (nlen > (size_t)room) {
-                nlen = (size_t)room;
-                while (nlen > 0 && ((unsigned char)name[nlen] & 0xc0) == 0x80) nlen--;
-            }
             char *label = peer_rows[n_peers].label;
             size_t cap = sizeof peer_rows[0].label;
-            if (nlen > cap - 1) nlen = cap - 1;
+            int room = sbw - 2 - utf8_str_cols(status);
+            if (room < 0) room = 0;
+            size_t nlen = utf8_fit_cols(name, strlen(name), room, NULL);
+            // The label buffer is bytes, not columns: the status still has to fit after the nick.
+            size_t slen = strlen(status);
+            while (nlen > 0 && nlen + slen >= cap) {
+                nlen--;
+                while (nlen > 0 && ((unsigned char)name[nlen] & 0xc0) == 0x80) nlen--;
+            }
             memcpy(label, name, nlen);
             copy_str(label + nlen, status, cap - nlen);
             memcpy(peer_rows[n_peers].color, p->color, 3);
@@ -925,7 +939,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
 
     fputs("\x1b[22;0t\x1b]0;chat\x07\x1b[?1049h\x1b[2J\x1b[H", stdout);
     fflush(stdout);
-    signal(SIGINT, on_sigint);
+    catch_quit_signals();
 
     tui_input_clear(&g_app.input);
     g_app.input.modal = 1;
@@ -1005,7 +1019,9 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
     crypto_wipe(g_app.pending_auto_password, sizeof g_app.pending_auto_password);
     tui_scrollback_clear(&g_app.log);
 
-    fputs("\x1b[?1049l\x1b[23;0t", stdout);
+    // Back to the main screen with the cursor visible, its default shape and autowrap on, however
+    // the last frame left them.
+    fputs("\x1b[?7h\x1b[0 q\x1b[?25h\x1b[?1049l\x1b[23;0t", stdout);
     term_raw_disable();
     fflush(stdout);
     net_shutdown();
@@ -1066,17 +1082,17 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
 
     chat_t c;
     chat_init(&c, &o, plain_print, plain_notify, NULL);
-    crypto_wipe(o.password, sizeof o.password);
+    crypto_wipe(&o, sizeof o);
     if (c.sock == SOCK_INVALID) {
         fprintf(stderr, "chat: cannot bind udp port %u\n", (unsigned)port);
-        crypto_wipe(&c, sizeof c);
+        chat_shutdown(&c);
         return 1;
     }
     char idhex[9]; hex_encode(c.my_id, 4, idhex);
     printf("session '%s', you are %s (peer %s). encrypted, udp/%u. /quit or EOF to stop.\n",
            c.session_name, c.nick, idhex, (unsigned)c.port);
 
-    signal(SIGINT, on_sigint);
+    catch_quit_signals();
     stdin_reader_t *reader = stdin_reader_start();
     int alive = 1;
     while (alive && !g_interrupted) {
@@ -1119,10 +1135,16 @@ int main(int argc, char **argv) {
         } else if (strcmp(key, "session") == 0 && i + 1 < argc) {
             copy_str(explicit_session, argv[++i], sizeof explicit_session);
         } else if (strcmp(key, "port") == 0 && i + 1 < argc) {
-            explicit_port = (uint16_t)atoi(argv[++i]);
+            char *end;
+            long port = strtol(argv[++i], &end, 10);
+            if (!argv[i][0] || *end || port < 0 || port > 65535) {
+                fprintf(stderr, "chat: bad --port %s (0-65535, 0 picks a free one)\n", argv[i]);
+                return 1;
+            }
+            explicit_port = (uint16_t)port;
         } else if (strcmp(key, "peer") == 0 && i + 1 < argc) {
-            if (n_peer_args < 16) copy_str(peer_args[n_peer_args++], argv[++i], sizeof peer_args[0]);
-            else i++;
+            if (n_peer_args >= 16) { fprintf(stderr, "chat: at most 16 --peer options\n"); return 1; }
+            copy_str(peer_args[n_peer_args++], argv[++i], sizeof peer_args[0]);
         } else if (strcmp(key, "nodht") == 0) {
             dht_on = 0;
         } else if (strcmp(key, "simple") == 0) {
@@ -1153,6 +1175,13 @@ int main(int argc, char **argv) {
     update_cleanup_stale();
 
     crypto_setup();
+    // The signing key, a pasted key block and typed passwords pass through these for the whole
+    // run. Best effort, as in chat_init.
+    crypto_lock(&g_app.identity, sizeof g_app.identity);
+    crypto_lock(g_app.paste_buf, sizeof g_app.paste_buf);
+    crypto_lock(&g_app.input, sizeof g_app.input);
+    crypto_lock(&g_app.saved_input, sizeof g_app.saved_input);
+    crypto_lock(g_app.pending_auto_password, sizeof g_app.pending_auto_password);
 
     if (do_update) {
         printf("chat: checking GitHub for a newer release (v" CHAT_VERSION " here)...\n");

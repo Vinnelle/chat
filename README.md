@@ -113,17 +113,35 @@ just test-build         # build, then keep a copy as test-builds/chat-<build id>
 just clean              # remove build directories
 ```
 
+### Tests
+
+`tests/` runs real sessions against each other over an in-memory network: handshake, message
+delivery with a lost packet, rekey, junk from outside the room, and a third peer joining. The
+fuzz targets (libFuzzer, so clang) cover bencode and DHT replies, PGP key import, text cleaning
+and the input line, and everything a session receives, including messages from a room member
+or a connected peer.
+
+```sh
+just test               # build and run the engine test
+just fuzz engine 600    # fuzz one target (bencode, pgp, text, engine) for 600 seconds
+```
+
 ### Releases
 
 ```sh
 just dist               # static musl Linux + Windows binaries and SHA256SUMS in dist/ (needs zig)
-just release            # dist, then sign SHA256SUMS and publish the GitHub release (needs minisign, gh)
+just release            # release CHANGELOG.md's Unreleased section: tag, dist, sign, publish (needs minisign, gh)
+just release 1.0.0      # the same, as a version other than the next patch
 ```
+
+Changes go under `## Unreleased` at the top of [CHANGELOG.md](CHANGELOG.md). `just release`
+turns that heading into the new version, sets the version in `CMakeLists.txt`, commits both as
+`Release VERSION` and tags `vVERSION`. It pushes the branch and tag only after `SHA256SUMS` is
+signed; if a step fails, run it again and it carries on from the tag.
 
 Releases are signed offline with the release key, never in CI, so someone who takes over the
 GitHub account still can't publish an update that chat will install. `just keygen` makes the
-key: commit `minisign.pub`, and keep the secret key backed up and off GitHub. Tag and push
-`vVERSION` before `just release`.
+key: commit `minisign.pub`, and keep the secret key backed up and off GitHub.
 
 ## Usage
 

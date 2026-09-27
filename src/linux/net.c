@@ -31,8 +31,21 @@ static void set_nonblock(sock_t s) {
     fcntl(s, F_SETFL, flags | O_NONBLOCK);
 }
 
+// Close-on-exec, so curl and notify-send don't inherit the session's sockets. SOCK_CLOEXEC
+// closes the gap between socket() and fcntl() where another thread could spawn one of them.
+static sock_t open_socket(int family) {
+    sock_t s;
+#ifdef SOCK_CLOEXEC
+    s = socket(family, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (s != SOCK_INVALID || errno != EINVAL) return s;
+#endif
+    s = socket(family, SOCK_DGRAM, 0);
+    if (s != SOCK_INVALID) fcntl(s, F_SETFD, FD_CLOEXEC);
+    return s;
+}
+
 static sock_t open_v4(uint16_t port, unsigned flags, uint16_t *bound_port) {
-    sock_t s = socket(AF_INET, SOCK_DGRAM, 0);
+    sock_t s = open_socket(AF_INET);
     if (s == SOCK_INVALID) return SOCK_INVALID;
     int one = 1;
     if (flags & NET_REUSE) {
@@ -58,7 +71,7 @@ static sock_t open_v4(uint16_t port, unsigned flags, uint16_t *bound_port) {
 }
 
 static sock_t open_v6(uint16_t port, unsigned flags, uint16_t *bound_port) {
-    sock_t s = socket(AF_INET6, SOCK_DGRAM, 0);
+    sock_t s = open_socket(AF_INET6);
     if (s == SOCK_INVALID) return SOCK_INVALID;
     int one = 1, zero = 0;
     if (setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, (const char *)&zero, sizeof zero) != 0) {

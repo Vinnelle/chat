@@ -178,6 +178,8 @@ if(NOT MSVC)
     chat_try_compile_flag(-fwrapv)
     chat_try_compile_flag(-fno-strict-aliasing)
     chat_try_compile_flag(-fno-delete-null-pointer-checks)
+    # Stack variables start zeroed, so a missed initialisation can't leak an earlier call's key bytes.
+    chat_try_compile_flag(-ftrivial-auto-var-init=zero)
 endif()
 
 if(WIN32)
@@ -200,6 +202,13 @@ if(APPLE)
     chat_try_link_flag(-Wl,-dead_strip)
 else()
     chat_try_link_flag(-Wl,--gc-sections)
+endif()
+
+option(CHAT_TESTS "Build the engine test (tests/)" OFF)
+option(CHAT_FUZZ "Also build the libFuzzer targets (needs clang)" OFF)
+if(CHAT_TESTS OR CHAT_FUZZ)
+    enable_testing()
+    add_subdirectory(tests)
 endif()
 
 if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")

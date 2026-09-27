@@ -173,16 +173,22 @@ void chat_clean_nick(const char *in, char out[MAX_NICK + 1]) {
     if (!out[0]) copy_str(out, "anon", MAX_NICK + 1);
 }
 
+static void set_peer_nick(peer_t *p, const char *nick) {
+    chat_clean_nick(nick, p->nick);
+    nick_skeleton(p->nick, p->nick_skel, sizeof p->nick_skel);
+}
+
+static void set_own_nick(chat_t *c, const char *nick) {
+    chat_clean_nick(nick, c->nick);
+    nick_skeleton(c->nick, c->nick_skel, sizeof c->nick_skel);
+}
+
 void chat_peer_name(const chat_t *c, const peer_t *p, char out[CHAT_NAME_LEN]) {
-    char mine[4 * MAX_NICK + 1], other[4 * MAX_NICK + 1];
-    nick_skeleton(p->nick, mine, sizeof mine);
-    nick_skeleton(c->nick, other, sizeof other);
-    int clash = strcmp(mine, other) == 0;
+    int clash = strcmp(p->nick_skel, c->nick_skel) == 0;
     for (int i = 0; i < c->peer_hi && !clash; i++) {
         const peer_t *q = &c->peers[i];
         if (q == p || !q->used || !q->ok) continue;
-        nick_skeleton(q->nick, other, sizeof other);
-        clash = strcmp(mine, other) == 0;
+        clash = strcmp(p->nick_skel, q->nick_skel) == 0;
     }
     if (!clash) { copy_str(out, p->nick, CHAT_NAME_LEN); return; }
     char idhex[9]; hex_encode(p->id, 4, idhex);
@@ -258,10 +264,12 @@ static int pending_peer_count(chat_t *c) {
     return n;
 }
 
+static void pending_clear(pending_msg_t *pm) { crypto_wipe(pm, sizeof *pm); }
+
 static void forget_peer(chat_t *c, peer_t *p) {
     for (int i = 0; i < MAX_PENDING_MSGS; i++)
-        if (c->pending[i].used && c->pending[i].peer_slot == peer_slot(c, p)) c->pending[i].used = 0;
-    memset(p, 0, sizeof *p);
+        if (c->pending[i].used && c->pending[i].peer_slot == peer_slot(c, p)) pending_clear(&c->pending[i]);
+    crypto_wipe(p, sizeof *p);
     while (c->peer_hi > 0 && !c->peers[c->peer_hi - 1].used) c->peer_hi--;
 }
 
@@ -321,22 +329,18 @@ static int frame_on_chain(ratchet_t *chain, const char *text, uint8_t *frame, si
     return rc;
 }
 
-static int frame_for_peer(peer_t *p, const char *text, uint8_t *frame, size_t frame_cap,
-                          size_t *len, uint32_t *index) {
-    return frame_on_chain(send_chain_for(p), text, frame, frame_cap, len, index);
-}
-
-static void send_peer_on(chat_t *c, peer_t *p, ratchet_t *chain, const char *text) {
+static int send_peer_on(chat_t *c, peer_t *p, ratchet_t *chain, const char *text) {
     uint8_t frame[512]; size_t len; uint32_t idx;
-    if (frame_on_chain(chain, text, frame, sizeof frame, &len, &idx) != 0) return;
+    if (frame_on_chain(chain, text, frame, sizeof frame, &len, &idx) != 0) return -1;
     net_send(c->sock, frame, len, p->addr);
     crypto_wipe(frame, sizeof frame);
 
     double iv = cover_interval(c);
     p->next_cover = now_seconds() + iv + jitter(iv * 0.25);
+    return 0;
 }
 
-static void send_peer(chat_t *c, peer_t *p, const char *text) { send_peer_on(c, p, send_chain_for(p), text); }
+static int send_peer(chat_t *c, peer_t *p, const char *text) { return send_peer_on(c, p, send_chain_for(p), text); }
 
 static void add_candidate(chat_t *c, addr_t a) {
     if (a.port == 0) return;
@@ -428,31 +432,35 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
         return NULL;
     }
     if (pending_peer_count(c) >= MAX_PENDING_PEERS || live_count(c) >= MAX_PEERS) return NULL;
-    uint8_t shared[32];
-    keypair_t mine = c->keys;
-    if (ecdh_shared(&mine, their_pub, shared) != 0) return NULL;
-    uint8_t prk_partial[32];
-    session_prk(c->master, shared, c->keys.pub, c->my_id, their_pub, peer_id, prk_partial);
 
     peer_t *slot = NULL;
     peer_t *existing = find_peer_by_id(c, peer_id);
-
-    peer_t carry;
-    int rejoin = 0;
-    if (existing && existing->ok) { carry = *existing; rejoin = 1; }
-    if (existing) { forget_peer(c, existing); slot = existing; }
+    if (existing) slot = existing;
     else {
         for (int i = 0; i < MAX_PEERS + MAX_PENDING_PEERS; i++) if (!c->peers[i].used) { slot = &c->peers[i]; break; }
         if (!slot) return NULL;
     }
+
+    uint8_t shared[32];
+    if (ecdh_shared(&c->keys, their_pub, shared) != 0) { crypto_wipe(shared, sizeof shared); return NULL; }
+    uint8_t prk_partial[32];
+    session_prk(c->master, shared, c->keys.pub, c->my_id, their_pub, peer_id, prk_partial);
+    crypto_wipe(shared, sizeof shared);
+
+    // carry holds the old chains for the overlap and the kx that may have come early; it is
+    // wiped on the way out.
+    peer_t carry;
+    int rejoin = 0;
+    if (existing && existing->ok) { carry = *existing; rejoin = 1; }
+    if (existing) forget_peer(c, existing);
     {
         int si = (int)(slot - c->peers) + 1;
         if (si > c->peer_hi) c->peer_hi = si;
     }
-    memset(slot, 0, sizeof *slot);
+    crypto_wipe(slot, sizeof *slot);
     slot->used = 1;
     memcpy(slot->id, peer_id, ID_LEN);
-    strcpy(slot->nick, "anon");
+    set_peer_nick(slot, "anon");
     slot->addr = addr;
     slot->seen = slot->born = now;
     slot->next_hello = now + retry_delay(0);
@@ -462,7 +470,8 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
     memcpy(slot->pub, their_pub, PUB_LEN);
     memcpy(slot->kem_pub, their_kem_pub, KEM_PUB_LEN);
     if (rejoin) {
-        copy_str(slot->nick, carry.nick, sizeof slot->nick);
+        memcpy(slot->nick, carry.nick, sizeof slot->nick);
+        memcpy(slot->nick_skel, carry.nick_skel, sizeof slot->nick_skel);
         memcpy(slot->color, carry.color, 3);
         slot->persists = carry.persists;
         slot->identity_source = carry.identity_source;
@@ -479,21 +488,28 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
         slot->announces_rekey = carry.announces_rekey;
     }
 
+    peer_t *result = slot;
     if (memcmp(c->my_id, peer_id, ID_LEN) < 0) {
-        uint8_t kem_ss[KEM_SS_LEN];
-        if (kem_encapsulate(their_kem_pub, slot->kem_ct, kem_ss) != 0) { memset(slot, 0, sizeof *slot); return NULL; }
-        uint8_t prk[32];
-        session_prk_finish(prk_partial, kem_ss, prk);
-        ratchet_seed(prk, c->keys.pub, &slot->send_chain);
-        ratchet_seed(prk, their_pub, &slot->recv_chain);
-        if (!slot->vfy_set) { session_verify_code(prk, slot->vfy); slot->vfy_set = 1; }
+        uint8_t kem_ss[KEM_SS_LEN], prk[32];
+        if (kem_encapsulate(their_kem_pub, slot->kem_ct, kem_ss) == 0) {
+            session_prk_finish(prk_partial, kem_ss, prk);
+            ratchet_seed(prk, c->keys.pub, &slot->send_chain);
+            ratchet_seed(prk, their_pub, &slot->recv_chain);
+            if (!slot->vfy_set) { session_verify_code(prk, slot->vfy); slot->vfy_set = 1; }
+        } else {
+            forget_peer(c, slot);
+            result = NULL;
+        }
+        crypto_wipe(kem_ss, sizeof kem_ss);
         crypto_wipe(prk, sizeof prk);
     } else {
         memcpy(slot->prk_partial, prk_partial, 32);
         if (rejoin && carry.kx_early) finish_kem_decap(c, slot, carry.kem_ct);
     }
-    *fresh = 1;
-    return slot;
+    crypto_wipe(prk_partial, sizeof prk_partial);
+    if (rejoin) crypto_wipe(&carry, sizeof carry);
+    *fresh = result != NULL;
+    return result;
 }
 
 static int we_initiate(const chat_t *c, const peer_t *p) { return memcmp(c->my_id, p->id, ID_LEN) < 0; }
@@ -589,7 +605,7 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
     char *f[MAX_FIELDS];
     int n = split_tabs(plain, f, MAX_FIELDS);
     if (n == 7 && strcmp(f[0], "k") == 0) {
-        chat_clean_nick(f[1], p->nick);
+        set_peer_nick(p, f[1]);
         identity_source_t had_source = p->identity_source;
         verify_state_t had_state = p->identity_state;
         uint8_t had_pub[ID_SIGN_PUB_LEN];
@@ -641,23 +657,23 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         uint8_t rgb[3];
         if (parse_color(f[1], rgb) == 0) memcpy(p->color, rgb, 3);
     } else if (n == 2 && strcmp(f[0], "n") == 0) {
-        chat_clean_nick(f[1], p->nick);
+        set_peer_nick(p, f[1]);
     } else if (n == 2 && strcmp(f[0], "px") == 0) {
-        char *item = strtok(f[1], ",");
-        int cnt = 0;
-        while (item && cnt < 12) {
+        char *item = f[1];
+        for (int cnt = 0; item && *item && cnt < 12; cnt++) {
+            char *comma = strchr(item, ',');
+            if (comma) *comma = '\0';
             addr_t a;
             // Numeric only: a hostname here would have us resolve whatever a peer names.
             if (addr_parse_ip_port(item, &a) == 0) add_candidate(c, a);
-            item = strtok(NULL, ",");
-            cnt++;
+            item = comma ? comma + 1 : NULL;
         }
     } else if (n == 5 && strcmp(f[0], "m") == 0) {
+        // Only p itself is authenticated here. f[2] and f[3] (origin id, nick) are whatever p says.
+        uint8_t mid_raw[4], origin[ID_LEN];
+        if (hex_decode(f[1], 8, mid_raw) != 0 || hex_decode(f[2], ID_LEN * 2, origin) != 0) return;
         char ack[16]; snprintf(ack, sizeof ack, "a\t%s", f[1]);
         send_peer(c, p, ack);
-        // Only p itself is authenticated here. f[2] and f[3] (origin id, nick) are whatever p says.
-        uint8_t origin[ID_LEN];
-        if (hex_decode(f[2], ID_LEN * 2, origin) != 0) return;
         int direct = memcmp(origin, p->id, ID_LEN) == 0;
         if (!direct) {
             if (memcmp(origin, c->my_id, ID_LEN) == 0) return;
@@ -680,24 +696,31 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         ui_chat(c, direct ? p->color : NULL, mentioned, shown, text);
         if (c->notify && (c->notify_mode == NOTIFY_ALL || (c->notify_mode == NOTIFY_MENTIONS && mentioned)))
             c->notify(c->ui, shown, text, mentioned);
-        char rejoin[16 + MAX_NICK + MAX_TEXT + 32];
+        char rejoin[MSG_LINE_LEN];
         snprintf(rejoin, sizeof rejoin, "m\t%s\t%s\t%s\t%s", f[1], f[2], nick, text);
         for (int i = 0; i < c->peer_hi; i++) {
             peer_t *q = &c->peers[i];
-            if (!q->used || !q->ok || q == p) continue;
-            char qid[33]; hex_encode(q->id, ID_LEN, qid);
-            if (strcmp(qid, f[2]) != 0) send_peer(c, q, rejoin);
+            if (!q->used || !q->ok || q == p || memcmp(q->id, origin, ID_LEN) == 0) continue;
+            send_peer(c, q, rejoin);
         }
     } else if (n == 2 && strcmp(f[0], "a") == 0) {
         for (int i = 0; i < MAX_PENDING_MSGS; i++)
             if (c->pending[i].used && c->pending[i].peer_slot == peer_slot(c, p) && strcmp(c->pending[i].mid, f[1]) == 0)
-                c->pending[i].used = 0;
+                pending_clear(&c->pending[i]);
     } else if (n == 1 && strcmp(f[0], "nop") == 0) {
 
     } else if (n == 1 && strcmp(f[0], "bye") == 0) {
         drop_peer(c, p, "left");
     }
     (void)now;
+}
+
+// Our own hi came back from addr, so it's one of ours: never a candidate. Kept once each, so
+// replays of it can't fill the list.
+static void note_self_addr(chat_t *c, addr_t addr) {
+    int cap = (int)(sizeof c->self_addrs / sizeof c->self_addrs[0]);
+    for (int i = 0; i < c->n_self_addrs; i++) if (addr_equal(c->self_addrs[i], addr)) return;
+    if (c->n_self_addrs < cap) c->self_addrs[c->n_self_addrs++] = addr;
 }
 
 static void on_room(chat_t *c, char *plain, addr_t addr, double now) {
@@ -708,7 +731,7 @@ static void on_room(chat_t *c, char *plain, addr_t addr, double now) {
     if (n == 4 && strcmp(f[0], "hi") == 0 && strlen(f[1]) == 32 && strlen(f[2]) == 64
         && strlen(f[3]) == KEM_PUB_LEN * 2) {
         if (strcmp(f[1], my_idhex) == 0) {
-            if (c->n_self_addrs < 8) c->self_addrs[c->n_self_addrs++] = addr;
+            note_self_addr(c, addr);
             for (int i = 0; i < MAX_CANDS; i++) if (c->cands[i].used && addr_equal(c->cands[i].addr, addr)) c->cands[i].used = 0;
             return;
         }
@@ -751,7 +774,7 @@ static void on_room(chat_t *c, char *plain, addr_t addr, double now) {
     } else if (n == 5 && strcmp(f[0], "hi2") == 0 && strlen(f[1]) == 32 && strlen(f[2]) == 64
                && strlen(f[3]) == KEM_PUB_LEN * 2 && strlen(f[4]) == 32) {
         if (strcmp(f[1], my_idhex) == 0) {
-            if (c->n_self_addrs < 8) c->self_addrs[c->n_self_addrs++] = addr;
+            note_self_addr(c, addr);
             return;
         }
         uint8_t peer_id[ID_LEN], pub[PUB_LEN], kem_pub[KEM_PUB_LEN], given[COOKIE_LEN];
@@ -878,7 +901,8 @@ static void on_frame(chat_t *c, uint8_t *data, size_t len, addr_t addr, double n
         on_room(c, (char *)plain, addr, now);
         return;
     }
-    if (len >= 4) {
+    // Checked before the peer loop: a frame no sealer could make shouldn't cost ratchet steps.
+    if (sealed_len_ok(len, SESSION_HEADER_LEN, SESSION_PAD_TARGET)) {
         uint32_t index = ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) | ((uint32_t)data[2] << 8) | data[3];
         int hit = -1, fast = -1, on_old = 0;
         for (int i = 0; i < c->peer_hi; i++)
@@ -1043,8 +1067,8 @@ void chat_tick(chat_t *c, double now) {
         if (!pm->used) continue;
         if (now >= pm->next_retry) {
             peer_t *p = &c->peers[pm->peer_slot];
-            if (!p->used || pm->tries >= 5) pm->used = 0;
-            else { net_send(c->sock, pm->frame, pm->frame_len, p->addr); pm->tries++; pm->next_retry = now + 1 + jitter(0.5); }
+            if (!p->used || !p->ok || pm->tries >= 5) pending_clear(pm);
+            else { send_peer(c, p, pm->text); pm->tries++; pm->next_retry = now + 1 + jitter(0.5); }
         }
     }
     for (int i = 0; i < c->peer_hi; i++) {
@@ -1166,7 +1190,7 @@ static void send_to_live_peers(chat_t *c, const char *msg) {
 }
 
 void chat_set_nick(chat_t *c, const char *nick) {
-    chat_clean_nick(nick, c->nick);
+    set_own_nick(c, nick);
     ui_print(c, "* your nickname is now %s", c->nick);
     char msg[8 + MAX_NICK];
     snprintf(msg, sizeof msg, "n\t%s", c->nick);
@@ -1371,32 +1395,25 @@ void chat_send_text(chat_t *c, const char *text_in, double now) {
     char mid[9]; gen_mid(mid);
     seen_add(c, mid);
     char myidhex[33]; hex_encode(c->my_id, ID_LEN, myidhex);
-    char text[16 + MAX_NICK + MAX_TEXT + 32];
+    char text[MSG_LINE_LEN];
     snprintf(text, sizeof text, "m\t%s\t%s\t%s\t%s", mid, myidhex, c->nick, line);
     char who[MAX_NICK + 8]; snprintf(who, sizeof who, "%s (you)", c->nick);
     ui_chat(c, c->my_color, 0, who, line);
-    int sent = 0;
+    int sent = 0, s = 0;
     for (int i = 0; i < c->peer_hi; i++) {
         peer_t *p = &c->peers[i];
-        if (!p->used || !p->ok) continue;
-        for (int s = 0; s < MAX_PENDING_MSGS; s++) {
-            if (!c->pending[s].used) {
-                c->pending[s].used = 1;
-                strcpy(c->pending[s].mid, mid);
-                c->pending[s].peer_slot = i;
-                uint32_t idx;
-                if (frame_for_peer(p, text, c->pending[s].frame, sizeof c->pending[s].frame,
-                                    &c->pending[s].frame_len, &idx) != 0) {
-                    c->pending[s].used = 0;
-                    break;
-                }
-                c->pending[s].tries = 1;
-                c->pending[s].next_retry = now + 1 + jitter(0.5);
-                net_send(c->sock, c->pending[s].frame, c->pending[s].frame_len, p->addr);
-                sent++;
-                break;
-            }
-        }
+        if (!p->used || !p->ok || send_peer(c, p, text) != 0) continue;
+        sent++;
+        // With every retry slot taken the message still goes out once, just without retries.
+        while (s < MAX_PENDING_MSGS && c->pending[s].used) s++;
+        if (s == MAX_PENDING_MSGS) continue;
+        pending_msg_t *pm = &c->pending[s];
+        pm->used = 1;
+        memcpy(pm->mid, mid, sizeof pm->mid);
+        pm->peer_slot = i;
+        copy_str(pm->text, text, sizeof pm->text);
+        pm->tries = 1;
+        pm->next_retry = now + 1 + jitter(0.5);
     }
     if (!sent) ui_print(c, "* nobody else is here yet, message not delivered");
 }
@@ -1411,10 +1428,14 @@ int chat_submit_line(chat_t *c, const char *line_in, double now) {
 
 void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify_fn notify, void *ui) {
     memset(c, 0, sizeof *c);
+    // Locked before any key lands there. Best effort: a low RLIMIT_MEMLOCK only means they may be
+    // swapped. The peers hold their chain keys.
+    crypto_lock((uint8_t *)c + SECRETS_OFFSET, SECRETS_LEN);
+    crypto_lock(c->peers, sizeof c->peers);
     c->print = print;
     c->notify = notify;
     c->ui = ui;
-    chat_clean_nick(o->nick, c->nick);
+    set_own_nick(c, o->nick);
     copy_str(c->session_name, o->session_name, sizeof c->session_name);
     c->created = o->created;
     c->dht_on = o->dht_on;
@@ -1441,20 +1462,23 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
     derive_fingerprint(c->master, c->fingerprint);
     refresh_hi(c);
 
+    // Without the main socket the caller gives up on this session, so nothing else is started.
     c->sock = net_udp_open(o->port, NET_DUAL, &c->port);
-    c->lan_sock = net_udp_open(LAN_PORT, NET_REUSE, NULL);
+    c->lan_sock = c->sock != SOCK_INVALID ? net_udp_open(LAN_PORT, NET_REUSE, NULL) : SOCK_INVALID;
 
-    memcpy(c->static_peers, o->peers, sizeof(addr_t) * (size_t)o->n_peers);
-    c->n_static = o->n_peers;
+    int n_static = o->n_peers;
+    if (n_static < 0) n_static = 0;
+    if (n_static > (int)(sizeof c->static_peers / sizeof c->static_peers[0]))
+        n_static = (int)(sizeof c->static_peers / sizeof c->static_peers[0]);
+    memcpy(c->static_peers, o->peers, sizeof(addr_t) * (size_t)n_static);
+    c->n_static = n_static;
 
-    if (c->dht_on) {
+    if (c->dht_on && c->sock != SOCK_INVALID) {
         uint8_t infohash[DHT_INFOHASH_LEN];
         derive_dht_infohash(c->master, infohash);
         dht_init(&c->dht, infohash, c->port);
         dht_start_bootstrap_resolve(&c->dht);
     }
-
-    crypto_lock((uint8_t *)c + SECRETS_OFFSET, SECRETS_LEN);
 
     c->persist = o->persist;
     if (c->persist) {
@@ -1476,6 +1500,7 @@ void chat_shutdown(chat_t *c) {
     if (c->log_fp) fclose(c->log_fp);
 
     crypto_unlock((uint8_t *)c + SECRETS_OFFSET, SECRETS_LEN);
+    crypto_unlock(c->peers, sizeof c->peers);
 
     crypto_wipe(c, sizeof *c);
 }

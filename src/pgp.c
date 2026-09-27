@@ -217,25 +217,72 @@ static int b64val(char c) {
     return -1;
 }
 
-static size_t base64_decode(const char *in, size_t inlen, uint8_t *out, size_t out_cap) {
-    size_t o = 0;
-    int vals[4], n = 0;
-    for (size_t i = 0; i < inlen; i++) {
-        int v = b64val(in[i]);
-        if (v < 0) continue;
-        vals[n++] = v;
-        if (n == 4) {
-            uint32_t x = ((uint32_t)vals[0] << 18) | ((uint32_t)vals[1] << 12) | ((uint32_t)vals[2] << 6) | (uint32_t)vals[3];
-            if (o < out_cap) { out[o] = (uint8_t)(x >> 16); }
-            o++;
-            if (o < out_cap) { out[o] = (uint8_t)(x >> 8); }
-            o++;
-            if (o < out_cap) { out[o] = (uint8_t)x; }
-            o++;
-            n = 0;
+// Appends the base64 in one armor line to out, carrying a partial quartet in q/nq across lines.
+// '=' padding ends the data. Returns -1 on a character outside the alphabet or when out is full.
+static int b64_line(const char *s, size_t n, uint8_t *out, size_t cap, size_t *o, int q[4], int *nq, int *done) {
+    for (size_t i = 0; i < n; i++) {
+        char ch = s[i];
+        if (ch == ' ' || ch == '\t' || ch == '\r') continue;
+        if (*done) return -1;
+        if (ch == '=') {
+            // Padding: 2 or 3 characters of the last quartet carry 1 or 2 bytes.
+            if (*nq < 2) return -1;
+            uint32_t x = ((uint32_t)q[0] << 18) | ((uint32_t)q[1] << 12) | (*nq > 2 ? (uint32_t)q[2] << 6 : 0);
+            size_t bytes = (size_t)(*nq - 1);
+            if (*o + bytes > cap) return -1;
+            out[(*o)++] = (uint8_t)(x >> 16);
+            if (bytes > 1) out[(*o)++] = (uint8_t)(x >> 8);
+            *nq = 0;
+            *done = 1;
+            // Anything after this on the line must be more '='.
+            for (i++; i < n; i++) if (s[i] != '=' && s[i] != '\r') return -1;
+            return 0;
+        }
+        int v = b64val(ch);
+        if (v < 0) return -1;
+        q[(*nq)++] = v;
+        if (*nq == 4) {
+            if (*o + 3 > cap) return -1;
+            uint32_t x = ((uint32_t)q[0] << 18) | ((uint32_t)q[1] << 12) | ((uint32_t)q[2] << 6) | (uint32_t)q[3];
+            out[(*o)++] = (uint8_t)(x >> 16);
+            out[(*o)++] = (uint8_t)(x >> 8);
+            out[(*o)++] = (uint8_t)x;
+            *nq = 0;
         }
     }
-    return o;
+    return 0;
+}
+
+// Decodes the body of an ASCII-armored block (the text between its BEGIN and END lines): skips
+// armor headers ("Key: value" lines before the first blank line), and checks the "=XXXX" CRC-24
+// line when there is one. Returns the decoded length, or -1.
+static long armor_decode(const char *text, size_t len, uint8_t *out, size_t cap) {
+    size_t o = 0;
+    int q[4], nq = 0, done = 0, in_headers = 1, have_crc = 0;
+    uint32_t crc_want = 0;
+    const char *p = text, *end = text + len;
+    while (p < end) {
+        const char *nl = memchr(p, '\n', (size_t)(end - p));
+        size_t n = nl ? (size_t)(nl - p) : (size_t)(end - p);
+        while (n > 0 && (p[n - 1] == '\r' || p[n - 1] == ' ' || p[n - 1] == '\t')) n--;
+        const char *line = p;
+        p = nl ? nl + 1 : end;
+        if (n == 0) { in_headers = 0; continue; }
+        if (in_headers && memchr(line, ':', n)) continue;
+        in_headers = 0;
+        if (line[0] == '=' && n == 5) {
+            // The checksum line: four base64 characters, three bytes.
+            int v[4];
+            for (int k = 0; k < 4; k++) if ((v[k] = b64val(line[1 + k])) < 0) return -1;
+            crc_want = ((uint32_t)v[0] << 18) | ((uint32_t)v[1] << 12) | ((uint32_t)v[2] << 6) | (uint32_t)v[3];
+            have_crc = 1;
+            break;
+        }
+        if (b64_line(line, n, out, cap, &o, q, &nq, &done) != 0) return -1;
+    }
+    if (nq != 0) return -1;
+    if (have_crc && crc24(out, o) != crc_want) return -1;
+    return (long)o;
 }
 
 static int read_packet_header(const uint8_t *data, size_t len, size_t *pos, int *tag, size_t *body_len) {
@@ -263,7 +310,7 @@ static int read_packet_header(const uint8_t *data, size_t len, size_t *pos, int 
         else if (ltype == 2) { if (*pos+4 > len) return -1; *body_len = ((size_t)data[*pos]<<24)|((size_t)data[*pos+1]<<16)|((size_t)data[*pos+2]<<8)|data[*pos+3]; *pos += 4; }
         else return -1;
     }
-    if (*pos + *body_len > len) return -1;
+    if (*body_len > len - *pos) return -1;
     return 0;
 }
 
@@ -281,65 +328,70 @@ int pgp_import_secret_key(const char *path, identity_keypair_t *idkp) {
     return rc;
 }
 
+// A v4 EdDSA (Ed25519) secret-key packet body, unencrypted, to a keypair.
+static int parse_secret_key_packet(const uint8_t *body, size_t blen, identity_keypair_t *out) {
+    // version 4, creation time (4), algorithm 22 (EdDSA), OID length, OID
+    size_t p = 0;
+    if (blen < 7 || body[0] != 4 || body[5] != 22) return -1;
+    p = 6;
+    uint8_t oid_len = body[p++];
+    if (oid_len != sizeof ED25519_OID || oid_len > blen - p || memcmp(body + p, ED25519_OID, oid_len) != 0) return -1;
+    p += oid_len;
+    // public point: an MPI of 0x40 followed by the 32-byte key
+    if (blen - p < 2) return -1;
+    size_t pub_bytes = (size_t)((mpi_read_len(body + p) + 7) / 8);
+    p += 2;
+    if (pub_bytes != 33 || pub_bytes > blen - p || body[p] != 0x40) return -1;
+    const uint8_t *pgp_pub = body + p + 1;
+    p += pub_bytes;
+    // S2K usage 0 means the secret MPI follows in the clear
+    if (blen - p < 1 || body[p++] != 0) return -1;
+    if (blen - p < 2) return -1;
+    size_t sec_start = p;
+    size_t sec_bytes = (size_t)((mpi_read_len(body + p) + 7) / 8);
+    p += 2;
+    if (sec_bytes > 32 || blen - p < sec_bytes + 2) return -1;
+    // two-byte sum of the secret MPI, length prefix included
+    uint32_t sum = 0;
+    for (size_t i = sec_start; i < p + sec_bytes; i++) sum += body[i];
+    if ((uint16_t)sum != mpi_read_len(body + p + sec_bytes)) return -1;
+
+    uint8_t seed[32] = {0};
+    memcpy(seed + (32 - sec_bytes), body + p, sec_bytes);
+    identity_keypair_t kp;
+    crypto_sign_seed_keypair(kp.pub, kp.priv, seed);
+    sodium_memzero(seed, sizeof seed);
+    int rc = -1;
+    if (memcmp(kp.pub, pgp_pub, 32) == 0) { *out = kp; rc = 0; }
+    sodium_memzero(&kp, sizeof kp);
+    return rc;
+}
+
+// idkp changes only on success: a key that fails to load leaves the current identity whole.
 int pgp_import_secret_key_text(const char *text, identity_keypair_t *idkp) {
-    const char *begin_marker = "-----BEGIN PGP PRIVATE KEY BLOCK-----";
-    const char *end_marker = "-----END PGP PRIVATE KEY BLOCK-----";
-    char *begin = strstr(text, begin_marker);
+    static const char begin_marker[] = "-----BEGIN PGP PRIVATE KEY BLOCK-----";
+    static const char end_marker[] = "-----END PGP PRIVATE KEY BLOCK-----";
+    const char *begin = strstr(text, begin_marker);
     if (!begin) return -1;
-    char *body_start = begin + strlen(begin_marker);
-    char *end = strstr(body_start, end_marker);
+    // The body starts on the line after BEGIN.
+    const char *body_start = strchr(begin + sizeof begin_marker - 1, '\n');
+    if (!body_start) return -1;
+    body_start++;
+    const char *end = strstr(body_start, end_marker);
     if (!end) return -1;
 
     uint8_t doc[4096];
-    size_t doclen = base64_decode(body_start, (size_t)(end - body_start), doc, sizeof doc);
-    if (doclen < 4) return -1;
-
-    size_t pos = 0;
-    while (pos < doclen) {
-        int tag; size_t blen;
-        if (read_packet_header(doc, doclen, &pos, &tag, &blen) != 0) break;
-        const uint8_t *body = doc + pos;
-        if (tag == 5) {
-            size_t p = 0;
-            if (blen < 6 || body[p] != 4) { return -1; }
-            p += 1 + 4;
-            if (body[p] != 22) { return -1; }
-            p += 1;
-            uint8_t oid_len = body[p++];
-            if (oid_len != sizeof ED25519_OID || p + oid_len > blen ||
-                memcmp(body + p, ED25519_OID, sizeof ED25519_OID) != 0) { return -1; }
-            p += oid_len;
-            if (p + 2 > blen) return -1;
-            uint16_t pub_bits = mpi_read_len(body + p); p += 2;
-            size_t pub_bytes = (size_t)((pub_bits + 7) / 8);
-            if (pub_bytes != 33 || p + pub_bytes > blen || body[p] != 0x40) { return -1; }
-            uint8_t pgp_pub[32];
-            memcpy(pgp_pub, body + p + 1, 32);
-            p += pub_bytes;
-            if (p >= blen) return -1;
-            uint8_t s2k_usage = body[p++];
-            if (s2k_usage != 0) { return -1; }
-            if (p + 2 > blen) return -1;
-            uint16_t sec_bits = mpi_read_len(body + p); p += 2;
-            size_t sec_bytes = (size_t)((sec_bits + 7) / 8);
-            if (sec_bytes > 32 || p + sec_bytes + 2 > blen) return -1;
-            uint8_t seed[32] = {0};
-            memcpy(seed + (32 - sec_bytes), body + p, sec_bytes);
-            p += sec_bytes;
-            uint16_t stored_checksum = mpi_read_len(body + p);
-
-            uint32_t sum = 0;
-            for (size_t i = 0; i < 2 + sec_bytes; i++) sum += body[p - 2 - sec_bytes + i];
-            if ((uint16_t)(sum & 0xffff) != stored_checksum) return -1;
-
-            uint8_t derived_pub[32];
-            crypto_sign_seed_keypair(derived_pub, idkp->priv, seed);
-            sodium_memzero(seed, sizeof seed);
-            if (memcmp(derived_pub, pgp_pub, 32) != 0) return -1;
-            memcpy(idkp->pub, derived_pub, 32);
-            return 0;
+    long decoded = armor_decode(body_start, (size_t)(end - body_start), doc, sizeof doc);
+    int rc = -1;
+    if (decoded >= 4) {
+        size_t doclen = (size_t)decoded, pos = 0;
+        while (pos < doclen) {
+            int tag; size_t blen;
+            if (read_packet_header(doc, doclen, &pos, &tag, &blen) != 0) break;
+            if (tag == 5) { rc = parse_secret_key_packet(doc + pos, blen, idkp); break; }
+            pos += blen;
         }
-        pos += blen;
     }
-    return -1;
+    sodium_memzero(doc, sizeof doc);
+    return rc;
 }

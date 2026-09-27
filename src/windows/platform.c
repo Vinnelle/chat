@@ -569,13 +569,28 @@ int platform_run_quiet(const char *const argv[]) {
     HANDLE nul = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
                              &sa, OPEN_EXISTING, 0, NULL);
     if (nul == INVALID_HANDLE_VALUE) return -1;
-    STARTUPINFOW si;
+    // The child inherits NUL for its standard handles and nothing else, whatever else in this
+    // process happens to be inheritable.
+    SIZE_T attr_size = 0;
+    InitializeProcThreadAttributeList(NULL, 1, 0, &attr_size);
+    LPPROC_THREAD_ATTRIBUTE_LIST attrs = attr_size ? malloc(attr_size) : NULL;
+    if (!attrs || !InitializeProcThreadAttributeList(attrs, 1, 0, &attr_size)) {
+        free(attrs);
+        CloseHandle(nul);
+        return -1;
+    }
+    BOOL ok = UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &nul, sizeof nul, NULL, NULL);
+    STARTUPINFOEXW si;
     memset(&si, 0, sizeof si);
-    si.cb = sizeof si;
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdInput = si.hStdOutput = si.hStdError = nul;
+    si.StartupInfo.cb = sizeof si;
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    si.StartupInfo.hStdInput = si.StartupInfo.hStdOutput = si.StartupInfo.hStdError = nul;
+    si.lpAttributeList = attrs;
     PROCESS_INFORMATION pi;
-    BOOL ok = CreateProcessW(app, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    if (ok) ok = CreateProcessW(app, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
+                                NULL, NULL, &si.StartupInfo, &pi);
+    DeleteProcThreadAttributeList(attrs);
+    free(attrs);
     CloseHandle(nul);
     if (!ok) return -1;
     WaitForSingleObject(pi.hProcess, INFINITE);

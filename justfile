@@ -27,6 +27,20 @@ all: build build-win
 run *args: build
     ./build/chat "$@"
 
+# Build and run the engine test: sessions handshaking and chatting over an in-memory network
+test:
+    cmake -B build-test -DCHAT_TESTS=ON
+    cmake --build build-test -j {{num_cpus()}} --target engine_test
+    ./build-test/tests/engine_test
+
+# Fuzz one target (bencode, pgp, text or engine) for a number of seconds (needs clang)
+fuzz target="engine" seconds="300":
+    cmake -B build-fuzz -DCHAT_FUZZ=ON -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Debug
+    cmake --build build-fuzz -j {{num_cpus()}} --target fuzz_{{target}}
+    mkdir -p fuzz-corpus/{{target}}
+    ASAN_OPTIONS=detect_leaks=0 ./build-fuzz/tests/fuzz_{{target}} fuzz-corpus/{{target}} \
+        $(test -d tests/seeds/{{target}} && echo tests/seeds/{{target}}) -dict=tests/fuzz.dict -max_total_time={{seconds}}
+
 # Build, then keep a copy in test-builds/ named after its build id (the one `chat --version` shows)
 test-build: build
     #!/bin/sh
@@ -59,24 +73,60 @@ keygen:
     minisign -G -p minisign.pub -s "$key"
     echo "commit minisign.pub; back up $key somewhere safe"
 
-# Tag and push vVERSION first. Signing happens here, offline, so a compromised GitHub
-# account can't publish an update that chat will install.
-# Build, sign and publish this version's release (needs zig, minisign, gh)
-release:
+# Releases what's under "## Unreleased" in CHANGELOG.md as VERSION: that heading becomes
+# "## VERSION", CMakeLists.txt gets the version, and both are committed and tagged vVERSION.
+# VERSION defaults to the one in CMakeLists.txt, or the patch after it once that one is published.
+# Nothing is pushed until SHA256SUMS is signed; if a later step fails, running this again picks up
+# from the tag. Signing happens here, offline, so a compromised GitHub account can't publish an
+# update that chat will install.
+# Build, sign and publish a release (needs zig, minisign, gh)
+[positional-arguments]
+release version="":
     #!/bin/sh
     set -eu
     key="${CHAT_SIGNING_KEY:-$HOME/.minisign/chat-release.key}"
     test -e minisign.pub || { echo "no minisign.pub - run just keygen" >&2; exit 1; }
     test -z "$(git status --porcelain)" || { echo "working tree not clean" >&2; exit 1; }
-    test "$(git rev-parse HEAD)" = "$(git rev-parse "v{{version}}^{commit}")" || { echo "HEAD is not tag v{{version}}" >&2; exit 1; }
-    if gh release view "v{{version}}" >/dev/null 2>&1; then
-        echo "release v{{version}} is already published - bump the version in CMakeLists.txt for a new one" >&2; exit 1
+    gh auth status >/dev/null 2>&1 || { echo "gh isn't logged in - run gh auth login" >&2; exit 1; }
+    cmake_version() { sed -n 's/^project(chat VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt; }
+    published() { gh release view "v$1" >/dev/null 2>&1; }
+    v="${1:-}"
+    if [ -z "$v" ]; then
+        v=$(cmake_version)
+        if published "$v"; then v=$(echo "$v" | awk -F. '{ print $1 "." $2 "." $3 + 1 }'); fi
     fi
+    echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "not a version: $v (want MAJOR.MINOR.PATCH)" >&2; exit 1; }
+    if published "$v"; then echo "release v$v is already published" >&2; exit 1; fi
+    older=$(printf '%s\n%s\n' "$v" "$(cmake_version)" | sort -V | head -n 1)
+    if [ "$older" = "$v" ] && [ "$v" != "$(cmake_version)" ]; then
+        echo "v$v is older than $(cmake_version), the version in CMakeLists.txt" >&2; exit 1
+    fi
+
+    if grep -q '^## Unreleased$' CHANGELOG.md; then
+        if git rev-parse -q --verify "refs/tags/v$v" >/dev/null; then
+            echo "tag v$v already exists, but CHANGELOG.md still has an Unreleased section" >&2; exit 1
+        fi
+        if grep -q "^## $v\$" CHANGELOG.md; then echo "CHANGELOG.md already has a section for $v" >&2; exit 1; fi
+        awk '$0 == "## Unreleased" { on = 1; next } on && /^## / { exit } on && /[^[:space:]]/ { found = 1 } END { exit !found }' \
+            CHANGELOG.md || { echo "the Unreleased section of CHANGELOG.md is empty" >&2; exit 1; }
+        echo "releasing the Unreleased changes as v$v"
+        awk -v v="$v" '$0 == "## Unreleased" && !done { print "## " v; done = 1; next } { print }' CHANGELOG.md > CHANGELOG.md.tmp
+        mv CHANGELOG.md.tmp CHANGELOG.md
+        sed "s/^project(chat VERSION [0-9.]*/project(chat VERSION $v/" CMakeLists.txt > CMakeLists.txt.tmp
+        mv CMakeLists.txt.tmp CMakeLists.txt
+        git commit -q -m "Release $v" CHANGELOG.md CMakeLists.txt
+        git tag "v$v"
+    fi
+    git rev-parse -q --verify "refs/tags/v$v" >/dev/null \
+        || { echo "no tag v$v and no Unreleased section in CHANGELOG.md to release" >&2; exit 1; }
+    test "$(cmake_version)" = "$v" || { echo "CMakeLists.txt says $(cmake_version), not $v" >&2; exit 1; }
+    test "$(git rev-parse HEAD)" = "$(git rev-parse "v$v^{commit}")" || { echo "HEAD is not tag v$v" >&2; exit 1; }
+
     just dist
-    minisign -S -s "$key" -m dist/SHA256SUMS -t "chat v{{version}}"
+    minisign -S -s "$key" -m dist/SHA256SUMS -t "chat v$v"
     minisign -V -p minisign.pub -m dist/SHA256SUMS
-    awk -v v="{{version}}" '$0 == "## " v { on = 1; next } on && /^## / { exit } on { print }' CHANGELOG.md > dist/notes.md
-    grep -q '[^[:space:]]' dist/notes.md || { echo "CHANGELOG.md has no section for {{version}}" >&2; exit 1; }
+    awk -v v="$v" '$0 == "## " v { on = 1; next } on && /^## / { exit } on { print }' CHANGELOG.md > dist/notes.md
+    grep -q '[^[:space:]]' dist/notes.md || { echo "CHANGELOG.md has no section for $v" >&2; exit 1; }
     {
         echo
         echo 'Check a download with `minisign -Vm SHA256SUMS -p minisign.pub`, then `sha256sum -c --ignore-missing SHA256SUMS`.'
@@ -85,9 +135,13 @@ release:
         cat dist/SHA256SUMS
         echo '```'
     } >> dist/notes.md
-    gh release create "v{{version}}" --title "v{{version}}" --notes-file dist/notes.md --verify-tag \
+
+    # The branch goes too when there is one, so the release commit is on GitHub, not just its tag.
+    branch=$(git symbolic-ref -q --short HEAD || true)
+    git push --atomic origin ${branch:+"$branch"} "refs/tags/v$v"
+    gh release create "v$v" --title "v$v" --notes-file dist/notes.md --verify-tag \
         dist/chat-linux-x86_64 dist/chat-windows-x86_64.exe dist/SHA256SUMS dist/SHA256SUMS.minisig
 
 # Remove build directories and release output
 clean:
-    rm -rf build build-static build-win dist
+    rm -rf build build-static build-win build-test build-fuzz dist

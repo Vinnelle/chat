@@ -90,10 +90,14 @@ typedef enum { IDENT_NONE = 0, IDENT_NATIVE = 1, IDENT_AGE = 2, IDENT_PGP = 3 } 
 
 typedef enum { VERIFY_UNVERIFIED = 0, VERIFY_VERIFIED = 1, VERIFY_FAILED = 2 } verify_state_t;
 
+// What a nick looks like once lookalikes, case and invisible characters are folded away.
+#define NICK_SKEL_LEN (4 * MAX_NICK + 1)
+
 typedef struct {
     int used;
     uint8_t id[ID_LEN];
     char nick[MAX_NICK + 1];
+    char nick_skel[NICK_SKEL_LEN];
     addr_t addr;
     double seen, born, next_hello;
     int hello_tries;
@@ -140,12 +144,17 @@ typedef struct {
     double next_try;
 } cand_t;
 
+// "m\t" MID "\t" ORIGIN "\t" NICK "\t" TEXT, with room to spare.
+#define MSG_LINE_LEN (16 + ID_LEN * 2 + MAX_NICK + MAX_TEXT + 16)
+
+// A message waiting for its ack. It keeps the text, not the sealed frame: each retry is sealed
+// afresh on the peer's current chain, since the peer can no longer open an old index once any
+// later frame (a cover nop, say) has reached it.
 typedef struct {
     int used;
     char mid[9];
     int peer_slot;
-    uint8_t frame[700];
-    size_t frame_len;
+    char text[MSG_LINE_LEN];
     int tries;
     double next_retry;
 } pending_msg_t;
@@ -161,6 +170,7 @@ typedef void (*chat_notify_fn)(void *ui, const char *nick, const char *text, int
 typedef struct {
 
     char nick[MAX_NICK + 1];
+    char nick_skel[NICK_SKEL_LEN];
     char session_name[MAX_SESSION_NAME + 1];
     uint8_t my_id[ID_LEN];
 

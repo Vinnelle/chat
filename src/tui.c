@@ -3,6 +3,8 @@
 #include "tui.h"
 #include "crypto.h"
 #include "platform.h"
+#include "util.h"
+#include <limits.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -37,7 +39,11 @@ void tui_scrollback_push(tui_scrollback_t *sb, const char *hhmm, const char *tex
     tui_line_t *l = &sb->lines[sb->head];
     memcpy(l->hhmm, hhmm, 6);
     size_t n = strlen(text);
-    if (n > TUI_LINE_MAX - 1) n = TUI_LINE_MAX - 1;
+    if (n > TUI_LINE_MAX - 1) {
+        // Cut before a character, never inside one.
+        n = TUI_LINE_MAX - 1;
+        while (n > 0 && ((unsigned char)text[n] & 0xc0) == 0x80) n--;
+    }
     memcpy(l->text, text, n);
     l->text[n] = '\0';
     if (rgb) { memcpy(l->rgb, rgb, 3); l->has_color = 1; }
@@ -61,6 +67,8 @@ size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out) {
     if (b0 == 0x1b) {
         if (len == 1) { out->type = TUI_KEY_ESCAPE; return 1; }
 
+        // Unknown CSI sequences (Ctrl+arrows, F-keys, focus reports) are swallowed whole, so
+        // their tail doesn't land in the input as text.
         if (len >= 3 && buf[1] == '[') {
             switch (buf[2]) {
                 case 'A': out->type = TUI_KEY_UP;    return 3;
@@ -80,15 +88,22 @@ size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out) {
                     default: break;
                 }
             }
+            // Parameter and intermediate bytes run up to a final byte in 0x40-0x7e.
+            size_t k = 2;
+            while (k < len && buf[k] >= 0x20 && buf[k] <= 0x3f) k++;
+            out->type = TUI_KEY_UNKNOWN;
+            return (k < len && buf[k] >= 0x40 && buf[k] <= 0x7e) ? k + 1 : 1;
         } else if (len >= 3 && buf[1] == 'O') {
             switch (buf[2]) {
                 case 'H': out->type = TUI_KEY_HOME; return 3;
                 case 'F': out->type = TUI_KEY_END;  return 3;
-                default: break;
+                default: out->type = TUI_KEY_UNKNOWN; return 3;
             }
         }
 
-        out->type = TUI_KEY_UNKNOWN;
+        // Esc and the next key arrived in one read (a fast ':' after Esc, say): the Esc stands
+        // alone, like vim reads it.
+        out->type = (buf[1] == '[' || buf[1] == 'O') ? TUI_KEY_UNKNOWN : TUI_KEY_ESCAPE;
         return 1;
     }
 
@@ -103,11 +118,17 @@ size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out) {
     if (b0 == 0x14) { out->type = TUI_KEY_TOGGLE_CHAT; return 1; }
     if (b0 < 0x20) { out->type = TUI_KEY_UNKNOWN; return 1; }
 
+    // Only whole, well-formed characters reach the input line; a stray byte (a C1 control
+    // among them) is dropped rather than echoed to the terminal.
     size_t seqlen = 1;
     if ((b0 & 0xe0) == 0xc0) seqlen = 2;
     else if ((b0 & 0xf0) == 0xe0) seqlen = 3;
     else if ((b0 & 0xf8) == 0xf0) seqlen = 4;
-    if (seqlen > len) seqlen = 1;
+    else if (b0 >= 0x80) { out->type = TUI_KEY_UNKNOWN; return 1; }
+    if (seqlen > len) { out->type = TUI_KEY_UNKNOWN; return 1; }
+    size_t adv;
+    utf8_decode((const char *)buf, seqlen, 0, &adv);
+    if (adv != seqlen) { out->type = TUI_KEY_UNKNOWN; return 1; }
     memcpy(out->ch, buf, seqlen);
     out->ch[seqlen] = '\0';
     out->ch_len = (int)seqlen;
@@ -314,24 +335,26 @@ static void wapp(wbuf_t *w, const char *fmt, ...) {
     if (n > 0) w->len += (size_t)n < w->cap - w->len ? (size_t)n : w->cap - w->len;
 }
 
-static int utf8_cols(const char *s) {
-    int cols = 0;
-    for (; *s; s++) if (((unsigned char)*s & 0xc0) != 0x80) cols++;
-    return cols;
-}
-
-static void wapp_trunc(wbuf_t *w, const char *s, int width) {
-    if (width <= 0) return;
+// Appends as much of s as fits in width columns and returns the columns it takes. A malformed
+// byte or a control character goes out as U+FFFD: all text reaches the terminal through here,
+// and nothing in it may start an escape sequence, whatever the terminal's encoding.
+static int wapp_trunc(wbuf_t *w, const char *s, int width) {
+    static const char REPLACEMENT[] = "\xef\xbf\xbd";
+    int used = 0;
     size_t n = strlen(s);
-    if ((int)n > width) {
-        n = (size_t)width;
-        while (n > 0 && (((unsigned char)s[n]) & 0xc0) == 0x80) n--;
+    for (size_t i = 0, adv; i < n; i += adv) {
+        int cw = utf8_char_cols(s, n, i, &adv);
+        if (used + cw > width) break;
+        uint32_t cp = utf8_decode(s, n, i, &adv);
+        int bad = cp < 0x20 || cp == 0x7f || (cp >= 0x80 && cp <= 0x9f) || (adv == 1 && cp >= 0x80);
+        const char *src = bad ? REPLACEMENT : s + i;
+        size_t len = bad ? sizeof REPLACEMENT - 1 : adv;
+        if (len > w->cap - w->len) break;
+        memcpy(w->buf + w->len, src, len);
+        w->len += len;
+        used += cw;
     }
-    if (w->len >= w->cap) return;
-    size_t room = w->cap - w->len;
-    size_t take = n < room ? n : room;
-    memcpy(w->buf + w->len, s, take);
-    w->len += take;
+    return used;
 }
 
 static void wapp_pad(wbuf_t *w, int written, int width) {
@@ -364,8 +387,9 @@ static void draw_chrome(wbuf_t *w, int rows, int cols, int sbw, int color_enable
                          const tui_session_row_t *sessions, int n_sessions, int selected_session,
                          const tui_peer_row_t *peers, int n_peers,
                          const char *const *net_lines, int n_net_lines) {
+    // Cleared first, so a title the width table overestimates leaves nothing behind at the end.
     wapp(w, "\x1b[1;1H");
-    wapp(w, color_enabled ? CHROME_WASH_BG CHROME_WASH_FG : "\x1b[7m");
+    wapp(w, color_enabled ? CHROME_WASH_BG CHROME_WASH_FG "\x1b[K" : "\x1b[7m\x1b[K");
     int used = 0;
     wapp(w, color_enabled ? CHROME_WASH_BG CHROME_WASH_FG "\x1b[1m" : "\x1b[7m\x1b[1m");
     wapp(w, " chat");
@@ -376,9 +400,7 @@ static void draw_chrome(wbuf_t *w, int rows, int cols, int sbw, int color_enable
     else crumb[0] = '\0';
     if (color_enabled) wapp(w, CHROME_DIM_FG);
     int room = cols - used; if (room < 0) room = 0;
-    wapp_trunc(w, crumb, room);
-    int shown = (int)strlen(crumb); if (shown > room) shown = room;
-    used += shown;
+    used += wapp_trunc(w, crumb, room);
     wapp_pad(w, used, cols);
     wapp(w, "\x1b[0m");
 
@@ -404,25 +426,20 @@ static void draw_chrome(wbuf_t *w, int rows, int cols, int sbw, int color_enable
             char cell[64];
             snprintf(cell, sizeof cell, "%s%s (%d)%s", is_sel ? "> " : "  ", s->label, s->online,
                       (!is_sel && s->unread) ? " *" : "");
-            wapp_trunc(w, cell, sbw);
-            wapp_pad(w, (int)strlen(cell), sbw);
+            wapp_pad(w, wapp_trunc(w, cell, sbw), sbw);
         } else if (n_peers > 0 && row == peers_header_row) {
             wapp(w, "\x1b[2m");
-            wapp_trunc(w, "  -- online --", sbw);
-            wapp_pad(w, 14, sbw);
+            wapp_pad(w, wapp_trunc(w, "  -- online --", sbw), sbw);
         } else if (n_peers > 0 && row >= peers_start_row && row - peers_start_row < n_peers) {
             const tui_peer_row_t *p = &peers[row - peers_start_row];
             char cell[64]; snprintf(cell, sizeof cell, "  %s", p->label);
-            wapp_trunc(w, cell, sbw);
-            wapp_pad(w, (int)strlen(cell), sbw);
+            wapp_pad(w, wapp_trunc(w, cell, sbw), sbw);
         } else if (net_fits && row == net_block_start) {
             wapp(w, "\x1b[2m");
-            wapp_trunc(w, "  -- network --", sbw);
-            wapp_pad(w, 15, sbw);
+            wapp_pad(w, wapp_trunc(w, "  -- network --", sbw), sbw);
         } else if (net_fits && row > net_block_start && row - net_block_start - 1 < n_net_lines) {
             char cell[64]; snprintf(cell, sizeof cell, "  %s", net_lines[row - net_block_start - 1]);
-            wapp_trunc(w, cell, sbw);
-            wapp_pad(w, (int)strlen(cell), sbw);
+            wapp_pad(w, wapp_trunc(w, cell, sbw), sbw);
         } else {
             wapp_pad(w, 0, sbw);
         }
@@ -432,10 +449,14 @@ static void draw_chrome(wbuf_t *w, int rows, int cols, int sbw, int color_enable
     }
 }
 
-static void begin_frame(wbuf_t *w) { wapp(w, "\x1b[?2026h\x1b[?25l"); }
+// Autowrap is off while a frame draws: a character the width table guesses too narrow is clipped
+// at the right edge instead of pushing the rest of the frame down a row.
+static void begin_frame(wbuf_t *w) { wapp(w, "\x1b[?2026h\x1b[?25l\x1b[?7l"); }
 static void end_frame(wbuf_t *w) {
-    wapp(w, "\x1b[?2026l");
+    // Written on its own so a frame that filled its buffer still turns autowrap back on.
+    static const char tail[] = "\x1b[?7h\x1b[?2026l";
     platform_write_stdout(w->buf, w->len);
+    platform_write_stdout(tail, sizeof tail - 1);
 }
 
 static int draw_identity_gap(wbuf_t *w, tui_identity_badge_t badge, int color_enabled, int room) {
@@ -493,7 +514,7 @@ static void draw_input(wbuf_t *w, int rows, int cols, int pane_x,
                        tui_identity_badge_t identity_badge, const char *status_right) {
     int input_row = rows;
     wapp(w, "\x1b[%d;1H", input_row);
-    wapp(w, color_enabled ? STATUS_BAR_BG STATUS_BAR_FG : "\x1b[7m");
+    wapp(w, color_enabled ? STATUS_BAR_BG STATUS_BAR_FG "\x1b[K" : "\x1b[7m\x1b[K");
     int used = 0;
 
     wapp(w, color_enabled ? STATUS_CHIP_BG STATUS_CHIP_FG : "\x1b[7m");
@@ -512,9 +533,7 @@ static void draw_input(wbuf_t *w, int rows, int cols, int pane_x,
     if (input->mode == TUI_IMODE_COMMAND) {
         wapp(w, ":"); used += 1;
         int room = cols - used; if (room < 0) room = 0;
-        wapp_trunc(w, input->cmd, room);
-        int cmd_shown = input->cmd_len < room ? input->cmd_len : room;
-        used += cmd_shown;
+        used += wapp_trunc(w, input->cmd, room);
         cursor_used = used;
 
         const char *sug = cmd_suggestion(input);
@@ -523,44 +542,51 @@ static void draw_input(wbuf_t *w, int rows, int cols, int pane_x,
             int room2 = cols - used;
             if (room2 > 0) {
                 wapp(w, "\x1b[2m");
-                wapp_trunc(w, rest, room2);
+                used += wapp_trunc(w, rest, room2);
                 wapp(w, color_enabled ? STATUS_BAR_FG : "\x1b[7m");
-                size_t rl = strlen(rest);
-                used += (int)(rl < (size_t)room2 ? rl : (size_t)room2);
             }
         }
     } else {
         const char *label = mode_prompt ? mode_prompt : nick;
         char lbl[64]; snprintf(lbl, sizeof lbl, "%s> ", label);
         int room0 = cols - used; if (room0 < 0) room0 = 0;
-        wapp_trunc(w, lbl, room0);
-        int lbl_shown = (int)strlen(lbl); if (lbl_shown > room0) lbl_shown = room0;
-        used += lbl_shown;
+        used += wapp_trunc(w, lbl, room0);
         int content_start = used;
+        int room = cols - used; if (room < 1) room = 1;
 
         int show_hint = input->len == 0 && !mask_input;
         if (mask_input) {
-
-            int room = cols - used;
-            for (int i = 0; i < input->len && i < room; i++) { wapp(w, "\xe2\x80\xa2"); used++; }
+            // One dot per character, not per byte.
+            int dots = 0, before = 0;
+            for (size_t i = 0, adv; i < (size_t)input->len; i += adv) {
+                utf8_decode(input->buf, (size_t)input->len, i, &adv);
+                if (i < (size_t)input->cursor) before++;
+                if (dots < room) { wapp(w, "\xe2\x80\xa2"); dots++; }
+            }
+            used += dots;
+            cursor_used = content_start + (before < room ? before : room - 1);
         } else if (show_hint) {
             const char *hint = !input->modal ? "Enter confirm \xc2\xb7 Esc cancel"
                 : input->mode == TUI_IMODE_NORMAL
                 ? "i/a/I/A insert \xc2\xb7 h/l move \xc2\xb7 0/$ ends \xc2\xb7 x del \xc2\xb7 : command"
                 : "type to chat \xc2\xb7 /help commands \xc2\xb7 Esc normal mode";
-            int room = cols - used;
-            if (room > 0) {
-                wapp(w, "\x1b[2m");
-                wapp_trunc(w, hint, room);
-                wapp(w, color_enabled ? STATUS_BAR_FG : "\x1b[7m");
-                int hl = utf8_cols(hint);
-                used += hl < room ? hl : room;
-            }
+            wapp(w, "\x1b[2m");
+            used += wapp_trunc(w, hint, room);
+            wapp(w, color_enabled ? STATUS_BAR_FG : "\x1b[7m");
+            cursor_used = content_start;
         } else {
-            int room = cols - used; if (room < 0) room = 0;
-            wapp_trunc(w, input->buf, room);
-            int shown = input->len < room ? input->len : room;
-            used += shown;
+            // A line wider than the field scrolls: it starts far enough in that the text before
+            // the cursor fits, with a column left for the cursor itself.
+            size_t start = 0;
+            int before;
+            utf8_fit_cols(input->buf, (size_t)input->cursor, INT_MAX, &before);
+            while (before > room - 1 && start < (size_t)input->cursor) {
+                size_t adv;
+                before -= utf8_char_cols(input->buf, (size_t)input->len, start, &adv);
+                start += adv;
+            }
+            used += wapp_trunc(w, input->buf + start, room);
+            cursor_used = content_start + before;
 
             const char *nick = input->mode == TUI_IMODE_INSERT ? mention_suggestion(input) : NULL;
             if (nick) {
@@ -568,19 +594,15 @@ static void draw_input(wbuf_t *w, int rows, int cols, int pane_x,
                 int room2 = cols - used;
                 if (room2 > 0) {
                     wapp(w, "\x1b[2m");
-                    wapp_trunc(w, rest, room2);
+                    used += wapp_trunc(w, rest, room2);
                     wapp(w, "\x1b[22m");
-                    int rl = utf8_cols(rest);
-                    used += rl < room2 ? rl : room2;
                 }
             }
         }
-
-        cursor_used = show_hint ? content_start : content_start + input->cursor;
     }
 
     if (status_right && status_right[0]) {
-        int slen = utf8_cols(status_right);
+        int slen = utf8_str_cols(status_right);
         int remaining = cols - used;
         if (slen > 0 && slen + 1 <= remaining) {
             wapp_pad(w, 0, remaining - slen);
@@ -608,7 +630,6 @@ static void draw_input(wbuf_t *w, int rows, int cols, int pane_x,
 typedef struct {
     char buf[GRID_MAXROWS][GRID_ROWBYTES];
     int len[GRID_MAXROWS];
-    int used[GRID_MAXROWS];
     int rows, pane_w;
 } grid_t;
 
@@ -617,20 +638,21 @@ static grid_t g_grid;
 static void grid_reset(grid_t *g, int rows, int pane_w) {
     if (rows > GRID_MAXROWS) rows = GRID_MAXROWS;
     g->rows = rows; g->pane_w = pane_w;
-    for (int r = 0; r < rows; r++) { g->len[r] = 0; g->used[r] = 0; }
+    for (int r = 0; r < rows; r++) g->len[r] = 0;
 }
 
 static wbuf_t grid_row(grid_t *g, int r) { wbuf_t w = { g->buf[r], GRID_ROWBYTES, (size_t)g->len[r] }; return w; }
-static void grid_commit(grid_t *g, int r, const wbuf_t *w, int used) { g->len[r] = (int)w->len; g->used[r] = used; }
+static void grid_commit(grid_t *g, int r, const wbuf_t *w) { g->len[r] = (int)w->len; }
 
+// The pane runs to the right edge, so each row is cleared to the end before it's drawn: nothing
+// from the previous frame survives past the new text, whatever width the terminal gave it.
 static void grid_emit(wbuf_t *w, const grid_t *g, int first_screen_row, int pane_x) {
     for (int r = 0; r < g->rows; r++) {
-        wapp(w, "\x1b[%d;%dH", first_screen_row + r, pane_x);
+        wapp(w, "\x1b[%d;%dH\x1b[0m\x1b[K", first_screen_row + r, pane_x);
         if (g->len[r] > 0 && w->len + (size_t)g->len[r] < w->cap) {
             memcpy(w->buf + w->len, g->buf[r], (size_t)g->len[r]);
             w->len += (size_t)g->len[r];
         }
-        wapp_pad(w, g->used[r], g->pane_w);
     }
 }
 
@@ -639,23 +661,29 @@ static void grid_rule(grid_t *g, int r, const char *label) {
     wbuf_t w = grid_row(g, r);
     int used = 0;
     wapp(&w, "\x1b[2m\xe2\x94\x80 "); used += 2;
-    int lab = (int)strlen(label); if (lab > g->pane_w - 4) lab = g->pane_w - 4;
-    if (lab > 0) { wapp_trunc(&w, label, lab); used += lab; }
+    used += wapp_trunc(&w, label, g->pane_w - 4);
     wapp(&w, " "); used += 1;
     for (; used < g->pane_w; used++) wapp(&w, "\xe2\x94\x80");
     wapp(&w, "\x1b[0m");
-    grid_commit(g, r, &w, g->pane_w);
+    grid_commit(g, r, &w);
 }
 
+// Bytes of s (len of them) that go on one row of width columns: up to the last space that
+// leaves the row at least a third full, else as much as fits.
 static size_t wrap_chunk(const char *s, size_t len, int width) {
     if (width < 1) width = 1;
-    if ((int)len <= width) return len;
-    size_t n = (size_t)width;
-    while (n > 0 && (((unsigned char)s[n]) & 0xc0) == 0x80) n--;
+    size_t n = utf8_fit_cols(s, len, width, NULL);
+    if (n >= len) return len;
+    if (n == 0) {
+        // A character wider than the whole row still has to go somewhere.
+        size_t adv;
+        utf8_char_cols(s, len, 0, &adv);
+        return adv;
+    }
     size_t sp = n;
     while (sp > 0 && s[sp] != ' ') sp--;
     if (sp > n / 3) return sp;
-    return n > 0 ? n : 1;
+    return n;
 }
 
 static void grid_scroll(grid_t *g, const tui_scrollback_t *sb, int first_row, int nrows,
@@ -708,17 +736,15 @@ static void grid_scroll(grid_t *g, const tui_scrollback_t *sb, int first_row, in
                 char hpart[TUI_LINE_MAX + 1];
                 memcpy(hpart, piece, head); hpart[head] = '\0';
                 wapp(&w, "\x1b[38;2;%d;%d;%dm", l->rgb[0], l->rgb[1], l->rgb[2]);
-                wapp_trunc(&w, hpart, pane_w - used);
+                used += wapp_trunc(&w, hpart, pane_w - used);
                 wapp(&w, "\x1b[39m");
-                if (head < len[c]) wapp_trunc(&w, piece + head, pane_w - used - (int)head);
+                if (head < len[c]) used += wapp_trunc(&w, piece + head, pane_w - used);
             } else {
-                wapp_trunc(&w, piece, pane_w - used);
+                used += wapp_trunc(&w, piece, pane_w - used);
             }
-            used += (int)len[c];
-            if (used > pane_w) used = pane_w;
             if (hl) { wapp_pad(&w, used, pane_w); used = pane_w; }
             if (hl || coloured || subdued) wapp(&w, "\x1b[0m");
-            grid_commit(g, gr, &w, used);
+            grid_commit(g, gr, &w);
         }
         bottom -= nchunks;
     }
@@ -770,8 +796,7 @@ void tui_render(int rows, int cols,
         wbuf_t hw = grid_row(&g_grid, 0);
         const char *hint = "  chat and console are hidden - ^T shows the chat, ^O shows the console";
         wapp(&hw, "\x1b[2m"); wapp_trunc(&hw, hint, pane_w); wapp(&hw, "\x1b[0m");
-        int hl = (int)strlen(hint); if (hl > pane_w) hl = pane_w;
-        grid_commit(&g_grid, 0, &hw, hl);
+        grid_commit(&g_grid, 0, &hw);
     }
     grid_emit(&w, &g_grid, 2, pane_x);
 
@@ -832,8 +857,8 @@ void tui_render_list(int rows, int cols,
             char cell[TUI_LIST_LABEL_MAX + 4];
             snprintf(cell, sizeof cell, "%s%s%s", is_sel ? "> " : "  ",
                      items[idx].label, items[idx].is_dir ? "/" : "");
-            wapp_trunc(&w, cell, pane_w);
-            if (is_sel) wapp_pad(&w, (int)strlen(cell), pane_w);
+            int shown = wapp_trunc(&w, cell, pane_w);
+            if (is_sel) wapp_pad(&w, shown, pane_w);
             if (is_sel) wapp(&w, "\x1b[0m");
         }
     }
