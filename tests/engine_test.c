@@ -18,11 +18,15 @@ typedef struct {
 
 static chat_t A, B, C;
 static log_t log_a = { .who = "alice" }, log_b = { .who = "bob" }, log_c = { .who = "carol" };
-static int failures;
+static int checks, failures;
+// -v: everything the sessions print, and every check as written, pass or fail.
 static int verbose;
 
 #define CHECK(cond, ...) do { \
-    if (!(cond)) { failures++; printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } \
+    checks++; \
+    if (cond) { if (verbose) printf("  pass  %s\n", #cond); } \
+    else { failures++; printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); \
+           if (verbose) printf("  fail  %s\n", #cond); } \
 } while (0)
 
 static void on_print(void *ui, const char *hhmm, const char *text, const uint8_t *rgb, unsigned flags, int color_len) {
@@ -198,11 +202,12 @@ static void test_third_peer(double *t) {
 }
 
 int main(int argc, char **argv) {
-    verbose = argc > 1 && strcmp(argv[1], "-v") == 0;
+    verbose = argc > 1 && (strcmp(argv[1], "-v") == 0 || strcmp(argv[1], "--verbose") == 0);
+    double t_start = now_seconds();
     crypto_setup();
     net_startup();
     uint16_t to_b[1] = { 40002 }, to_a[1] = { 40001 };
-    printf("deriving session keys (Argon2id, 512 MiB, twice)...\n");
+    printf("deriving session keys (Argon2id, 512 MiB each)...\n");
     start(&A, &log_a, "alice", 40001, to_b, 1, 1);
     start(&B, &log_b, "bob", 40002, to_a, 1, 0);
     double t = now_seconds();
@@ -212,12 +217,25 @@ int main(int argc, char **argv) {
         { "rekey", test_rekey }, { "junk", test_junk }, { "lookalike nick", test_lookalike_nick },
         { "third peer", test_third_peer },
     };
-    for (size_t i = 0; i < sizeof tests / sizeof tests[0]; i++) {
+    size_t n_tests = sizeof tests / sizeof tests[0];
+    int failed[sizeof tests / sizeof tests[0]], n_failed = 0;
+    for (size_t i = 0; i < n_tests; i++) {
         int before = failures;
+        double t0 = now_seconds();
+        if (verbose) printf("\n== %s\n", tests[i].name);
         tests[i].fn(&t);
-        printf("%s %s\n", failures == before ? "ok  " : "FAIL", tests[i].name);
+        int ok = failures == before;
+        if (!ok) failed[n_failed++] = (int)i;
+        printf("%s %-16s %6.0f ms\n", ok ? "ok  " : "FAIL", tests[i].name, (now_seconds() - t0) * 1000.0);
     }
     for (int i = 0; i < n_live; i++) chat_shutdown(ALL[i]);
-    printf(failures ? "%d check(s) failed\n" : "all passed\n", failures);
+
+    printf("\n%zu tests: %zu passed, %d failed | %d checks, %d failed | %.1f s\n",
+           n_tests, n_tests - (size_t)n_failed, n_failed, checks, failures, now_seconds() - t_start);
+    if (n_failed) {
+        printf("failed:");
+        for (int i = 0; i < n_failed; i++) printf("%s %s", i ? "," : "", tests[failed[i]].name);
+        printf("\n");
+    }
     return failures ? 1 : 0;
 }
