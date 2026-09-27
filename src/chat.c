@@ -15,6 +15,25 @@
 
 static void ui_print(chat_t *c, const char *fmt, ...);
 static void net_report(chat_t *c);
+static void module_log(void *ctx, int verbose_only, const char *msg);
+static void knock_room_slots(chat_t *c);
+
+static const char *const DEFAULT_RELAYS[] = {
+    "wss://relay.primal.net",
+    "wss://nostr.mom",
+    "wss://relay.nostr.net",
+};
+
+void routing_defaults(routing_t *r) {
+    memset(r, 0, sizeof *r);
+    r->mode = ROUTE_DIRECT;
+    r->dht4 = r->dht6 = r->lan = r->portmap = r->nostr = 1;
+    for (size_t i = 0; i < sizeof DEFAULT_RELAYS / sizeof DEFAULT_RELAYS[0]; i++)
+        copy_str(r->relays[r->n_relays++], DEFAULT_RELAYS[i], NOSTR_URL_MAX);
+    r->tor = TOR_DEFAULTS;
+}
+
+const char *routing_mode_name(route_mode_t m) { return m == ROUTE_TOR ? "tor" : "direct"; }
 static void ui_print_colored(chat_t *c, const uint8_t rgb[3], const char *fmt, ...);
 static void ui_chat(chat_t *c, const uint8_t rgb[3], int mention, const char *name, const char *text);
 
@@ -279,12 +298,29 @@ static void rekey_drop_overlap(peer_t *p) {
     p->old_until = 0.0;
 }
 
+// Every datagram leaves through here, to UDP, the relays or Tor as its address says. In Tor mode
+// nothing goes out over UDP at all.
+static void xmit(chat_t *c, sock_t sock, const void *data, size_t len, addr_t to) {
+    switch (to.kind) {
+        case ADDR_NOSTR:
+            if (c->nostr) nostr_send(c->nostr, to, data, len, now_seconds());
+            return;
+        case ADDR_TOR:
+            if (c->tor) tor_send(c->tor, to, data, len, now_seconds());
+            return;
+        default:
+            if (c->route.mode == ROUTE_TOR || sock == SOCK_INVALID) return;
+            net_send(sock, data, len, to);
+    }
+}
+
 static void send_room(chat_t *c, const char *text, addr_t to, sock_t sock) {
 
     uint8_t frame[HANDSHAKE_BUF_LEN + 128];
     size_t len;
     if (room_seal(c->room_key, text, strlen(text), frame, sizeof frame, &len) != 0) return;
-    if (len <= CHUNK_PAYLOAD) { net_send(sock, frame, len, to); return; }
+    // Relays and Tor streams take whole frames; only UDP needs them in pieces.
+    if (len <= CHUNK_PAYLOAD || to.kind != ADDR_UDP) { xmit(c, sock, frame, len, to); return; }
 
     size_t count = (len + CHUNK_PAYLOAD - 1) / CHUNK_PAYLOAD;
     if (count > CHUNK_MAX) return;
@@ -297,15 +333,17 @@ static void send_room(chat_t *c, const char *text, addr_t to, sock_t sock) {
         memcpy(pkt + 2, id, 4);
         pkt[6] = (uint8_t)i; pkt[7] = (uint8_t)count;
         memcpy(pkt + CHUNK_HDR, frame + off, n);
-        net_send(sock, pkt, CHUNK_HDR + n, to);
+        xmit(c, sock, pkt, CHUNK_HDR + n, to);
     }
 }
 
-static double cover_interval(chat_t *c) {
+static double cover_interval(chat_t *c, const peer_t *p) {
     int live = live_count(c);
     if (live < 1) live = 1;
     double scale = (double)live / (COVER_MAX_RATE * COVER_INTERVAL);
-    return COVER_INTERVAL * (scale > 1.0 ? scale : 1.0);
+    double iv = COVER_INTERVAL * (scale > 1.0 ? scale : 1.0);
+    if (p && p->addr.kind == ADDR_NOSTR && iv < NOSTR_COVER_INTERVAL) iv = NOSTR_COVER_INTERVAL;
+    return iv;
 }
 
 static ratchet_t *send_chain_for(peer_t *p) {
@@ -332,10 +370,10 @@ static int frame_on_chain(ratchet_t *chain, const char *text, uint8_t *frame, si
 static int send_peer_on(chat_t *c, peer_t *p, ratchet_t *chain, const char *text) {
     uint8_t frame[512]; size_t len; uint32_t idx;
     if (frame_on_chain(chain, text, frame, sizeof frame, &len, &idx) != 0) return -1;
-    net_send(c->sock, frame, len, p->addr);
+    xmit(c, c->sock, frame, len, p->addr);
     crypto_wipe(frame, sizeof frame);
 
-    double iv = cover_interval(c);
+    double iv = cover_interval(c, p);
     p->next_cover = now_seconds() + iv + jitter(iv * 0.25);
     return 0;
 }
@@ -367,6 +405,21 @@ static void add_candidate(chat_t *c, addr_t a) {
 }
 
 static void dht_candidate_cb(void *ctx, addr_t a) { add_candidate((chat_t *)ctx, a); }
+
+static int candidate_reached(chat_t *c, addr_t a) {
+    for (int i = 0; i < c->peer_hi; i++) {
+        const peer_t *p = &c->peers[i];
+        if (!p->used || !p->ok) continue;
+        if (addr_equal(p->addr, a)) return 1;
+        if (a.kind == ADDR_NOSTR && memcmp(p->id, a.ip, ID_LEN) == 0) return 1;
+    }
+    return 0;
+}
+
+// A message resend waits for the ack's round trip: relays take a good deal longer than UDP.
+static double resend_delay(const peer_t *p) {
+    return p->addr.kind == ADDR_NOSTR ? 4.0 + jitter(1.0) : 1.0 + jitter(0.5);
+}
 
 static void refresh_hi(chat_t *c) {
     char pubhex[65], kemhex[KEM_PUB_LEN * 2 + 1];
@@ -514,6 +567,22 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
 
 static int we_initiate(const chat_t *c, const peer_t *p) { return memcmp(c->my_id, p->id, ID_LEN) < 0; }
 
+static int path_rank(addr_t a) { return a.kind == ADDR_UDP ? 2 : a.kind == ADDR_TOR ? 1 : 0; }
+
+// A connected peer's hi came over a better path than the one we use (UDP punched through after
+// the relays, a Tor stream after the relays). A hi proves nothing - any member can send one - so
+// the path doesn't change on it. Instead a session frame goes back that way: once the peer opens
+// it, the path is proven on its side and it moves there, and its frames then move us.
+static void probe_path(chat_t *c, peer_t *p, addr_t addr) {
+    if (!p->ok || path_rank(addr) <= path_rank(p->addr)) return;
+    uint8_t frame[512];
+    size_t len;
+    uint32_t idx;
+    if (frame_on_chain(send_chain_for(p), "nop", frame, sizeof frame, &len, &idx) != 0) return;
+    xmit(c, c->sock, frame, len, addr);
+    crypto_wipe(frame, sizeof frame);
+}
+
 static void finish_kem_decap(chat_t *c, peer_t *p, const uint8_t ct[KEM_CT_LEN]) {
     // The initiator's chains come from its own encapsulation; only the responder takes a kx.
     if (we_initiate(c, p)) return;
@@ -559,25 +628,46 @@ static void connect_peer(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
 
 #define PX_MAX_BODY (SESSION_PAD_TARGET - 2)
 
+// How to reach p, for "px": its UDP address, or in Tor mode its onion address. Peers only
+// reached through the relays have none to give: the relays introduce them by themselves.
+static int px_entry(const chat_t *c, const peer_t *p, char out[ADDR_STR_LEN]) {
+    if (c->route.mode == ROUTE_TOR) {
+        if (!p->onion[0]) return -1;
+        snprintf(out, ADDR_STR_LEN, "%s.onion", p->onion);
+        return 0;
+    }
+    if (p->addr.kind != ADDR_UDP) return -1;
+    addr_to_string(p->addr, out);
+    return 0;
+}
+
 static void introduce(chat_t *c, peer_t *newp) {
+    // Several px messages if one can't hold them all (onion addresses are long).
     char list[PX_MAX_BODY];
     size_t pos = 0;
-    int n = 0;
-    for (int i = 0; i < c->peer_hi && n < 12; i++) {
+    int n = 0, total = 0;
+    for (int i = 0; i < c->peer_hi && total < 24; i++) {
         peer_t *q = &c->peers[i];
-        if (!q->used || !q->ok || q == newp) continue;
-        char as[ADDR_STR_LEN]; addr_to_string(q->addr, as);
+        char as[ADDR_STR_LEN];
+        if (!q->used || !q->ok || q == newp || px_entry(c, q, as) != 0) continue;
         size_t need = strlen(as) + (n ? 1 : 0);
-        if (pos + need + 4 > PX_MAX_BODY) break;
+        if (pos + need + 4 > PX_MAX_BODY) {
+            char msg[PX_MAX_BODY + 8];
+            snprintf(msg, sizeof msg, "px\t%s", list);
+            send_peer(c, newp, msg);
+            pos = 0; n = 0; need = strlen(as);
+        }
         pos += (size_t)snprintf(list + pos, sizeof(list) - pos, "%s%s", n ? "," : "", as);
         n++;
+        total++;
     }
     if (n > 0) {
         char msg[PX_MAX_BODY + 8];
         snprintf(msg, sizeof msg, "px\t%s", list);
         send_peer(c, newp, msg);
     }
-    char newp_addr[ADDR_STR_LEN]; addr_to_string(newp->addr, newp_addr);
+    char newp_addr[ADDR_STR_LEN];
+    if (px_entry(c, newp, newp_addr) != 0) return;
     for (int i = 0; i < c->peer_hi; i++) {
         peer_t *q = &c->peers[i];
         if (!q->used || !q->ok || q == newp) continue;
@@ -585,6 +675,14 @@ static void introduce(chat_t *c, peer_t *newp) {
         snprintf(msg, sizeof msg, "px\t%s", newp_addr);
         send_peer(c, q, msg);
     }
+}
+
+// In Tor mode, tells p our onion address, which it passes on in px.
+static void send_onion(chat_t *c, peer_t *p) {
+    if (!c->tor || !tor_my_onion(c->tor)[0]) return;
+    char msg[8 + TOR_ADDR_LEN];
+    snprintf(msg, sizeof msg, "ta\t%s", tor_my_onion(c->tor));
+    send_peer(c, p, msg);
 }
 
 static void drop_peer(chat_t *c, peer_t *p, const char *why) {
@@ -599,6 +697,8 @@ static void drop_peer(chat_t *c, peer_t *p, const char *why) {
     }
     forget_peer(c, p);
     if (was_ok) ui_print(c, "* %s %s (%d online)", name, why, live_count(c) + 1);
+    // The one who left may have been the room onion's latest publisher: point it back at us.
+    if (was_ok && c->tor && c->tor_hosting && c->tor_republish_at == 0.0) c->tor_republish_at = now_seconds() + 5.0 + jitter(25.0);
 }
 
 static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
@@ -664,10 +764,19 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
             char *comma = strchr(item, ',');
             if (comma) *comma = '\0';
             addr_t a;
-            // Numeric only: a hostname here would have us resolve whatever a peer names.
-            if (addr_parse_ip_port(item, &a) == 0) add_candidate(c, a);
+            size_t il = strlen(item);
+            if (il == TOR_ADDR_LEN + 6 && strcmp(item + TOR_ADDR_LEN, ".onion") == 0) {
+                // Only Tor mode follows onion addresses; nothing else may ever look them up.
+                item[TOR_ADDR_LEN] = '\0';
+                if (c->tor && tor_target(c->tor, item, &a) == 0) add_candidate(c, a);
+            } else if (c->route.mode == ROUTE_DIRECT && addr_parse_ip_port(item, &a) == 0) {
+                // Numeric only: a hostname here would have us resolve whatever a peer names.
+                add_candidate(c, a);
+            }
             item = comma ? comma + 1 : NULL;
         }
+    } else if (n == 2 && strcmp(f[0], "ta") == 0) {
+        if (onion_valid(f[1])) copy_str(p->onion, f[1], sizeof p->onion);
     } else if (n == 5 && strcmp(f[0], "m") == 0) {
         // Only p itself is authenticated here. f[2] and f[3] (origin id, nick) are whatever p says.
         uint8_t mid_raw[4], origin[ID_LEN];
@@ -718,6 +827,8 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
 // Our own hi came back from addr, so it's one of ours: never a candidate. Kept once each, so
 // replays of it can't fill the list.
 static void note_self_addr(chat_t *c, addr_t addr) {
+    // A relayed address stands for a peer, or a Tor stream: never ours to rule out.
+    if (addr.kind != ADDR_UDP) return;
     int cap = (int)(sizeof c->self_addrs / sizeof c->self_addrs[0]);
     for (int i = 0; i < c->n_self_addrs; i++) if (addr_equal(c->self_addrs[i], addr)) return;
     if (c->n_self_addrs < cap) c->self_addrs[c->n_self_addrs++] = addr;
@@ -751,6 +862,8 @@ static void on_room(chat_t *c, char *plain, addr_t addr, double now) {
                       && (existing->ok || addr_equal(existing->addr, addr));
         if (trusted) {
             connect_peer(c, peer_id, addr, pub, kem_pub, now);
+            peer_t *p = find_peer_by_id(c, peer_id);
+            if (p) probe_path(c, p, addr);
         } else if (existing || !(c->once && c->once_used)) {
             uint8_t cookie[COOKIE_LEN];
             cookie_compute(c->cookie_secret, addr_str, peer_id, pub, cookie);
@@ -803,6 +916,15 @@ static void on_room(chat_t *c, char *plain, addr_t addr, double now) {
             ui_print(c, "* kx from %s, peer %s%s", addr_str, shortid, p ? "" : " (unknown peer, ignored)");
         }
         if (p) finish_kem_decap(c, p, ct);
+    } else if (n == 2 && strcmp(f[0], "nb") == 0 && addr.kind == ADDR_NOSTR && strlen(f[1]) == 32
+               && strcmp(f[1], my_idhex) != 0) {
+        // A member announcing itself on the relays. Someone we already hear from directly
+        // needs nothing; anyone else gets a hi through the relays.
+        uint8_t peer_id[ID_LEN];
+        if (hex_decode(f[1], 32, peer_id) != 0) return;
+        peer_t *known = find_peer_by_id(c, peer_id);
+        if (known && known->ok && now - known->seen < UDP_STALE) return;
+        add_candidate(c, addr_virtual(ADDR_NOSTR, peer_id));
     } else if (n == 3 && strcmp(f[0], "lan") == 0 && strcmp(f[1], my_idhex) != 0) {
         c->st.lan++;
         int port = atoi(f[2]);
@@ -926,7 +1048,12 @@ static void on_frame(chat_t *c, uint8_t *data, size_t len, addr_t addr, double n
             }
             c->st.session_ok++;
             plain[plain_len] = '\0';
-            if (!addr_equal(p->addr, addr)) p->addr = addr;
+            // The best path that works: direct UDP, then Tor (end to end, no relay in the middle),
+            // then the relays. A worse path takes over only once the better one goes quiet.
+            if (!addr_equal(p->addr, addr)
+                && (path_rank(addr) >= path_rank(p->addr) || now - p->path_seen[p->addr.kind] > UDP_STALE))
+                p->addr = addr;
+            p->path_seen[addr.kind] = now;
             p->seen = now;
             int was_pending = !p->ok;
             p->ok = 1;
@@ -960,21 +1087,27 @@ static void on_frame(chat_t *c, uint8_t *data, size_t len, addr_t addr, double n
                     ui_print(c, "* %s reconnected with a new verify code (was %s, now %s) - if you had compared "
                                 "codes with them, compare the new one", name, was, now_hex);
                 }
+                send_onion(c, p);
                 introduce(c, p);
             }
             return;
         }
     }
     c->st.other++;
-    if (c->dht_on) dht_on_packet(&c->dht, data, len, addr, dht_candidate_cb, c);
+    if (c->dht_on && addr.kind == ADDR_UDP) dht_on_packet(&c->dht, data, len, addr, dht_candidate_cb, c);
 }
 
-int chat_sockets(chat_t *c, sock_t out[2]) {
+int chat_sockets(chat_t *c, sock_t out[CHAT_MAX_SOCKS]) {
     int k = 0;
-    out[k++] = c->sock;
+    if (c->sock != SOCK_INVALID) out[k++] = c->sock;
     if (c->lan_sock != SOCK_INVALID) out[k++] = c->lan_sock;
+    // The relays' and Tor's sockets only wake the loop; chat_tick does their I/O.
+    if (c->nostr) k += nostr_sockets(c->nostr, out + k, CHAT_MAX_SOCKS - k);
+    if (c->tor) k += tor_sockets(c->tor, out + k, CHAT_MAX_SOCKS - k);
     return k;
 }
+
+int chat_started(const chat_t *c) { return c->started; }
 
 int chat_online_count(const chat_t *c) { return live_count((chat_t *)c); }
 int chat_pending_count(const chat_t *c) { return pending_peer_count((chat_t *)c); }
@@ -986,8 +1119,14 @@ int chat_candidate_count(const chat_t *c) {
 
 int chat_ready(const chat_t *c) { return c->created || c->ever_connected; }
 
-void chat_on_socket_readable(chat_t *c, sock_t which, double now) {
+static void transports_step(chat_t *c, double now) {
+    if (c->nostr) nostr_step(c->nostr, now);
+    if (c->tor) tor_step(c->tor, now);
+}
 
+void chat_on_socket_readable(chat_t *c, sock_t which, double now) {
+    if (which == SOCK_INVALID) return;
+    if (which != c->sock && which != c->lan_sock) { transports_step(c, now); return; }
     uint8_t buf[HANDSHAKE_BUF_LEN + 128];
     addr_t from;
     for (int i = 0; i < 64; i++) {
@@ -1034,7 +1173,56 @@ static void session_rekey(chat_t *c, double now) {
                   (unsigned)c->keygen, told, told == 1 ? "" : "s");
 }
 
+static void send_beacon(chat_t *c) {
+    char beacon[48];
+    snprintf(beacon, sizeof beacon, "nb\t%s", c->my_idhex);
+    send_room(c, beacon, nostr_everyone(), c->sock);
+}
+
+static void tor_tick(chat_t *c, double now) {
+    const char *me = tor_my_onion(c->tor);
+    // Tor published our onion (again, after a restart of tor): peers learn it for px.
+    if (me[0] && strcmp(me, c->told_onion) != 0) {
+        copy_str(c->told_onion, me, sizeof c->told_onion);
+        for (int i = 0; i < c->peer_hi; i++)
+            if (c->peers[i].used && c->peers[i].ok) send_onion(c, &c->peers[i]);
+    }
+    if (!c->tor_hosting && (c->ever_connected || now - c->start > TOR_HOST_AFTER)) {
+        c->tor_hosting = 1;
+        tor_host_room(c->tor, -1);
+        // Knocking on our own slot from now on would only reach ourselves.
+        addr_t mine = tor_room_target(c->tor, tor_hosted_slot(c->tor));
+        for (int i = 0; i < MAX_CANDS; i++) if (c->cands[i].used && addr_equal(c->cands[i].addr, mine)) c->cands[i].used = 0;
+    }
+    if (c->tor_republish_at > 0.0 && now >= c->tor_republish_at) {
+        c->tor_republish_at = 0.0;
+        tor_republish_room(c->tor);
+    }
+}
+
 void chat_tick(chat_t *c, double now) {
+    transports_step(c, now);
+    if (c->tor) tor_tick(c, now);
+    if (c->pm) {
+        portmap_step(c->pm, now);
+        // With a mapping up, the DHT is told the router's forwarded port, not whatever source
+        // port it sees.
+        uint16_t ext = 0;
+        int mapped = portmap_mapped(c->pm, &ext);
+        if (c->dht_on && mapped && (!c->dht.explicit_port || c->dht.my_port != ext)) {
+            c->dht.explicit_port = 1;
+            c->dht.my_port = ext;
+            c->dht.next_lookup = 0;
+        } else if (c->dht_on && !mapped && c->dht.explicit_port) {
+            c->dht.explicit_port = 0;
+            c->dht.my_port = c->port;
+        }
+    }
+    if (c->nostr && nostr_relays_up(c->nostr) > 0 && now >= c->next_beacon) {
+        double every = live_count(c) > 0 ? NOSTR_BEACON_CONNECTED : NOSTR_BEACON_ALONE;
+        c->next_beacon = now + every + jitter(every * 0.3);
+        send_beacon(c);
+    }
     if (c->dht_on) {
         c->dht.peers_now = live_count(c) > 0;
         if (dht_step(&c->dht, c->sock, now, dht_candidate_cb, c) && !c->dht_summary_printed) {
@@ -1049,6 +1237,8 @@ void chat_tick(chat_t *c, double now) {
     for (int i = 0; i < MAX_CANDS; i++) {
         cand_t *cd = &c->cands[i];
         if (!cd->used) continue;
+        // Reached already, at this address or (relays) under this id: nothing left to try.
+        if (candidate_reached(c, cd->addr)) { cd->used = 0; continue; }
         if (now >= cd->next_try) {
             if (c->probe_tokens < 1.0) break;
             c->probe_tokens -= 1.0;
@@ -1068,7 +1258,7 @@ void chat_tick(chat_t *c, double now) {
         if (now >= pm->next_retry) {
             peer_t *p = &c->peers[pm->peer_slot];
             if (!p->used || !p->ok || pm->tries >= 5) pending_clear(pm);
-            else { send_peer(c, p, pm->text); pm->tries++; pm->next_retry = now + 1 + jitter(0.5); }
+            else { send_peer(c, p, pm->text); pm->tries++; pm->next_retry = now + resend_delay(p); }
         }
     }
     for (int i = 0; i < c->peer_hi; i++) {
@@ -1094,10 +1284,23 @@ void chat_tick(chat_t *c, double now) {
     if (now >= c->next_alive) {
         c->next_alive = now + KEEPALIVE + jitter(3.0);
         int sent_to = 0;
-        for (int i = 0; i < c->peer_hi; i++)
-            if (c->peers[i].used && c->peers[i].ok) { send_room(c, c->hi_msg, c->peers[i].addr, c->sock); sent_to++; }
+        for (int i = 0; i < c->peer_hi; i++) {
+            peer_t *p = &c->peers[i];
+            if (!p->used || !p->ok) continue;
+            // Its path gone quiet (UDP, or a Tor stream): try the relays. Frames that come back
+            // through them move the peer there.
+            if (c->nostr && p->addr.kind != ADDR_NOSTR && now - p->seen > UDP_STALE) {
+                p->addr = addr_virtual(ADDR_NOSTR, p->id);
+                if (c->net_verbose) ui_print(c, "* %s went quiet - trying the relays", p->nick);
+            }
+            // Relayed peers keep alive on cover traffic: a hi there costs every member an event.
+            if (p->addr.kind == ADDR_NOSTR) continue;
+            send_room(c, c->hi_msg, p->addr, c->sock);
+            sent_to++;
+        }
         if (c->net_verbose && sent_to > 0) ui_print(c, "* keepalive hi -> %d connected peer%s", sent_to, sent_to == 1 ? "" : "s");
         for (int i = 0; i < c->n_static; i++) add_candidate(c, c->static_peers[i]);
+        if (c->tor) knock_room_slots(c);
     }
     if (c->lan_sock != SOCK_INVALID && now >= c->next_lan) {
         c->next_lan = now + 5 + jitter(2.0);
@@ -1131,10 +1334,10 @@ void chat_tick(chat_t *c, double now) {
         }
     }
 
-    double cover_iv = cover_interval(c);
     for (int i = 0; i < c->peer_hi; i++) {
         peer_t *p = &c->peers[i];
         if (!p->used || !p->ok) continue;
+        double cover_iv = cover_interval(c, p);
         if (p->next_cover == 0.0) { p->next_cover = now + jitter(cover_iv); continue; }
         if (now >= p->next_cover) send_peer(c, p, "nop");
     }
@@ -1142,6 +1345,11 @@ void chat_tick(chat_t *c, double now) {
         c->warned_lonely = 1;
         ui_print(c, "* nobody has answered for this session yet - check the id and password with "
                      "whoever shared them, or they may not have started their app yet");
+        // Direct and Tor sessions only meet on the relays: without them the room splits in two
+        // without a word.
+        if (!c->nostr)
+            ui_print(c, "* Nostr relays are off here, so members using %s routing can't reach you - /settings turns them on%s",
+                     c->route.mode == ROUTE_TOR ? "direct" : "Tor", c->route.mode == ROUTE_TOR ? " (through Tor)" : "");
         net_report(c);
     }
 }
@@ -1150,12 +1358,35 @@ static void net_report(chat_t *c) {
     net_stats_t *st = &c->st;
     int cands = 0;
     for (int i = 0; i < MAX_CANDS; i++) if (c->cands[i].used) cands++;
-    if (c->dht_on)
-        ui_print(c, "* net: udp/%u | internet lookup: %d nodes reached, %d peers found | candidates to try: %d | handshakes in progress: %d | connected: %d",
-                 (unsigned)c->port, dht_queried_count(&c->dht), dht_found_count(&c->dht), cands, pending_peer_count(c), live_count(c));
-    else
+    if (c->route.mode == ROUTE_TOR) {
+        char ts[300] = "not running";
+        if (c->tor) tor_status(c->tor, ts, sizeof ts);
+        ui_print(c, "* net: tor | %s | candidates to try: %d | handshakes in progress: %d | connected: %d",
+                 ts, cands, pending_peer_count(c), live_count(c));
+        char ns[300] = "off - direct peers can't reach this session";
+        if (c->nostr) nostr_status(c->nostr, ns, sizeof ns);
+        int relayed = 0;
+        for (int i = 0; i < c->peer_hi; i++) if (c->peers[i].used && c->peers[i].ok && c->peers[i].addr.kind == ADDR_NOSTR) relayed++;
+        ui_print(c, "* nostr relays through Tor: %s | peers through relays: %d", ns, relayed);
+    } else if (c->dht_on) {
+        ui_print(c, "* net: udp/%u | internet lookup: IPv4 %s%d nodes, %d peers | IPv6 %s%d nodes, %d peers | candidates to try: %d | handshakes in progress: %d | connected: %d",
+                 (unsigned)c->port, c->dht.want[DHT_V4] ? "" : "(off) ", dht_queried_count_fam(&c->dht, DHT_V4),
+                 dht_found_count_fam(&c->dht, DHT_V4), c->dht.want[DHT_V6] ? "" : "(off) ",
+                 dht_queried_count_fam(&c->dht, DHT_V6), dht_found_count_fam(&c->dht, DHT_V6),
+                 cands, pending_peer_count(c), live_count(c));
+    } else {
         ui_print(c, "* net: udp/%u | internet lookup: off | candidates to try: %d | handshakes in progress: %d | connected: %d",
                  (unsigned)c->port, cands, pending_peer_count(c), live_count(c));
+    }
+    if (c->route.mode == ROUTE_DIRECT) {
+        char pm[160] = "off", ns[300] = "off";
+        if (c->pm) portmap_status(c->pm, pm, sizeof pm);
+        if (c->nostr) nostr_status(c->nostr, ns, sizeof ns);
+        int relayed = 0;
+        for (int i = 0; i < c->peer_hi; i++) if (c->peers[i].used && c->peers[i].ok && c->peers[i].addr.kind == ADDR_NOSTR) relayed++;
+        ui_print(c, "* port mapping: %s | lan: %s | nostr fallback: %s | peers through relays: %d", pm,
+                 c->lan_sock != SOCK_INVALID ? "on" : "off", ns, relayed);
+    }
     ui_print(c, "* rx: %u datagrams | readable with this room's key: %u (hi %u, ck %u, hi2 %u of which %u bad-cookie, kx %u, lan %u) | from connected peers: %u | unreadable: %u | handshake pieces: %u (%u rebuilt)",
              st->rx, st->room_ok, st->hi, st->ck, st->hi2, st->hi2_bad, st->kx, st->lan, st->session_ok, st->other, st->rx_chunks, st->rx_chunk_done);
     if (st->n_src > 0) {
@@ -1167,7 +1398,8 @@ static void net_report(chat_t *c) {
         ui_print(c, "* recent senders: %s", list);
     }
     const char *why;
-    if (st->rx == 0) why = "nothing at all has reached this session's port - a firewall/NAT is blocking inbound UDP, or nobody is sending to you yet";
+    if (st->rx == 0 && c->route.mode == ROUTE_TOR) why = "nothing has reached this session through Tor yet - publishing and finding onion services takes a minute or two";
+    else if (st->rx == 0) why = "nothing at all has reached this session's port - a firewall/NAT is blocking inbound UDP, or nobody is sending to you yet";
     else if (st->room_ok == 0 && st->other > 0) why = "packets arrive but none are readable - wrong session id or password, or the other side runs an incompatible build";
     else if (st->hi > 0 && st->connects == 0) why = "a handshake started but never finished - typically a NAT that can't be hole-punched, or handshake pieces being lost";
     else if (st->connects > 0) why = "connected to at least one peer";
@@ -1321,6 +1553,10 @@ static cmd_result_t cmd_netverbose(void *ctx, const char *arg) {
 
 static cmd_result_t cmd_port(void *ctx, const char *arg) {
     chat_t *c = ctx;
+    if (c->route.mode == ROUTE_TOR) {
+        ui_print(c, "* this session runs over Tor and has no udp port");
+        return CMD_OK;
+    }
     if (!arg[0]) {
         ui_print(c, "* udp port: %u. usage: /port N (0 picks a free one)", (unsigned)c->port);
         return CMD_OK;
@@ -1347,7 +1583,9 @@ static cmd_result_t cmd_port(void *ctx, const char *arg) {
     // Peers follow the source address of our next hi; the DHT re-announces from the new socket.
     c->next_alive = 0;
     c->next_lan = 0;
-    if (c->dht_on) { c->dht.my_port = got; c->dht.next_lookup = 0; }
+    if (c->dht_on) { c->dht.my_port = got; c->dht.explicit_port = 0; c->dht.next_lookup = 0; }
+    // The old mapping pointed at the old port.
+    if (c->pm) { portmap_free(c->pm); c->pm = portmap_new(c->port, module_log, c); }
     ui_print(c, "* now on udp port %u", (unsigned)got);
     return CMD_OK;
 }
@@ -1413,7 +1651,7 @@ void chat_send_text(chat_t *c, const char *text_in, double now) {
         pm->peer_slot = i;
         copy_str(pm->text, text, sizeof pm->text);
         pm->tries = 1;
-        pm->next_retry = now + 1 + jitter(0.5);
+        pm->next_retry = now + resend_delay(p);
     }
     if (!sent) ui_print(c, "* nobody else is here yet, message not delivered");
 }
@@ -1424,6 +1662,119 @@ int chat_submit_line(chat_t *c, const char *line_in, double now) {
     if (line[0] == '/') return chat_run_command(c, line + 1) != CMD_QUIT;
     chat_send_text(c, line, now);
     return 1;
+}
+
+static void module_log(void *ctx, int verbose_only, const char *msg) {
+    chat_t *c = ctx;
+    if (!verbose_only || c->net_verbose) ui_print(c, "%s", msg);
+}
+
+static void module_deliver(void *ctx, const uint8_t *data, size_t len, addr_t from, double now) {
+    uint8_t buf[HANDSHAKE_BUF_LEN + 128];
+    if (len > sizeof buf) return;
+    memcpy(buf, data, len);
+    on_packet((chat_t *)ctx, buf, len, from, now);
+}
+
+// The room slots someone else may publish: always worth a hi, since members publishing different
+// slots only find each other by knocking.
+static void knock_room_slots(chat_t *c) {
+    for (int i = 0; i < TOR_ROOM_SLOTS; i++)
+        if (i != tor_hosted_slot(c->tor)) add_candidate(c, tor_room_target(c->tor, i));
+}
+
+static void start_dht(chat_t *c) {
+    if (c->dht_on || c->sock == SOCK_INVALID || !(c->route.dht4 || c->route.dht6)) return;
+    dht_init(&c->dht, c->infohash, c->port, c->route.dht4, c->route.dht6);
+    dht_start_bootstrap_resolve(&c->dht);
+    c->dht_on = 1;
+}
+
+static void start_nostr(chat_t *c) {
+    if (c->nostr || !c->route.nostr || c->route.n_relays == 0) return;
+    uint8_t tag_key[NOSTR_KEY_LEN], wrap_key[NOSTR_KEY_LEN];
+    derive_nostr_keys(c->master, tag_key, wrap_key);
+    // In Tor mode the relays are where direct peers can be met, and they're only ever reached
+    // through Tor: its SOCKS port, or nothing at all until chat has one.
+    const char *proxy = c->route.mode == ROUTE_TOR ? c->route.tor.socks : NULL;
+    c->nostr = nostr_new(tag_key, wrap_key, c->my_id, (const char (*)[NOSTR_URL_MAX])c->route.relays, c->route.n_relays,
+                         proxy, module_deliver, module_log, c);
+    crypto_wipe(tag_key, sizeof tag_key);
+    crypto_wipe(wrap_key, sizeof wrap_key);
+    c->next_beacon = 0;
+}
+
+static void start_direct(chat_t *c) {
+    if (c->route.lan) c->lan_sock = net_udp_open(LAN_PORT, NET_REUSE, NULL);
+    start_dht(c);
+    if (c->route.portmap) c->pm = portmap_new(c->port, module_log, c);
+    start_nostr(c);
+}
+
+static int relays_differ(const routing_t *a, const routing_t *b) {
+    if (a->n_relays != b->n_relays) return 1;
+    for (int i = 0; i < a->n_relays; i++) if (strcmp(a->relays[i], b->relays[i]) != 0) return 1;
+    return 0;
+}
+
+int chat_apply_routing(chat_t *c, const routing_t *r) {
+    int later = r->mode != c->route.mode || strcmp(r->tor.password, c->route.tor.password) != 0;
+    routing_t was = c->route;
+    // The relays apply in both modes: a Tor session reaches them through Tor.
+    c->route.nostr = r->nostr;
+    memcpy(c->route.relays, r->relays, sizeof r->relays);
+    c->route.n_relays = r->n_relays;
+    if (c->nostr && (!r->nostr || relays_differ(&was, r))) {
+        // Peers reached only through the relays move back to waiting for another path; they
+        // time out if none comes.
+        nostr_free(c->nostr);
+        c->nostr = NULL;
+    }
+    start_nostr(c);
+    if (c->route.mode == ROUTE_TOR) return later;
+    c->route.dht4 = r->dht4; c->route.dht6 = r->dht6; c->route.lan = r->lan;
+    c->route.portmap = r->portmap;
+
+    if (r->lan && c->lan_sock == SOCK_INVALID) c->lan_sock = net_udp_open(LAN_PORT, NET_REUSE, NULL);
+    if (!r->lan && c->lan_sock != SOCK_INVALID) { net_close(c->lan_sock); c->lan_sock = SOCK_INVALID; }
+
+    if (!r->dht4 && !r->dht6) c->dht_on = 0;
+    else if (!c->dht_on) start_dht(c);
+    else if (was.dht4 != r->dht4 || was.dht6 != r->dht6) {
+        c->dht.want[DHT_V4] = r->dht4;
+        c->dht.want[DHT_V6] = r->dht6;
+        // The bootstrap list only holds the families that were wanted: look it up again.
+        DHT_STORE(&c->dht.n_boot, 0);
+        c->dht.next_resolve = 0;
+        c->dht.next_lookup = 0;
+    }
+
+    if (r->portmap && !c->pm) c->pm = portmap_new(c->port, module_log, c);
+    if (!r->portmap && c->pm) {
+        portmap_free(c->pm);
+        c->pm = NULL;
+        if (c->dht_on && c->dht.explicit_port) { c->dht.explicit_port = 0; c->dht.my_port = c->port; }
+    }
+    return later;
+}
+
+void chat_tor_set_ports(chat_t *c, const char *socks, const char *control) {
+    if (!c->tor) return;
+    copy_str(c->route.tor.socks, socks, sizeof c->route.tor.socks);
+    copy_str(c->route.tor.control, control, sizeof c->route.tor.control);
+    tor_set_ports(c->tor, socks, control);
+    if (c->nostr) nostr_set_proxy(c->nostr, socks);
+}
+
+void chat_route_summary(const chat_t *c, char *out, size_t cap) {
+    if (c->route.mode == ROUTE_TOR) {
+        size_t p = (size_t)snprintf(out, cap, "tor%s", c->tor && tor_my_onion(c->tor)[0] ? "" : " (waiting)");
+        if (c->nostr && p < cap) snprintf(out + p, cap - p, "+nostr %d/%d", nostr_relays_up(c->nostr), nostr_relay_total(c->nostr));
+        return;
+    }
+    size_t p = (size_t)snprintf(out, cap, "direct");
+    if (c->pm && portmap_mapped(c->pm, NULL) && p < cap) p += (size_t)snprintf(out + p, cap - p, "+map");
+    if (c->nostr && p < cap) snprintf(out + p, cap - p, "+nostr %d/%d", nostr_relays_up(c->nostr), nostr_relay_total(c->nostr));
 }
 
 void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify_fn notify, void *ui) {
@@ -1438,7 +1789,7 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
     set_own_nick(c, o->nick);
     copy_str(c->session_name, o->session_name, sizeof c->session_name);
     c->created = o->created;
-    c->dht_on = o->dht_on;
+    c->route = o->route;
     c->once = o->once;
     c->notify_mode = o->notify_mode;
 
@@ -1462,23 +1813,31 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
     derive_fingerprint(c->master, c->fingerprint);
     refresh_hi(c);
 
-    // Without the main socket the caller gives up on this session, so nothing else is started.
-    c->sock = net_udp_open(o->port, NET_DUAL, &c->port);
-    c->lan_sock = c->sock != SOCK_INVALID ? net_udp_open(LAN_PORT, NET_REUSE, NULL) : SOCK_INVALID;
+    derive_dht_infohash(c->master, c->infohash);
+    c->sock = c->lan_sock = SOCK_INVALID;
+    if (c->route.mode == ROUTE_TOR) {
+        // No UDP socket at all: whatever goes out, goes through Tor.
+        uint8_t room_keys[TOR_ROOM_SLOTS][64], room_pubs[TOR_ROOM_SLOTS][32];
+        for (int i = 0; i < TOR_ROOM_SLOTS; i++) derive_tor_room_key(c->master, i, room_keys[i], room_pubs[i]);
+        c->tor = tor_new(&c->route.tor, (const uint8_t (*)[64])room_keys, (const uint8_t (*)[32])room_pubs,
+                         module_deliver, module_log, c);
+        crypto_wipe(room_keys, sizeof room_keys);
+        c->started = c->tor != NULL;
+        if (c->tor && c->created) { tor_host_room(c->tor, 0); c->tor_hosting = 1; }
+        if (c->tor) { knock_room_slots(c); start_nostr(c); }
+    } else {
+        // Without the main socket the caller gives up on this session, so nothing else is started.
+        c->sock = net_udp_open(o->port, NET_DUAL, &c->port);
+        c->started = c->sock != SOCK_INVALID;
+        if (c->started) start_direct(c);
+    }
 
-    int n_static = o->n_peers;
+    int n_static = c->route.mode == ROUTE_TOR ? 0 : o->n_peers;
     if (n_static < 0) n_static = 0;
     if (n_static > (int)(sizeof c->static_peers / sizeof c->static_peers[0]))
         n_static = (int)(sizeof c->static_peers / sizeof c->static_peers[0]);
     memcpy(c->static_peers, o->peers, sizeof(addr_t) * (size_t)n_static);
     c->n_static = n_static;
-
-    if (c->dht_on && c->sock != SOCK_INVALID) {
-        uint8_t infohash[DHT_INFOHASH_LEN];
-        derive_dht_infohash(c->master, infohash);
-        dht_init(&c->dht, infohash, c->port);
-        dht_start_bootstrap_resolve(&c->dht);
-    }
 
     c->persist = o->persist;
     if (c->persist) {
@@ -1495,6 +1854,9 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
 void chat_shutdown(chat_t *c) {
     for (int i = 0; i < c->peer_hi; i++)
         if (c->peers[i].used && c->peers[i].ok) send_peer(c, &c->peers[i], "bye");
+    nostr_free(c->nostr);
+    tor_free(c->tor);
+    portmap_free(c->pm);
     net_close(c->sock);
     net_close(c->lan_sock);
     if (c->log_fp) fclose(c->log_fp);

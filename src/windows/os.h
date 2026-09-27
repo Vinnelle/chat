@@ -7,6 +7,7 @@
 #include <stdlib.h>
 
 #define strcasecmp _stricmp
+#define strncasecmp _strnicmp
 
 typedef SOCKET sock_t;
 #define SOCK_INVALID INVALID_SOCKET

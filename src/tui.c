@@ -116,6 +116,7 @@ size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out) {
     if (b0 == 0x02) { out->type = TUI_KEY_TOGGLE_SIDEBAR; return 1; }
     if (b0 == 0x0f) { out->type = TUI_KEY_TOGGLE_CONSOLE; return 1; }
     if (b0 == 0x14) { out->type = TUI_KEY_TOGGLE_CHAT; return 1; }
+    if (b0 == 0x13) { out->type = TUI_KEY_SETTINGS; return 1; }
     if (b0 < 0x20) { out->type = TUI_KEY_UNKNOWN; return 1; }
 
     // Only whole, well-formed characters reach the input line; a stray byte (a C1 control
@@ -566,7 +567,7 @@ static void draw_input(wbuf_t *w, int rows, int cols, int pane_x,
             used += dots;
             cursor_used = content_start + (before < room ? before : room - 1);
         } else if (show_hint) {
-            const char *hint = !input->modal ? "Enter confirm \xc2\xb7 Esc cancel"
+            const char *hint = input->hint ? input->hint : !input->modal ? "Enter confirm \xc2\xb7 Esc cancel"
                 : input->mode == TUI_IMODE_NORMAL
                 ? "i/a/I/A insert \xc2\xb7 h/l move \xc2\xb7 0/$ ends \xc2\xb7 x del \xc2\xb7 : command"
                 : "type to chat \xc2\xb7 /help commands \xc2\xb7 Esc normal mode";
@@ -867,5 +868,118 @@ void tui_render_list(int rows, int cols,
     wapp(&w, "\x1b[%d;%dH\x1b[0K\x1b[2m", input_row, pane_x);
     wapp_trunc(&w, hint, pane_w);
     wapp(&w, "\x1b[0m\x1b[?25l");
+    end_frame(&w);
+}
+
+void tui_render_settings(int rows, int cols,
+                         const tui_session_row_t *sessions, int n_sessions, int selected_session,
+                         const tui_setting_row_t *items, int n_items, int selected,
+                         const char *help, const char *note, const char *hint, int color_enabled,
+                         const tui_input_t *input, const char *prompt, int mask_input, const char *nick) {
+    static char frame[FRAME_CAP];
+    wbuf_t w = { frame, FRAME_CAP, 0 };
+
+    if (rows < 6) rows = 6;
+    if (cols < 30) cols = 30;
+    int pane_x, pane_rows;
+    int sbw = tui_pane_geometry(rows, cols, &pane_x, &pane_rows);
+    int pane_w = cols - pane_x + 1;
+
+    begin_frame(&w);
+    static const tui_view_t full = { 1, 1, 1, "settings" };
+    draw_chrome(&w, rows, cols, sbw, color_enabled, &full, sessions, n_sessions, selected_session, NULL, 0, NULL, 0);
+
+    // The help text under the list: wrapped, up to six rows, then the note, then a blank row.
+    int help_rows = 0;
+    size_t off[6], len[6];
+    {
+        const char *tx = help ? help : "";
+        size_t remain = strlen(tx);
+        int width = pane_w - 2;
+        while (remain > 0 && help_rows < 6) {
+            size_t take = wrap_chunk(tx, remain, width);
+            off[help_rows] = (size_t)(tx - help);
+            len[help_rows] = take;
+            help_rows++;
+            tx += take; remain -= take;
+            while (remain > 0 && *tx == ' ') { tx++; remain--; }
+        }
+    }
+    int foot = help_rows + 2;
+    int list_rows = pane_rows - foot - 1;
+    if (list_rows < 3) list_rows = 3;
+
+    // Rows on screen: section headings and settings, headings taking a row of their own.
+    int line_of[64], total = 0;
+    for (int i = 0; i < n_items && i < 64; i++) {
+        if (items[i].section) total++;
+        line_of[i] = total++;
+    }
+    int scroll = 0;
+    if (selected >= 0 && selected < n_items) {
+        int want = line_of[selected];
+        if (selected > 0 && items[selected].section) want--;
+        if (line_of[selected] >= list_rows) scroll = line_of[selected] - list_rows + 1;
+        if (want < scroll) scroll = want;
+    }
+    int label_w = pane_w / 2 - 2;
+    if (label_w > 30) label_w = 30;
+    if (label_w < 12) label_w = 12;
+
+    for (int r = 0; r < list_rows + 1; r++) wapp(&w, "\x1b[%d;%dH\x1b[0m\x1b[K", 2 + r, pane_x);
+    int line = 0;
+    for (int i = 0; i < n_items && i < 64; i++) {
+        for (int pass = 0; pass < 2; pass++) {
+            if (pass == 0 && !items[i].section) continue;
+            int shown = line - scroll;
+            line++;
+            if (shown < 0 || shown >= list_rows) continue;
+            wapp(&w, "\x1b[%d;%dH", 2 + shown, pane_x);
+            if (pass == 0) {
+                wapp(&w, "\x1b[2m\xe2\x94\x80 ");
+                int used = 2 + wapp_trunc(&w, items[i].section, pane_w - 4);
+                wapp(&w, " "); used++;
+                for (; used < pane_w; used++) wapp(&w, "\xe2\x94\x80");
+                wapp(&w, "\x1b[0m");
+                continue;
+            }
+            int sel = i == selected;
+            if (sel) wapp(&w, "\x1b[7m");
+            else if (items[i].dim) wapp(&w, "\x1b[2m");
+            int used = wapp_trunc(&w, sel ? "> " : "  ", pane_w);
+            int lw = wapp_trunc(&w, items[i].label, label_w);
+            wapp_pad(&w, lw, label_w);
+            used += label_w;
+            if (used < pane_w) { wapp(&w, " "); used++; }
+            used += wapp_trunc(&w, items[i].value, pane_w - used);
+            if (sel) wapp_pad(&w, used, pane_w);
+            wapp(&w, "\x1b[0m");
+        }
+    }
+
+    int help_top = 2 + list_rows + 1;
+    for (int r = 0; r < help_rows; r++) {
+        wapp(&w, "\x1b[%d;%dH\x1b[0m\x1b[K", help_top + r, pane_x);
+        char piece[TUI_LINE_MAX + 1];
+        size_t n = len[r] < TUI_LINE_MAX ? len[r] : TUI_LINE_MAX;
+        memcpy(piece, help + off[r], n);
+        piece[n] = '\0';
+        wapp(&w, "  ");
+        wapp_trunc(&w, piece, pane_w - 2);
+    }
+    for (int r = help_top + help_rows; r < rows; r++) wapp(&w, "\x1b[%d;%dH\x1b[0m\x1b[K", r, pane_x);
+    if (note && note[0]) {
+        wapp(&w, "\x1b[%d;%dH\x1b[1m  ", rows - 1, pane_x);
+        wapp_trunc(&w, note, pane_w - 2);
+        wapp(&w, "\x1b[0m");
+    }
+
+    if (input) {
+        draw_input(&w, rows, cols, pane_x, nick, prompt, input, color_enabled, mask_input, TUI_ID_NONE, "");
+    } else {
+        wapp(&w, "\x1b[%d;%dH\x1b[0K\x1b[2m", rows, pane_x);
+        wapp_trunc(&w, hint, pane_w);
+        wapp(&w, "\x1b[0m\x1b[?25l");
+    }
     end_frame(&w);
 }

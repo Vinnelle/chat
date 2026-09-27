@@ -122,6 +122,7 @@ void net_close(sock_t s) {
 }
 
 int net_send(sock_t s, const void *data, size_t len, addr_t to) {
+    if (to.kind != ADDR_UDP) return -1;
     if (fam_is_v6(s)) {
         struct sockaddr_in6 sa;
         to_sockaddr6(to, &sa);
@@ -150,6 +151,94 @@ void net_wait(sock_t *socks, int *ready, int n, int timeout_ms) {
     for (int i = 0; i < m; i++) ready[i] = (pfds[i].revents & POLLIN) ? 1 : 0;
 }
 
+static sock_t open_stream(int family) {
+    sock_t s = socket(family, SOCK_STREAM, 0);
+    if (s == SOCK_INVALID) return SOCK_INVALID;
+    SetHandleInformation((HANDLE)s, HANDLE_FLAG_INHERIT, 0);
+    set_nonblock(s);
+    BOOL one = TRUE;
+    setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof one);
+    return s;
+}
+
+sock_t net_tcp_connect(addr_t to) {
+    if (to.kind != ADDR_UDP) return SOCK_INVALID;
+    sock_t s = open_stream(to.is_v6 ? AF_INET6 : AF_INET);
+    if (s == SOCK_INVALID) return SOCK_INVALID;
+    int rc;
+    if (to.is_v6) { struct sockaddr_in6 sa; to_sockaddr6(to, &sa); rc = connect(s, (struct sockaddr *)&sa, sizeof sa); }
+    else { struct sockaddr_in sa; to_sockaddr4(to, &sa); rc = connect(s, (struct sockaddr *)&sa, sizeof sa); }
+    if (rc != 0 && WSAGetLastError() != WSAEWOULDBLOCK) { CLOSESOCK(s); return SOCK_INVALID; }
+    return s;
+}
+
+int net_tcp_connect_done(sock_t s) {
+    WSAPOLLFD p;
+    p.fd = s; p.events = POLLWRNORM; p.revents = 0;
+    if (WSAPoll(&p, 1, 0) <= 0) return 0;
+    int err = 0, len = sizeof err;
+    if (getsockopt(s, SOL_SOCKET, SO_ERROR, (char *)&err, &len) != 0 || err != 0) return -1;
+    return (p.revents & POLLWRNORM) ? 1 : -1;
+}
+
+sock_t net_tcp_listen_loopback(uint16_t *port) {
+    sock_t s = open_stream(AF_INET);
+    if (s == SOCK_INVALID) return SOCK_INVALID;
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(s, (struct sockaddr *)&sa, sizeof sa) != 0 || listen(s, 16) != 0) { CLOSESOCK(s); return SOCK_INVALID; }
+    int len = sizeof sa;
+    if (getsockname(s, (struct sockaddr *)&sa, &len) != 0) { CLOSESOCK(s); return SOCK_INVALID; }
+    *port = ntohs(sa.sin_port);
+    return s;
+}
+
+sock_t net_tcp_accept(sock_t listener) {
+    sock_t s = accept(listener, NULL, NULL);
+    if (s == SOCK_INVALID) return SOCK_INVALID;
+    SetHandleInformation((HANDLE)s, HANDLE_FLAG_INHERIT, 0);
+    set_nonblock(s);
+    BOOL one = TRUE;
+    setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof one);
+    return s;
+}
+
+int net_tcp_send(sock_t s, const void *data, size_t len) {
+    int n = send(s, (const char *)data, (int)len, 0);
+    if (n >= 0) return n;
+    return WSAGetLastError() == WSAEWOULDBLOCK ? 0 : -1;
+}
+
+int net_tcp_recv(sock_t s, void *buf, size_t cap) {
+    int n = recv(s, (char *)buf, (int)cap, 0);
+    if (n > 0) return n;
+    if (n == 0) return -1;
+    return WSAGetLastError() == WSAEWOULDBLOCK ? 0 : -1;
+}
+
+int net_local_addr_toward(addr_t dest, addr_t *out) {
+    if (dest.kind != ADDR_UDP) return -1;
+    sock_t s = open_socket(dest.is_v6 ? AF_INET6 : AF_INET);
+    if (s == SOCK_INVALID) return -1;
+    struct sockaddr_storage ss;
+    int len = sizeof ss, rc;
+    if (dest.is_v6) { struct sockaddr_in6 sa; to_sockaddr6(dest, &sa); rc = connect(s, (struct sockaddr *)&sa, sizeof sa); }
+    else { struct sockaddr_in sa; to_sockaddr4(dest, &sa); rc = connect(s, (struct sockaddr *)&sa, sizeof sa); }
+    if (rc == 0) rc = getsockname(s, (struct sockaddr *)&ss, &len);
+    CLOSESOCK(s);
+    if (rc != 0) return -1;
+    from_sockaddr(&ss, out);
+    return 0;
+}
+
+int net_set_multicast_if(sock_t s, const uint8_t local_ip[4]) {
+    struct in_addr a;
+    memcpy(&a.s_addr, local_ip, 4);
+    return setsockopt(s, IPPROTO_IP, IP_MULTICAST_IF, (const char *)&a, sizeof a) == 0 ? 0 : -1;
+}
+
 static int resolve(const char *host, uint16_t port, addr_t *out, int max, int flags) {
     struct addrinfo hints, *res, *ai;
     memset(&hints, 0, sizeof hints);
@@ -174,6 +263,7 @@ static int resolve(const char *host, uint16_t port, addr_t *out, int max, int fl
 }
 
 int addr_resolve_all(const char *host, uint16_t port, addr_t *out, int max) {
+    if (host_is_onion(host)) return 0;
     return resolve(host, port, out, max, 0);
 }
 
@@ -182,6 +272,7 @@ int addr_resolve_numeric(const char *host, uint16_t port, addr_t *out) {
 }
 
 void addr_to_string(addr_t a, char out[ADDR_STR_LEN]) {
+    if (virtual_to_string(a, out)) return;
     char ipbuf[INET6_ADDRSTRLEN];
     if (a.is_v6) {
         struct in6_addr ia;

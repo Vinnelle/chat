@@ -6,11 +6,15 @@
 
 #include "platform.h"
 #include "util.h"
+#include "crypto.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include <winsock2.h>
 #include <windows.h>
+#include <wincrypt.h>
+#include <iphlpapi.h>
 #include <shellapi.h>
 #include <io.h>
 #include <fcntl.h>
@@ -306,10 +310,10 @@ int term_resized(void) {
 }
 
 void platform_wait(const sock_t *socks, int n, int *ready, int *stdin_ready, int timeout_ms) {
-    if (n > 64) n = 64;
+    if (n > PLATFORM_WAIT_MAX) n = PLATFORM_WAIT_MAX;
     for (int i = 0; i < n; i++) ready[i] = 0;
     *stdin_ready = 0;
-    WSAPOLLFD pfds[64];
+    WSAPOLLFD pfds[PLATFORM_WAIT_MAX];
     for (int i = 0; i < n; i++) { pfds[i].fd = socks[i]; pfds[i].events = POLLRDNORM; pfds[i].revents = 0; }
 
     static int is_console = -1;
@@ -610,4 +614,239 @@ int platform_replace_exe(const char *new_path, const char *exe_path) {
     if (!MoveFileExW(wexe, wold, MOVEFILE_REPLACE_EXISTING)) return -1;
     if (!MoveFileExW(wnew, wexe, 0)) { MoveFileExW(wold, wexe, 0); return -1; }
     return 0;
+}
+
+int platform_default_gateway(uint8_t ip[4]) {
+    ULONG size = 0;
+    if (GetIpForwardTable(NULL, &size, FALSE) != ERROR_INSUFFICIENT_BUFFER || size == 0) return -1;
+    MIB_IPFORWARDTABLE *table = malloc(size);
+    if (!table) return -1;
+    int found = -1;
+    DWORD best_metric = ~0u;
+    if (GetIpForwardTable(table, &size, FALSE) == NO_ERROR) {
+        for (DWORD i = 0; i < table->dwNumEntries; i++) {
+            MIB_IPFORWARDROW *r = &table->table[i];
+            if (r->dwForwardDest != 0 || r->dwForwardMask != 0 || r->dwForwardNextHop == 0) continue;
+            if (found == 0 && r->dwForwardMetric1 >= best_metric) continue;
+            memcpy(ip, &r->dwForwardNextHop, 4);
+            best_metric = r->dwForwardMetric1;
+            found = 0;
+        }
+    }
+    free(table);
+    return found;
+}
+
+void platform_ca_roots(void (*add_der)(void *ctx, const uint8_t *der, size_t len),
+                       int (*add_file)(void *ctx, const char *path), void *ctx) {
+    (void)add_file;
+    HCERTSTORE store = CertOpenSystemStoreW(0, L"ROOT");
+    if (!store) return;
+    const CERT_CONTEXT *cert = NULL;
+    while ((cert = CertEnumCertificatesInStore(store, cert)) != NULL)
+        add_der(ctx, cert->pbCertEncoded, cert->cbCertEncoded);
+    CertCloseStore(store, 0);
+}
+
+static int from_wide(const wchar_t *w, char *out, size_t cap) {
+    return WideCharToMultiByte(CP_UTF8, 0, w, -1, out, (int)cap, NULL, NULL) > 0 ? 0 : -1;
+}
+
+static int wide_is_absolute(const wchar_t *p) {
+    return (p[0] && p[1] == L':' && (p[2] == L'\\' || p[2] == L'/')) || (p[0] == L'\\' && p[1] == L'\\');
+}
+
+static int program_ok_w(const wchar_t *path, char *out, size_t cap) {
+    wchar_t full[MAX_PATH * 2];
+    if (!wide_is_absolute(path) || !GetFullPathNameW(path, MAX_PATH * 2, full, NULL)) return -1;
+    DWORD a = GetFileAttributesW(full);
+    if (a == INVALID_FILE_ATTRIBUTES || (a & FILE_ATTRIBUTE_DIRECTORY)) return -1;
+    return from_wide(full, out, cap);
+}
+
+int platform_find_program(const char *name, const char *path, char *out, size_t cap) {
+    wchar_t w[MAX_PATH * 2];
+    if (path && path[0]) return to_wide(path, w, MAX_PATH * 2) ? program_ok_w(w, out, cap) : -1;
+    wchar_t exe[64];
+    if (!to_wide(name, exe, 56)) return -1;
+    wcscat(exe, L".exe");
+    // Only absolute PATH entries: CreateProcess-style searching would try the current folder first.
+    static wchar_t env[32768];
+    DWORD n = GetEnvironmentVariableW(L"PATH", env, 32768);
+    if (n > 0 && n < 32768) {
+        for (wchar_t *save = NULL, *dir = wcstok(env, L";", &save); dir; dir = wcstok(NULL, L";", &save)) {
+            if (!wide_is_absolute(dir) || wcslen(dir) + wcslen(exe) + 2 >= MAX_PATH * 2) continue;
+            swprintf(w, MAX_PATH * 2, L"%ls\\%ls", dir, exe);
+            if (program_ok_w(w, out, cap) == 0) return 0;
+        }
+    }
+    // Tor Browser's own tor, where its installer puts it by default.
+    wchar_t home[MAX_PATH];
+    if (GetEnvironmentVariableW(L"USERPROFILE", home, MAX_PATH) > 0) {
+        swprintf(w, MAX_PATH * 2, L"%ls\\Desktop\\Tor Browser\\Browser\\TorBrowser\\Tor\\%ls", home, exe);
+        if (program_ok_w(w, out, cap) == 0) return 0;
+    }
+    return -1;
+}
+
+int platform_private_tempdir(const char *prefix, char *out, size_t cap) {
+    // The user's own temporary folder: its permissions keep other users out, and a random name
+    // that must not exist yet keeps a planted folder from being used.
+    wchar_t base[MAX_PATH + 1], wp[64], dir[MAX_PATH * 2];
+    DWORD n = GetTempPathW(MAX_PATH + 1, base);
+    if (n == 0 || n > MAX_PATH || !to_wide(prefix, wp, 48)) return -1;
+    for (int tries = 0; tries < 8; tries++) {
+        unsigned char r[8];
+        gen_random(r, sizeof r);
+        swprintf(dir, MAX_PATH * 2, L"%ls%ls-%02x%02x%02x%02x%02x%02x%02x%02x", base, wp,
+                 r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
+        if (CreateDirectoryW(dir, NULL)) return from_wide(dir, out, cap);
+        if (GetLastError() != ERROR_ALREADY_EXISTS) return -1;
+    }
+    return -1;
+}
+
+static int remove_tree_w(const wchar_t *path, int depth) {
+    DWORD a = GetFileAttributesW(path);
+    if (a == INVALID_FILE_ATTRIBUTES) return -1;
+    if (a & FILE_ATTRIBUTE_READONLY) SetFileAttributesW(path, a & ~(DWORD)FILE_ATTRIBUTE_READONLY);
+    if (!(a & FILE_ATTRIBUTE_DIRECTORY)) return DeleteFileW(path) ? 0 : -1;
+    // A link (junction, symlink) goes, not what it points to.
+    if (!(a & FILE_ATTRIBUTE_REPARSE_POINT) && depth < 16) {
+        wchar_t pat[MAX_PATH * 2];
+        swprintf(pat, MAX_PATH * 2, L"%ls\\*", path);
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW(pat, &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+                wchar_t child[MAX_PATH * 2];
+                swprintf(child, MAX_PATH * 2, L"%ls\\%ls", path, fd.cFileName);
+                remove_tree_w(child, depth + 1);
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+    }
+    return RemoveDirectoryW(path) ? 0 : -1;
+}
+
+int platform_remove_tree(const char *path) {
+    wchar_t w[MAX_PATH * 2];
+    return to_wide(path, w, MAX_PATH * 2) ? remove_tree_w(w, 0) : -1;
+}
+
+struct platform_proc { HANDLE process, job; };
+
+platform_proc_t *platform_spawn(const char *const argv[], const char *out_path) {
+    wchar_t app[MAX_PATH * 2];
+    if (!argv[0] || !to_wide(argv[0], app, MAX_PATH * 2) || !wide_is_absolute(app)) return NULL;
+    static wchar_t cmd[16384];
+    size_t pos = 0;
+    cmd[0] = L'\0';
+    for (int i = 0; argv[i]; i++)
+        if (append_quoted(cmd, sizeof cmd / sizeof cmd[0], &pos, argv[i]) != 0) return NULL;
+
+    platform_proc_t *p = calloc(1, sizeof *p);
+    if (!p) return NULL;
+    // In a job that ends when chat does, however chat ends.
+    p->job = CreateJobObjectW(NULL, NULL);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION lim;
+    memset(&lim, 0, sizeof lim);
+    lim.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!p->job || !SetInformationJobObject(p->job, JobObjectExtendedLimitInformation, &lim, sizeof lim)) {
+        if (p->job) CloseHandle(p->job);
+        free(p);
+        return NULL;
+    }
+    SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, TRUE };
+    HANDLE nul = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             &sa, OPEN_EXISTING, 0, NULL);
+    HANDLE out = nul;
+    wchar_t wout[MAX_PATH * 2];
+    if (out_path) {
+        out = to_wide(out_path, wout, MAX_PATH * 2)
+            ? CreateFileW(wout, GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL)
+            : INVALID_HANDLE_VALUE;
+    }
+    HANDLE inherit[2] = { nul, out };
+    SIZE_T attr_size = 0;
+    InitializeProcThreadAttributeList(NULL, 1, 0, &attr_size);
+    LPPROC_THREAD_ATTRIBUTE_LIST attrs = attr_size ? malloc(attr_size) : NULL;
+    BOOL ok = nul != INVALID_HANDLE_VALUE && out != INVALID_HANDLE_VALUE && attrs
+              && InitializeProcThreadAttributeList(attrs, 1, 0, &attr_size);
+    if (ok) ok = UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit,
+                                           out == nul ? sizeof nul : sizeof inherit, NULL, NULL);
+    STARTUPINFOEXW si;
+    memset(&si, 0, sizeof si);
+    si.StartupInfo.cb = sizeof si;
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    si.StartupInfo.hStdInput = nul;
+    si.StartupInfo.hStdOutput = si.StartupInfo.hStdError = out;
+    si.lpAttributeList = attrs;
+    PROCESS_INFORMATION pi;
+    if (ok) ok = CreateProcessW(app, cmd, NULL, NULL, TRUE,
+                                CREATE_NO_WINDOW | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT,
+                                NULL, NULL, &si.StartupInfo, &pi);
+    if (attrs) { DeleteProcThreadAttributeList(attrs); free(attrs); }
+    if (out != nul && out != INVALID_HANDLE_VALUE) CloseHandle(out);
+    if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
+    if (!ok) { CloseHandle(p->job); free(p); return NULL; }
+    if (!AssignProcessToJobObject(p->job, pi.hProcess)) {
+        TerminateProcess(pi.hProcess, 1);
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess); CloseHandle(p->job);
+        free(p);
+        return NULL;
+    }
+    ResumeThread(pi.hThread);
+    CloseHandle(pi.hThread);
+    p->process = pi.hProcess;
+    return p;
+}
+
+int platform_proc_exited(platform_proc_t *p, int *code) {
+    if (WaitForSingleObject(p->process, 0) != WAIT_OBJECT_0) return 0;
+    DWORD c = 1;
+    GetExitCodeProcess(p->process, &c);
+    if (code) *code = (int)c;
+    return 1;
+}
+
+void platform_proc_stop(platform_proc_t *p, int wait_ms) {
+    if (!p) return;
+    if (WaitForSingleObject(p->process, 0) != WAIT_OBJECT_0) {
+        TerminateProcess(p->process, 0);
+        WaitForSingleObject(p->process, (DWORD)wait_ms);
+    }
+    CloseHandle(p->process);
+    CloseHandle(p->job);
+    free(p);
+}
+
+long platform_pid(void) { return (long)GetCurrentProcessId(); }
+
+void platform_sleep_ms(int ms) { Sleep((DWORD)ms); }
+
+void platform_remove_stale_tempdirs(const char *prefix, const char *lock_rel) {
+    wchar_t base[MAX_PATH + 1], wp[64], pat[MAX_PATH * 2], wl[MAX_PATH];
+    DWORD n = GetTempPathW(MAX_PATH + 1, base);
+    if (n == 0 || n > MAX_PATH || !to_wide(prefix, wp, 48) || !to_wide(lock_rel, wl, MAX_PATH)) return;
+    swprintf(pat, MAX_PATH * 2, L"%ls%ls-*", base, wp);
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    ULONGLONG now = ((ULONGLONG)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) continue;
+        ULONGLONG made = ((ULONGLONG)fd.ftLastWriteTime.dwHighDateTime << 32) | fd.ftLastWriteTime.dwLowDateTime;
+        if (now - made < 60ULL * 10000000ULL) continue;
+        wchar_t dir[MAX_PATH * 2], lock[MAX_PATH * 3];
+        swprintf(dir, MAX_PATH * 2, L"%ls%ls", base, fd.cFileName);
+        swprintf(lock, MAX_PATH * 3, L"%ls\\%ls", dir, wl);
+        // A running tor keeps its lock file open, and then it can't be deleted.
+        if (!DeleteFileW(lock) && GetLastError() != ERROR_FILE_NOT_FOUND && GetLastError() != ERROR_PATH_NOT_FOUND) continue;
+        remove_tree_w(dir, 0);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
 }

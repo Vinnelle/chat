@@ -22,7 +22,9 @@ set(DEP_CC_ARGS "")
 set(OQS_CROSS_ARGS "")
 if(CMAKE_CROSSCOMPILING)
     set(DEP_CC_ARGS CC=${CMAKE_C_COMPILER} AR=${CMAKE_AR} RANLIB=${CMAKE_RANLIB} --host=${CHAT_HOST_TRIPLE})
-    set(OQS_CROSS_ARGS -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE})
+    # Absolute: the dependencies configure in their own directories, where a relative path breaks.
+    get_filename_component(CHAT_TOOLCHAIN_FILE "${CMAKE_TOOLCHAIN_FILE}" ABSOLUTE BASE_DIR "${CMAKE_SOURCE_DIR}")
+    set(OQS_CROSS_ARGS -DCMAKE_TOOLCHAIN_FILE=${CHAT_TOOLCHAIN_FILE})
 endif()
 
 set(SODIUM_VERSION 1.0.20-stable)
@@ -63,6 +65,60 @@ ExternalProject_Add(liboqs_ext
 set(OQS_INCLUDE_DIRS ${OQS_PREFIX}/install/include)
 set(OQS_STATIC_LIB ${OQS_PREFIX}/install/lib/liboqs.a)
 
+# TLS for the Nostr relays' wss:// connections.
+set(MBEDTLS_VERSION 3.6.7)
+set(MBEDTLS_PREFIX ${CMAKE_BINARY_DIR}/mbedtls-ext)
+ExternalProject_Add(mbedtls_ext
+    URL https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-${MBEDTLS_VERSION}/mbedtls-${MBEDTLS_VERSION}.tar.bz2
+    URL_HASH SHA256=a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6
+    DOWNLOAD_EXTRACT_TIMESTAMP true
+    PREFIX ${MBEDTLS_PREFIX}
+    CMAKE_ARGS
+        -DCMAKE_BUILD_TYPE=Release
+        -DCMAKE_INSTALL_PREFIX=${MBEDTLS_PREFIX}/install
+        -DCMAKE_INSTALL_LIBDIR=lib
+        -DENABLE_PROGRAMS=OFF
+        -DENABLE_TESTING=OFF
+        -DUSE_SHARED_MBEDTLS_LIBRARY=OFF
+        -DUSE_STATIC_MBEDTLS_LIBRARY=ON
+        -DMBEDTLS_FATAL_WARNINGS=OFF
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+        ${OQS_CROSS_ARGS}
+    BUILD_BYPRODUCTS ${MBEDTLS_PREFIX}/install/lib/libmbedtls.a ${MBEDTLS_PREFIX}/install/lib/libmbedx509.a
+                     ${MBEDTLS_PREFIX}/install/lib/libmbedcrypto.a
+)
+set(MBEDTLS_INCLUDE_DIRS ${MBEDTLS_PREFIX}/install/include)
+set(MBEDTLS_STATIC_LIBS ${MBEDTLS_PREFIX}/install/lib/libmbedtls.a ${MBEDTLS_PREFIX}/install/lib/libmbedx509.a
+                        ${MBEDTLS_PREFIX}/install/lib/libmbedcrypto.a)
+
+# BIP-340 Schnorr signatures, which Nostr events carry.
+set(SECP256K1_VERSION 0.7.1)
+set(SECP256K1_PREFIX ${CMAKE_BINARY_DIR}/secp256k1-ext)
+ExternalProject_Add(secp256k1_ext
+    URL https://github.com/bitcoin-core/secp256k1/archive/refs/tags/v${SECP256K1_VERSION}.tar.gz
+    URL_HASH SHA256=958f204dbafc117e73a2604285dc2eb2a5128344d3499c114dcba5de54cb7a9e
+    DOWNLOAD_EXTRACT_TIMESTAMP true
+    PREFIX ${SECP256K1_PREFIX}
+    CMAKE_ARGS
+        -DCMAKE_BUILD_TYPE=Release
+        -DCMAKE_INSTALL_PREFIX=${SECP256K1_PREFIX}/install
+        -DCMAKE_INSTALL_LIBDIR=lib
+        -DBUILD_SHARED_LIBS=OFF
+        -DSECP256K1_INSTALL=ON
+        -DSECP256K1_BUILD_TESTS=OFF
+        -DSECP256K1_BUILD_EXHAUSTIVE_TESTS=OFF
+        -DSECP256K1_BUILD_BENCHMARK=OFF
+        -DSECP256K1_BUILD_CTIME_TESTS=OFF
+        -DSECP256K1_ENABLE_MODULE_ECDH=OFF
+        -DSECP256K1_ENABLE_MODULE_MUSIG=OFF
+        -DSECP256K1_ENABLE_MODULE_ELLSWIFT=OFF
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+        ${OQS_CROSS_ARGS}
+    BUILD_BYPRODUCTS ${SECP256K1_PREFIX}/install/lib/libsecp256k1.a
+)
+set(SECP256K1_INCLUDE_DIRS ${SECP256K1_PREFIX}/install/include)
+set(SECP256K1_STATIC_LIB ${SECP256K1_PREFIX}/install/lib/libsecp256k1.a)
+
 add_executable(chat
     src/main.c
     src/chat.c
@@ -75,6 +131,12 @@ add_executable(chat
     src/pgp.c
     src/tui.c
     src/update.c
+    src/json.c
+    src/tls.c
+    src/nostr.c
+    src/tor.c
+    src/torproc.c
+    src/portmap.c
     src/${CHAT_OS}/net.c
     src/${CHAT_OS}/platform.c
 )
@@ -82,7 +144,7 @@ add_executable(chat
 add_custom_target(build_stamp ALL
     COMMAND ${CMAKE_COMMAND} -DOUT=${CMAKE_BINARY_DIR}/build_stamp.h -DSRC=${CMAKE_SOURCE_DIR} -P ${CMAKE_SOURCE_DIR}/cmake/stamp.cmake
     BYPRODUCTS ${CMAKE_BINARY_DIR}/build_stamp.h)
-add_dependencies(chat libsodium_ext liboqs_ext build_stamp)
+add_dependencies(chat libsodium_ext liboqs_ext mbedtls_ext secp256k1_ext build_stamp)
 target_compile_definitions(chat PRIVATE CHAT_VERSION="${PROJECT_VERSION}")
 
 # /update installs only releases whose SHA256SUMS the key in minisign.pub signed (`just keygen`
@@ -104,14 +166,15 @@ if(EXISTS ${CHAT_PUBKEY_FILE})
 else()
     message(WARNING "chat: no minisign.pub - this build will refuse every update (`just keygen` makes one)")
 endif()
-target_include_directories(chat PRIVATE src src/${CHAT_OS} ${CMAKE_BINARY_DIR} ${SODIUM_INCLUDE_DIRS} ${OQS_INCLUDE_DIRS})
-target_link_libraries(chat PRIVATE ${SODIUM_STATIC_LIB} ${OQS_STATIC_LIB})
+target_include_directories(chat PRIVATE src src/${CHAT_OS} ${CMAKE_BINARY_DIR} ${SODIUM_INCLUDE_DIRS} ${OQS_INCLUDE_DIRS}
+                           ${MBEDTLS_INCLUDE_DIRS} ${SECP256K1_INCLUDE_DIRS})
+target_link_libraries(chat PRIVATE ${SODIUM_STATIC_LIB} ${OQS_STATIC_LIB} ${MBEDTLS_STATIC_LIBS} ${SECP256K1_STATIC_LIB})
 
 if(WIN32)
 
-    target_compile_definitions(chat PRIVATE SODIUM_STATIC=1 WIN32_LEAN_AND_MEAN)
+    target_compile_definitions(chat PRIVATE SODIUM_STATIC=1 SECP256K1_STATIC=1 WIN32_LEAN_AND_MEAN)
 
-    target_link_libraries(chat PRIVATE ws2_32 bcrypt advapi32 shell32 user32)
+    target_link_libraries(chat PRIVATE ws2_32 bcrypt advapi32 shell32 user32 crypt32 iphlpapi)
     target_link_options(chat PRIVATE -static)
 else()
     find_package(Threads REQUIRED)

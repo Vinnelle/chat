@@ -64,6 +64,7 @@ typedef enum {
     TUI_KEY_TOGGLE_SIDEBAR,
     TUI_KEY_TOGGLE_CONSOLE,
     TUI_KEY_TOGGLE_CHAT,
+    TUI_KEY_SETTINGS,
     TUI_KEY_ESCAPE,
     TUI_KEY_UNKNOWN
 } tui_keytype_t;
@@ -93,6 +94,8 @@ typedef struct {
     int modal;
     tui_complete_fn complete;
     tui_complete_fn mention;
+    // Shown dimmed in an empty line instead of the usual hint, when set.
+    const char *hint;
 } tui_input_t;
 
 // Empties the line and returns to INSERT; keeps modal and complete.
@@ -131,6 +134,21 @@ typedef struct {
     char label[TUI_LIST_LABEL_MAX];
     int is_dir;
 } tui_list_item_t;
+
+typedef struct {
+    const char *section;   // starts a new section with this heading, or NULL
+    char label[48];
+    char value[160];
+    int dim;               // doesn't apply in the current mode
+} tui_setting_row_t;
+
+// The settings page: a list of name/value rows by section, the selected row's help underneath,
+// a note on the last change, and the hint line. With input set, the bottom line edits a value.
+void tui_render_settings(int rows, int cols,
+                         const tui_session_row_t *sessions, int n_sessions, int selected_session,
+                         const tui_setting_row_t *items, int n_items, int selected,
+                         const char *help, const char *note, const char *hint, int color_enabled,
+                         const tui_input_t *input, const char *prompt, int mask_input, const char *nick);
 
 void tui_render_list(int rows, int cols,
                       const tui_session_row_t *sessions, int n_sessions, int selected_session,

@@ -79,7 +79,7 @@ void fake_net_inject(addr_t from, addr_t to, const void *data, size_t len) {
 
 int net_send(sock_t s, const void *data, size_t len, addr_t to) {
     fake_sock_t *fs = sock_of(s);
-    if (!fs) return -1;
+    if (!fs || to.kind != ADDR_UDP) return -1;
     addr_t from = fake_net_addr(fs->port);
     if (fake_net_filter && fake_net_filter(fake_net_filter_ctx, from, to, data, len)) return (int)len;
     fake_net_inject(from, to, data, len);
@@ -131,7 +131,18 @@ int addr_resolve_numeric(const char *host, uint16_t port, addr_t *out) {
     return -1;
 }
 
+// No TCP here: relays and Tor are never reachable, as with no network at all.
+sock_t net_tcp_connect(addr_t to) { (void)to; return SOCK_INVALID; }
+int net_tcp_connect_done(sock_t s) { (void)s; return -1; }
+sock_t net_tcp_listen_loopback(uint16_t *port) { (void)port; return SOCK_INVALID; }
+sock_t net_tcp_accept(sock_t listener) { (void)listener; return SOCK_INVALID; }
+int net_tcp_send(sock_t s, const void *data, size_t len) { (void)s; (void)data; (void)len; return -1; }
+int net_tcp_recv(sock_t s, void *buf, size_t cap) { (void)s; (void)buf; (void)cap; return -1; }
+int net_local_addr_toward(addr_t dest, addr_t *out) { (void)dest; (void)out; return -1; }
+int net_set_multicast_if(sock_t s, const uint8_t local_ip[4]) { (void)s; (void)local_ip; return -1; }
+
 void addr_to_string(addr_t a, char out[ADDR_STR_LEN]) {
+    if (virtual_to_string(a, out)) return;
     char ipbuf[INET6_ADDRSTRLEN];
     if (a.is_v6) {
         inet_ntop(AF_INET6, a.ip, ipbuf, sizeof ipbuf);

@@ -1,5 +1,70 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- chat asks at startup how sessions should reach people: direct with a Nostr relay fallback,
+  direct only, or Tor. `--routing direct+nostr|direct|tor` answers ahead of time.
+- IPv6 DHT (BEP 32). Lookups run on the IPv4 and IPv6 DHTs side by side, and IPv6 peers
+  connect directly. `--noipv6` turns it off.
+- Router port mapping: chat asks the router to forward the session's UDP port (PCP, then
+  NAT-PMP, then UPnP-IGD), renews it, tells the DHT the forwarded port, and removes the
+  mapping when the session ends. `--noportmap` turns it off.
+- Nostr relay fallback: when UDP between two peers can't get through, public Nostr relays
+  carry their traffic. Each event is signed with its own one-off key, has a random ephemeral
+  kind and a timestamp a few seconds off, and holds one fixed-size payload encrypted under a
+  fresh nonce. It carries a room tag that changes every ten minutes. Relays that rate-limit get
+  fewer events, and relays whose policy refuses throwaway keys are only read from. `--relay`
+  picks relays; `--nonostr` turns it off.
+- Tor routing: onion services. Each session publishes its own onion service and one of six room
+  onion services derived from the session id and password. In Tor mode chat sends no UDP and
+  connects nowhere directly.
+- Tor and direct members of a room meet on the Nostr relays, the only place they can: both
+  need the relays on. A Tor session reaches them only
+  through Tor's SOCKS port, with a circuit per relay and the relay's name resolved at the exit,
+  and doesn't connect to any relay until it has a tor. Between Tor members the traffic moves to
+  their onion services once those connect. The **Nostr relays** setting and `--nonostr` now
+  apply in both modes. When nobody answers and relays are off, chat says members using the
+  other routing can't reach this session.
+- Tor mode uses a tor that's already running (system service or Tor Browser) when its control
+  port lets chat log in, since that one keeps its entry guards and bridges. Otherwise chat
+  starts its own: tor from `PATH`, or `--tor-path`, provided no one but root or the user can
+  change it. It runs with an empty configuration, on random 127.0.0.1 ports with cookie login,
+  in a private temporary folder (in memory under `$XDG_RUNTIME_DIR` where there is one). chat
+  deletes the folder on exit, tor quits by itself if chat crashes, and the next chat deletes
+  what a crash left. `--tor-launch auto|always|never` chooses. `--tor-socks` and
+  `--tor-control` say where to look for a running tor.
+- A settings page (`Ctrl+S` or `/settings`): routing and each part of it, the relays and Tor
+  ports, nickname, colour, signing identity, notifications, the network log, the UDP port for
+  new sessions, and the layout. Routing toggles apply to open sessions at once. The mode and
+  the Tor settings apply to sessions opened afterwards. Nothing is written to disk.
+- `--nolan` turns off LAN discovery.
+- `/net` reports port mapping, relay and Tor status, and IPv4 and IPv6 lookups separately.
+- A fuzz target for relay JSON and UPnP gateway replies (`just fuzz json`).
+- `just test-build [all|linux|windows]` builds the Linux and Windows binaries, or one of them,
+  into `test-builds/<date>-<time>/`. It builds this system's natively and cross-builds the
+  other with zig, then offers to run this system's when there's a terminal to ask on, passing
+  it any further arguments.
+
+### Changed
+- In Tor mode, `/update` and `--update` download through Tor's SOCKS port.
+- Peers are reached on the best path that works: direct UDP, then Tor, then the relays. A
+  worse path takes over only once the better one goes quiet. When a connected peer's hello
+  arrives over a better path (UDP punched through, or a Tor stream, after the relays), chat
+  answers with an encrypted frame on it, so both sides move there once it's proven.
+- `--nodht` now turns off both DHTs.
+- Candidate addresses stop getting hellos once their peer is connected.
+- Mbed TLS 3.6.7 and libsecp256k1 0.7.1 are fetched and linked statically, and on Windows
+  chat also links crypt32 (the system root certificates) and iphlpapi (the default gateway).
+
+### Fixed
+- A second Ctrl+C, SIGTERM or SIGHUP soon after the first killed chat on the spot, before
+  sessions said bye, keys were wiped and the terminal was restored: the quit handler was reset
+  after the first signal (glibc's `signal()` does that with `_POSIX_C_SOURCE`, and the Windows
+  C runtime always does). The handler now stays in place.
+- Cross builds passed a relative toolchain path to the dependencies' builds, which only
+  worked with an existing build directory.
+
 ## 0.1.6
 
 ### Security
