@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.7
 
 ### Added
 - chat asks at startup how sessions should reach people: direct with a Nostr relay fallback,
