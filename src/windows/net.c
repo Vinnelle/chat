@@ -39,8 +39,16 @@ static void tame_connreset(sock_t s) {
     WSAIoctl(s, SIO_UDP_CONNRESET, &enable, sizeof enable, NULL, 0, &b, NULL, NULL);
 }
 
+// Winsock sockets are inheritable by default, and /update starts curl.exe with handle
+// inheritance on: without this, curl would hold the session's sockets.
+static sock_t open_socket(int family) {
+    sock_t s = socket(family, SOCK_DGRAM, 0);
+    if (s != SOCK_INVALID) SetHandleInformation((HANDLE)s, HANDLE_FLAG_INHERIT, 0);
+    return s;
+}
+
 static sock_t open_v4(uint16_t port, unsigned flags, uint16_t *bound_port) {
-    sock_t s = socket(AF_INET, SOCK_DGRAM, 0);
+    sock_t s = open_socket(AF_INET);
     if (s == SOCK_INVALID) return SOCK_INVALID;
     int one = 1;
     if (flags & NET_REUSE) {
@@ -67,7 +75,7 @@ static sock_t open_v4(uint16_t port, unsigned flags, uint16_t *bound_port) {
 }
 
 static sock_t open_v6(uint16_t port, unsigned flags, uint16_t *bound_port) {
-    sock_t s = socket(AF_INET6, SOCK_DGRAM, 0);
+    sock_t s = open_socket(AF_INET6);
     if (s == SOCK_INVALID) return SOCK_INVALID;
     int one = 1, zero = 0;
     if (setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, (const char *)&zero, sizeof zero) != 0) {

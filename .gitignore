@@ -2,8 +2,17 @@
 /build/
 /build-win/
 /build-static/
+/build-test/
+/build-fuzz/
 /dist/
 /test-builds/
+
+# Fuzzing (just fuzz)
+/fuzz-corpus/
+crash-*
+leak-*
+oom-*
+timeout-*
 build_stamp.h
 *.o
 *.a

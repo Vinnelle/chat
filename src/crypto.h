@@ -29,6 +29,9 @@
 #define ROOM_HEADER_LEN AEAD_NONCE_LEN
 #define SESSION_HEADER_LEN (4 + AEAD_NONCE_LEN)
 size_t sealed_len(size_t plain_len, size_t header_len, size_t min_body);
+// True if frame_len is a length the sealer can produce (padding to PAD_BLOCK, at least min_body):
+// a free check that turns most junk away before any key is derived or tag checked.
+int sealed_len_ok(size_t frame_len, size_t header_len, size_t min_body);
 
 typedef struct {
     uint8_t priv[PRIV_LEN];

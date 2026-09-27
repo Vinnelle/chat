@@ -26,6 +26,16 @@ uint32_t utf8_decode(const char *s, size_t n, size_t i, size_t *adv);
 // Writes cp as UTF-8 (1-4 bytes) and returns the length.
 size_t utf8_put(uint32_t cp, char *out);
 
+// Terminal columns the character at s[i] takes (0 for combining marks and zero-width characters,
+// 2 for East Asian wide ones and emoji); *adv gets its byte length. A locale-free approximation of
+// wcwidth: a malformed byte or a control character counts as one column, for the replacement
+// character the UI shows in its place.
+int utf8_char_cols(const char *s, size_t n, size_t i, size_t *adv);
+// How many bytes of s (at most len) fit in max_cols columns, stopping on a character boundary;
+// *cols (if not NULL) gets the columns they take.
+size_t utf8_fit_cols(const char *s, size_t len, int max_cols, int *cols);
+int utf8_str_cols(const char *s);
+
 void random_nickname(char *out, size_t out_cap);
 
 double now_seconds(void);

@@ -35,6 +35,10 @@ void platform_harden_process(void) {
 
     prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
 #endif
+#ifdef PR_SET_NO_NEW_PRIVS
+    // chat only ever runs curl and notify-send; neither needs to gain privileges through exec.
+    prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+#endif
 
     struct rlimit ml;
     if (getrlimit(RLIMIT_MEMLOCK, &ml) == 0 && ml.rlim_cur != ml.rlim_max) {

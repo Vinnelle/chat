@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
 #include "util.h"
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -70,11 +71,14 @@ int hex_decode(const char *in, size_t hexlen, uint8_t *out) {
     return 0;
 }
 
+// Strict: overlong forms, surrogates and anything past U+10FFFF are malformed. Decoding those
+// leniently would let e.g. C1 9B through as '[' while an 8-bit terminal reads the 9B as CSI.
 static uint32_t utf8_next(const unsigned char *s, size_t n, size_t i, size_t *adv) {
+    static const uint32_t MIN_CP[5] = { 0, 0, 0x80, 0x800, 0x10000 };
     unsigned char c = s[i];
-    size_t len = 1;
-    uint32_t cp = c;
-    if ((c & 0x80) == 0) { len = 1; cp = c; }
+    size_t len;
+    uint32_t cp;
+    if ((c & 0x80) == 0) { *adv = 1; return c; }
     else if ((c & 0xe0) == 0xc0 && i + 1 < n) { len = 2; cp = c & 0x1f; }
     else if ((c & 0xf0) == 0xe0 && i + 2 < n) { len = 3; cp = c & 0x0f; }
     else if ((c & 0xf8) == 0xf0 && i + 3 < n) { len = 4; cp = c & 0x07; }
@@ -84,6 +88,7 @@ static uint32_t utf8_next(const unsigned char *s, size_t n, size_t i, size_t *ad
         if ((cc & 0xc0) != 0x80) { *adv = 1; return c; }
         cp = (cp << 6) | (cc & 0x3f);
     }
+    if (cp < MIN_CP[len] || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) { *adv = 1; return c; }
     *adv = len;
     return cp;
 }
@@ -104,10 +109,76 @@ size_t utf8_put(uint32_t cp, char *out) {
     return 4;
 }
 
+typedef struct { uint32_t lo, hi; } cp_range_t;
+
+static int in_ranges(uint32_t cp, const cp_range_t *r, size_t n) {
+    size_t lo = 0, hi = n;
+    while (lo < hi) {
+        size_t mid = (lo + hi) / 2;
+        if (cp < r[mid].lo) hi = mid;
+        else if (cp > r[mid].hi) lo = mid + 1;
+        else return 1;
+    }
+    return 0;
+}
+
+// Sorted. Combining marks and characters that take no column.
+static const cp_range_t ZERO_WIDTH[] = {
+    { 0x0300, 0x036f }, { 0x0483, 0x0489 }, { 0x0591, 0x05bd }, { 0x05bf, 0x05bf }, { 0x05c1, 0x05c2 },
+    { 0x05c4, 0x05c5 }, { 0x05c7, 0x05c7 }, { 0x0610, 0x061a }, { 0x064b, 0x065f }, { 0x0670, 0x0670 },
+    { 0x06d6, 0x06dc }, { 0x06df, 0x06e4 }, { 0x06e7, 0x06e8 }, { 0x06ea, 0x06ed }, { 0x0e31, 0x0e31 },
+    { 0x0e34, 0x0e3a }, { 0x0e47, 0x0e4e }, { 0x1ab0, 0x1aff }, { 0x1dc0, 0x1dff }, { 0x200b, 0x200f },
+    { 0x202a, 0x202e }, { 0x2060, 0x2064 }, { 0x20d0, 0x20ff }, { 0xfe00, 0xfe0f }, { 0xfe20, 0xfe2f },
+    { 0xfeff, 0xfeff }, { 0xe0000, 0xe007f }, { 0xe0100, 0xe01ef },
+};
+
+// Sorted. East Asian wide and fullwidth ranges, and emoji that terminals draw two columns wide.
+static const cp_range_t WIDE[] = {
+    { 0x1100, 0x115f }, { 0x231a, 0x231b }, { 0x2329, 0x232a }, { 0x23e9, 0x23ec }, { 0x23f0, 0x23f0 },
+    { 0x23f3, 0x23f3 }, { 0x25fd, 0x25fe }, { 0x2614, 0x2615 }, { 0x2648, 0x2653 }, { 0x267f, 0x267f },
+    { 0x2693, 0x2693 }, { 0x26a1, 0x26a1 }, { 0x26aa, 0x26ab }, { 0x26bd, 0x26be }, { 0x26c4, 0x26c5 },
+    { 0x26ce, 0x26ce }, { 0x26d4, 0x26d4 }, { 0x26ea, 0x26ea }, { 0x26f2, 0x26f3 }, { 0x26f5, 0x26f5 },
+    { 0x26fa, 0x26fa }, { 0x26fd, 0x26fd }, { 0x2705, 0x2705 }, { 0x270a, 0x270b }, { 0x2728, 0x2728 },
+    { 0x274c, 0x274c }, { 0x274e, 0x274e }, { 0x2753, 0x2755 }, { 0x2757, 0x2757 }, { 0x2795, 0x2797 },
+    { 0x27b0, 0x27b0 }, { 0x27bf, 0x27bf }, { 0x2b1b, 0x2b1c }, { 0x2b50, 0x2b50 }, { 0x2b55, 0x2b55 },
+    { 0x2e80, 0x303e }, { 0x3041, 0x33ff }, { 0x3400, 0x4dbf }, { 0x4e00, 0x9fff }, { 0xa000, 0xa4cf },
+    { 0xa960, 0xa97f }, { 0xac00, 0xd7a3 }, { 0xf900, 0xfaff }, { 0xfe10, 0xfe19 }, { 0xfe30, 0xfe6f },
+    { 0xff00, 0xff60 }, { 0xffe0, 0xffe6 }, { 0x16fe0, 0x18cff }, { 0x1b000, 0x1b2ff }, { 0x1f004, 0x1f004 },
+    { 0x1f0cf, 0x1f0cf }, { 0x1f18e, 0x1f18e }, { 0x1f191, 0x1f19a }, { 0x1f200, 0x1f251 }, { 0x1f300, 0x1f64f },
+    { 0x1f680, 0x1f6ff }, { 0x1f7e0, 0x1f7eb }, { 0x1f90c, 0x1f9ff }, { 0x1fa70, 0x1faff }, { 0x20000, 0x3fffd },
+};
+
+int utf8_char_cols(const char *s, size_t n, size_t i, size_t *adv) {
+    uint32_t cp = utf8_next((const unsigned char *)s, n, i, adv);
+    if (cp < 0x80 || *adv == 1) return 1;
+    if (in_ranges(cp, ZERO_WIDTH, sizeof ZERO_WIDTH / sizeof ZERO_WIDTH[0])) return 0;
+    return in_ranges(cp, WIDE, sizeof WIDE / sizeof WIDE[0]) ? 2 : 1;
+}
+
+size_t utf8_fit_cols(const char *s, size_t len, int max_cols, int *cols) {
+    size_t i = 0;
+    int used = 0;
+    while (i < len && s[i]) {
+        size_t adv;
+        int w = utf8_char_cols(s, len, i, &adv);
+        if (used + w > max_cols) break;
+        used += w;
+        i += adv;
+    }
+    if (cols) *cols = used;
+    return i;
+}
+
+int utf8_str_cols(const char *s) {
+    int cols;
+    utf8_fit_cols(s, strlen(s), INT_MAX, &cols);
+    return cols;
+}
+
 static int is_stripped(uint32_t cp) {
     if (cp < 0x20 || cp == 0x7f) return 1;
     if (cp >= 0x80 && cp <= 0x9f) return 1;
-    if (cp == 0x200e || cp == 0x200f) return 1;
+    if (cp == 0x61c || cp == 0x200e || cp == 0x200f) return 1;
     if (cp >= 0x202a && cp <= 0x202e) return 1;
     if (cp >= 0x2066 && cp <= 0x2069) return 1;
     return 0;
@@ -130,7 +201,8 @@ size_t clean_text(const char *in, char *out, size_t max_len) {
     while (i < n) {
         size_t adv;
         uint32_t cp = utf8_next(s, n, i, &adv);
-        if (!is_stripped(cp)) {
+        // A lone byte of 0x80 or more is malformed: dropped, so the result is always valid UTF-8.
+        if (!is_stripped(cp) && !(adv == 1 && cp >= 0x80)) {
             if (o + adv > max_len) break;
             memcpy(out + o, s + i, adv);
             o += adv;
@@ -151,10 +223,10 @@ size_t clean_text(const char *in, char *out, size_t max_len) {
 static const char SID_ALPHABET[] = "23456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 void random_session_id(char *out, size_t len) {
-    uint8_t b[64];
-    if (len > sizeof(b)) len = sizeof(b);
-    randombytes_buf(b, len);
-    for (size_t i = 0; i < len; i++) out[i] = SID_ALPHABET[b[i] % (sizeof(SID_ALPHABET) - 1)];
+    if (len > 64) len = 64;
+    // randombytes_uniform has no modulo bias: every character carries the full log2(30) bits.
+    for (size_t i = 0; i < len; i++)
+        out[i] = SID_ALPHABET[randombytes_uniform((uint32_t)(sizeof(SID_ALPHABET) - 1))];
     out[len] = '\0';
 }
 
