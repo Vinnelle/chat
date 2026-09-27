@@ -5,7 +5,7 @@
 // reads it. The LAN beacon port can't be opened, so sessions only find each other through the
 // peers they're given.
 #define _POSIX_C_SOURCE 200809L
-#include "net.h"
+#include "platform/net.h"
 #include "fake_net.h"
 #include <errno.h>
 #include <stdio.h>
@@ -19,7 +19,7 @@
 // net_common.h also carries helpers for real sockets, which have no use here.
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"
-#include "net_common.h"
+#include "platform/net_common.h"
 #pragma GCC diagnostic pop
 
 #define FAKE_LAN_PORT 47474

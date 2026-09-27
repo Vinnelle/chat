@@ -122,25 +122,25 @@ set(SECP256K1_INCLUDE_DIRS ${SECP256K1_PREFIX}/install/include)
 set(SECP256K1_STATIC_LIB ${SECP256K1_PREFIX}/install/lib/libsecp256k1.a)
 
 add_executable(chat
-    src/main.c
-    src/chat.c
-    src/cmd.c
-    src/dht.c
-    src/bencode.c
-    src/crypto.c
-    src/util.c
-    src/age.c
-    src/pgp.c
-    src/tui.c
-    src/update.c
-    src/json.c
-    src/tls.c
-    src/nostr.c
-    src/tor.c
-    src/torproc.c
-    src/portmap.c
-    src/${CHAT_OS}/net.c
-    src/${CHAT_OS}/platform.c
+    src/app/main.c
+    src/app/tui.c
+    src/app/update.c
+    src/core/chat.c
+    src/core/cmd.c
+    src/crypto/crypto.c
+    src/crypto/age.c
+    src/crypto/pgp.c
+    src/transport/dht.c
+    src/transport/nostr.c
+    src/transport/tls.c
+    src/transport/tor.c
+    src/transport/torproc.c
+    src/transport/portmap.c
+    src/common/util.c
+    src/common/bencode.c
+    src/common/json.c
+    src/platform/${CHAT_OS}/net.c
+    src/platform/${CHAT_OS}/platform.c
 )
 
 add_custom_target(build_stamp ALL
@@ -168,7 +168,7 @@ if(EXISTS ${CHAT_PUBKEY_FILE})
 else()
     message(WARNING "chat: no minisign.pub - this build will refuse every update (`just keygen` makes one)")
 endif()
-target_include_directories(chat PRIVATE src src/${CHAT_OS} ${CMAKE_BINARY_DIR} ${SODIUM_INCLUDE_DIRS} ${OQS_INCLUDE_DIRS}
+target_include_directories(chat PRIVATE src src/platform/${CHAT_OS} ${CMAKE_BINARY_DIR} ${SODIUM_INCLUDE_DIRS} ${OQS_INCLUDE_DIRS}
                            ${MBEDTLS_INCLUDE_DIRS} ${SECP256K1_INCLUDE_DIRS})
 target_link_libraries(chat PRIVATE ${SODIUM_STATIC_LIB} ${OQS_STATIC_LIB} ${MBEDTLS_STATIC_LIBS} ${SECP256K1_STATIC_LIB})
 

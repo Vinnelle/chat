@@ -3,9 +3,9 @@
 // Text that reaches the terminal (message and nick cleaning, column widths) and the input line
 // editor fed with arbitrary key bytes.
 #define _POSIX_C_SOURCE 200809L
-#include "chat.h"
-#include "tui.h"
-#include "util.h"
+#include "core/chat.h"
+#include "app/tui.h"
+#include "common/util.h"
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>

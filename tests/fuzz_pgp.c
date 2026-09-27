@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
 // PGP secret-key import (a file the user picked, or text they pasted).
-#include "pgp.h"
+#include "crypto/pgp.h"
 #include <sodium.h>
 #include <stdlib.h>
 #include <string.h>

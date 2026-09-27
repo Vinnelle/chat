@@ -3,7 +3,7 @@
 #ifndef CHAT_FAKE_NET_H
 #define CHAT_FAKE_NET_H
 
-#include "net.h"
+#include "platform/net.h"
 
 // Called for each datagram a session sends; returning nonzero drops it.
 typedef int (*fake_net_filter_fn)(void *ctx, addr_t from, addr_t to, const void *data, size_t len);
