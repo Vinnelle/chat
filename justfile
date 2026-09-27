@@ -1,4 +1,4 @@
-version := `sed -n 's/^project(chat VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt`
+version := `sed -n 's/^project(chat VERSION \([0-9.]*\).*/\1/p; s/^set(CHAT_PRERELEASE "\(.*\)")$/\1/p' CMakeLists.txt | tr -d '\n'`
 
 # List recipes
 default:

@@ -45,7 +45,7 @@ jobs:
       - name: Read version
         id: version
         run: |
-          v=$(sed -n 's/^project(chat VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          v=$(sed -n 's/^project(chat VERSION \([0-9.]*\).*/\1/p; s/^set(CHAT_PRERELEASE "\(.*\)")$/\1/p' CMakeLists.txt | tr -d '\n')
           test -n "$v"
           echo "version=$v" >> "$GITHUB_OUTPUT"
 

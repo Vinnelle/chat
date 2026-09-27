@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Copyright (C) 2026 finlay@tuta.com
 cmake_minimum_required(VERSION 3.15)
-project(chat VERSION 0.2.1 LANGUAGES C)
+project(chat VERSION 0.3.0 LANGUAGES C)
+# "-beta.N" on a beta of the version above, empty on a release.
+set(CHAT_PRERELEASE "-beta.1")
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -145,7 +147,7 @@ add_custom_target(build_stamp ALL
     COMMAND ${CMAKE_COMMAND} -DOUT=${CMAKE_BINARY_DIR}/build_stamp.h -DSRC=${CMAKE_SOURCE_DIR} -P ${CMAKE_SOURCE_DIR}/cmake/stamp.cmake
     BYPRODUCTS ${CMAKE_BINARY_DIR}/build_stamp.h)
 add_dependencies(chat libsodium_ext liboqs_ext mbedtls_ext secp256k1_ext build_stamp)
-target_compile_definitions(chat PRIVATE CHAT_VERSION="${PROJECT_VERSION}")
+target_compile_definitions(chat PRIVATE CHAT_VERSION="${PROJECT_VERSION}${CHAT_PRERELEASE}")
 
 # /update installs only releases whose SHA256SUMS the key in minisign.pub signed (`just keygen`
 # makes one). Without the file the build still works, but refuses every update.
