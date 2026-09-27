@@ -123,6 +123,7 @@ or a connected peer.
 
 ```sh
 just test               # build and run the engine test
+just test -v            # the same, printing every session line and every check before the summary
 just fuzz engine 600    # fuzz one target (bencode, pgp, text, engine) for 600 seconds
 ```
 

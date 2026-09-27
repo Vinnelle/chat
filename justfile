@@ -27,11 +27,13 @@ all: build build-win
 run *args: build
     ./build/chat "$@"
 
-# Build and run the engine test: sessions handshaking and chatting over an in-memory network
-test:
+# Sessions handshake and chat over an in-memory network. -v also prints every session line and check.
+# Build and run the engine test (-v for everything, then the summary)
+[positional-arguments]
+test *flags:
     cmake -B build-test -DCHAT_TESTS=ON
     cmake --build build-test -j {{num_cpus()}} --target engine_test
-    ./build-test/tests/engine_test
+    ./build-test/tests/engine_test "$@"
 
 # Fuzz one target (bencode, pgp, text or engine) for a number of seconds (needs clang)
 fuzz target="engine" seconds="300":
