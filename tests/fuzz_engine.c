@@ -7,9 +7,9 @@
 //   3  a session message from bob (sealed on bob's chain to alice: an authenticated peer)
 // Both sessions go back to the connected snapshot before every input. tests/seeds/engine holds
 // one input per message type.
-#include "chat.h"
+#include "core/chat.h"
 #include "fake_net.h"
-#include "util.h"
+#include "common/util.h"
 #include <stdlib.h>
 #include <string.h>
 

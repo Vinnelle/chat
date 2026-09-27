@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
 // Two (or three) sessions talking over fake_net: handshake, delivery, loss, rekey, junk.
-#include "chat.h"
+#include "core/chat.h"
 #include "fake_net.h"
-#include "json.h"
-#include "portmap.h"
-#include "util.h"
+#include "common/json.h"
+#include "transport/portmap.h"
+#include "common/util.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

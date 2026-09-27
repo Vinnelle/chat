@@ -7,21 +7,21 @@ if(WIN32)
 endif()
 
 set(CHAT_CORE_SOURCES
-    ${PROJECT_SOURCE_DIR}/src/chat.c
-    ${PROJECT_SOURCE_DIR}/src/cmd.c
-    ${PROJECT_SOURCE_DIR}/src/dht.c
-    ${PROJECT_SOURCE_DIR}/src/bencode.c
-    ${PROJECT_SOURCE_DIR}/src/crypto.c
-    ${PROJECT_SOURCE_DIR}/src/util.c
-    ${PROJECT_SOURCE_DIR}/src/age.c
-    ${PROJECT_SOURCE_DIR}/src/pgp.c
-    ${PROJECT_SOURCE_DIR}/src/tui.c
-    ${PROJECT_SOURCE_DIR}/src/json.c
-    ${PROJECT_SOURCE_DIR}/src/tls.c
-    ${PROJECT_SOURCE_DIR}/src/nostr.c
-    ${PROJECT_SOURCE_DIR}/src/tor.c
-    ${PROJECT_SOURCE_DIR}/src/portmap.c
-    ${PROJECT_SOURCE_DIR}/src/${CHAT_OS}/platform.c
+    ${PROJECT_SOURCE_DIR}/src/app/tui.c
+    ${PROJECT_SOURCE_DIR}/src/core/chat.c
+    ${PROJECT_SOURCE_DIR}/src/core/cmd.c
+    ${PROJECT_SOURCE_DIR}/src/crypto/crypto.c
+    ${PROJECT_SOURCE_DIR}/src/crypto/age.c
+    ${PROJECT_SOURCE_DIR}/src/crypto/pgp.c
+    ${PROJECT_SOURCE_DIR}/src/transport/dht.c
+    ${PROJECT_SOURCE_DIR}/src/transport/nostr.c
+    ${PROJECT_SOURCE_DIR}/src/transport/tls.c
+    ${PROJECT_SOURCE_DIR}/src/transport/tor.c
+    ${PROJECT_SOURCE_DIR}/src/transport/portmap.c
+    ${PROJECT_SOURCE_DIR}/src/common/util.c
+    ${PROJECT_SOURCE_DIR}/src/common/bencode.c
+    ${PROJECT_SOURCE_DIR}/src/common/json.c
+    ${PROJECT_SOURCE_DIR}/src/platform/${CHAT_OS}/platform.c
     ${CMAKE_CURRENT_SOURCE_DIR}/fake_net.c
 )
 
@@ -30,7 +30,7 @@ function(chat_test_executable name)
     add_dependencies(${name} libsodium_ext liboqs_ext mbedtls_ext secp256k1_ext)
     target_compile_definitions(${name} PRIVATE CHAT_VERSION="test")
     target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/src
-                               ${PROJECT_SOURCE_DIR}/src/${CHAT_OS} ${SODIUM_INCLUDE_DIRS} ${OQS_INCLUDE_DIRS}
+                               ${PROJECT_SOURCE_DIR}/src/platform/${CHAT_OS} ${SODIUM_INCLUDE_DIRS} ${OQS_INCLUDE_DIRS}
                                ${MBEDTLS_INCLUDE_DIRS} ${SECP256K1_INCLUDE_DIRS})
     target_link_libraries(${name} PRIVATE ${SODIUM_STATIC_LIB} ${OQS_STATIC_LIB} ${MBEDTLS_STATIC_LIBS}
                           ${SECP256K1_STATIC_LIB} Threads::Threads)

@@ -2,9 +2,9 @@
 // Copyright (C) 2026 finlay@tuta.com
 // What relays and routers send: JSON from Nostr relays, and the HTTP replies and device
 // descriptions a UPnP gateway (any device on the LAN that answers discovery) serves.
-#include "json.h"
-#include "portmap.h"
-#include "crypto.h"
+#include "common/json.h"
+#include "transport/portmap.h"
+#include "crypto/crypto.h"
 #include <stdlib.h>
 #include <string.h>
 

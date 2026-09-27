@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
 // Bencode parsing and DHT replies (bytes from any DHT node on the internet).
-#include "bencode.h"
-#include "crypto.h"
-#include "dht.h"
+#include "common/bencode.h"
+#include "crypto/crypto.h"
+#include "transport/dht.h"
 #include <stdlib.h>
 #include <string.h>
 
