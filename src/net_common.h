@@ -51,9 +51,36 @@ static void addr_set_v6(addr_t *a, const uint8_t ip16[16], uint16_t port) {
 int addr_is_v4(addr_t a) { return !a.is_v6; }
 
 int addr_equal(addr_t a, addr_t b) {
-    if (a.port != b.port || a.is_v6 != b.is_v6) return 0;
+    if (a.kind != b.kind || a.port != b.port || a.is_v6 != b.is_v6) return 0;
+    if (a.kind != ADDR_UDP) return memcmp(a.ip, b.ip, 16) == 0;
     if (a.is_v6) return a.scope == b.scope && memcmp(a.ip, b.ip, 16) == 0;
     return memcmp(a.ip, b.ip, 4) == 0;
+}
+
+addr_t addr_virtual(addr_kind_t kind, const uint8_t id[16]) {
+    addr_t a;
+    memset(&a, 0, sizeof a);
+    memcpy(a.ip, id, 16);
+    a.port = 1;
+    a.kind = (uint8_t)kind;
+    return a;
+}
+
+// "nostr:..." or "tor:..." for a relayed address; 0 for a real one, left to the caller.
+static int virtual_to_string(addr_t a, char out[ADDR_STR_LEN]) {
+    if (a.kind == ADDR_UDP) return 0;
+    static const char *H = "0123456789abcdef";
+    char hex[33];
+    for (int i = 0; i < 16; i++) { hex[i * 2] = H[a.ip[i] >> 4]; hex[i * 2 + 1] = H[a.ip[i] & 15]; }
+    hex[32] = '\0';
+    snprintf(out, ADDR_STR_LEN, "%s:%s", a.kind == ADDR_NOSTR ? "nostr" : "tor", hex);
+    return 1;
+}
+
+int host_is_onion(const char *host) {
+    size_t n = strlen(host);
+    while (n > 0 && host[n - 1] == '.') n--;
+    return n >= 6 && strncasecmp(host + n - 6, ".onion", 6) == 0;
 }
 
 addr_t addr_broadcast_lan(uint16_t port) {
@@ -105,6 +132,7 @@ static void from_sockaddr(const struct sockaddr_storage *ss, addr_t *out) {
 }
 
 int addr_resolve(const char *host, uint16_t port, addr_t *out) {
+    if (host_is_onion(host)) return -1;
     addr_t got[ADDR_RESOLVE_MAX];
     int n = addr_resolve_all(host, port, got, ADDR_RESOLVE_MAX);
     if (n <= 0) return -1;

@@ -7,6 +7,9 @@
 #include "crypto.h"
 #include "dht.h"
 #include "cmd.h"
+#include "nostr.h"
+#include "tor.h"
+#include "portmap.h"
 #include <stdint.h>
 #include <stdio.h>
 
@@ -61,6 +64,32 @@
 #define COVER_INTERVAL 1.5
 #define COVER_MAX_RATE 8.0
 
+// Relays rate-limit, and every member receives every event: cover traffic to a peer reached
+// through them is sparser, still well inside PEER_TIMEOUT.
+#define NOSTR_COVER_INTERVAL 10.0
+// A peer's UDP path counts as broken after this long without a frame; its traffic moves to the relays.
+#define UDP_STALE 25.0
+#define NOSTR_BEACON_ALONE 20.0
+#define NOSTR_BEACON_CONNECTED 90.0
+// A joiner in Tor mode that hasn't reached anyone by then publishes the room's onion itself.
+#define TOR_HOST_AFTER 120.0
+
+typedef enum { ROUTE_DIRECT = 0, ROUTE_TOR = 1 } route_mode_t;
+
+// How a session reaches peers. Direct: UDP, found through the DHT (IPv4, IPv6), LAN broadcast
+// and relays, with a router port mapping to let more of them in, and Nostr relays carrying
+// traffic when UDP can't. Tor: onion services only; nothing else touches the network.
+typedef struct {
+    route_mode_t mode;
+    int dht4, dht6, lan, portmap, nostr;
+    char relays[NOSTR_MAX_RELAYS][NOSTR_URL_MAX];
+    int n_relays;
+    tor_opts_t tor;
+} routing_t;
+
+void routing_defaults(routing_t *r);
+const char *routing_mode_name(route_mode_t m);
+
 typedef struct {
     unsigned rx;
     unsigned rx_chunks, rx_chunk_done;
@@ -112,6 +141,11 @@ typedef struct {
     verify_state_t identity_state;
     uint8_t identity_pub[ID_SIGN_PUB_LEN];
     uint8_t identity_fp[ID_FP_LEN];
+
+    // When a frame last came over each kind of path (by addr_kind_t), and (Tor) the onion
+    // address the peer said it has.
+    double path_seen[3];
+    char onion[TOR_ADDR_LEN + 1];
 
     uint8_t kem_pub[KEM_PUB_LEN];
     uint8_t prk_partial[32];
@@ -198,6 +232,16 @@ typedef struct {
     sock_t sock, lan_sock;
     uint16_t port;
 
+    routing_t route;
+    int started;
+    nostr_t *nostr;
+    tor_t *tor;
+    portmap_t *pm;
+    double next_beacon;
+    int tor_hosting;
+    double tor_republish_at;
+    char told_onion[TOR_ADDR_LEN + 1];
+
     peer_t peers[MAX_PEERS + MAX_PENDING_PEERS];
     int peer_hi;
     cand_t cands[MAX_CANDS];
@@ -209,6 +253,7 @@ typedef struct {
 
     int dht_on;
     dht_state_t dht;
+    uint8_t infohash[DHT_INFOHASH_LEN];
 
     double start, next_alive, next_lan;
     uint32_t keygen;
@@ -245,7 +290,7 @@ typedef struct {
     uint16_t port;
     addr_t peers[16];
     int n_peers;
-    int dht_on;
+    routing_t route;
     int created;
     int once;
     notify_mode_t notify_mode;
@@ -287,7 +332,17 @@ void chat_peer_name(const chat_t *c, const peer_t *p, char out[CHAT_NAME_LEN]);
 
 void chat_set_identity(chat_t *c, identity_source_t source, const identity_keypair_t *idkp);
 
-int chat_sockets(chat_t *c, sock_t out[2]);
+#define CHAT_MAX_SOCKS 12
+int chat_sockets(chat_t *c, sock_t out[CHAT_MAX_SOCKS]);
+// Whether the session is up: its UDP socket (direct) or its Tor link (Tor) could be made.
+int chat_started(const chat_t *c);
+// Applies changed routing toggles to a running session. The mode and the Tor settings only
+// apply to sessions opened afterwards; returns 1 if those differ from this session's.
+int chat_apply_routing(chat_t *c, const routing_t *r);
+// Moves a Tor session to the tor at these ports (the one chat started, or found running).
+void chat_tor_set_ports(chat_t *c, const char *socks, const char *control);
+// One line on how this session reaches peers, for the sidebar.
+void chat_route_summary(const chat_t *c, char *out, size_t cap);
 int chat_online_count(const chat_t *c);
 int chat_pending_count(const chat_t *c);
 int chat_candidate_count(const chat_t *c);

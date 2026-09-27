@@ -25,7 +25,7 @@ typedef _Atomic int dht_flag_t;
 #define DHT_LOOKUP_TIMEOUT 15.0
 #define DHT_RELOOKUP_IDLE 30.0
 #define DHT_RELOOKUP_CONNECTED 300.0
-#define DHT_BOOT_MAX 8
+#define DHT_BOOT_MAX 12
 #define DHT_RESOLVE_BACKOFF_MAX 300.0
 
 typedef struct {
@@ -57,6 +57,10 @@ typedef struct {
     int dirty;
 } dht_lookup_t;
 
+// One lookup per address family: IPv4 nodes make up one DHT, IPv6 nodes another (BEP 32).
+#define DHT_V4 0
+#define DHT_V6 1
+
 typedef struct {
     addr_t boot[DHT_BOOT_MAX];
     dht_flag_t n_boot;
@@ -66,13 +70,17 @@ typedef struct {
     uint8_t node_id[20];
     uint8_t infohash[20];
     uint16_t my_port;
-    dht_lookup_t lk;
+    // Announce my_port as given (a port mapping's external port) instead of the source port the
+    // node sees.
+    int explicit_port;
+    int want[2];
+    dht_lookup_t lk[2];
     double next_lookup;
     int told_dht;
     int peers_now;
 } dht_state_t;
 
-void dht_init(dht_state_t *d, const uint8_t infohash[20], uint16_t my_port);
+void dht_init(dht_state_t *d, const uint8_t infohash[20], uint16_t my_port, int want_v4, int want_v6);
 void dht_start_bootstrap_resolve(dht_state_t *d);
 
 int dht_step(dht_state_t *d, sock_t sock, double now,
@@ -81,8 +89,11 @@ int dht_step(dht_state_t *d, sock_t sock, double now,
 void dht_on_packet(dht_state_t *d, const uint8_t *data, size_t len, addr_t from,
                     void (*on_candidate)(void *ctx, addr_t a), void *ctx);
 
+// Totals over both families, or one family's with dht_*_count_fam.
 int dht_queried_count(const dht_state_t *d);
 int dht_found_count(const dht_state_t *d);
+int dht_queried_count_fam(const dht_state_t *d, int fam);
+int dht_found_count_fam(const dht_state_t *d, int fam);
 int dht_bootstrap_ready(const dht_state_t *d);
 
 #endif

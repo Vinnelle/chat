@@ -35,13 +35,19 @@ static int g_state = UPD_IDLE;
 static char g_msg[UPDATE_MSG_MAX];
 static int g_ok;
 
+static char g_proxy[64];
+
+void update_set_proxy(const char *socks) { copy_str(g_proxy, socks ? socks : "", sizeof g_proxy); }
+
 static int fetch(const char *url, const char *out_path, int api) {
     // -q must come first: it stops curl reading a .curlrc that could turn off TLS checks or add a proxy.
+    // --socks5-hostname leaves name lookups to the proxy, so Tor resolves GitHub, not local DNS.
     const char *argv[] = {
         "curl", "-q", "-fsL", "--proto", "=https", "--proto-redir", "=https", "--tlsv1.2",
         "--max-time", "300", "--max-filesize", UPDATE_MAX_BYTES,
         "-H", api ? "Accept: application/vnd.github+json" : "Accept: application/octet-stream",
-        "-o", out_path, url, NULL
+        "-o", out_path, url,
+        g_proxy[0] ? "--socks5-hostname" : NULL, g_proxy, NULL
     };
     return platform_run_quiet(argv);
 }

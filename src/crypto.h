@@ -63,6 +63,21 @@ void derive_room_key(const uint8_t master[MASTER_LEN], uint8_t room_key[ROOM_KEY
 void derive_dht_infohash(const uint8_t master[MASTER_LEN], uint8_t infohash[DHT_INFOHASH_LEN]);
 void derive_fingerprint(const uint8_t master[MASTER_LEN], uint8_t fp[FP_LEN]);
 
+// Nostr: tag_key makes the rotating tag room members' events carry, wrap_key seals each event's
+// whole payload (addressing, datagram and padding) under a fresh nonce.
+#define NOSTR_KEY_LEN 32
+#define NOSTR_WRAP_PLAIN 2800
+#define NOSTR_WRAP_LEN (AEAD_NONCE_LEN + NOSTR_WRAP_PLAIN + AEAD_TAG_LEN)
+void derive_nostr_keys(const uint8_t master[MASTER_LEN], uint8_t tag_key[NOSTR_KEY_LEN], uint8_t wrap_key[NOSTR_KEY_LEN]);
+void nostr_wrap(const uint8_t key[NOSTR_KEY_LEN], const uint8_t plain[NOSTR_WRAP_PLAIN], uint8_t out[NOSTR_WRAP_LEN]);
+int nostr_unwrap(const uint8_t key[NOSTR_KEY_LEN], const uint8_t *in, size_t len, uint8_t plain[NOSTR_WRAP_PLAIN]);
+// One of the room's onion service keys, the same for every member: the expanded ed25519 secret
+// key ADD_ONION takes, and its public key.
+void derive_tor_room_key(const uint8_t master[MASTER_LEN], int slot, uint8_t expanded[64], uint8_t pub[32]);
+
+int hmac_sha256(const uint8_t *key, size_t keylen, const uint8_t *data, size_t len, uint8_t out[32]);
+void sha256_hash(const void *data, size_t len, uint8_t out[32]);
+
 int ecdh_shared(const keypair_t *mine, const uint8_t their_pub[PUB_LEN], uint8_t shared[32]);
 
 void session_prk(const uint8_t master[MASTER_LEN], const uint8_t shared[32],

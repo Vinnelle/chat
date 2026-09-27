@@ -17,10 +17,12 @@ static const struct { const char *host; uint16_t port; } BOOTSTRAP[4] = {
     { "dht.libtorrent.org", 25401 },
 };
 
-void dht_init(dht_state_t *d, const uint8_t infohash[20], uint16_t my_port) {
+void dht_init(dht_state_t *d, const uint8_t infohash[20], uint16_t my_port, int want_v4, int want_v6) {
     memset(d, 0, sizeof *d);
     memcpy(d->infohash, infohash, 20);
     d->my_port = my_port;
+    d->want[DHT_V4] = want_v4;
+    d->want[DHT_V6] = want_v6;
     gen_random(d->node_id, 20);
     DHT_STORE(&d->n_boot, 0);
     DHT_STORE(&d->resolving, 0);
@@ -31,15 +33,17 @@ typedef struct { dht_state_t *d; } resolve_arg_t;
 static void resolve_thread(void *arg) {
     dht_state_t *d = ((resolve_arg_t *)arg)->d;
     addr_t got[DHT_BOOT_MAX];
-    int n = 0;
+    int n = 0, per_fam[2] = { 0, 0 };
     for (int i = 0; i < 4 && n < DHT_BOOT_MAX; i++) {
         addr_t found[ADDR_RESOLVE_MAX];
         int k = addr_resolve_all(BOOTSTRAP[i].host, BOOTSTRAP[i].port, found, ADDR_RESOLVE_MAX);
         for (int j = 0; j < k && n < DHT_BOOT_MAX; j++) {
-            if (!addr_is_v4(found[j])) continue;
+            int fam = found[j].is_v6 ? DHT_V6 : DHT_V4;
+            // Half the slots each, so one family's many addresses can't crowd out the other's.
+            if (!d->want[fam] || per_fam[fam] >= DHT_BOOT_MAX / 2) continue;
             int dup = 0;
             for (int m = 0; m < n; m++) if (addr_equal(got[m], found[j])) { dup = 1; break; }
-            if (!dup) got[n++] = found[j];
+            if (!dup) { got[n++] = found[j]; per_fam[fam]++; }
         }
     }
     if (n > 0) memcpy(d->boot, got, sizeof(addr_t) * (size_t)n);
@@ -126,13 +130,22 @@ static size_t append_int(uint8_t *buf, size_t pos, long v) {
     return append_raw(buf, pos, b, (size_t)n);
 }
 
+// With both families on, every query asks for nodes of both (BEP 32 "want"), so an IPv4 node can
+// point the IPv6 lookup at IPv6 nodes when no bootstrap server has an IPv6 address.
+static size_t append_want(dht_state_t *d, uint8_t *buf, size_t p) {
+    if (d->want[DHT_V4] && d->want[DHT_V6]) return append_str(buf, p, "4:wantl2:n42:n6e");
+    if (d->want[DHT_V6]) return append_str(buf, p, "4:wantl2:n6e");
+    return p;
+}
+
 static void send_get_peers(dht_state_t *d, sock_t sock, addr_t to, const uint8_t tid[2]) {
-    uint8_t buf[128];
+    uint8_t buf[160];
     size_t p = 0;
     p = append_str(buf, p, "d1:ad2:id");
     p = append_bstr(buf, p, d->node_id, 20);
     p = append_str(buf, p, "9:info_hash");
     p = append_bstr(buf, p, d->infohash, 20);
+    p = append_want(d, buf, p);
     p = append_str(buf, p, "e1:q9:get_peers1:t");
     p = append_bstr(buf, p, tid, 2);
     p = append_str(buf, p, "1:y1:qe");
@@ -145,7 +158,7 @@ static void send_announce(dht_state_t *d, sock_t sock, addr_t to, const uint8_t 
     size_t p = 0;
     p = append_str(buf, p, "d1:ad2:id");
     p = append_bstr(buf, p, d->node_id, 20);
-    p = append_str(buf, p, "12:implied_porti1e9:info_hash");
+    p = append_str(buf, p, d->explicit_port ? "12:implied_porti0e9:info_hash" : "12:implied_porti1e9:info_hash");
     p = append_bstr(buf, p, d->infohash, 20);
     p = append_str(buf, p, "4:port");
     p = append_int(buf, p, (long)d->my_port);
@@ -157,14 +170,16 @@ static void send_announce(dht_state_t *d, sock_t sock, addr_t to, const uint8_t 
     net_send(sock, buf, p, to);
 }
 
-static void start_lookup(dht_state_t *d, double now) {
-    memset(&d->lk, 0, sizeof d->lk);
-    d->lk.t0 = now;
-    d->lk.active = 1;
-    d->lk.dirty = 1;
+static void start_lookup(dht_state_t *d, dht_lookup_t *lk, int fam, double now) {
+    memset(lk, 0, sizeof *lk);
+    lk->t0 = now;
+    lk->active = 1;
+    lk->dirty = 1;
     int n_boot = DHT_LOAD(&d->n_boot);
     if (n_boot > DHT_BOOT_MAX) n_boot = DHT_BOOT_MAX;
-    for (int i = 0; i < n_boot; i++) find_or_add_cand(&d->lk, d->boot[i]);
+    for (int i = 0; i < n_boot; i++)
+        if (d->boot[i].is_v6 == (fam == DHT_V6)) find_or_add_cand(lk, d->boot[i]);
+    // A family no bootstrap server answers for starts empty and fills from the other's replies.
 }
 
 static void maybe_reresolve(dht_state_t *d, double now) {
@@ -178,16 +193,8 @@ static void maybe_reresolve(dht_state_t *d, double now) {
     dht_start_bootstrap_resolve(d);
 }
 
-int dht_step(dht_state_t *d, sock_t sock, double now,
-             void (*on_candidate)(void *ctx, addr_t a), void *ctx) {
-    (void)on_candidate; (void)ctx;
-    if (!d->lk.active) {
-        maybe_reresolve(d, now);
-        if (now >= d->next_lookup && !DHT_LOAD(&d->resolving) && DHT_LOAD(&d->n_boot) > 0) start_lookup(d, now);
-        return 0;
-    }
-    dht_lookup_t *lk = &d->lk;
-
+// Sends the next queries of one lookup. Returns 1 once it has finished (and announced).
+static int lookup_step(dht_state_t *d, dht_lookup_t *lk, sock_t sock, double now) {
     for (int i = 0; i < DHT_MAX_INFLIGHT; i++)
         if (lk->inflight[i].used && now - lk->inflight[i].sent_at > 3.0) lk->inflight[i].used = 0;
 
@@ -220,7 +227,9 @@ int dht_step(dht_state_t *d, sock_t sock, double now,
         }
     }
 
-    if ((inflight_count == 0 && all_top_queried) || now - lk->t0 > DHT_LOOKUP_TIMEOUT) {
+    // An empty lookup waits a little for the other family's replies to give it nodes.
+    int starved = lk->n_cands == 0 && now - lk->t0 < 5.0;
+    if ((inflight_count == 0 && all_top_queried && !starved) || now - lk->t0 > DHT_LOOKUP_TIMEOUT) {
         int ann_idx[DHT_ANNOUNCE_TOP];
         int n_ann = rank_select(lk, d->infohash, DHT_ANNOUNCE_TOP, ann_idx, 1);
         for (int i = 0; i < n_ann; i++) {
@@ -228,24 +237,73 @@ int dht_step(dht_state_t *d, sock_t sock, double now,
             uint8_t tid[2]; gen_random(tid, 2);
             send_announce(d, sock, c->addr, tid, c->token, c->token_len);
         }
-        d->next_lookup = now + (d->peers_now ? DHT_RELOOKUP_CONNECTED : DHT_RELOOKUP_IDLE);
         lk->active = 0;
+        return 1;
+    }
+    return 0;
+}
+
+int dht_step(dht_state_t *d, sock_t sock, double now,
+             void (*on_candidate)(void *ctx, addr_t a), void *ctx) {
+    (void)on_candidate; (void)ctx;
+    int any_active = d->lk[DHT_V4].active || d->lk[DHT_V6].active;
+    if (!any_active) {
+        maybe_reresolve(d, now);
+        if (now >= d->next_lookup && !DHT_LOAD(&d->resolving) && DHT_LOAD(&d->n_boot) > 0) {
+            for (int fam = 0; fam < 2; fam++)
+                if (d->want[fam]) start_lookup(d, &d->lk[fam], fam, now);
+        }
+        return 0;
+    }
+    int finished = 0;
+    for (int fam = 0; fam < 2; fam++)
+        if (d->lk[fam].active) finished |= lookup_step(d, &d->lk[fam], sock, now);
+    if (finished && !d->lk[DHT_V4].active && !d->lk[DHT_V6].active) {
+        d->next_lookup = now + (d->peers_now ? DHT_RELOOKUP_CONNECTED : DHT_RELOOKUP_IDLE);
         if (!d->told_dht) d->told_dht = 1;
         return 1;
     }
     return 0;
 }
 
-int dht_queried_count(const dht_state_t *d) {
+int dht_queried_count_fam(const dht_state_t *d, int fam) {
     int n = 0;
-    for (int i = 0; i < d->lk.n_cands; i++) if (d->lk.cands[i].queried) n++;
+    for (int i = 0; i < d->lk[fam].n_cands; i++) if (d->lk[fam].cands[i].queried) n++;
     return n;
 }
-int dht_found_count(const dht_state_t *d) { return d->lk.found; }
+int dht_found_count_fam(const dht_state_t *d, int fam) { return d->lk[fam].found; }
+int dht_queried_count(const dht_state_t *d) { return dht_queried_count_fam(d, DHT_V4) + dht_queried_count_fam(d, DHT_V6); }
+int dht_found_count(const dht_state_t *d) { return d->lk[DHT_V4].found + d->lk[DHT_V6].found; }
+
+static void add_nodes(dht_state_t *d, const be_value *nodes, int fam) {
+    if (!nodes || nodes->type != BE_STR || !d->want[fam]) return;
+    dht_lookup_t *lk = &d->lk[fam];
+    if (!lk->active) return;
+    size_t iplen = fam == DHT_V6 ? 16 : 4, step = 20 + iplen + 2;
+    for (size_t i = 0; i + step <= nodes->slen; i += step) {
+        const uint8_t *e = (const uint8_t *)nodes->s + i;
+        addr_t a;
+        uint16_t port = (uint16_t)((e[20 + iplen] << 8) | e[21 + iplen]);
+        if (port == 0) continue;
+        if (fam == DHT_V6) {
+            // A v4-mapped address here is an IPv4 node in the wrong list.
+            static const uint8_t v4map[12] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff };
+            if (memcmp(e + 20, v4map, 12) == 0) continue;
+            memset(&a, 0, sizeof a);
+            memcpy(a.ip, e + 20, 16);
+            a.port = port;
+            a.is_v6 = 1;
+        } else {
+            addr_set_v4(&a, e + 20, port);
+        }
+        dht_cand_t *nc = find_or_add_cand(lk, a);
+        if (nc && !nc->have_id) { memcpy(nc->node_id, e, 20); nc->have_id = 1; lk->dirty = 1; }
+    }
+}
 
 void dht_on_packet(dht_state_t *d, const uint8_t *data, size_t len, addr_t from,
                     void (*on_candidate)(void *ctx, addr_t a), void *ctx) {
-    if (!d->lk.active || len == 0 || data[0] != 'd') return;
+    if ((!d->lk[DHT_V4].active && !d->lk[DHT_V6].active) || len == 0 || data[0] != 'd') return;
     be_arena arena;
     const be_value *msg = be_parse(data, len, &arena);
     if (!msg || msg->type != BE_DICT) return;
@@ -254,49 +312,54 @@ void dht_on_packet(dht_state_t *d, const uint8_t *data, size_t len, addr_t from,
     if (!y || y->type != BE_STR || y->slen != 1 || y->s[0] != 'r') return;
     if (!t || t->type != BE_STR || t->slen != 2) return;
 
+    dht_lookup_t *lk = NULL;
     int slot = -1;
-    for (int i = 0; i < DHT_MAX_INFLIGHT; i++) {
-        if (d->lk.inflight[i].used && memcmp(d->lk.inflight[i].tid, t->s, 2) == 0 &&
-            addr_equal(d->lk.inflight[i].addr, from)) { slot = i; break; }
+    for (int fam = 0; fam < 2 && slot < 0; fam++) {
+        dht_lookup_t *l = &d->lk[fam];
+        if (!l->active) continue;
+        for (int i = 0; i < DHT_MAX_INFLIGHT; i++) {
+            if (l->inflight[i].used && memcmp(l->inflight[i].tid, t->s, 2) == 0 &&
+                addr_equal(l->inflight[i].addr, from)) { slot = i; lk = l; break; }
+        }
     }
     if (slot < 0) return;
-    d->lk.inflight[slot].used = 0;
+    lk->inflight[slot].used = 0;
 
     const be_value *r = be_dict_get(msg, "r");
     if (!r || r->type != BE_DICT) return;
-    dht_cand_t *c = find_or_add_cand(&d->lk, from);
+    dht_cand_t *c = find_or_add_cand(lk, from);
     if (!c) return;
     const be_value *id = be_dict_get(r, "id");
     if (id && id->type == BE_STR && id->slen == 20 && !c->have_id) {
         memcpy(c->node_id, id->s, 20);
         c->have_id = 1;
-        d->lk.dirty = 1;
+        lk->dirty = 1;
     }
     const be_value *token = be_dict_get(r, "token");
     if (token && token->type == BE_STR && token->slen <= sizeof(c->token)) {
         memcpy(c->token, token->s, token->slen); c->token_len = token->slen; c->have_token = 1;
     }
-    const be_value *nodes = be_dict_get(r, "nodes");
-    if (nodes && nodes->type == BE_STR) {
-        for (size_t i = 0; i + 26 <= nodes->slen; i += 26) {
-            addr_t a;
-            uint16_t port = (uint16_t)(((unsigned char)nodes->s[i + 24] << 8) | (unsigned char)nodes->s[i + 25]);
-            if (port == 0) continue;
-            addr_set_v4(&a, nodes->s + i + 20, port);
-            dht_cand_t *nc = find_or_add_cand(&d->lk, a);
-            if (nc && !nc->have_id) { memcpy(nc->node_id, nodes->s + i, 20); nc->have_id = 1; d->lk.dirty = 1; }
-        }
-    }
+    add_nodes(d, be_dict_get(r, "nodes"), DHT_V4);
+    add_nodes(d, be_dict_get(r, "nodes6"), DHT_V6);
     const be_value *values = be_dict_get(r, "values");
     if (values && values->type == BE_LIST) {
         for (size_t i = 0; i < values->n; i++) {
             const be_value *v = &values->items[i];
-            if (v->type != BE_STR || v->slen != 6) continue;
+            if (v->type != BE_STR || (v->slen != 6 && v->slen != 18)) continue;
+            const uint8_t *e = (const uint8_t *)v->s;
+            size_t iplen = v->slen - 2;
             addr_t a;
-            uint16_t port = (uint16_t)(((unsigned char)v->s[4] << 8) | (unsigned char)v->s[5]);
+            uint16_t port = (uint16_t)((e[iplen] << 8) | e[iplen + 1]);
             if (port == 0) continue;
-            addr_set_v4(&a, v->s, port);
-            d->lk.found++;
+            if (iplen == 16) {
+                memset(&a, 0, sizeof a);
+                memcpy(a.ip, e, 16);
+                a.port = port;
+                a.is_v6 = 1;
+            } else {
+                addr_set_v4(&a, e, port);
+            }
+            lk->found++;
             if (on_candidate) on_candidate(ctx, a);
         }
     }

@@ -84,6 +84,50 @@ void derive_fingerprint(const uint8_t master[MASTER_LEN], uint8_t fp[FP_LEN]) {
     kh_trunc(fp, FP_LEN, master, MASTER_LEN, "fp", 2);
 }
 
+void derive_nostr_keys(const uint8_t master[MASTER_LEN], uint8_t tag_key[NOSTR_KEY_LEN], uint8_t wrap_key[NOSTR_KEY_LEN]) {
+    kh_trunc(tag_key, NOSTR_KEY_LEN, master, MASTER_LEN, "nostr-tag", 9);
+    kh_trunc(wrap_key, NOSTR_KEY_LEN, master, MASTER_LEN, "nostr-wrap", 10);
+}
+
+static const uint8_t NOSTR_WRAP_AD[] = "chat nostr wrap v1";
+
+void nostr_wrap(const uint8_t key[NOSTR_KEY_LEN], const uint8_t plain[NOSTR_WRAP_PLAIN], uint8_t out[NOSTR_WRAP_LEN]) {
+    randombytes_buf(out, AEAD_NONCE_LEN);
+    crypto_aead_xchacha20poly1305_ietf_encrypt(out + AEAD_NONCE_LEN, NULL, plain, NOSTR_WRAP_PLAIN,
+                                               NOSTR_WRAP_AD, sizeof NOSTR_WRAP_AD - 1, NULL, out, key);
+}
+
+int nostr_unwrap(const uint8_t key[NOSTR_KEY_LEN], const uint8_t *in, size_t len, uint8_t plain[NOSTR_WRAP_PLAIN]) {
+    if (len != NOSTR_WRAP_LEN) return -1;
+    return crypto_aead_xchacha20poly1305_ietf_decrypt(plain, NULL, NULL, in + AEAD_NONCE_LEN, len - AEAD_NONCE_LEN,
+                                                      NOSTR_WRAP_AD, sizeof NOSTR_WRAP_AD - 1, in, key) == 0 ? 0 : -1;
+}
+
+void derive_tor_room_key(const uint8_t master[MASTER_LEN], int slot, uint8_t expanded[64], uint8_t pub[32]) {
+    uint8_t seed[32], label[4] = { 't', 'o', 'r', (uint8_t)slot };
+    kh_trunc(seed, sizeof seed, master, MASTER_LEN, label, sizeof label);
+    // Tor takes an ed25519 key in its expanded form: SHA-512 of the seed, the scalar half clamped.
+    crypto_hash_sha512(expanded, seed, sizeof seed);
+    sodium_memzero(seed, sizeof seed);
+    expanded[0] &= 248;
+    expanded[31] &= 127;
+    expanded[31] |= 64;
+    crypto_scalarmult_ed25519_base_noclamp(pub, expanded);
+}
+
+int hmac_sha256(const uint8_t *key, size_t keylen, const uint8_t *data, size_t len, uint8_t out[32]) {
+    crypto_auth_hmacsha256_state st;
+    if (crypto_auth_hmacsha256_init(&st, key, keylen) != 0) return -1;
+    crypto_auth_hmacsha256_update(&st, data, len);
+    crypto_auth_hmacsha256_final(&st, out);
+    sodium_memzero(&st, sizeof st);
+    return 0;
+}
+
+void sha256_hash(const void *data, size_t len, uint8_t out[32]) {
+    crypto_hash_sha256(out, data, len);
+}
+
 int ecdh_shared(const keypair_t *mine, const uint8_t their_pub[PUB_LEN], uint8_t shared[32]) {
     return crypto_scalarmult(shared, mine->priv, their_pub);
 }

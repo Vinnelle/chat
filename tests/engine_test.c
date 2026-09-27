@@ -3,6 +3,8 @@
 // Two (or three) sessions talking over fake_net: handshake, delivery, loss, rekey, junk.
 #include "chat.h"
 #include "fake_net.h"
+#include "json.h"
+#include "portmap.h"
 #include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -201,6 +203,67 @@ static void test_third_peer(double *t) {
     CHECK(log_count(&log_b, "carol: hi all") == 1, "bob didn't get carol's message once");
 }
 
+// A peer already connected is no candidate: the keepalive's static peers stop being tried.
+static void test_candidates_settle(double *t) {
+    *t += KEEPALIVE + 4.0;
+    pump(4, *t);
+    CHECK(chat_candidate_count(&A) == 0, "alice still tries %d candidates she's connected to", chat_candidate_count(&A));
+    CHECK(chat_online_count(&A) == 2, "alice lost a peer");
+}
+
+// What comes from relays, routers and Tor, taken apart without a network.
+static void test_parsers(double *t) {
+    (void)t;
+    // An address Tor itself handed out, and the same with one character changed.
+    CHECK(onion_valid("loz66ml5itetz4mg7lor2nzfceeawpenvab57hrkcqcbldkebzkszpyd"), "a real onion address fails its checksum");
+    CHECK(!onion_valid("loz66ml5itetz4mg7lor2nzfceeawpenvab57hrkcqcbldkebzkszpye"), "a mistyped onion address passes");
+    CHECK(!onion_valid("loz66ml5itetz4mg7lor2nzfceeawpenvab57hrkcqcbldkebzkszpy"), "a short onion address passes");
+
+    static js_arena arena;
+    const char *msg = "[\"EVENT\",\"ab\",{\"kind\":21000,\"tags\":[[\"e\",\"x\\u00e9\\n\"]],\"content\":\"a\\\"b\"}]";
+    const js_value *v = js_parse(msg, strlen(msg), &arena);
+    CHECK(v && v->type == JS_ARR && v->n == 3, "a relay message didn't parse");
+    if (v && v->n == 3) {
+        const js_value *ev = &v->items[2];
+        const js_value *kind = js_obj_get(ev, "kind");
+        CHECK(kind && kind->is_int && kind->i == 21000, "event kind came out wrong");
+        const char *content = js_str(js_obj_get(ev, "content"));
+        CHECK(content && strcmp(content, "a\"b") == 0, "escaped content came out as '%s'", content ? content : "");
+        const js_value *tags = js_obj_get(ev, "tags");
+        const char *tag = tags && tags->n == 1 ? js_str(&tags->items[0].items[1]) : NULL;
+        CHECK(tag && strcmp(tag, "x\xc3\xa9\n") == 0, "a \\u escape didn't decode to UTF-8");
+        char out[64];
+        size_t n = tag ? js_put_str(out, 0, sizeof out, tag, strlen(tag)) : 0;
+        CHECK(n > 0 && strcmp(out, "\"x\xc3\xa9\\n\"") == 0, "NIP-01 escaping gave %s", n ? out : "nothing");
+    }
+    CHECK(js_parse("[1,]", 4, &arena) == NULL, "a trailing comma parsed");
+    CHECK(js_parse("[\"\\ud800\"]", 10, &arena) == NULL, "a lone surrogate parsed");
+
+    const char *xml = "<root><service><serviceType>urn:schemas-upnp-org:service:WANPPPConnection:1</serviceType>"
+                      "<controlURL>/ppp</controlURL></service><service><serviceType>"
+                      "urn:schemas-upnp-org:service:WANIPConnection:1</serviceType><controlURL> /ctl/ip </controlURL>"
+                      "</service></root>";
+    char service[96], url[256];
+    CHECK(portmap_parse_control_url(xml, strlen(xml), service, sizeof service, url, sizeof url) == 0
+          && strcmp(url, "/ctl/ip") == 0 && strstr(service, "WANIPConnection:1"),
+          "UPnP control URL came out wrong");
+    const char *resp = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+    char body[64];
+    int status = 0;
+    CHECK(portmap_http_body(resp, strlen(resp), &status, body, sizeof body) == 0 && status == 200
+          && strcmp(body, "hello world") == 0, "a chunked reply came out as '%s'", body);
+
+    uint8_t key[NOSTR_KEY_LEN], plain[NOSTR_WRAP_PLAIN], back[NOSTR_WRAP_PLAIN], sealed[NOSTR_WRAP_LEN], sealed2[NOSTR_WRAP_LEN];
+    gen_random(key, sizeof key);
+    gen_random(plain, sizeof plain);
+    nostr_wrap(key, plain, sealed);
+    nostr_wrap(key, plain, sealed2);
+    CHECK(nostr_unwrap(key, sealed, sizeof sealed, back) == 0 && memcmp(back, plain, sizeof plain) == 0, "a wrapped event didn't open");
+    CHECK(memcmp(sealed, sealed2, sizeof sealed) != 0, "the same datagram wrapped twice came out the same");
+    sealed[100] ^= 1;
+    CHECK(nostr_unwrap(key, sealed, sizeof sealed, back) != 0, "a tampered event opened");
+}
+
 int main(int argc, char **argv) {
     verbose = argc > 1 && (strcmp(argv[1], "-v") == 0 || strcmp(argv[1], "--verbose") == 0);
     double t_start = now_seconds();
@@ -215,7 +278,8 @@ int main(int argc, char **argv) {
     struct { const char *name; void (*fn)(double *); } tests[] = {
         { "connect", test_connect }, { "message", test_message }, { "lost message", test_lost_message },
         { "rekey", test_rekey }, { "junk", test_junk }, { "lookalike nick", test_lookalike_nick },
-        { "third peer", test_third_peer },
+        { "third peer", test_third_peer }, { "candidates settle", test_candidates_settle },
+        { "parsers", test_parsers },
     };
     size_t n_tests = sizeof tests / sizeof tests[0];
     int failed[sizeof tests / sizeof tests[0]], n_failed = 0;

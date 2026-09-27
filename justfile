@@ -35,7 +35,7 @@ test *flags:
     cmake --build build-test -j {{num_cpus()}} --target engine_test
     ./build-test/tests/engine_test "$@"
 
-# Fuzz one target (bencode, pgp, text or engine) for a number of seconds (needs clang)
+# Fuzz one target (bencode, json, pgp, text or engine) for a number of seconds (needs clang)
 fuzz target="engine" seconds="300":
     cmake -B build-fuzz -DCHAT_FUZZ=ON -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Debug
     cmake --build build-fuzz -j {{num_cpus()}} --target fuzz_{{target}}
@@ -43,15 +43,80 @@ fuzz target="engine" seconds="300":
     ASAN_OPTIONS=detect_leaks=0 ./build-fuzz/tests/fuzz_{{target}} fuzz-corpus/{{target}} \
         $(test -d tests/seeds/{{target}} && echo tests/seeds/{{target}}) -dict=tests/fuzz.dict -max_total_time={{seconds}}
 
-# Build, then keep a copy in test-builds/ named after its build id (the one `chat --version` shows)
-test-build: build
+# linux, windows or all (the default). This system's binary builds natively, the other is
+# cross-built with zig. With all, a failed cross build only leaves that binary out. Only with a
+# terminal to answer on does it ask; any further arguments go to chat if it runs.
+# Build into test-builds/<date>-<time>/ (all, linux or windows), then offer to run this system's
+[positional-arguments]
+test-build target="all" *args:
     #!/bin/sh
     set -eu
-    id=$(sed -n 's/^#define CHAT_BUILD_ID "\(.*\)"$/\1/p' build/build_stamp.h)
-    test -n "$id" || { echo "no CHAT_BUILD_ID in build/build_stamp.h" >&2; exit 1; }
-    mkdir -p test-builds
-    cp build/chat "test-builds/chat-$id"
-    echo "test-builds/chat-$id"
+    target="$1"
+    shift
+    case "$target" in
+        all|linux|windows) ;;
+        *) echo "test-build takes all, linux or windows, not $target" >&2; exit 1 ;;
+    esac
+    just={{quote(just_executable())}}
+    host={{os()}}
+    dir="test-builds/$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$dir"
+    native=
+    have_zig() {
+        command -v "${ZIG:-zig}" >/dev/null 2>&1 || { echo "no zig on PATH - can't cross-build for $1" >&2; return 1; }
+    }
+    build_linux() {
+        if [ "$host" = linux ]; then
+            "$just" build || return 1
+            cp build/chat "$dir/chat-linux-{{arch()}}" || return 1
+            native="$dir/chat-linux-{{arch()}}"
+        else
+            have_zig Linux && "$just" build-static || return 1
+            cp build-static/chat "$dir/chat-linux-x86_64" || return 1
+        fi
+    }
+    build_windows() {
+        if [ "$host" = windows ]; then
+            "$just" build || return 1
+            # A multi-config generator (Visual Studio) puts it under Release/.
+            for exe in build/chat.exe build/Release/chat.exe; do
+                if [ -f "$exe" ]; then
+                    cp "$exe" "$dir/chat-windows-{{arch()}}.exe" || return 1
+                    native="$dir/chat-windows-{{arch()}}.exe"
+                    return 0
+                fi
+            done
+            echo "no chat.exe in build/" >&2
+            return 1
+        else
+            have_zig Windows && "$just" build-win || return 1
+            cp build-win/chat.exe "$dir/chat-windows-x86_64.exe" || return 1
+        fi
+    }
+    fail() { echo "$1" >&2; rmdir "$dir" 2>/dev/null || true; exit 1; }
+    case "$target" in
+        linux)   build_linux || fail "the Linux build failed" ;;
+        windows) build_windows || fail "the Windows build failed" ;;
+        all)
+            # This system's first: without it there's nothing to run.
+            if [ "$host" = windows ]; then
+                build_windows || fail "the Windows build failed"
+                build_linux || echo "the Linux build failed - $dir only has the Windows binary" >&2
+            else
+                build_linux || fail "the Linux build failed"
+                build_windows || echo "the Windows build failed - $dir only has the Linux binary" >&2
+            fi
+            ;;
+    esac
+    echo
+    ls -1 "$dir" | sed "s|^|$dir/|"
+    if [ -n "$native" ] && [ -t 0 ] && [ -t 1 ]; then
+        printf 'run %s now? [y/N] ' "$native"
+        read -r answer || answer=
+        case "$answer" in
+            [yY]|[yY][eE][sS]) exec "$native" "$@" ;;
+        esac
+    fi
 
 # Put standalone release binaries and SHA256SUMS in dist/
 dist: build-static build-win

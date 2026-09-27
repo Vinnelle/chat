@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
 #define _POSIX_C_SOURCE 200809L
+// realpath, mkdtemp: X/Open, which musl only declares when asked for.
+#define _XOPEN_SOURCE 700
 
 #include "platform.h"
 #include "util.h"
@@ -22,6 +24,7 @@
 #include <dirent.h>
 #include <spawn.h>
 #include <sys/wait.h>
+#include <sys/file.h>
 #ifdef __linux__
 #include <sys/prctl.h>
 #endif
@@ -36,7 +39,7 @@ void platform_harden_process(void) {
     prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
 #endif
 #ifdef PR_SET_NO_NEW_PRIVS
-    // chat only ever runs curl and notify-send; neither needs to gain privileges through exec.
+    // chat only ever runs curl, notify-send and tor; none needs to gain privileges through exec.
     prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
 #endif
 
@@ -177,10 +180,10 @@ int term_resized(void) {
 }
 
 void platform_wait(const sock_t *socks, int n, int *ready, int *stdin_ready, int timeout_ms) {
-    if (n > 64) n = 64;
+    if (n > PLATFORM_WAIT_MAX) n = PLATFORM_WAIT_MAX;
     for (int i = 0; i < n; i++) ready[i] = 0;
     *stdin_ready = 0;
-    struct pollfd pfds[1 + 64];
+    struct pollfd pfds[1 + PLATFORM_WAIT_MAX];
     pfds[0].fd = STDIN_FILENO; pfds[0].events = POLLIN; pfds[0].revents = 0;
     for (int i = 0; i < n; i++) { pfds[1 + i].fd = socks[i]; pfds[1 + i].events = POLLIN; pfds[1 + i].revents = 0; }
     poll(pfds, (nfds_t)(1 + n), timeout_ms);
@@ -392,4 +395,237 @@ int platform_replace_exe(const char *new_path, const char *exe_path) {
     mode_t mode = (stat(exe_path, &st) == 0) ? (st.st_mode & 07777) : 0755;
     if (chmod(new_path, mode | 0100) != 0) return -1;
     return rename(new_path, exe_path);
+}
+
+int platform_default_gateway(uint8_t ip[4]) {
+    FILE *f = fopen("/proc/net/route", "r");
+    if (!f) return -1;
+    char line[256];
+    int found = -1;
+    unsigned best_metric = ~0u;
+    // Iface Destination Gateway Flags RefCnt Use Metric Mask ..., addresses in host byte order hex.
+    while (fgets(line, sizeof line, f)) {
+        char iface[64];
+        unsigned dest, gw, flags, refcnt, use, metric, mask;
+        if (sscanf(line, "%63s %x %x %x %u %u %u %x", iface, &dest, &gw, &flags, &refcnt, &use, &metric, &mask) != 8) continue;
+        if (dest != 0 || mask != 0 || !(flags & 0x2) || !(flags & 0x1) || gw == 0) continue;
+        if (found == 0 && metric >= best_metric) continue;
+        memcpy(ip, &gw, 4);
+        best_metric = metric;
+        found = 0;
+    }
+    fclose(f);
+    return found;
+}
+
+void platform_ca_roots(void (*add_der)(void *ctx, const uint8_t *der, size_t len),
+                       int (*add_file)(void *ctx, const char *path), void *ctx) {
+    (void)add_der;
+    static const char *const BUNDLES[] = {
+        "/etc/ssl/certs/ca-certificates.crt",   // Debian, Ubuntu, Arch, Gentoo
+        "/etc/pki/tls/certs/ca-bundle.crt",     // Fedora, RHEL
+        "/etc/ssl/ca-bundle.pem",               // openSUSE
+        "/etc/pki/tls/cacert.pem",              // OpenELEC
+        "/etc/ssl/cert.pem",                    // Alpine, Void
+        "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+    };
+    const char *env = getenv("SSL_CERT_FILE");
+    if (env && env[0] && add_file(ctx, env) == 0) return;
+    for (size_t i = 0; i < sizeof BUNDLES / sizeof BUNDLES[0]; i++)
+        if (add_file(ctx, BUNDLES[i]) == 0) return;
+}
+
+// A program chat will run: a regular executable file nobody else can swap out, in a folder
+// nobody else can write to.
+static int program_ok(const char *path, char *out, size_t cap) {
+    char real[4096];
+    if (path[0] != '/' || !realpath(path, real)) return -1;
+    struct stat st;
+    if (stat(real, &st) != 0 || !S_ISREG(st.st_mode) || access(real, X_OK) != 0) return -1;
+    if ((st.st_mode & S_IWOTH) || (st.st_uid != 0 && st.st_uid != geteuid())) return -1;
+    char dir[4096];
+    copy_str(dir, real, sizeof dir);
+    char *slash = strrchr(dir, '/');
+    if (!slash) return -1;
+    if (slash == dir) slash[1] = '\0'; else *slash = '\0';
+    struct stat ds;
+    if (stat(dir, &ds) != 0 || (ds.st_mode & S_IWOTH) || (ds.st_uid != 0 && ds.st_uid != geteuid())) return -1;
+    if (strlen(real) >= cap) return -1;
+    copy_str(out, real, cap);
+    return 0;
+}
+
+int platform_find_program(const char *name, const char *path, char *out, size_t cap) {
+    if (path && path[0]) return program_ok(path, out, cap);
+    char cand[4096];
+    const char *env = getenv("PATH");
+    if (env) {
+        char list[8192];
+        copy_str(list, env, sizeof list);
+        for (char *save = NULL, *dir = strtok_r(list, ":", &save); dir; dir = strtok_r(NULL, ":", &save)) {
+            // A relative entry ("." or "bin") would run whatever sits in the current folder.
+            if (dir[0] != '/') continue;
+            snprintf(cand, sizeof cand, "%s/%s", dir, name);
+            if (program_ok(cand, out, cap) == 0) return 0;
+        }
+    }
+    static const char *const DIRS[] = { "/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin", "/bin", "/sbin" };
+    for (size_t i = 0; i < sizeof DIRS / sizeof DIRS[0]; i++) {
+        snprintf(cand, sizeof cand, "%s/%s", DIRS[i], name);
+        if (program_ok(cand, out, cap) == 0) return 0;
+    }
+    return -1;
+}
+
+static int private_dir_ok(const char *dir) {
+    struct stat st;
+    return dir && dir[0] == '/' && stat(dir, &st) == 0 && S_ISDIR(st.st_mode) && st.st_uid == geteuid()
+        && (st.st_mode & 077) == 0;
+}
+
+static const char *tempdir_base(void) {
+    // XDG_RUNTIME_DIR is this user's alone and usually lives in memory; /tmp is the fallback,
+    // where mkdtemp still makes the folder 0700 under a name nobody can guess.
+    const char *base = getenv("XDG_RUNTIME_DIR");
+    return private_dir_ok(base) ? base : "/tmp";
+}
+
+int platform_private_tempdir(const char *prefix, char *out, size_t cap) {
+    const char *base = tempdir_base();
+    char tmpl[4096];
+    int n = snprintf(tmpl, sizeof tmpl, "%s/%s-XXXXXX", base, prefix);
+    if (n <= 0 || (size_t)n >= sizeof tmpl || (size_t)n >= cap) return -1;
+    if (!mkdtemp(tmpl)) return -1;
+    copy_str(out, tmpl, cap);
+    return 0;
+}
+
+static int remove_at(int dirfd, const char *name, int depth) {
+    struct stat st;
+    if (fstatat(dirfd, name, &st, AT_SYMLINK_NOFOLLOW) != 0) return -1;
+    if (!S_ISDIR(st.st_mode)) return unlinkat(dirfd, name, 0);
+    if (depth < 16) {
+        int fd = openat(dirfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        DIR *d = fd >= 0 ? fdopendir(fd) : NULL;
+        if (!d && fd >= 0) close(fd);
+        // Deleting while reading can skip entries: go round until a pass finds none.
+        for (int pass = 0; d && pass < 4; pass++) {
+            int found = 0;
+            rewinddir(d);
+            struct dirent *e;
+            while ((e = readdir(d)) != NULL) {
+                if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+                found = 1;
+                remove_at(fd, e->d_name, depth + 1);
+            }
+            if (!found) break;
+        }
+        if (d) closedir(d);
+    }
+    return unlinkat(dirfd, name, AT_REMOVEDIR);
+}
+
+int platform_remove_tree(const char *path) { return remove_at(AT_FDCWD, path, 0); }
+
+struct platform_proc { pid_t pid; int exited, code; };
+
+platform_proc_t *platform_spawn(const char *const argv[], const char *out_path) {
+    if (!argv[0] || argv[0][0] != '/') return NULL;
+    platform_proc_t *p = calloc(1, sizeof *p);
+    if (!p) return NULL;
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_addopen(&fa, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    if (out_path) posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, out_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    else posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+    posix_spawn_file_actions_adddup2(&fa, STDOUT_FILENO, STDERR_FILENO);
+    // Its own process group: Ctrl+C in the terminal is chat's to handle, and chat stops it after.
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
+    posix_spawnattr_setpgroup(&attr, 0);
+    sigset_t none, all;
+    sigemptyset(&none);
+    sigfillset(&all);
+    posix_spawnattr_setsigmask(&attr, &none);
+    posix_spawnattr_setsigdefault(&attr, &all);
+    // Our environment, less systemd's hand-over variables: a program started from a service or
+    // a desktop session would otherwise report to (or take sockets from) chat's supervisor.
+    size_t n = 0;
+    while (environ[n]) n++;
+    char **env = calloc(n + 1, sizeof *env);
+    if (!env) { posix_spawnattr_destroy(&attr); posix_spawn_file_actions_destroy(&fa); free(p); return NULL; }
+    size_t k = 0;
+    for (size_t i = 0; i < n; i++) {
+        const char *e = environ[i];
+        if (strncmp(e, "NOTIFY_SOCKET=", 14) == 0 || strncmp(e, "LISTEN_PID=", 11) == 0
+            || strncmp(e, "LISTEN_FDS=", 11) == 0 || strncmp(e, "LISTEN_FDNAMES=", 15) == 0) continue;
+        env[k++] = environ[i];
+    }
+    int rc = posix_spawn(&p->pid, argv[0], &fa, &attr, (char *const *)argv, env);
+    free(env);
+    posix_spawnattr_destroy(&attr);
+    posix_spawn_file_actions_destroy(&fa);
+    if (rc != 0) { free(p); return NULL; }
+    return p;
+}
+
+int platform_proc_exited(platform_proc_t *p, int *code) {
+    if (!p->exited) {
+        int status;
+        pid_t r = waitpid(p->pid, &status, WNOHANG);
+        if (r == p->pid) { p->exited = 1; p->code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0); }
+        else if (r < 0 && errno == ECHILD) { p->exited = 1; p->code = -1; }
+    }
+    if (p->exited && code) *code = p->code;
+    return p->exited;
+}
+
+void platform_sleep_ms(int ms) {
+    struct timespec ts = { ms / 1000, (long)(ms % 1000) * 1000000L };
+    while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {}
+}
+
+void platform_proc_stop(platform_proc_t *p, int wait_ms) {
+    if (!p) return;
+    if (!platform_proc_exited(p, NULL)) {
+        kill(p->pid, SIGTERM);
+        for (int waited = 0; waited < wait_ms && !platform_proc_exited(p, NULL); waited += 20) platform_sleep_ms(20);
+        if (!platform_proc_exited(p, NULL)) {
+            kill(p->pid, SIGKILL);
+            int status;
+            waitpid(p->pid, &status, 0);
+        }
+    }
+    free(p);
+}
+
+long platform_pid(void) { return (long)getpid(); }
+
+void platform_remove_stale_tempdirs(const char *prefix, const char *lock_rel) {
+    const char *base = tempdir_base();
+    DIR *d = opendir(base);
+    if (!d) return;
+    size_t pl = strlen(prefix);
+    struct dirent *e;
+    time_t now = time(NULL);
+    while ((e = readdir(d)) != NULL) {
+        if (strncmp(e->d_name, prefix, pl) != 0 || e->d_name[pl] != '-') continue;
+        char path[4096], lock[4200];
+        snprintf(path, sizeof path, "%s/%s", base, e->d_name);
+        struct stat st;
+        // Ours only, made by mkdtemp (0700), and not one another chat is just setting up.
+        if (lstat(path, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != geteuid() || (st.st_mode & 077)
+            || now - st.st_mtime < 60) continue;
+        snprintf(lock, sizeof lock, "%s/%s", path, lock_rel);
+        int fd = open(lock, O_RDWR | O_NOFOLLOW | O_CLOEXEC);
+        if (fd >= 0) {
+            // tor holds an flock on it while it runs.
+            int busy = flock(fd, LOCK_EX | LOCK_NB) != 0;
+            close(fd);
+            if (busy) continue;
+        }
+        platform_remove_tree(path);
+    }
+    closedir(d);
 }

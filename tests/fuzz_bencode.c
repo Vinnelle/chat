@@ -46,18 +46,22 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     const be_value *v = be_parse(data, size, &g_arena);
     if (v) walk(v, 0);
 
-    // A lookup in flight with one query out, so a reply with t = "aa" from `from` gets read.
+    // Both lookups in flight, the IPv4 one with one query out, so a reply with t = "aa" from
+    // `from` gets read, and IPv6 nodes in it land in the IPv6 lookup.
     static dht_state_t d;
     static const uint8_t infohash[20] = { 1, 2, 3 };
-    dht_init(&d, infohash, 40000);
-    d.lk.active = 1;
+    dht_init(&d, infohash, 40000, 1, 1);
+    d.lk[DHT_V4].active = 1;
+    d.lk[DHT_V6].active = 1;
     addr_t from;
     uint8_t ip[4] = { 192, 0, 2, 1 };
     addr_set_v4(&from, ip, 6881);
-    memcpy(d.lk.inflight[0].tid, "aa", 2);
-    d.lk.inflight[0].addr = from;
-    d.lk.inflight[0].used = 1;
+    memcpy(d.lk[DHT_V4].inflight[0].tid, "aa", 2);
+    d.lk[DHT_V4].inflight[0].addr = from;
+    d.lk[DHT_V4].inflight[0].used = 1;
     dht_on_packet(&d, data, size, from, on_candidate, NULL);
-    check(d.lk.n_cands <= DHT_MAX_CANDS);
+    check(d.lk[DHT_V4].n_cands <= DHT_MAX_CANDS);
+    check(d.lk[DHT_V6].n_cands <= DHT_MAX_CANDS);
+    for (int i = 0; i < d.lk[DHT_V6].n_cands; i++) check(d.lk[DHT_V6].cands[i].addr.is_v6);
     return 0;
 }
