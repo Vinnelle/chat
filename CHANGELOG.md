@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.1
 
 ### Security
 - Importing a PGP key could read past the end of a buffer when the key block decoded to more
