@@ -6,6 +6,9 @@
 #include "common/json.h"
 #include "transport/portmap.h"
 #include "common/util.h"
+#include "crypto/age.h"
+#include "crypto/pgp.h"
+#include <sodium.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,6 +19,9 @@ typedef struct {
     const char *who;
     char lines[LOG_LINES][320];
     int n;
+    int modified_warnings;
+    int anon_joins;   // "* anon ... joined": a peer announced before its nick came
+    int joining, unheralded_joins;   // "joining" lines not yet followed by "joined", and "joined" without one
 } log_t;
 
 static chat_t A, B, C;
@@ -35,7 +41,13 @@ static void on_print(void *ui, const char *hhmm, const char *text, const uint8_t
     log_t *l = ui;
     (void)hhmm; (void)rgb; (void)color_len;
     if (verbose) printf("  [%s%s] %s\n", l->who, (flags & LINE_CHAT) ? " chat" : "", text);
-    if (!(flags & LINE_CHAT)) return;
+    if (!(flags & LINE_CHAT)) {
+        if (strstr(text, "runs a modified client")) l->modified_warnings++;
+        if (strncmp(text, "* anon", 6) == 0 && strstr(text, " joined (")) l->anon_joins++;
+        if (strncmp(text, "* joining: peer ", 16) == 0) l->joining++;
+        else if (strstr(text, " joined (")) { if (l->joining > 0) l->joining--; else l->unheralded_joins++; }
+        return;
+    }
     if (l->n < LOG_LINES) copy_str(l->lines[l->n++], text, sizeof l->lines[0]);
 }
 
@@ -45,7 +57,23 @@ static int log_count(const log_t *l, const char *needle) {
     return k;
 }
 
-static void start(chat_t *c, log_t *l, const char *nick, uint16_t port, const uint16_t *peer_ports, int n, int created) {
+// Release 1.2.3 is alice's and bob's binaries; carol's is another. No other version was released.
+static const uint8_t BUILD_ALICE[BUILD_HASH_LEN] = { 1 }, BUILD_BOB[BUILD_HASH_LEN] = { 2 },
+                     BUILD_CAROL[BUILD_HASH_LEN] = { 3 };
+static int builds_asked;
+
+// Says "still fetching" to the first few asks, as the real one does while it downloads.
+static int fake_builds(const char *version, uint8_t hashes[][BUILD_HASH_LEN], int max) {
+    if (++builds_asked <= 3) return CHAT_BUILDS_PENDING;
+    if (strcmp(version, "1.2.3") != 0) return CHAT_BUILDS_NONE;
+    if (max < 2) return CHAT_BUILDS_UNKNOWN;
+    memcpy(hashes[0], BUILD_ALICE, BUILD_HASH_LEN);
+    memcpy(hashes[1], BUILD_BOB, BUILD_HASH_LEN);
+    return 2;
+}
+
+static void start(chat_t *c, log_t *l, const char *nick, uint16_t port, const uint16_t *peer_ports, int n, int created,
+                  const uint8_t build[BUILD_HASH_LEN]) {
     chat_opts_t o;
     memset(&o, 0, sizeof o);
     copy_str(o.nick, nick, sizeof o.nick);
@@ -56,10 +84,15 @@ static void start(chat_t *c, log_t *l, const char *nick, uint16_t port, const ui
     o.n_peers = n;
     o.created = created;
     o.notify_mode = NOTIFY_NONE;
+    copy_str(o.version, "1.2.3", sizeof o.version);
+    o.has_build = 1;
+    memcpy(o.build_hash, build, BUILD_HASH_LEN);
+    o.builds = fake_builds;
     chat_init(c, &o, on_print, NULL, l);
 }
 
 static chat_t *const ALL[] = { &A, &B, &C };
+static const log_t *const ALL_LOGS[] = { &log_a, &log_b, &log_c };
 static int n_live = 2;
 
 // Delivers everything queued and ticks every session, `rounds` times, at time t.
@@ -190,13 +223,29 @@ static void test_lookalike_nick(double *t) {
 }
 
 // Carol joins through alice only: bob hears about her from alice (px) and connects directly.
+// Carol's first session frame to alice, her nick and identity ("k"), is lost, so her next one
+// gets through first. Alice still has to say carol joined, not an "anon".
 static void test_third_peer(double *t) {
     uint16_t via_alice[1] = { A.port };
-    start(&C, &log_c, "carol", 40003, via_alice, 1, 0);
+    start(&C, &log_c, "carol", 40003, via_alice, 1, 0, BUILD_CAROL);
     n_live = 3;
+    drop_t d = { 1, 40003, A.port, 0 };
+    fake_net_filter = drop_one;
+    fake_net_filter_ctx = &d;
     for (int i = 0; i < 60 && (chat_online_count(&C) < 2 || chat_online_count(&B) < 2); i++) { *t += 0.05; pump(4, *t); }
+    fake_net_filter = NULL;
+    for (int i = 0; i < 40 && !peer_named(&A, "carol"); i++) { *t += 0.05; pump(4, *t); }
+    CHECK(d.dropped == 1, "carol's first frame to alice wasn't dropped");
     CHECK(chat_online_count(&C) == 2, "carol sees %d peers, want 2", chat_online_count(&C));
     CHECK(chat_online_count(&B) == 2, "bob sees %d peers, want 2", chat_online_count(&B));
+    CHECK(peer_named(&A, "carol") != NULL, "alice never learned carol's nick");
+    CHECK(log_a.anon_joins == 0 && log_b.anon_joins == 0, "a peer joined as anon (alice %d, bob %d)",
+          log_a.anon_joins, log_b.anon_joins);
+    for (int i = 0; i < n_live; i++) {
+        const log_t *l = ALL_LOGS[i];
+        CHECK(l->unheralded_joins == 0 && l->joining == 0, "%s printed %d joined without joining first, and %d "
+              "joining without joined after", l->who, l->unheralded_joins, l->joining);
+    }
     chat_send_text(&C, "hi all", *t);
     pump(4, *t);
     CHECK(log_count(&log_a, "carol: hi all") == 1, "alice didn't get carol's message once");
@@ -211,7 +260,115 @@ static void test_candidates_settle(double *t) {
     CHECK(chat_online_count(&A) == 2, "alice lost a peer");
 }
 
+// Each peer's "v" against release 1.2.3: alice and bob run its binaries, carol doesn't.
+static void test_builds(double *t) {
+    for (int i = 0; i < 10; i++) { *t += 0.05; pump(2, *t); }
+    CHECK(builds_asked > 3, "the release's hashes were never waited on");
+    peer_t *ab = peer_named(&A, "bob"), *ba = peer_named(&B, "alice"), *ca = peer_named(&C, "alice");
+    peer_t *ac = peer_named(&A, "carol"), *bc = peer_named(&B, "carol");
+    CHECK(ab && ab->build_state == BUILD_OFFICIAL, "alice doesn't see bob's build as official");
+    CHECK(ba && ba->build_state == BUILD_OFFICIAL, "bob doesn't see alice's build as official");
+    CHECK(ca && ca->build_state == BUILD_OFFICIAL, "carol doesn't see alice's build as official");
+    CHECK(ac && ac->build_state == BUILD_MODIFIED, "alice doesn't see carol's build as modified");
+    CHECK(bc && bc->build_state == BUILD_MODIFIED, "bob doesn't see carol's build as modified");
+    CHECK(log_a.modified_warnings == 1 && log_b.modified_warnings == 1, "carol's build was warned about %d and %d times, want once each",
+          log_a.modified_warnings, log_b.modified_warnings);
+    CHECK(log_c.modified_warnings == 0, "carol was warned about an official build");
+
+    // A rekey sends the same "v" again: no second warning.
+    A.next_rekey = B.next_rekey = C.next_rekey = 0;
+    for (int i = 0; i < 40; i++) { *t += 0.05; pump(4, *t); }
+    ac = peer_named(&A, "carol");
+    CHECK(ac && ac->build_state == BUILD_MODIFIED, "carol's build isn't modified after the rekey");
+    CHECK(log_a.modified_warnings == 1, "a rekey warned about carol's build again");
+
+    // A version that was never released.
+    copy_str(C.version, "9.9.9", sizeof C.version);
+    C.next_rekey = 0;
+    for (int i = 0; i < 40; i++) { *t += 0.05; pump(4, *t); }
+    ac = peer_named(&A, "carol");
+    CHECK(ac && ac->build_state == BUILD_MODIFIED && strcmp(ac->build_version, "9.9.9") == 0,
+          "carol's claim of an unreleased version isn't modified");
+    CHECK(log_a.modified_warnings == 2, "alice warned %d times about carol, want 2", log_a.modified_warnings);
+    char label[64];
+    if (ac) chat_build_label(ac, label, sizeof label);
+    CHECK(ac && strcmp(label, "modified client (says v9.9.9)") == 0, "carol's build shows as '%s'", ac ? label : "");
+}
+
 // What comes from relays, routers and Tor, taken apart without a network.
+static void test_identity_keys(double *t) {
+    (void)t;
+    // An identity file age-keygen wrote, and the recipient it gave for it.
+    static const char age_file[] =
+        "# created: 2026-09-29T12:00:00+02:00\n"
+        "# public key: age18t0t9tvw7r6at489p6jm9ngptg3j7tcyps5pn47fgvvzayc82dmsnghjje\n"
+        "AGE-SECRET-KEY-1DRRXFHJCPKR2T7VJRQ4A4XR2P8NTDCT4J5GMQL3DRVRWMNVU90PST53ZSA\n";
+    identity_keypair_t id;
+    memset(&id, 0, sizeof id);
+    CHECK(age_import_secret_key_text(age_file, &id) == 0 && id.scalar, "an age-keygen key didn't load");
+    char recipient[AGE_RECIPIENT_STRLEN + 1];
+    age_export_recipient(&id, recipient);
+    CHECK(strcmp(recipient, "age18t0t9tvw7r6at489p6jm9ngptg3j7tcyps5pn47fgvvzayc82dmsnghjje") == 0,
+          "the AGE key's recipient came out as %s", recipient);
+
+    uint8_t eph_a[PUB_LEN], id_a[ID_LEN], eph_b[PUB_LEN], id_b[ID_LEN], sig[ID_SIGN_LEN];
+    gen_random(eph_a, sizeof eph_a); gen_random(id_a, sizeof id_a);
+    gen_random(eph_b, sizeof eph_b); gen_random(id_b, sizeof id_b);
+    identity_sign(&id, eph_a, id_a, eph_b, id_b, sig);
+    CHECK(identity_verify(id.pub, sig, eph_a, id_a, eph_b, id_b) == 0, "a signature by the AGE key didn't verify");
+    sig[40] ^= 1;
+    CHECK(identity_verify(id.pub, sig, eph_a, id_a, eph_b, id_b) != 0, "a tampered signature verified");
+
+    char typo[sizeof age_file];
+    memcpy(typo, age_file, sizeof typo);
+    char *c = strstr(typo, "AGE-SECRET-KEY-1") + 30;
+    *c = *c == 'Q' ? 'P' : 'Q';
+    identity_keypair_t before = id;
+    CHECK(age_import_secret_key_text(typo, &id) != 0, "an AGE key with a typo loaded");
+    CHECK(memcmp(&id, &before, sizeof id) == 0, "a key that failed to load changed the identity");
+
+    // The scalar signer against libsodium's: a seed key, put as its scalar and nonce key, has to
+    // sign the same bytes.
+    identity_keypair_t seeded, split;
+    gen_identity_keypair(&seeded);
+    uint8_t h[64], wide[64] = {0};
+    crypto_hash_sha512(h, seeded.priv, 32);
+    memcpy(wide, h, 32);
+    wide[0] &= 248; wide[31] &= 127; wide[31] |= 64;
+    memcpy(split.pub, seeded.pub, sizeof split.pub);
+    crypto_core_ed25519_scalar_reduce(split.priv, wide);
+    memcpy(split.priv + 32, h + 32, 32);
+    split.scalar = 1;
+    uint8_t msg[200], want[ID_SIGN_LEN], got[ID_SIGN_LEN];
+    gen_random(msg, sizeof msg);
+    identity_sign_bytes(&seeded, msg, sizeof msg, want);
+    identity_sign_bytes(&split, msg, sizeof msg, got);
+    CHECK(memcmp(want, got, sizeof want) == 0, "the scalar signer and libsodium signed differently");
+
+    char armor[PGP_ARMOR_MAX];
+    uint8_t fp[PGP_FP_LEN], fp2[PGP_FP_LEN];
+    pgp_export_public_key(&seeded, "alice", 1790000000u, armor, sizeof armor, fp);
+    pgp_export_public_key(&seeded, "alice", 1790000000u, armor, sizeof armor, fp2);
+    CHECK(memcmp(fp, fp2, sizeof fp) == 0, "the same PGP key exported twice changed fingerprint");
+    CHECK(strstr(armor, "-----END PGP PUBLIC KEY BLOCK-----") != NULL, "the PGP public key has no END line");
+
+    // A key made from a password has to come out the same on every run and in every version, or
+    // everyone's established identity changes. The answer is from Python's cryptography package:
+    // Argon2id (4 passes, 512 MiB, one lane) over a BLAKE2b-128 salt of the label and device id.
+    static const char device[] = "0123456789abcdef0123456789abcdef";
+    identity_keypair_t derived, other;
+    CHECK(identity_from_password("correct horse battery staple", device, &derived) == 0 && !derived.scalar,
+          "no key came from a password");
+    char pubhex[ID_SIGN_PUB_LEN * 2 + 1];
+    hex_encode(derived.pub, ID_SIGN_PUB_LEN, pubhex);
+    CHECK(strcmp(pubhex, "044354ed8bd36257adf234b893510d040769ba720f4e886431c27211e3b5dec2") == 0,
+          "the key from a password came out as %s", pubhex);
+    CHECK(identity_from_password("correct horse battery staple", "0123456789abcdef0123456789abcdee", &other) == 0
+          && memcmp(derived.pub, other.pub, sizeof derived.pub) != 0, "another device made the same key");
+    identity_sign_bytes(&derived, msg, sizeof msg, got);
+    CHECK(crypto_sign_verify_detached(got, msg, sizeof msg, derived.pub) == 0, "the key from a password can't sign");
+}
+
 static void test_parsers(double *t) {
     (void)t;
     // An address Tor itself handed out, and the same with one character changed.
@@ -271,15 +428,15 @@ int main(int argc, char **argv) {
     net_startup();
     uint16_t to_b[1] = { 40002 }, to_a[1] = { 40001 };
     printf("deriving session keys (Argon2id, 512 MiB each)...\n");
-    start(&A, &log_a, "alice", 40001, to_b, 1, 1);
-    start(&B, &log_b, "bob", 40002, to_a, 1, 0);
+    start(&A, &log_a, "alice", 40001, to_b, 1, 1, BUILD_ALICE);
+    start(&B, &log_b, "bob", 40002, to_a, 1, 0, BUILD_BOB);
     double t = now_seconds();
 
     struct { const char *name; void (*fn)(double *); } tests[] = {
         { "connect", test_connect }, { "message", test_message }, { "lost message", test_lost_message },
         { "rekey", test_rekey }, { "junk", test_junk }, { "lookalike nick", test_lookalike_nick },
-        { "third peer", test_third_peer }, { "candidates settle", test_candidates_settle },
-        { "parsers", test_parsers },
+        { "third peer", test_third_peer }, { "candidates settle", test_candidates_settle }, { "builds", test_builds },
+        { "parsers", test_parsers }, { "identity keys", test_identity_keys },
     };
     size_t n_tests = sizeof tests / sizeof tests[0];
     int failed[sizeof tests / sizeof tests[0]], n_failed = 0;

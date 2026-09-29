@@ -60,6 +60,7 @@
 #define REKEY_DRAIN_GRACE 20.0
 
 #define REKEY_OVERLAP 20.0
+#define JOIN_WAIT 5.0
 
 #define COVER_INTERVAL 1.5
 #define COVER_MAX_RATE 8.0
@@ -119,6 +120,26 @@ typedef enum { IDENT_NONE = 0, IDENT_NATIVE = 1, IDENT_AGE = 2, IDENT_PGP = 3 } 
 
 typedef enum { VERIFY_UNVERIFIED = 0, VERIFY_VERIFIED = 1, VERIFY_FAILED = 2 } verify_state_t;
 
+// What a peer's "v" (its version, and its executable's hash) says once checked against the
+// signed SHA256SUMS of that version's release.
+typedef enum {
+    BUILD_UNKNOWN = 0,   // it sent none: a build from before "v"
+    BUILD_CHECKING,      // that release's hashes are still being fetched
+    BUILD_UNCHECKED,     // they couldn't be fetched (offline, say); tried again later
+    BUILD_OFFICIAL,
+    BUILD_MODIFIED       // not a binary of that release, or there's no signed release of it
+} build_state_t;
+
+#define MAX_VERSION 15
+
+// Looks up the SHA-256 of each binary in the signed release of `version`. Returns how many it
+// wrote (at most max), or one of these.
+#define CHAT_BUILDS_PENDING (-1)   // still being fetched: ask again
+#define CHAT_BUILDS_NONE (-2)      // there's no signed release of that version
+#define CHAT_BUILDS_UNKNOWN (-3)   // couldn't find out
+#define CHAT_BUILDS_MAX 8
+typedef int (*chat_builds_fn)(const char *version, uint8_t hashes[][BUILD_HASH_LEN], int max);
+
 // What a nick looks like once lookalikes, case and invisible characters are folded away.
 #define NICK_SKEL_LEN (4 * MAX_NICK + 1)
 
@@ -131,6 +152,10 @@ typedef struct {
     double seen, born, next_hello;
     int hello_tries;
     int ok;
+    // The join is announced once "k" has brought the nick and identity (k_seen), or JOIN_WAIT
+    // after the first frame opened (ok_since) if it never does, so nobody joins unannounced.
+    double ok_since;
+    int k_seen, announced;
     uint8_t pub[PUB_LEN];
     ratchet_t send_chain;
     ratchet_t recv_chain;
@@ -141,6 +166,10 @@ typedef struct {
     verify_state_t identity_state;
     uint8_t identity_pub[ID_SIGN_PUB_LEN];
     uint8_t identity_fp[ID_FP_LEN];
+
+    char build_version[MAX_VERSION + 1];
+    uint8_t build_proof[BUILD_HASH_LEN];
+    build_state_t build_state;
 
     // When a frame last came over each kind of path (by addr_kind_t), and (Tor) the onion
     // address the peer said it has.
@@ -225,6 +254,11 @@ typedef struct {
 
     notify_mode_t notify_mode;
 
+    char version[MAX_VERSION + 1];
+    int has_build;
+    uint8_t build_hash[BUILD_HASH_LEN];
+    chat_builds_fn builds;
+
     int once, once_used;
 
     int net_verbose;
@@ -301,6 +335,13 @@ typedef struct {
     identity_keypair_t identity;
     int has_color;
     uint8_t color[3];
+
+    // This program's version and its executable's SHA-256 (has_build 0 if it couldn't be read),
+    // which peers check; builds checks theirs (NULL: they're left unchecked).
+    char version[MAX_VERSION + 1];
+    int has_build;
+    uint8_t build_hash[BUILD_HASH_LEN];
+    chat_builds_fn builds;
 } chat_opts_t;
 
 void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify_fn notify, void *ui);
@@ -309,16 +350,17 @@ void chat_shutdown(chat_t *c);
 void chat_tick(chat_t *c, double now);
 void chat_on_socket_readable(chat_t *c, sock_t which, double now);
 
-// Plain-mode entry point: "/name args" runs a command, anything else is sent. Returns 0 on /quit.
+// Plain-mode entry point: ":name args" runs a command, anything else is sent. Returns 0 on :quit.
 int chat_submit_line(chat_t *c, const char *line, double now);
 
-// Runs "name args" (no leading '/') from CHAT_COMMANDS against this session.
+// Runs "name args" (no leading ':') from CHAT_COMMANDS against this session.
 cmd_result_t chat_run_command(chat_t *c, const char *line);
 void chat_send_text(chat_t *c, const char *text, double now);
 
 extern const command_t CHAT_COMMANDS[];
 
 void chat_set_nick(chat_t *c, const char *nick);
+void chat_set_colour(chat_t *c, const uint8_t rgb[3]);
 
 // Cleans a nick and drops the characters the UI puts around nicks ("(verified)", "#id", "name:"),
 // including lookalikes such as fullwidth brackets, and invisible characters, so no nick can fake
@@ -349,6 +391,8 @@ int chat_candidate_count(const chat_t *c);
 
 int chat_ready(const chat_t *c);
 const char *chat_verify_label(verify_state_t s);
+// What p runs, for :peers: "official v0.1.8", "modified client (says v0.1.8)" and so on.
+void chat_build_label(const peer_t *p, char *out, size_t cap);
 
 typedef struct { const char *name; uint8_t r, g, b; } named_color_t;
 extern const named_color_t COLOR_PALETTE[];

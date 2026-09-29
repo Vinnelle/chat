@@ -60,7 +60,7 @@ typedef enum {
     TUI_KEY_BACKTAB,
     TUI_KEY_NEW_SESSION,
     TUI_KEY_JOIN_SESSION,
-    TUI_KEY_CLOSE_SESSION,
+    TUI_KEY_DELETE_WORD,
     TUI_KEY_TOGGLE_SIDEBAR,
     TUI_KEY_TOGGLE_CONSOLE,
     TUI_KEY_TOGGLE_CHAT,
@@ -94,8 +94,6 @@ typedef struct {
     int modal;
     tui_complete_fn complete;
     tui_complete_fn mention;
-    // Shown dimmed in an empty line instead of the usual hint, when set.
-    const char *hint;
 } tui_input_t;
 
 // Empties the line and returns to INSERT; keeps modal and complete.
@@ -103,12 +101,32 @@ void tui_input_clear(tui_input_t *in);
 
 int tui_input_feed(tui_input_t *in, const tui_key_t *key);
 
+// "INSERT", "NORMAL" or "COMMAND".
+const char *tui_mode_name(tui_input_mode_t mode);
+
 typedef enum { TUI_ID_NONE = 0, TUI_ID_NATIVE, TUI_ID_AGE, TUI_ID_PGP } tui_identity_badge_t;
 
+// title follows "chat" in the top bar, and clock (or nothing, if NULL) stands at its right end.
 typedef struct {
     int sidebar, console, chat;
     const char *title;
+    const char *clock;
 } tui_view_t;
+
+// The bottom row, the same on every screen: a chip saying where you are, the identity badge and
+// version under the sidebar, then the input after its prompt (or a line of text), then
+// status_right. message is the reply to the last thing done: it stands in bold where the input
+// would be. hint is dim, and shows when there's no input or the input is empty.
+typedef struct {
+    const char *chip;
+    const char *prompt;
+    const tui_input_t *input;
+    int mask_input;
+    const char *message;
+    const char *hint;
+    tui_identity_badge_t badge;
+    const char *status_right;
+} tui_bar_t;
 
 int tui_pane_geometry(int rows, int cols, int *pane_x, int *pane_rows);
 
@@ -116,43 +134,34 @@ void tui_render(int rows, int cols,
                  const tui_session_row_t *sessions, int n_sessions, int selected,
                  const tui_peer_row_t *peers, int n_peers,
                  const tui_scrollback_t *sb, const tui_scrollback_t *console,
-                 const tui_view_t *view,
-                 const char *nick, const char *mode_prompt,
-                 const tui_input_t *input, int color_enabled, int mask_input,
-                 tui_identity_badge_t identity_badge, const char *status_right,
+                 const tui_view_t *view, const tui_bar_t *bar, int color_enabled,
                  const char *const *net_lines, int n_net_lines);
 
-void tui_render_input(int rows, int cols, const tui_view_t *view,
-                      const char *nick, const char *mode_prompt,
-                      const tui_input_t *input, int color_enabled, int mask_input,
-                      tui_identity_badge_t identity_badge, const char *status_right);
-
-#define TUI_MAX_LIST_ITEMS 512
-#define TUI_LIST_LABEL_MAX 200
-
-typedef struct {
-    char label[TUI_LIST_LABEL_MAX];
-    int is_dir;
-} tui_list_item_t;
+// Redraws only the bottom row.
+void tui_render_bar(int rows, int cols, const tui_view_t *view, const tui_bar_t *bar, int color_enabled);
 
 typedef struct {
     const char *section;   // starts a new section with this heading, or NULL
-    char label[48];
-    char value[160];
-    int dim;               // doesn't apply in the current mode
-} tui_setting_row_t;
+    const char *label;
+    const char *value;     // in a column after the label, or NULL
+} tui_row_t;
 
-// The settings page: a list of name/value rows by section, the selected row's help underneath,
-// a note on the last change, and the hint line. With input set, the bottom line edits a value.
-void tui_render_settings(int rows, int cols,
-                         const tui_session_row_t *sessions, int n_sessions, int selected_session,
-                         const tui_setting_row_t *items, int n_items, int selected,
-                         const char *help, const char *note, const char *hint, int color_enabled,
-                         const tui_input_t *input, const char *prompt, int mask_input, const char *nick);
+// A list page (settings, and the pages under it): rows by section with one selected, the selected
+// row's help wrapped underneath, and a button after the rows if button is set (selected == n_rows
+// selects it).
+typedef struct {
+    const tui_row_t *rows;
+    int n_rows;
+    int selected;
+    const char *help;
+    const char *button;
+} tui_page_t;
 
-void tui_render_list(int rows, int cols,
-                      const tui_session_row_t *sessions, int n_sessions, int selected_session,
-                      const char *title, const tui_list_item_t *items, int n_items, int selected,
-                      const char *hint, int color_enabled);
+// title goes in the top bar after "chat", as the page's place in the settings; clock goes at its
+// right end, as in tui_view_t.
+void tui_render_page(int rows, int cols,
+                     const tui_session_row_t *sessions, int n_sessions, int selected_session,
+                     const char *title, const char *clock, const tui_page_t *page, const tui_bar_t *bar,
+                     int color_enabled);
 
 #endif

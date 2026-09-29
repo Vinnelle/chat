@@ -30,7 +30,7 @@
 typedef struct nostr nostr_t;
 
 typedef void (*nostr_deliver_fn)(void *ctx, const uint8_t *data, size_t len, addr_t from, double now);
-// verbose_only: a detail for /netverbose; otherwise worth a console line on its own.
+// verbose_only: a detail for :netverbose; otherwise worth a console line on its own.
 typedef void (*nostr_log_fn)(void *ctx, int verbose_only, const char *msg);
 
 // proxy: NULL connects to relays directly. Otherwise (Tor mode) every connection goes through

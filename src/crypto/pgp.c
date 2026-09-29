@@ -7,7 +7,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 typedef struct { uint32_t h[5]; uint64_t len; uint8_t buf[64]; size_t buflen; } sha1_ctx;
 
@@ -135,9 +134,9 @@ static uint32_t crc24(const uint8_t *data, size_t n) {
     return crc & 0xFFFFFFu;
 }
 
-void pgp_export_public_key(const identity_keypair_t *idkp, const char *nick,
+void pgp_export_public_key(const identity_keypair_t *idkp, const char *nick, uint32_t created,
                             char *out, size_t out_cap, uint8_t fingerprint[PGP_FP_LEN]) {
-    uint32_t ctime = (uint32_t)time(NULL);
+    uint32_t ctime = created;
     uint8_t pubkey_body[64];
     size_t pubkey_body_len = build_pubkey_body(idkp->pub, ctime, pubkey_body, sizeof pubkey_body);
     key_fingerprint(pubkey_body, pubkey_body_len, fingerprint);
@@ -170,8 +169,7 @@ void pgp_export_public_key(const identity_keypair_t *idkp, const char *nick,
     crypto_hash_sha256(hash, preimage, pb.len);
 
     uint8_t ed_sig[64];
-    unsigned long long siglen;
-    crypto_sign_detached(ed_sig, &siglen, hash, sizeof hash, idkp->priv);
+    identity_sign_bytes(idkp, hash, sizeof hash, ed_sig);
 
     uint8_t unhashed_subpkts[10];
     bb_t ub = { unhashed_subpkts, 0, sizeof unhashed_subpkts };
@@ -359,6 +357,7 @@ static int parse_secret_key_packet(const uint8_t *body, size_t blen, identity_ke
     uint8_t seed[32] = {0};
     memcpy(seed + (32 - sec_bytes), body + p, sec_bytes);
     identity_keypair_t kp;
+    kp.scalar = 0;
     crypto_sign_seed_keypair(kp.pub, kp.priv, seed);
     sodium_memzero(seed, sizeof seed);
     int rc = -1;

@@ -318,8 +318,100 @@ void cookie_compute(const uint8_t secret[32], const char *addr, const uint8_t pe
     sodium_memzero(&st, sizeof st);
 }
 
+void build_proof(const uint8_t exe_sha256[BUILD_HASH_LEN], const uint8_t from_id[ID_LEN],
+                  const uint8_t to_id[ID_LEN], uint8_t proof[BUILD_HASH_LEN]) {
+    static const char LABEL[] = "chat build v1";
+    crypto_generichash_state st;
+    crypto_generichash_init(&st, exe_sha256, BUILD_HASH_LEN, BUILD_HASH_LEN);
+    crypto_generichash_update(&st, (const unsigned char *)LABEL, sizeof LABEL - 1);
+    crypto_generichash_update(&st, from_id, ID_LEN);
+    crypto_generichash_update(&st, to_id, ID_LEN);
+    crypto_generichash_final(&st, proof, BUILD_HASH_LEN);
+    sodium_memzero(&st, sizeof st);
+}
+
 void gen_identity_keypair(identity_keypair_t *kp) {
     crypto_sign_keypair(kp->pub, kp->priv);
+    kp->scalar = 0;
+}
+
+int identity_from_password(const char *password, const char *device_id, identity_keypair_t *idkp) {
+    uint8_t salt[crypto_pwhash_SALTBYTES];
+    crypto_generichash_state st;
+    crypto_generichash_init(&st, NULL, 0, sizeof salt);
+    crypto_generichash_update(&st, (const unsigned char *)ID_KDF_LABEL, sizeof(ID_KDF_LABEL) - 1);
+    crypto_generichash_update(&st, (const unsigned char *)device_id, strlen(device_id));
+    crypto_generichash_final(&st, salt, sizeof salt);
+    sodium_memzero(&st, sizeof st);
+
+    uint8_t seed[crypto_sign_SEEDBYTES];
+    if (crypto_pwhash(seed, sizeof seed, password, strlen(password), salt,
+                      KDF_OPSLIMIT, KDF_MEMLIMIT, crypto_pwhash_ALG_ARGON2ID13) != 0) return -1;
+    identity_keypair_t kp;
+    crypto_sign_seed_keypair(kp.pub, kp.priv, seed);
+    kp.scalar = 0;
+    *idkp = kp;
+    sodium_memzero(seed, sizeof seed);
+    sodium_memzero(&kp, sizeof kp);
+    return 0;
+}
+
+int identity_from_x25519(const uint8_t secret[32], identity_keypair_t *idkp) {
+    static const char NONCE_KEY_TAG[] = "chat identity nonce key";
+    // X25519 clamps the secret before it multiplies; the Ed25519 side has to use the same scalar.
+    uint8_t wide[64] = {0};
+    memcpy(wide, secret, 32);
+    wide[0] &= 248; wide[31] &= 127; wide[31] |= 64;
+    identity_keypair_t kp;
+    kp.scalar = 1;
+    crypto_core_ed25519_scalar_reduce(kp.priv, wide);
+    crypto_generichash(kp.priv + 32, 32, (const uint8_t *)NONCE_KEY_TAG, sizeof NONCE_KEY_TAG - 1, secret, 32);
+    uint8_t x_pub[32], x_from_ed[32];
+    int rc = -1;
+    if (crypto_scalarmult_ed25519_base_noclamp(kp.pub, kp.priv) == 0
+        && crypto_scalarmult_base(x_pub, secret) == 0
+        && crypto_sign_ed25519_pk_to_curve25519(x_from_ed, kp.pub) == 0
+        && sodium_memcmp(x_pub, x_from_ed, 32) == 0) {
+        *idkp = kp;
+        rc = 0;
+    }
+    sodium_memzero(wide, sizeof wide);
+    sodium_memzero(&kp, sizeof kp);
+    return rc;
+}
+
+// RFC 8032's signing, from the scalar and nonce key where libsodium would derive both from a seed.
+static void sign_with_scalar(const identity_keypair_t *idkp, const uint8_t *msg, size_t len,
+                             uint8_t sig[ID_SIGN_LEN]) {
+    crypto_hash_sha512_state st;
+    uint8_t h[64], r[32], k[32], ka[32];
+    crypto_hash_sha512_init(&st);
+    crypto_hash_sha512_update(&st, idkp->priv + 32, 32);
+    crypto_hash_sha512_update(&st, msg, len);
+    crypto_hash_sha512_final(&st, h);
+    crypto_core_ed25519_scalar_reduce(r, h);
+    if (crypto_scalarmult_ed25519_base_noclamp(sig, r) != 0) {
+        // r came out zero (odds 2^-252): no signature, rather than one that gives the scalar away.
+        memset(sig, 0, ID_SIGN_LEN);
+    } else {
+        crypto_hash_sha512_init(&st);
+        crypto_hash_sha512_update(&st, sig, 32);
+        crypto_hash_sha512_update(&st, idkp->pub, ID_SIGN_PUB_LEN);
+        crypto_hash_sha512_update(&st, msg, len);
+        crypto_hash_sha512_final(&st, h);
+        crypto_core_ed25519_scalar_reduce(k, h);
+        crypto_core_ed25519_scalar_mul(ka, k, idkp->priv);
+        crypto_core_ed25519_scalar_add(sig + 32, r, ka);
+    }
+    sodium_memzero(&st, sizeof st);
+    sodium_memzero(h, sizeof h);
+    sodium_memzero(r, sizeof r);
+    sodium_memzero(ka, sizeof ka);
+}
+
+void identity_sign_bytes(const identity_keypair_t *idkp, const uint8_t *msg, size_t len, uint8_t sig[ID_SIGN_LEN]) {
+    if (idkp->scalar) sign_with_scalar(idkp, msg, len, sig);
+    else crypto_sign_detached(sig, NULL, msg, len, idkp->priv);
 }
 
 void identity_fingerprint(const uint8_t id_pub[ID_SIGN_PUB_LEN], uint8_t fp[ID_FP_LEN]) {
@@ -344,7 +436,7 @@ void identity_sign(const identity_keypair_t *idkp,
                     uint8_t sig[ID_SIGN_LEN]) {
     uint8_t buf[SIGN_MSG_LEN];
     sign_message(buf, my_eph_pub, my_id, their_eph_pub, their_id);
-    crypto_sign_detached(sig, NULL, buf, SIGN_MSG_LEN, idkp->priv);
+    identity_sign_bytes(idkp, buf, SIGN_MSG_LEN, sig);
 }
 
 int identity_verify(const uint8_t id_pub[ID_SIGN_PUB_LEN], const uint8_t sig[ID_SIGN_LEN],

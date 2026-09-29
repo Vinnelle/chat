@@ -16,11 +16,12 @@
 #include <signal.h>
 #include <ctype.h>
 #include <stdarg.h>
+#include <time.h>
 #include "os.h"
 #include "build_stamp.h"
 
 static const char *USAGE =
-    "usage: chat [--nick NAME] [--colour NAME|#HEX] [--identity native|age|pgp:KEYFILE] [--simple]\n"
+    "usage: chat [--nick NAME] [--colour NAME|#HEX] [--identity age|pgp[:KEYFILE]] [--simple]\n"
     "            [--routing direct+nostr|direct|tor] [--nodht] [--noipv6] [--nolan] [--noportmap]\n"
     "            [--nonostr] [--relay wss://HOST ...] [--tor-launch auto|always|never] [--tor-path PATH]\n"
     "            [--tor-socks HOST:PORT] [--tor-control HOST:PORT]\n"
@@ -30,37 +31,46 @@ static const char *USAGE =
     "With a real terminal, chat opens a full-screen UI: sessions you've joined or created\n"
     "sit in a list on the left (switch with Tab/Shift+Tab), the selected one's messages and\n"
     "timestamps fill the rest of the screen, who's online sits below the session list, and\n"
-    "you type at the bottom. Your nickname and, optionally, an identity key are set up in\n"
-    "this same screen the first time you run it.\n"
+    "you type at the bottom. It starts on the settings page, where routing, your nickname,\n"
+    "colour, signing key and the rest are set up in one place; Done at the bottom (or Esc)\n"
+    "goes on to your sessions. Nothing reaches the network before Done: no tor is looked\n"
+    "for or started, and no --peer name is looked up.\n"
     "\n"
     "  Ctrl+N   create a new session (asks for a password; blank is fine, still encrypts)\n"
     "  Ctrl+J   join an existing session (asks for its id, then its password)\n"
-    "  Ctrl+W   leave the session you're currently looking at\n"
-    "  Tab      next session       Shift+Tab   previous session\n"
+    "  Tab      next session       Shift+Tab   previous session (j/k in NORMAL too)\n"
     "  Ctrl+B   hide/show the session sidebar   Ctrl+O   hide/show the console\n"
     "  Ctrl+T   hide/show the chat (hide two of the three and the last one fills the screen)\n"
-    "  Ctrl+S   settings: routing, identity, notifications, layout (also /settings)\n"
+    "  Ctrl+S   settings: routing, identity, notifications, layout (also :set)\n"
     "  Ctrl+C   quit chat (every open session leaves cleanly first)\n"
     "\n"
     "Each session has two sections: the conversation, and a console above it for everything\n"
     "that isn't chat - people joining and leaving, the internet lookup, command output. A\n"
     "session you joined is locked (the prompt says \"connecting\") until someone answers.\n"
+    "The bottom bar says where you are, what the keys do there, and the reply to what you\n"
+    "just did, until your next key.\n"
     "\n"
-    "The input line is a small vim. It starts in INSERT: type and press Enter to send.\n"
-    "  Esc      INSERT -> NORMAL: h/l move, 0/$ ends, x delete, i/a/I/A back to INSERT\n"
+    "The input line is a small vim. It starts in NORMAL:\n"
+    "  i/a/I/A  NORMAL -> INSERT: type and press Enter to send, Ctrl+W deletes a word\n"
+    "  Esc      INSERT -> NORMAL: h/l move, 0/$ ends, x delete, j/k switch session\n"
     "  :        NORMAL -> COMMAND: type a command, Tab completes, Enter runs, Esc cancels\n"
     "The password and session-id prompts are plain fields: Enter confirms, Esc cancels,\n"
     "and whatever you were typing before comes back afterwards.\n"
     "\n"
-    "Commands are the same whether typed as /name in INSERT or :name in COMMAND:\n"
-    "  /new /join /quit (/q) /quitall (/qa) /nick [NAME] /sign /copyid /update\n"
-    "  /peers /verify NICK /colour [NAME|#HEX] /notify [all|mentions|none] /net /settings\n"
-    "  /netverbose [on|off] /help   - /help lists them all with a line each\n"
+    "Commands only run from COMMAND (Esc, then :name); everything typed in INSERT is sent:\n"
+    "  :new :join :quit (:q) :quitall (:qa) :copyid :update :peers :verify NICK :net\n"
+    "  :port [N] :set [NAME [VALUE]] :help   - :help lists them all with a line each\n"
+    "\n"
+    "Each setting is a row on the settings page, and :set NAME VALUE sets it without opening\n"
+    "the page (:set nick bob, :set net verbose, :set routing tor). :set alone opens the page,\n"
+    "and :set NAME opens it on that row. The page and those under it take the same keys:\n"
+    "j/k move, g/G ends, Enter chooses, h/l change a value or go out/in, Esc goes back, q\n"
+    "closes.\n"
     "\n"
     "  --nick      display name; a random one (\"swift-otter42\"-style) is assigned if\n"
-    "              omitted - /nick renames it anytime, shared by every session\n"
+    "              omitted - :set nick renames it anytime, shared by every session\n"
     "  --colour    your display colour in every session; random by default (--color too)\n"
-    "  --routing   how sessions reach peers, instead of asking at startup:\n"
+    "  --routing   how sessions reach peers, preset on the settings page chat opens on:\n"
     "              direct+nostr: UDP between peers, found through the BitTorrent DHT (IPv4\n"
     "              and IPv6), the LAN and a router port mapping, with Nostr relays carrying\n"
     "              encrypted traffic when UDP can't get through. direct: the same without\n"
@@ -83,17 +93,23 @@ static const char *USAGE =
     "  --tor-socks, --tor-control\n"
     "              where to look for a running tor (default 127.0.0.1:9050 and :9051; Tor\n"
     "              Browser's 9150 and 9151 are tried too)\n"
-    "  --identity  native: a fresh Ed25519 identity, used to sign every session you join.\n"
-    "              age: same, plus an AGE recipient string (age1...) others can `age -r`\n"
-    "              encrypt files to. pgp:KEYFILE: import an UNENCRYPTED armored EdDSA\n"
-    "              secret key from real gpg and sign with it instead. There's no prompt\n"
-    "              for this at startup anymore - chat opens unsigned by default, and\n"
-    "              /sign sets one up whenever you actually want it,\n"
-    "              live, without restarting: browse for a key file, paste one directly\n"
-    "              (never written to disk), or turn signing off again.\n"
+    "  --identity  age: an Ed25519 identity, used to sign every session you join, with an\n"
+    "              AGE recipient string (age1...) others can `age -r` encrypt files to.\n"
+    "              pgp: the same as a PGP key, whose public key others can import.\n"
+    "              Both ask for a password (or take it from CHAT_SIGN_PASSWORD) and make\n"
+    "              the key from it and this device's id: the same password on this device\n"
+    "              and OS always makes the same key. Always use the same password to keep\n"
+    "              an established signing identity. Blank makes a new key each run.\n"
+    "              age:KEYFILE, pgp:KEYFILE: sign with your own key instead - an identity\n"
+    "              file from age-keygen, or an UNENCRYPTED armored EdDSA secret key from\n"
+    "              real gpg. Without it chat opens unsigned; Signing identity on the\n"
+    "              settings page (:set sign) sets any of these up live, without restarting\n"
+    "              - a key from a file browser or pasted directly (never written to disk)\n"
+    "              - or turns it off.\n"
     "  --simple    skip the full-screen UI even on a real terminal: plain \"[HH:MM] ...\"\n"
-    "              lines, one session, reads lines from stdin. For scripting/low-feature\n"
-    "              terminals; this is also the automatic fallback when stdout isn't a tty.\n"
+    "              lines, one session, reads lines from stdin; a line starting with : is a\n"
+    "              command (:help lists them). For scripting/low-feature terminals; this is\n"
+    "              also the automatic fallback when stdout isn't a tty.\n"
     "  --session   also join this session immediately at startup (needs --port; \"chat\n"
     "              --session ID\" alone still opens straight into the TUI to join by hand)\n"
     "  --update    install the latest release from GitHub and exit, without opening chat\n"
@@ -105,6 +121,8 @@ static const char *USAGE =
     "for a multi-session UI; ask if you want it back for a specific session).\n";
 
 #define MAX_SESSIONS 12
+#define MAX_PEER_ARGS 16
+#define PEER_ARG_LEN 256
 
 typedef struct {
     chat_t engine;
@@ -116,24 +134,35 @@ typedef struct {
 } session_slot_t;
 
 typedef enum {
-    MODE_ROUTE_CHOICE,
     MODE_SETTINGS,
     MODE_SETTINGS_EDIT,
     MODE_SIGN_CHOICE,
-    MODE_SIGN_PGP_CHOICE,
-    MODE_SIGN_PGP_BROWSE,
-    MODE_SIGN_PGP_PASTE,
+    MODE_SIGN_BROWSE,
+    MODE_SIGN_PASTE,
+    MODE_SIGN_PASSWORD,
     MODE_CHAT,
     MODE_NEW_PASSWORD,
     MODE_JOIN_ID,
     MODE_JOIN_PASSWORD
 } app_mode_t;
 
+// KEY_MADE is a new random key, KEY_DERIVED one made from a password on this device.
+typedef enum { KEY_MADE, KEY_DERIVED, KEY_FILE, KEY_PASTED } key_origin_t;
+
+// A PGP key's fingerprint covers its creation time, so a key made from a password always
+// gets this one (2026-01-01) to keep its fingerprint.
+#define DERIVED_PGP_CREATED 1767225600u
+
 #define MAX_DIR_ITEMS 512
 
 typedef struct {
+    char name[200];   // a folder's ends in '/'
+    int is_dir;
+} dir_entry_t;
+
+typedef struct {
     char path[900];
-    tui_list_item_t items[MAX_DIR_ITEMS];
+    dir_entry_t items[MAX_DIR_ITEMS];
     int n_items;
     int selected;
 } browser_t;
@@ -150,7 +179,12 @@ typedef struct {
     int net_verbose;
     uint16_t default_port;
     int settings_sel;
-    char settings_note[200];
+    char message[200];   // the bottom bar's reply to the last thing done, until the next key
+    int onboarding;   // the settings page chat opens on: its Done starts chat proper
+    int sign_sel;
+    key_origin_t key_origin;       // where the identity in use came from
+    uint32_t pgp_created;          // a PGP key made here: its creation time, which its fingerprint covers
+    identity_source_t load_kind;   // AGE or PGP: what the key file browser or the paste page takes
     int tor_launch;
     char tor_path[512];
     uint8_t color[3];
@@ -173,7 +207,8 @@ typedef struct {
     char pending_auto_session[MAX_SESSION_NAME + 1];
     char pending_auto_password[256];
     uint16_t pending_auto_port;
-    addr_t pending_auto_peers[16];
+    // As given: a name in them is only looked up once the settings page chat opens on is done.
+    char pending_auto_peer_args[MAX_PEER_ARGS][PEER_ARG_LEN];
     int pending_auto_n_peers;
 } app_t;
 
@@ -289,15 +324,33 @@ static void console_note(session_slot_t *s, const char *fmt, ...) {
     g_app.dirty = 1;
 }
 
-static void copy_session_id(session_slot_t *s) {
-    if (!s) { push_log("* no session selected - nothing to copy"); return; }
-    const char *sid = s->engine.session_name;
-    char b64[(MAX_SESSION_NAME + 2) / 3 * 4 + 1];
-    base64_encode((const uint8_t *)sid, strlen(sid), b64);
+// A reply to what the user just did, on the bottom bar until their next key. Reports and anything
+// that happens on its own go to the console instead.
+static void note(const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    vsnprintf(g_app.message, sizeof g_app.message, fmt, ap);
+    va_end(ap);
+    g_app.dirty = 1;
+}
+
+// Asks the terminal to put text (up to 255 bytes) on the clipboard; one that doesn't allow OSC 52 ignores it.
+#define OSC52_MAX 1024   // a PGP public key fits
+
+static void osc52_copy(const char *text) {
+    size_t n = strlen(text);
+    if (n > OSC52_MAX) n = OSC52_MAX;
+    char b64[(OSC52_MAX + 2) / 3 * 4 + 1];
+    base64_encode((const uint8_t *)text, n, b64);
     char osc[sizeof b64 + 16];
     snprintf(osc, sizeof osc, "\x1b]52;c;%s\x07", b64);
     platform_write_stdout(osc, strlen(osc));
-    console_note(s, "* session id copied to clipboard (OSC 52): %s", sid);
+}
+
+static void copy_session_id(session_slot_t *s) {
+    if (!s) { note("no session selected - nothing to copy"); return; }
+    const char *sid = s->engine.session_name;
+    osc52_copy(sid);
+    note("session id copied to the clipboard (OSC 52): %s", sid);
 }
 
 // ---- which tor Tor mode uses ----
@@ -308,7 +361,7 @@ static void copy_session_id(session_slot_t *s) {
 // a tor of its own (torproc.c).
 
 typedef enum { TOR_LAUNCH_AUTO = 0, TOR_LAUNCH_ALWAYS = 1, TOR_LAUNCH_NEVER = 2 } tor_launch_t;
-static const char *const TOR_LAUNCH_NAMES[] = { "when none is running", "always", "never" };
+static const char *const TOR_LAUNCH_NAMES[] = { "auto", "always", "never" };
 
 typedef enum { TL_OFF, TL_PROBING, TL_STARTING, TL_READY, TL_FAILED } tor_link_state_t;
 
@@ -324,7 +377,7 @@ static struct {
     double retry_at;
 } g_tor;
 
-// Downloads (/update) go through Tor whenever Tor mode is on: to the tor in use once there is
+// Downloads (:update) go through Tor whenever Tor mode is on: to the tor in use once there is
 // one, and to a port nothing listens on until then, so they fail instead of going direct.
 static void sync_update_proxy(void) {
     if (g_app.route.mode != ROUTE_TOR) update_set_proxy(NULL);
@@ -353,7 +406,7 @@ static void tor_link_start_own(double now) {
             push_log("* tor: can't use %s as tor - it has to be a program only root or you can change", g_app.tor_path);
         else
             push_log("* tor: tor isn't installed. Install it (Arch: sudo pacman -S tor, Debian/Ubuntu: sudo apt install tor, "
-                     "Windows: the Tor Expert Bundle), set where it is in /settings, or start Tor Browser");
+                     "Windows: the Tor Expert Bundle), set where it is with :set torpath, or start Tor Browser");
         tor_link_fail(now, 30.0);
         return;
     }
@@ -397,7 +450,7 @@ static void tor_link_step(double now) {
             } else if (g_app.tor_launch == TOR_LAUNCH_NEVER) {
                 if (r == -2) push_log("* tor: the running tor won't let chat in: %s", why);
                 else push_log("* tor: no tor is running at %s or Tor Browser's ports - start one, or let chat start its "
-                              "own (/settings: Start chat's own tor)", g_app.route.tor.control);
+                              "own (:set torlaunch auto)", g_app.route.tor.control);
                 tor_link_fail(now, 30.0);
             } else {
                 if (r == -2) push_log("* tor: a tor is running but won't let chat in (%s) - starting chat's own", why);
@@ -463,6 +516,17 @@ static void tor_link_line(char *out, size_t cap) {
     }
 }
 
+// The running executable's SHA-256, taken at startup before :update can replace the file.
+static struct { int ok; uint8_t hash[BUILD_HASH_LEN]; } g_self_build;
+
+// What peers are told about this build ("v"), and how the builds they tell of are checked.
+static void set_build_opts(chat_opts_t *o) {
+    copy_str(o->version, CHAT_VERSION, sizeof o->version);
+    o->has_build = g_self_build.ok;
+    memcpy(o->build_hash, g_self_build.hash, BUILD_HASH_LEN);
+    o->builds = update_official_hashes;
+}
+
 static session_slot_t *start_session(const char *session_name, const char *password, int created,
                                       uint16_t port, const addr_t *peers, int n_peers) {
     session_slot_t *s = find_free_slot();
@@ -501,6 +565,7 @@ static session_slot_t *start_session(const char *session_name, const char *passw
     memcpy(o.color, g_app.color, 3);
     o.identity_source = g_app.identity_source;
     if (g_app.identity_source != IDENT_NONE) o.identity = g_app.identity;
+    set_build_opts(&o);
 
     chat_init(&s->engine, &o, session_print, session_notify, s);
     crypto_wipe(&o, sizeof o);
@@ -531,6 +596,16 @@ static session_slot_t *start_session(const char *session_name, const char *passw
     return s;
 }
 
+static int pgp_key_made_here(void) {
+    return g_app.identity_source == IDENT_PGP && (g_app.key_origin == KEY_MADE || g_app.key_origin == KEY_DERIVED);
+}
+
+// The PGP key made here, armored, with the nick as it is now in its user id.
+static void pgp_public_key(char armor[PGP_ARMOR_MAX], uint8_t fp[PGP_FP_LEN]) {
+    pgp_export_public_key(&g_app.identity, g_app.nick[0] ? g_app.nick : "chat", g_app.pgp_created,
+                          armor, PGP_ARMOR_MAX, fp);
+}
+
 static void show_identity_result(void) {
     if (g_app.identity_source == IDENT_NONE) return;
     uint8_t fp[ID_FP_LEN]; identity_fingerprint(g_app.identity.pub, fp);
@@ -541,45 +616,39 @@ static void show_identity_result(void) {
         age_export_recipient(&g_app.identity, recipient);
         push_log("AGE recipient (others can `age -r` encrypt files to you): %s", recipient);
     }
-}
-
-static void begin_sign(void) {
-    g_app.mode = MODE_SIGN_CHOICE;
-    g_app.dirty = 1;
-    if (g_app.identity_source == IDENT_NONE) {
-        push_log("* no signing identity set. add one? [n] no  [a] age  [p] pgp (Esc cancels, keeps it off)");
-    } else {
-        const char *kind = g_app.identity_source == IDENT_NATIVE ? "native"
-                          : g_app.identity_source == IDENT_AGE ? "age" : "pgp";
-        uint8_t fp[ID_FP_LEN]; identity_fingerprint(g_app.identity.pub, fp);
-        char fphex[ID_FP_LEN * 2 + 1]; hex_encode(fp, ID_FP_LEN, fphex);
-        push_log("* current identity: %s, fingerprint %s. replace it? [n] turn off  [a] age  [p] pgp "
-                 "(Esc cancels, keeps this one)", kind, fphex);
+    if (pgp_key_made_here()) {
+        char armor[PGP_ARMOR_MAX]; uint8_t fp[PGP_FP_LEN];
+        pgp_public_key(armor, fp);
+        push_log("PGP public key (others can `gpg --import` it; Enter on it in the settings copies it):");
+        // Line by line, the blank one after BEGIN included: gpg wants it.
+        for (char *line = armor, *nl; *line; line = nl + 1) {
+            nl = strchr(line, '\n');
+            if (!nl) { push_log("%s", line); break; }
+            *nl = '\0';
+            push_log("%s", line);
+        }
     }
-}
-
-static void identity_chosen(void) {
-    int any = 0;
-    for (int i = 0; i < MAX_SESSIONS; i++) {
-        if (!g_app.used[i] || g_app.sessions[i].initialising) continue;
-        chat_set_identity(&g_app.sessions[i].engine, g_app.identity_source, &g_app.identity);
-        any = 1;
-    }
-    if (!any) push_log(g_app.identity_source == IDENT_NONE
-                        ? "* signing stays off for sessions you open from now on"
-                        : "* signing key set - it applies to sessions you open from now on");
-    g_app.mode = MODE_CHAT;
-    g_app.dirty = 1;
 }
 
 static void finish_onboarding(void) {
     g_app.mode = MODE_CHAT;
 
-    push_log("* ready. Ctrl+N (or /new) creates a session, Ctrl+J (or /join) joins one, "
-             "/sign adds a signing key so others can verify you, /help lists everything");
+    push_log("* ready. Ctrl+N (or :new) creates a session, Ctrl+J (or :join) joins one, "
+             "Ctrl+S (or :set) brings the settings back, :help lists everything");
     if (g_app.pending_auto_session[0]) {
+        addr_t peers[MAX_PEER_ARGS];
+        int n_peers = 0;
+        if (g_app.pending_auto_n_peers > 0 && g_app.route.mode == ROUTE_TOR) {
+            // Looking a name up here would go around Tor.
+            push_log("* --peer left out: Tor mode never reaches peers over UDP, so their addresses aren't looked up");
+        } else {
+            for (int i = 0; i < g_app.pending_auto_n_peers; i++) {
+                if (addr_parse_hostport(g_app.pending_auto_peer_args[i], &peers[n_peers]) == 0) n_peers++;
+                else push_log("* --peer %s left out: can't find that address", g_app.pending_auto_peer_args[i]);
+            }
+        }
         start_session(g_app.pending_auto_session, g_app.pending_auto_password, 0,
-                      g_app.pending_auto_port, g_app.pending_auto_peers, g_app.pending_auto_n_peers);
+                      g_app.pending_auto_port, peers, n_peers);
         crypto_wipe(g_app.pending_auto_password, sizeof g_app.pending_auto_password);
         g_app.pending_auto_session[0] = '\0';
     }
@@ -587,9 +656,9 @@ static void finish_onboarding(void) {
 }
 
 static int entry_cmp(const void *a, const void *b) {
-    const tui_list_item_t *ea = a, *eb = b;
+    const dir_entry_t *ea = a, *eb = b;
     if (ea->is_dir != eb->is_dir) return eb->is_dir - ea->is_dir;
-    return strcasecmp(ea->label, eb->label);
+    return strcasecmp(ea->name, eb->name);
 }
 
 static int path_is_root(const char *p) {
@@ -619,47 +688,28 @@ static void browser_add(void *ctx, const char *name, int is_dir) {
     // Names go straight to the terminal; one carrying escape sequences could drive it.
     if (has_control_chars(name)) return;
     if (strcmp(name, "..") == 0 && path_is_root(b->path)) return;
-    tui_list_item_t *item = &b->items[b->n_items++];
-    copy_str(item->label, name, sizeof item->label);
+    dir_entry_t *item = &b->items[b->n_items++];
+    snprintf(item->name, sizeof item->name, "%s%s", name, is_dir ? "/" : "");
     item->is_dir = is_dir;
 }
 
 static int browser_load(browser_t *b, const char *path) {
-    browser_t tmp;
+    static browser_t tmp;
     memset(&tmp, 0, sizeof tmp);
     copy_str(tmp.path, path, sizeof tmp.path);
     if (platform_list_dir(tmp.path, browser_add, &tmp) != 0) return -1;
-    qsort(tmp.items, (size_t)tmp.n_items, sizeof(tui_list_item_t), entry_cmp);
+    qsort(tmp.items, (size_t)tmp.n_items, sizeof(dir_entry_t), entry_cmp);
     *b = tmp;
     return 0;
 }
 
-static void begin_pgp_browse(void) {
-    const char *home = platform_home_dir();
-    if (!home || browser_load(&g_app.browser, home) != 0) browser_load(&g_app.browser, "/");
-    g_app.mode = MODE_SIGN_PGP_BROWSE;
-    g_app.dirty = 1;
-}
-
-static void begin_pgp_paste(void) {
-    g_app.paste_len = 0;
-    g_app.paste_buf[0] = '\0';
-    copy_str(g_app.paste_status, "pasting (0 bytes so far, Esc to cancel)", sizeof g_app.paste_status);
-    g_app.mode = MODE_SIGN_PGP_PASTE;
-    push_log("paste your armored PGP private key now - it's picked up automatically once the END line arrives");
-}
-
-static void try_load_pgp_from_browser(void) {
-    tui_list_item_t *sel = &g_app.browser.items[g_app.browser.selected];
-    char full[1200]; path_join(full, sizeof full, g_app.browser.path, sel->label);
-    if (pgp_import_secret_key(full, &g_app.identity) == 0) {
-        g_app.identity_source = IDENT_PGP;
-        show_identity_result();
-        identity_chosen();
-    } else {
-        push_log("* could not load a PGP identity from %s (must be an unencrypted EdDSA/Ed25519 secret key)", sel->label);
-    }
-    g_app.dirty = 1;
+// The path of an entry in the folder the browser shows, without a folder's trailing '/'.
+static void browser_entry_path(const browser_t *b, const dir_entry_t *e, char *out, size_t cap) {
+    char name[sizeof e->name];
+    copy_str(name, e->name, sizeof name);
+    size_t n = strlen(name);
+    if (n > 0 && name[n - 1] == '/') name[n - 1] = '\0';
+    path_join(out, cap, b->path, name);
 }
 
 // New/join prompts borrow the input line: the draft is stashed and comes back when the prompt ends.
@@ -705,24 +755,6 @@ static cmd_result_t app_quitall(void *ctx, const char *arg) {
     return CMD_OK;
 }
 
-static cmd_result_t app_nick(void *ctx, const char *arg) {
-    (void)ctx;
-    if (!*arg) { push_log("* current nickname: %s. usage: /nick NAME", g_app.nick); return CMD_OK; }
-    chat_clean_nick(arg, g_app.nick);
-    int any = 0;
-    for (int i = 0; i < MAX_SESSIONS; i++)
-        if (g_app.used[i]) { chat_set_nick(&g_app.sessions[i].engine, g_app.nick); any = 1; }
-    if (!any) push_log("* your nickname is now %s", g_app.nick);
-    g_app.dirty = 1;
-    return CMD_OK;
-}
-
-static cmd_result_t app_sign(void *ctx, const char *arg) {
-    (void)ctx; (void)arg;
-    begin_sign();
-    return CMD_OK;
-}
-
 static cmd_result_t app_copyid(void *ctx, const char *arg) {
     (void)ctx; (void)arg;
     copy_session_id(g_app.selected);
@@ -742,10 +774,10 @@ static cmd_result_t app_update(void *ctx, const char *arg) {
 
 static cmd_result_t app_help(void *ctx, const char *arg);
 
-// ---- routing, asked once at startup ----
+// ---- routing: asked at the start of --simple; the full-screen UI opens on the settings page ----
 
 static const char *const ROUTE_CHOICE_LINES[] = {
-    "* how should chat reach people? (Ctrl+S or /settings changes this, and more, later)",
+    "* how should chat reach people?",
     ("*   [1] direct + Nostr fallback (recommended): UDP straight to peers, found through the BitTorrent DHT "
      "(IPv4 and IPv6), your LAN and a router port mapping. Public Nostr relays carry the traffic, encrypted "
      "and padded, when UDP can't get through"),
@@ -771,101 +803,117 @@ static const char *route_label(void) {
     return g_app.route.nostr ? "direct, with Nostr relay fallback" : "direct only";
 }
 
-static void finish_onboarding(void);
-
-static void begin_route_choice(void) {
-    g_app.mode = MODE_ROUTE_CHOICE;
-    g_app.input.hint = "press 1, 2 or 3 (Enter takes 1)";
-    for (size_t i = 0; i < sizeof ROUTE_CHOICE_LINES / sizeof ROUTE_CHOICE_LINES[0]; i++) push_log("%s", ROUTE_CHOICE_LINES[i]);
-}
-
-static void route_chosen(int choice) {
-    g_app.input.hint = NULL;
-    apply_route_choice(choice);
-    sync_update_proxy();
-    push_log("* routing: %s", route_label());
-    tor_link_ensure(now_seconds());
-    finish_onboarding();
-}
-
 // ---- the settings page ----
+//
+// Every setting is a row on this page, and :set NAME VALUE sets a row without opening it. Either
+// way the change applies at once, to the open sessions and to the ones opened after.
 
 enum { K_TOGGLE, K_CHOICE, K_TEXT, K_SECRET, K_ACTION };
 
 typedef enum {
-    SET_ROUTING, SET_DHT4, SET_DHT6, SET_PORTMAP, SET_LAN, SET_NOSTR, SET_RELAYS,
+    SET_ROUTING, SET_DHT4, SET_DHT6, SET_PORTMAP, SET_LAN,
     SET_TOR_LAUNCH, SET_TOR_PATH, SET_TOR_SOCKS, SET_TOR_CONTROL, SET_TOR_PASSWORD,
-    SET_NICK, SET_COLOUR, SET_SIGN,
-    SET_NOTIFY, SET_NETVERBOSE, SET_PORT,
+    SET_NOSTR, SET_RELAYS,
+    SET_NICK, SET_COLOUR, SET_SIGN, SET_AGE_RECIPIENT, SET_PGP_PUBKEY,
+    SET_NOTIFY, SET_NET, SET_PORT,
     SET_SIDEBAR, SET_CONSOLE, SET_CHAT
 } setting_id_t;
 
 typedef struct {
     setting_id_t id;
     const char *section;
+    const char *key;      // its name after :set
     const char *label;
     int kind;
+    const char *values;   // what :set takes, or NULL for a row only the page sets
     const char *help;
 } setting_def_t;
 
 static const setting_def_t SETTINGS[] = {
-    { SET_ROUTING, "routing", "Routing", K_CHOICE,
-      "direct: UDP straight between peers, using the options below. tor: Tor onion services only - hides your "
-      "IP address from everyone; needs tor or Tor Browser running. Applies to sessions you open from now on." },
-    { SET_DHT4, NULL, "BitTorrent DHT (IPv4)", K_TOGGLE,
+    { SET_ROUTING, "routing", "routing", "Routing", K_CHOICE, "direct|tor",
+      "direct: UDP straight between peers, found with the options below. tor: onion services, plus the Nostr "
+      "relays through Tor to meet direct members - hides your IP address from everyone. Uses a running tor or "
+      "starts chat's own; connecting takes longer. Applies to sessions you open from now on." },
+    { SET_DHT4, NULL, "dht", "BitTorrent DHT (IPv4)", K_TOGGLE, "on|off",
       "Finds peers on the internet through the public BitTorrent DHT. Its nodes see your IP address next to a "
       "lookup key only room members can compute." },
-    { SET_DHT6, NULL, "IPv6 DHT", K_TOGGLE,
+    { SET_DHT6, NULL, "dht6", "IPv6 DHT", K_TOGGLE, "on|off",
       "Also looks peers up on the IPv6 DHT (BEP 32). IPv6 usually has no NAT to punch through, so peers there "
       "connect more reliably." },
-    { SET_PORTMAP, NULL, "Router port mapping", K_TOGGLE,
+    { SET_PORTMAP, NULL, "portmap", "Router port mapping", K_TOGGLE, "on|off",
       "Asks your router to forward this session's UDP port (PCP, NAT-PMP or UPnP-IGD), so peers behind NATs that "
       "can't be hole-punched still reach you. Removed when the session ends; the router may log it." },
-    { SET_LAN, NULL, "LAN discovery", K_TOGGLE,
+    { SET_LAN, NULL, "lan", "LAN discovery", K_TOGGLE, "on|off",
       "Broadcasts an encrypted beacon on your local network, so room members there find you without the internet." },
-    { SET_NOSTR, NULL, "Nostr relays", K_TOGGLE,
+    { SET_TOR_LAUNCH, NULL, "torlaunch", "Start chat's own tor", K_CHOICE, "auto|always|never",
+      "auto: use a tor that's already running if its control port lets chat log in - it keeps its entry guards "
+      "and any bridges - else start chat's own. always: chat's own, apart from any other tor, but with new entry "
+      "guards each run and nothing from your torrc. never: only a running tor. Chat's own tor has random "
+      "127.0.0.1 ports, a cookie login and a private temporary folder deleted on exit." },
+    { SET_TOR_PATH, NULL, "torpath", "Tor program", K_TEXT, "PATH",
+      "The tor chat starts: a full path, or empty for tor on PATH or in the usual folders. It has to be a "
+      "program only root or you can change." },
+    { SET_TOR_SOCKS, NULL, "torsocks", "Tor SOCKS port", K_TEXT, "HOST:PORT",
+      "Where to look for a running tor's SOCKS port (host:port). With the defaults, Tor Browser's "
+      "127.0.0.1:9150 is tried too. Applies to sessions you open from now on." },
+    { SET_TOR_CONTROL, NULL, "torcontrol", "Tor control port", K_TEXT, "HOST:PORT",
+      "Where to look for a running tor's control port (host:port); it needs ControlPort on, and chat has to be "
+      "able to read its cookie file (or have its password). Applies to sessions you open from now on." },
+    { SET_TOR_PASSWORD, NULL, "torpassword", "Tor control password", K_SECRET, NULL,
+      "Only for a tor set up with HashedControlPassword. Kept in memory only. Applies to sessions you open from now on." },
+    // Last in the section: the relays apply in both modes, so they stay put when the mode changes.
+    { SET_NOSTR, NULL, "nostr", "Nostr relays", K_TOGGLE, "on|off",
       "Tor and direct members can only reach each other through these relays, so both need this on. Direct: "
       "they carry traffic when UDP can't get through. Tor: they're reached only through Tor and never see your "
       "IP. Each event has a one-off key, a random kind, one size and fresh encryption, under a tag that changes "
       "every 10 minutes." },
-    { SET_RELAYS, NULL, "Relay list", K_TEXT,
+    { SET_RELAYS, NULL, "relays", "Relay list", K_TEXT, "wss://URL ... (up to 6)",
       "The relays the fallback uses: up to 6 wss:// URLs, separated by spaces or commas." },
-    { SET_TOR_LAUNCH, NULL, "Start chat's own tor", K_CHOICE,
-      "when none is running: use a tor that's already running if its control port lets chat log in - it keeps "
-      "its entry guards and any bridges - else start chat's own. always: chat's own, apart from any other tor, "
-      "but with new entry guards each run and nothing from your torrc. never: only a running tor. Chat's own tor "
-      "has random 127.0.0.1 ports, a cookie login and a private temporary folder deleted on exit." },
-    { SET_TOR_PATH, NULL, "Tor program", K_TEXT,
-      "The tor chat starts: a full path, or empty for tor on PATH or in the usual folders. It has to be a "
-      "program only root or you can change." },
-    { SET_TOR_SOCKS, NULL, "Tor SOCKS port", K_TEXT,
-      "Where to look for a running tor's SOCKS port (host:port). With the defaults, Tor Browser's "
-      "127.0.0.1:9150 is tried too. Applies to sessions you open from now on." },
-    { SET_TOR_CONTROL, NULL, "Tor control port", K_TEXT,
-      "Where to look for a running tor's control port (host:port); it needs ControlPort on, and chat has to be "
-      "able to read its cookie file (or have its password). Applies to sessions you open from now on." },
-    { SET_TOR_PASSWORD, NULL, "Tor control password", K_SECRET,
-      "Only for a tor set up with HashedControlPassword. Kept in memory only. Applies to sessions you open from now on." },
-    { SET_NICK, "you", "Nickname", K_TEXT, "Your name in every session." },
-    { SET_COLOUR, NULL, "Colour", K_TEXT,
-      "Your colour in every session. Left/right step through the palette; Enter takes a name or #RRGGBB." },
-    { SET_SIGN, NULL, "Signing identity", K_ACTION,
-      "A key that signs your handshakes so peers can check it's you. Enter sets one up, replaces it or turns it off." },
-    { SET_NOTIFY, "chat", "Notifications", K_CHOICE,
+    { SET_NICK, "you", "nick", "Nickname", K_TEXT, "NAME", "Your name in every session." },
+    { SET_COLOUR, NULL, "colour", "Colour", K_TEXT, "NAME|#RRGGBB",
+      "Your colour in every session. h/l step through the palette; Enter takes a name or #RRGGBB." },
+    { SET_SIGN, NULL, "sign", "Signing identity", K_ACTION, "off|age|pgp",
+      "A key that signs your handshakes so peers can check it's you: an AGE or PGP key made here from a "
+      "password, or your own from a file or pasted in. Enter chooses one, replaces it or turns signing off. Kept "
+      "in memory only." },
+    { SET_AGE_RECIPIENT, NULL, "agerecipient", "AGE recipient", K_ACTION, NULL,
+      "The age1... string others give age -r to encrypt files to you. Enter copies it to the clipboard." },
+    { SET_PGP_PUBKEY, NULL, "pgpkey", "PGP public key", K_ACTION, NULL,
+      "The public half of the PGP key made here, by its fingerprint, for others to gpg --import. Enter copies "
+      "it to the clipboard; it's in the console too." },
+    { SET_NOTIFY, "chat", "notify", "Notifications", K_CHOICE, "all|mentions|none",
       "Desktop notifications, for open sessions and new ones: every message, mentions of your nick, or none." },
-    { SET_NETVERBOSE, NULL, "Network log", K_TOGGLE,
-      "Logs every handshake packet, relay and Tor event to the console, in every session." },
-    { SET_PORT, NULL, "UDP port", K_TEXT,
-      "The UDP port new sessions listen on; 0 picks a free one each time. /port changes an open session's." },
-    { SET_SIDEBAR, "layout", "Session sidebar", K_TOGGLE, "The list of sessions and who is online (Ctrl+B)." },
-    { SET_CONSOLE, NULL, "Console", K_TOGGLE, "The console above each conversation (Ctrl+O)." },
-    { SET_CHAT, NULL, "Chat", K_TOGGLE, "The conversation itself (Ctrl+T)." },
+    { SET_NET, NULL, "net", "Network log", K_CHOICE, "normal|verbose",
+      "What the console shows of the network, in every session. verbose adds every handshake packet, relay "
+      "and Tor event." },
+    { SET_PORT, NULL, "port", "UDP port for new sessions", K_TEXT, "N",
+      "The UDP port new sessions listen on; 0 picks a free one each time. :port moves an open session to another." },
+    { SET_SIDEBAR, "layout", "sidebar", "Session sidebar", K_TOGGLE, "on|off",
+      "The list of sessions and who is online (Ctrl+B)." },
+    { SET_CONSOLE, NULL, "console", "Console", K_TOGGLE, "on|off", "The console above each conversation (Ctrl+O)." },
+    { SET_CHAT, NULL, "chat", "Chat", K_TOGGLE, "on|off", "The conversation itself (Ctrl+T)." },
 };
 #define N_SETTINGS ((int)(sizeof SETTINGS / sizeof SETTINGS[0]))
 
 static const char *const NOTIFY_NAMES[] = { "none", "mentions", "all" };
+static const char *const ON_OFF[] = { "off", "on" };
+static const char *const ROUTE_NAMES[] = { "direct", "tor" };
+static const char *const NET_LOG_NAMES[] = { "normal", "verbose" };
 
 static setting_id_t g_edit_id;
+
+static int settings_index(setting_id_t id) {
+    for (int i = 0; i < N_SETTINGS; i++) if (SETTINGS[i].id == id) return i;
+    return 0;
+}
+
+static const setting_def_t *setting_def(setting_id_t id) { return &SETTINGS[settings_index(id)]; }
+
+static const setting_def_t *setting_by_key(const char *key) {
+    if (strcmp(key, "color") == 0) key = "colour";
+    for (int i = 0; i < N_SETTINGS; i++) if (strcmp(SETTINGS[i].key, key) == 0) return &SETTINGS[i];
+    return NULL;
+}
 
 static int direct_only_setting(setting_id_t id) {
     return id == SET_DHT4 || id == SET_DHT6 || id == SET_PORTMAP || id == SET_LAN;
@@ -875,15 +923,55 @@ static int tor_only_setting(setting_id_t id) {
         || id == SET_TOR_PASSWORD;
 }
 
+// Settings that don't apply right now aren't listed: the direct ones in Tor mode, the Tor ones in
+// direct mode, the relay list with relays off, the AGE recipient without an AGE identity, and the
+// PGP public key without a PGP key made here.
+static int setting_shown(setting_id_t id) {
+    if (g_app.route.mode == ROUTE_TOR && direct_only_setting(id)) return 0;
+    if (g_app.route.mode == ROUTE_DIRECT && tor_only_setting(id)) return 0;
+    if (id == SET_RELAYS && !g_app.route.nostr) return 0;
+    if (id == SET_AGE_RECIPIENT && g_app.identity_source != IDENT_AGE) return 0;
+    if (id == SET_PGP_PUBKEY && !pgp_key_made_here()) return 0;
+    return 1;
+}
+
+static const char *setting_hidden_why(setting_id_t id) {
+    if (direct_only_setting(id)) return "it only applies with direct routing";
+    if (tor_only_setting(id)) return "it only applies with tor routing";
+    if (id == SET_RELAYS) return "it only applies with the Nostr relays on";
+    if (id == SET_PGP_PUBKEY) return "it needs a PGP signing key made here";
+    return "it needs an AGE signing identity";
+}
+
+// A toggle or choice row's values, in the order h/l steps through them, and the index of the one
+// in force. The other rows have none, and get -1.
+static int setting_options(setting_id_t id, const char *const **names, int *n) {
+    const routing_t *r = &g_app.route;
+    *names = ON_OFF;
+    *n = 2;
+    switch (id) {
+        case SET_ROUTING:    *names = ROUTE_NAMES; return r->mode == ROUTE_TOR;
+        case SET_DHT4:       return r->dht4 != 0;
+        case SET_DHT6:       return r->dht6 != 0;
+        case SET_PORTMAP:    return r->portmap != 0;
+        case SET_LAN:        return r->lan != 0;
+        case SET_NOSTR:      return r->nostr != 0;
+        case SET_TOR_LAUNCH: *names = TOR_LAUNCH_NAMES; *n = 3; return g_app.tor_launch;
+        case SET_NOTIFY:     *names = NOTIFY_NAMES; *n = 3; return (int)g_app.notify_mode;
+        case SET_NET:        *names = NET_LOG_NAMES; return g_app.net_verbose != 0;
+        case SET_SIDEBAR:    return g_app.show_sidebar != 0;
+        case SET_CONSOLE:    return g_app.show_console != 0;
+        case SET_CHAT:       return g_app.show_chat != 0;
+        default:             *names = NULL; *n = 0; return -1;
+    }
+}
+
 static void setting_value(setting_id_t id, char *out, size_t cap) {
+    const char *const *names;
+    int n, cur = setting_options(id, &names, &n);
+    if (cur >= 0) { snprintf(out, cap, "%s", names[cur]); return; }
     const routing_t *r = &g_app.route;
     switch (id) {
-        case SET_ROUTING:   snprintf(out, cap, "%s", r->mode == ROUTE_TOR ? "tor" : "direct"); break;
-        case SET_DHT4:      snprintf(out, cap, "%s", r->dht4 ? "on" : "off"); break;
-        case SET_DHT6:      snprintf(out, cap, "%s", r->dht6 ? "on" : "off"); break;
-        case SET_PORTMAP:   snprintf(out, cap, "%s", r->portmap ? "on" : "off"); break;
-        case SET_LAN:       snprintf(out, cap, "%s", r->lan ? "on" : "off"); break;
-        case SET_NOSTR:     snprintf(out, cap, "%s", r->nostr ? "on" : "off"); break;
         case SET_RELAYS: {
             size_t p = 0;
             out[0] = '\0';
@@ -892,7 +980,6 @@ static void setting_value(setting_id_t id, char *out, size_t cap) {
             if (r->n_relays == 0) snprintf(out, cap, "none");
             break;
         }
-        case SET_TOR_LAUNCH:   snprintf(out, cap, "%s", TOR_LAUNCH_NAMES[g_app.tor_launch]); break;
         case SET_TOR_PATH: {
             char found[1024];
             if (g_app.tor_path[0]) snprintf(out, cap, "%s", g_app.tor_path);
@@ -903,7 +990,7 @@ static void setting_value(setting_id_t id, char *out, size_t cap) {
         case SET_TOR_SOCKS:    snprintf(out, cap, "%s", r->tor.socks); break;
         case SET_TOR_CONTROL:  snprintf(out, cap, "%s", r->tor.control); break;
         case SET_TOR_PASSWORD: snprintf(out, cap, "%s", r->tor.password[0] ? "set" : "not set (cookie or no login)"); break;
-        case SET_NICK:      snprintf(out, cap, "%s", g_app.nick); break;
+        case SET_NICK:         snprintf(out, cap, "%s", g_app.nick); break;
         case SET_COLOUR: {
             const char *name = NULL;
             for (int i = 0; i < COLOR_PALETTE_N; i++)
@@ -917,104 +1004,110 @@ static void setting_value(setting_id_t id, char *out, size_t cap) {
             if (g_app.identity_source == IDENT_NONE) { snprintf(out, cap, "off"); break; }
             uint8_t fp[ID_FP_LEN]; identity_fingerprint(g_app.identity.pub, fp);
             char fphex[ID_FP_LEN * 2 + 1]; hex_encode(fp, ID_FP_LEN, fphex);
-            snprintf(out, cap, "%s, fingerprint %s", g_app.identity_source == IDENT_NATIVE ? "native"
-                     : g_app.identity_source == IDENT_AGE ? "age" : "pgp", fphex);
+            snprintf(out, cap, "%s%s, fingerprint %s", g_app.identity_source == IDENT_AGE ? "age" : "pgp",
+                     g_app.key_origin == KEY_DERIVED ? " from password" : "", fphex);
             break;
         }
-        case SET_NOTIFY:     snprintf(out, cap, "%s", NOTIFY_NAMES[g_app.notify_mode]); break;
-        case SET_NETVERBOSE: snprintf(out, cap, "%s", g_app.net_verbose ? "on" : "off"); break;
+        case SET_AGE_RECIPIENT: {
+            if (g_app.identity_source != IDENT_AGE) { snprintf(out, cap, "none"); break; }
+            char recipient[AGE_RECIPIENT_STRLEN + 1];
+            age_export_recipient(&g_app.identity, recipient);
+            snprintf(out, cap, "%s", recipient);
+            break;
+        }
+        case SET_PGP_PUBKEY: {
+            if (!pgp_key_made_here()) { snprintf(out, cap, "none"); break; }
+            char armor[PGP_ARMOR_MAX]; uint8_t fp[PGP_FP_LEN];
+            pgp_public_key(armor, fp);
+            char fphex[PGP_FP_LEN * 2 + 1]; hex_encode(fp, PGP_FP_LEN, fphex);
+            snprintf(out, cap, "%s", fphex);
+            break;
+        }
         case SET_PORT:
             if (g_app.default_port) snprintf(out, cap, "%u", (unsigned)g_app.default_port);
             else snprintf(out, cap, "0 (a free one)");
             break;
-        case SET_SIDEBAR: snprintf(out, cap, "%s", g_app.show_sidebar ? "shown" : "hidden"); break;
-        case SET_CONSOLE: snprintf(out, cap, "%s", g_app.show_console ? "shown" : "hidden"); break;
-        case SET_CHAT:    snprintf(out, cap, "%s", g_app.show_chat ? "shown" : "hidden"); break;
+        default:
+            out[0] = '\0';
+            break;
     }
 }
 
-static void settings_note(const char *fmt, ...) {
-    va_list ap; va_start(ap, fmt);
-    vsnprintf(g_app.settings_note, sizeof g_app.settings_note, fmt, ap);
-    va_end(ap);
-    g_app.dirty = 1;
-}
-
-// Pushes the routing settings to the open sessions. The toggles take effect there at once.
+// Pushes the routing settings to the open sessions. The toggles take effect there at once. On
+// the page chat opens on, nothing reaches the network before Done: settings_done does this then.
 static void routing_changed(setting_id_t id) {
     int later = 0, any = 0;
-    sync_update_proxy();
-    tor_link_ensure(now_seconds());
+    if (!g_app.onboarding) {
+        sync_update_proxy();
+        tor_link_ensure(now_seconds());
+    }
     for (int i = 0; i < MAX_SESSIONS; i++) {
         if (!g_app.used[i] || g_app.sessions[i].initialising) continue;
         later |= chat_apply_routing(&g_app.sessions[i].engine, &g_app.route);
         any = 1;
     }
     char v[160]; setting_value(id, v, sizeof v);
-    const char *label = "";
-    for (int i = 0; i < N_SETTINGS; i++) if (SETTINGS[i].id == id) label = SETTINGS[i].label;
+    const char *label = setting_def(id)->label;
     if (id == SET_ROUTING || tor_only_setting(id) || (later && !direct_only_setting(id)))
-        settings_note("%s: %s - for sessions you open from now on%s", label, v, any ? "; open ones keep their routing" : "");
-    else if (any && g_app.route.mode == ROUTE_TOR && direct_only_setting(id))
-        settings_note("%s: %s - for direct sessions; Tor mode doesn't use it", label, v);
+        note("%s: %s - for sessions you open from now on%s", label, v, any ? "; open ones keep their routing" : "");
     else
-        settings_note("%s: %s%s", label, v, any ? " - applied to open sessions too" : "");
-}
-
-static void set_notify_all(void) {
-    for (int i = 0; i < MAX_SESSIONS; i++)
-        if (g_app.used[i] && !g_app.sessions[i].initialising) g_app.sessions[i].engine.notify_mode = g_app.notify_mode;
+        note("%s: %s%s", label, v, any ? " - applied to open sessions too" : "");
 }
 
 static void set_colour_all(void) {
-    char hex[8];
-    snprintf(hex, sizeof hex, "#%02x%02x%02x", g_app.color[0], g_app.color[1], g_app.color[2]);
-    char cmd[16];
-    snprintf(cmd, sizeof cmd, "colour %s", hex);
     for (int i = 0; i < MAX_SESSIONS; i++)
-        if (g_app.used[i] && !g_app.sessions[i].initialising) chat_run_command(&g_app.sessions[i].engine, cmd);
+        if (g_app.used[i] && !g_app.sessions[i].initialising) chat_set_colour(&g_app.sessions[i].engine, g_app.color);
 }
 
-static void setting_step(setting_id_t id, int dir) {
+// Puts a toggle or choice row on its i-th value, wherever it applies.
+static void setting_choose(setting_id_t id, int i) {
     routing_t *r = &g_app.route;
     switch (id) {
-        case SET_ROUTING: r->mode = r->mode == ROUTE_TOR ? ROUTE_DIRECT : ROUTE_TOR; routing_changed(id); return;
-        case SET_DHT4:    r->dht4 = !r->dht4; routing_changed(id); return;
-        case SET_DHT6:    r->dht6 = !r->dht6; routing_changed(id); return;
-        case SET_PORTMAP: r->portmap = !r->portmap; routing_changed(id); return;
-        case SET_LAN:     r->lan = !r->lan; routing_changed(id); return;
-        case SET_NOSTR:   r->nostr = !r->nostr; routing_changed(id); return;
+        case SET_ROUTING: r->mode = i ? ROUTE_TOR : ROUTE_DIRECT; routing_changed(id); return;
+        case SET_DHT4:    r->dht4 = i; routing_changed(id); return;
+        case SET_DHT6:    r->dht6 = i; routing_changed(id); return;
+        case SET_PORTMAP: r->portmap = i; routing_changed(id); return;
+        case SET_LAN:     r->lan = i; routing_changed(id); return;
+        case SET_NOSTR:   r->nostr = i; routing_changed(id); return;
         case SET_TOR_LAUNCH:
-            g_app.tor_launch = (g_app.tor_launch + (dir < 0 ? 2 : 1)) % 3;
-            settings_note("Start chat's own tor: %s - for the next tor chat looks for; a tor already in use stays",
-                          TOR_LAUNCH_NAMES[g_app.tor_launch]);
+            g_app.tor_launch = i;
+            note("Start chat's own tor: %s - for the next tor chat looks for; a tor already in use stays",
+                 TOR_LAUNCH_NAMES[i]);
             return;
         case SET_NOTIFY:
-            g_app.notify_mode = (notify_mode_t)(((int)g_app.notify_mode + (dir < 0 ? 2 : 1)) % 3);
-            set_notify_all();
-            settings_note("Notifications: %s", NOTIFY_NAMES[g_app.notify_mode]);
-            return;
-        case SET_NETVERBOSE:
-            g_app.net_verbose = !g_app.net_verbose;
-            for (int i = 0; i < MAX_SESSIONS; i++)
-                if (g_app.used[i] && !g_app.sessions[i].initialising) g_app.sessions[i].engine.net_verbose = g_app.net_verbose;
-            settings_note("Network log: %s", g_app.net_verbose ? "on" : "off");
-            return;
-        case SET_COLOUR: {
-            int cur = -1;
-            for (int i = 0; i < COLOR_PALETTE_N; i++)
-                if (COLOR_PALETTE[i].r == g_app.color[0] && COLOR_PALETTE[i].g == g_app.color[1] && COLOR_PALETTE[i].b == g_app.color[2]) cur = i;
-            int next = cur < 0 ? 0 : (cur + (dir < 0 ? COLOR_PALETTE_N - 1 : 1)) % COLOR_PALETTE_N;
-            g_app.color[0] = COLOR_PALETTE[next].r; g_app.color[1] = COLOR_PALETTE[next].g; g_app.color[2] = COLOR_PALETTE[next].b;
-            set_colour_all();
-            settings_note("Colour: %s", COLOR_PALETTE[next].name);
-            return;
-        }
-        case SET_SIDEBAR: g_app.show_sidebar = !g_app.show_sidebar; g_app.dirty = 1; return;
-        case SET_CONSOLE: g_app.show_console = !g_app.show_console; g_app.dirty = 1; return;
-        case SET_CHAT:    g_app.show_chat = !g_app.show_chat; g_app.dirty = 1; return;
+            g_app.notify_mode = (notify_mode_t)i;
+            for (int s = 0; s < MAX_SESSIONS; s++)
+                if (g_app.used[s] && !g_app.sessions[s].initialising) g_app.sessions[s].engine.notify_mode = g_app.notify_mode;
+            break;
+        case SET_NET:
+            g_app.net_verbose = i;
+            for (int s = 0; s < MAX_SESSIONS; s++)
+                if (g_app.used[s] && !g_app.sessions[s].initialising) g_app.sessions[s].engine.net_verbose = i;
+            break;
+        case SET_SIDEBAR: g_app.show_sidebar = i; break;
+        case SET_CONSOLE: g_app.show_console = i; break;
+        case SET_CHAT:    g_app.show_chat = i; break;
         default: return;
     }
+    char v[32]; setting_value(id, v, sizeof v);
+    note("%s: %s", setting_def(id)->label, v);
+}
+
+// h/l on a row: the next or previous value, round the end. The colour steps through the palette.
+static void setting_step(setting_id_t id, int dir) {
+    if (id == SET_COLOUR) {
+        int cur = -1;
+        for (int i = 0; i < COLOR_PALETTE_N; i++)
+            if (COLOR_PALETTE[i].r == g_app.color[0] && COLOR_PALETTE[i].g == g_app.color[1] && COLOR_PALETTE[i].b == g_app.color[2]) cur = i;
+        int next = cur < 0 ? 0 : (cur + (dir < 0 ? COLOR_PALETTE_N - 1 : 1)) % COLOR_PALETTE_N;
+        g_app.color[0] = COLOR_PALETTE[next].r; g_app.color[1] = COLOR_PALETTE[next].g; g_app.color[2] = COLOR_PALETTE[next].b;
+        set_colour_all();
+        note("Colour: %s", COLOR_PALETTE[next].name);
+        return;
+    }
+    const char *const *names;
+    int n, cur = setting_options(id, &names, &n);
+    if (cur >= 0) setting_choose(id, (cur + (dir < 0 ? n - 1 : 1)) % n);
 }
 
 static void begin_setting_edit(setting_id_t id) {
@@ -1061,19 +1154,18 @@ static int valid_host_port(const char *s) {
     return port > 0 && port <= 65535;
 }
 
-static void commit_setting_edit(void) {
+// Sets a text row from what was typed for it, on the page or after :set NAME.
+static void setting_apply_text(setting_id_t id, const char *typed) {
     char text[sizeof g_app.input.buf];
-    copy_str(text, g_app.input.buf, sizeof text);
-    setting_id_t id = g_edit_id;
-    end_setting_edit();
+    copy_str(text, typed, sizeof text);
     routing_t *r = &g_app.route;
     switch (id) {
         case SET_RELAYS: {
             char urls[NOSTR_MAX_RELAYS][NOSTR_URL_MAX];
             int n = 0;
             for (char *tok = strtok(text, " ,"); tok; tok = strtok(NULL, " ,")) {
-                if (nostr_url_ok(tok) != 0) { settings_note("not a relay chat can use: %.80s (wss://host[:port][/path])", tok); return; }
-                if (n >= NOSTR_MAX_RELAYS) { settings_note("at most %d relays", NOSTR_MAX_RELAYS); return; }
+                if (nostr_url_ok(tok) != 0) { note("not a relay chat can use: %.80s (wss://host[:port][/path])", tok); return; }
+                if (n >= NOSTR_MAX_RELAYS) { note("at most %d relays", NOSTR_MAX_RELAYS); return; }
                 copy_str(urls[n++], tok, NOSTR_URL_MAX);
             }
             memcpy(r->relays, urls, sizeof urls);
@@ -1083,18 +1175,18 @@ static void commit_setting_edit(void) {
         }
         case SET_TOR_SOCKS:
         case SET_TOR_CONTROL:
-            if (!valid_host_port(text)) { settings_note("that isn't host:port"); return; }
+            if (!valid_host_port(text)) { note("that isn't host:port"); return; }
             copy_str(id == SET_TOR_SOCKS ? r->tor.socks : r->tor.control, text, TOR_HOST_MAX);
             routing_changed(id);
             return;
         case SET_TOR_PATH: {
             char found[1024];
             if (text[0] && platform_find_program("tor", text, found, sizeof found) != 0) {
-                settings_note("can't use %.100s - it has to be a full path to a program only root or you can change", text);
+                note("can't use %.100s - it has to be a full path to a program only root or you can change", text);
                 return;
             }
             copy_str(g_app.tor_path, text[0] ? found : "", sizeof g_app.tor_path);
-            settings_note("Tor program: %s", g_app.tor_path[0] ? g_app.tor_path : "search PATH and the usual folders");
+            note("Tor program: %s", g_app.tor_path[0] ? g_app.tor_path : "search PATH and the usual folders");
             return;
         }
         case SET_TOR_PASSWORD:
@@ -1107,22 +1199,22 @@ static void commit_setting_edit(void) {
             chat_clean_nick(text, g_app.nick);
             for (int i = 0; i < MAX_SESSIONS; i++)
                 if (g_app.used[i] && !g_app.sessions[i].initialising) chat_set_nick(&g_app.sessions[i].engine, g_app.nick);
-            settings_note("Nickname: %s", g_app.nick);
+            note("Nickname: %s", g_app.nick);
             return;
         case SET_COLOUR: {
             uint8_t rgb[3];
-            if (parse_color(text, rgb) != 0) { settings_note("unknown colour %.40s - try a name or #RRGGBB", text); return; }
+            if (parse_color(text, rgb) != 0) { note("unknown colour %.40s - try a name or #RRGGBB", text); return; }
             memcpy(g_app.color, rgb, 3);
             set_colour_all();
-            settings_note("Colour: #%02x%02x%02x", rgb[0], rgb[1], rgb[2]);
+            note("Colour: #%02x%02x%02x", rgb[0], rgb[1], rgb[2]);
             return;
         }
         case SET_PORT: {
             char *end;
             long port = strtol(text, &end, 10);
-            if (!text[0] || *end || port < 0 || port > 65535) { settings_note("not a port: %.20s (0-65535, 0 picks a free one)", text); return; }
+            if (!text[0] || *end || port < 0 || port > 65535) { note("not a port: %.20s (0-65535, 0 picks a free one)", text); return; }
             g_app.default_port = (uint16_t)port;
-            settings_note("UDP port for new sessions: %ld%s", port, port ? "" : " (a free one)");
+            note("UDP port for new sessions: %ld%s", port, port ? "" : " (a free one)");
             return;
         }
         default:
@@ -1130,79 +1222,599 @@ static void commit_setting_edit(void) {
     }
 }
 
+static void commit_setting_edit(void) {
+    char text[sizeof g_app.input.buf];
+    copy_str(text, g_app.input.buf, sizeof text);
+    setting_id_t id = g_edit_id;
+    end_setting_edit();
+    setting_apply_text(id, text);
+    crypto_wipe(text, sizeof text);
+}
+
+#define SETTINGS_DONE N_SETTINGS   // settings_sel of the Done button, after the last setting
+
+// The next listed row from the selected one in direction dir: the Done button after the last,
+// and the same row again before the first.
+static int settings_step_sel(int dir) {
+    for (int i = g_app.settings_sel + dir; i >= 0 && i < N_SETTINGS; i += dir)
+        if (setting_shown(SETTINGS[i].id)) return i;
+    return dir > 0 ? SETTINGS_DONE : g_app.settings_sel;
+}
+
+// Moves the selection off a row that stopped being listed.
+static void settings_fix_sel(void) {
+    if (g_app.settings_sel >= N_SETTINGS || setting_shown(SETTINGS[g_app.settings_sel].id)) return;
+    int up = settings_step_sel(-1);
+    g_app.settings_sel = up != g_app.settings_sel ? up : settings_step_sel(1);
+}
+
 static void begin_settings(void) {
     if (g_app.mode != MODE_CHAT) return;
     g_app.mode = MODE_SETTINGS;
-    g_app.settings_note[0] = '\0';
+    if (g_app.settings_sel == SETTINGS_DONE) g_app.settings_sel = 0;
+    settings_fix_sel();
     g_app.dirty = 1;
 }
 
-static void settings_key(const tui_key_t *key) {
-    const setting_def_t *d = &SETTINGS[g_app.settings_sel];
-    int ch = key->type == TUI_KEY_CHAR && key->ch_len == 1 ? key->ch[0] : 0;
-    if (key->type == TUI_KEY_UP || ch == 'k') {
-        if (g_app.settings_sel > 0) g_app.settings_sel--;
-    } else if (key->type == TUI_KEY_DOWN || ch == 'j' || key->type == TUI_KEY_TAB) {
-        if (g_app.settings_sel < N_SETTINGS - 1) g_app.settings_sel++;
-    } else if (key->type == TUI_KEY_HOME) {
-        g_app.settings_sel = 0;
-    } else if (key->type == TUI_KEY_END) {
-        g_app.settings_sel = N_SETTINGS - 1;
-    } else if (key->type == TUI_KEY_LEFT || ch == 'h') {
-        if (d->kind == K_TOGGLE || d->kind == K_CHOICE || d->id == SET_COLOUR) setting_step(d->id, -1);
-    } else if (key->type == TUI_KEY_RIGHT || ch == 'l') {
-        if (d->kind == K_TOGGLE || d->kind == K_CHOICE || d->id == SET_COLOUR) setting_step(d->id, 1);
-    } else if (key->type == TUI_KEY_ENTER || ch == ' ') {
-        if (d->kind == K_TOGGLE || d->kind == K_CHOICE) setting_step(d->id, 1);
-        else if (d->kind == K_TEXT || d->kind == K_SECRET) begin_setting_edit(d->id);
-        else if (d->id == SET_SIGN) { g_app.mode = MODE_CHAT; begin_sign(); }
-    } else if (key->type == TUI_KEY_ESCAPE || ch == 'q' || key->type == TUI_KEY_SETTINGS) {
-        g_app.mode = MODE_CHAT;
+// Opens the page on a row, or says why the row isn't on it right now.
+static void settings_open_at(setting_id_t id) {
+    begin_settings();
+    if (setting_shown(id)) g_app.settings_sel = settings_index(id);
+    else note("%s isn't on the page right now: %s", setting_def(id)->label, setting_hidden_why(id));
+}
+
+// The Done button; Esc, q and Ctrl+S do the same. On the page chat opens on, it's where chat starts:
+// until then nothing reaches the network, not even a tor or a --peer name lookup.
+static void settings_done(void) {
+    g_app.mode = MODE_CHAT;
+    if (g_app.onboarding) {
+        g_app.onboarding = 0;
+        push_log("* routing: %s", route_label());
+        sync_update_proxy();
+        tor_link_ensure(now_seconds());
+        finish_onboarding();
     }
     g_app.dirty = 1;
 }
 
-static void render_settings(const tui_session_row_t *rows, int n, int sel, int rows_n, int cols_n) {
-    tui_setting_row_t items[N_SETTINGS];
+static const char *settings_hint(void) {
+    const setting_def_t *d = g_app.settings_sel < N_SETTINGS ? &SETTINGS[g_app.settings_sel] : NULL;
+    if (!d) return "j/k move \xc2\xb7 Enter or Esc done";
+    if (d->id == SET_COLOUR) return "j/k move \xc2\xb7 h/l step \xc2\xb7 Enter edit \xc2\xb7 Esc done";
+    if (d->kind == K_TEXT || d->kind == K_SECRET) return "j/k move \xc2\xb7 Enter edit \xc2\xb7 Esc done";
+    if (d->id == SET_SIGN) return "j/k move \xc2\xb7 Enter choose \xc2\xb7 Esc done";
+    if (d->id == SET_AGE_RECIPIENT || d->id == SET_PGP_PUBKEY) return "j/k move \xc2\xb7 Enter copy \xc2\xb7 Esc done";
+    return "j/k move \xc2\xb7 h/l or Enter change \xc2\xb7 Esc done";
+}
+
+// ---- the signing identity, chosen on a page under the settings ----
+
+// Off, then for each of AGE and PGP a key made here, one from a file and one pasted in.
+typedef enum {
+    PICK_OFF, PICK_AGE_MADE, PICK_AGE_FILE, PICK_AGE_PASTE, PICK_PGP_MADE, PICK_PGP_FILE, PICK_PGP_PASTE, N_PICKS
+} sign_pick_t;
+
+static const struct { const char *section, *label, *help; } SIGN_PICKS[N_PICKS] = {
+    { NULL, "Off", "Don't sign. Peers see you as unverified." },
+    { "AGE", "Native", "A key made here, with an age1... recipient others can encrypt files to you with "
+                       "(age -r). Enter asks for a password: the same password on this device and OS always makes "
+                       "the same key, so always use the same one to keep an established signing identity. Blank "
+                       "makes a new key that lasts until chat exits." },
+    { NULL, "AGE key file", "Your own AGE key from a file, as age-keygen writes it. Your age1... recipient stays "
+                            "the same." },
+    { NULL, "AGE key paste", "Your own AGE key pasted in: the AGE-SECRET-KEY-1... line. Kept in memory and never "
+                             "written to disk." },
+    { "PGP", "Native", "A PGP key made here, whose public key is in the settings and the console for others "
+                       "to import. Enter asks for a password: the same password on this device and OS always makes "
+                       "the same key, so always use the same one to keep an established signing identity. Blank "
+                       "makes a new key that lasts until chat exits." },
+    { NULL, "PGP key file", "Your own key from a file: an unencrypted EdDSA/Ed25519 secret key, armored, as "
+                            "gpg --export-secret-keys --armor writes it." },
+    { NULL, "PGP key paste", "Your own key pasted in, armored. Kept in memory and never written to disk." },
+};
+
+static const char AGE_PASTE_HELP[] =
+    "Paste your AGE secret key now: the AGE-SECRET-KEY-1... line, or the whole file age-keygen wrote. It's read "
+    "when its line ends (Enter, if the paste didn't end it), kept in memory and never written to disk. Esc goes "
+    "back.";
+
+static const char PGP_PASTE_HELP[] =
+    "Paste your armored PGP private key now, BEGIN line to END line. It's read as soon as the END line "
+    "arrives, kept in memory and never written to disk. It has to be an unencrypted EdDSA/Ed25519 key "
+    "(gpg --export-secret-keys --armor, from a key with no passphrase). Esc goes back.";
+
+static const char SIGN_PASSWORD_HELP[] =
+    "Type the password to make your key from. The same password on this device and OS always makes the same "
+    "key and fingerprint, so always use the same password to keep an established signing identity: a different "
+    "one, or a typo, makes a different key. Make it long, since anyone who learns this device's id can guess at "
+    "it. Blank makes a new key that lasts until chat exits. Nothing is written to disk. Esc goes back.";
+
+static int sign_row_in_use(void) {
+    int age = g_app.identity_source == IDENT_AGE;
+    if (!age && g_app.identity_source != IDENT_PGP) return PICK_OFF;
+    switch (g_app.key_origin) {
+        case KEY_FILE:   return age ? PICK_AGE_FILE : PICK_PGP_FILE;
+        case KEY_PASTED: return age ? PICK_AGE_PASTE : PICK_PGP_PASTE;
+        default:         return age ? PICK_AGE_MADE : PICK_PGP_MADE;
+    }
+}
+
+// Opens the picker from the Signing identity row, on the choice in use.
+static void begin_sign(void) {
+    g_app.sign_sel = sign_row_in_use();
+    g_app.mode = MODE_SIGN_CHOICE;
+    g_app.dirty = 1;
+}
+
+// Hands the identity just chosen to every open session.
+static void identity_chosen(void) {
+    int any = 0;
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        if (!g_app.used[i] || g_app.sessions[i].initialising) continue;
+        chat_set_identity(&g_app.sessions[i].engine, g_app.identity_source, &g_app.identity);
+        any = 1;
+    }
+    show_identity_result();
+    char v[160]; setting_value(SET_SIGN, v, sizeof v);
+    note("Signing identity: %s%s", v, any ? " - applied to open sessions too" : "");
+}
+
+// A key of kind (AGE or PGP) made here: from password and this device's id, the same every time,
+// or a new random one when password is empty. NULL once it's the identity in use, else why not;
+// the identity in use stays then.
+static const char *make_identity(identity_source_t kind, const char *password) {
+    if (!password[0]) {
+        gen_identity_keypair(&g_app.identity);
+        g_app.key_origin = KEY_MADE;
+        g_app.pgp_created = (uint32_t)time(NULL);
+    } else {
+        char device[128];
+        if (platform_machine_id(device, sizeof device) != 0)
+            return "this system has no machine id to make the key with - leave the password blank for a new key";
+        if (identity_from_password(password, device, &g_app.identity) != 0)
+            return "couldn't make the key - it needs 512 MiB of free memory for a moment";
+        g_app.key_origin = KEY_DERIVED;
+        g_app.pgp_created = DERIVED_PGP_CREATED;
+    }
+    g_app.identity_source = kind;
+    return NULL;
+}
+
+// The password a native key is made from, typed on the bottom bar with the picker still up.
+static void begin_sign_password(identity_source_t kind) {
+    g_app.load_kind = kind;
+    g_app.saved_input = g_app.input;
+    tui_input_clear(&g_app.input);
+    g_app.input.modal = 0;
+    g_app.mode = MODE_SIGN_PASSWORD;
+    g_app.dirty = 1;
+}
+
+static void end_sign_password(void) {
+    crypto_wipe(g_app.input.buf, sizeof g_app.input.buf);
+    g_app.input = g_app.saved_input;
+    crypto_wipe(&g_app.saved_input, sizeof g_app.saved_input);
+    g_app.mode = MODE_SIGN_CHOICE;
+    g_app.dirty = 1;
+}
+
+static void commit_sign_password(void) {
+    char pw[sizeof g_app.input.buf];
+    copy_str(pw, g_app.input.buf, sizeof pw);
+    end_sign_password();
+    if (pw[0]) {
+        // Argon2id takes a few seconds: say so before the screen stops.
+        note("making your key from the password...");
+        render();
+    }
+    const char *why = make_identity(g_app.load_kind, pw);
+    crypto_wipe(pw, sizeof pw);
+    if (why) { note("%s", why); return; }
+    identity_chosen();
+    g_app.mode = MODE_SETTINGS;
+}
+
+// kind's key (AGE or PGP) from the file at path: 0 once it's the identity in use.
+static int load_key_file(identity_source_t kind, const char *path) {
+    int rc = kind == IDENT_AGE ? age_import_secret_key(path, &g_app.identity)
+                               : pgp_import_secret_key(path, &g_app.identity);
+    if (rc != 0) return -1;
+    g_app.identity_source = kind;
+    g_app.key_origin = KEY_FILE;
+    return 0;
+}
+
+static void begin_key_browse(identity_source_t kind) {
+    g_app.load_kind = kind;
+    const char *home = platform_home_dir();
+    if (!home || browser_load(&g_app.browser, home) != 0) browser_load(&g_app.browser, "/");
+    g_app.mode = MODE_SIGN_BROWSE;
+    g_app.dirty = 1;
+}
+
+static void paste_clear(void) {
+    crypto_wipe(g_app.paste_buf, sizeof g_app.paste_buf);
+    g_app.paste_len = 0;
+    copy_str(g_app.paste_status, "pasting: 0 bytes so far \xc2\xb7 Esc back", sizeof g_app.paste_status);
+}
+
+static void begin_key_paste(identity_source_t kind) {
+    g_app.load_kind = kind;
+    paste_clear();
+    g_app.mode = MODE_SIGN_PASTE;
+    g_app.dirty = 1;
+}
+
+// Loads the key file picked in the browser: 0 once it's the identity in use.
+static int try_load_key_from_browser(void) {
+    const dir_entry_t *sel = &g_app.browser.items[g_app.browser.selected];
+    char full[1200]; browser_entry_path(&g_app.browser, sel, full, sizeof full);
+    if (load_key_file(g_app.load_kind, full) != 0) {
+        if (g_app.load_kind == IDENT_AGE) note("%.80s holds no AGE secret key", sel->name);
+        else note("%.80s isn't an unencrypted EdDSA/Ed25519 secret key", sel->name);
+        return -1;
+    }
+    identity_chosen();
+    return 0;
+}
+
+// Off takes effect at once; a key made here asks for its password first, and a key file or paste
+// goes on to a page of its own.
+static void sign_pick(int pick) {
+    switch (pick) {
+        case PICK_OFF:
+            g_app.identity_source = IDENT_NONE;
+            crypto_wipe(&g_app.identity, sizeof g_app.identity);
+            identity_chosen();
+            return;
+        case PICK_AGE_MADE:  begin_sign_password(IDENT_AGE); return;
+        case PICK_PGP_MADE:  begin_sign_password(IDENT_PGP); return;
+        case PICK_AGE_FILE:  begin_key_browse(IDENT_AGE); return;
+        case PICK_AGE_PASTE: begin_key_paste(IDENT_AGE); return;
+        case PICK_PGP_FILE:  begin_key_browse(IDENT_PGP); return;
+        case PICK_PGP_PASTE: begin_key_paste(IDENT_PGP); return;
+        default: return;
+    }
+}
+
+static void copy_age_recipient(void) {
+    if (g_app.identity_source != IDENT_AGE) return;
+    char recipient[AGE_RECIPIENT_STRLEN + 1];
+    age_export_recipient(&g_app.identity, recipient);
+    osc52_copy(recipient);
+    note("AGE recipient copied to the clipboard (OSC 52)");
+}
+
+static void copy_pgp_public_key(void) {
+    if (!pgp_key_made_here()) return;
+    char armor[PGP_ARMOR_MAX]; uint8_t fp[PGP_FP_LEN];
+    pgp_public_key(armor, fp);
+    osc52_copy(armor);
+    note("PGP public key copied to the clipboard (OSC 52)");
+}
+
+// ---- keys on the list pages ----
+
+typedef enum {
+    LIST_NONE, LIST_UP, LIST_DOWN, LIST_FIRST, LIST_LAST, LIST_CHOOSE, LIST_LEFT, LIST_RIGHT, LIST_BACK, LIST_CLOSE
+} list_key_t;
+
+// The keys every list page takes alike: j/k or up/down move, g/G or Home/End go to the ends,
+// Enter or space chooses, h/l or left/right go sideways (Backspace too, as vim's h), Esc goes back
+// a level, and q or Ctrl+S closes the settings.
+static list_key_t list_key(const tui_key_t *key) {
+    switch (key->type) {
+        case TUI_KEY_UP:        return LIST_UP;
+        case TUI_KEY_DOWN:      return LIST_DOWN;
+        case TUI_KEY_HOME:      return LIST_FIRST;
+        case TUI_KEY_END:       return LIST_LAST;
+        case TUI_KEY_ENTER:     return LIST_CHOOSE;
+        case TUI_KEY_LEFT:
+        case TUI_KEY_BACKSPACE: return LIST_LEFT;
+        case TUI_KEY_RIGHT:     return LIST_RIGHT;
+        case TUI_KEY_ESCAPE:    return LIST_BACK;
+        case TUI_KEY_SETTINGS:  return LIST_CLOSE;
+        case TUI_KEY_CHAR:      break;
+        default:                return LIST_NONE;
+    }
+    if (key->ch_len != 1) return LIST_NONE;
+    switch (key->ch[0]) {
+        case 'k': return LIST_UP;
+        case 'j': return LIST_DOWN;
+        case 'g': return LIST_FIRST;
+        case 'G': return LIST_LAST;
+        case ' ': return LIST_CHOOSE;
+        case 'h': return LIST_LEFT;
+        case 'l': return LIST_RIGHT;
+        case 'q': return LIST_CLOSE;
+        default:  return LIST_NONE;
+    }
+}
+
+static void list_move(list_key_t k, int *sel, int n) {
+    if (k == LIST_UP && *sel > 0) (*sel)--;
+    else if (k == LIST_DOWN && *sel < n - 1) (*sel)++;
+    else if (k == LIST_FIRST) *sel = 0;
+    else if (k == LIST_LAST) *sel = n > 0 ? n - 1 : 0;
+}
+
+// Sideways on a row changes its value; on the Signing identity row, right goes in to the picker.
+static void settings_key(const tui_key_t *key) {
+    const setting_def_t *d = g_app.settings_sel < N_SETTINGS ? &SETTINGS[g_app.settings_sel] : NULL;
+    const char *const *names;
+    int n;
+    int steps = d && (setting_options(d->id, &names, &n) >= 0 || d->id == SET_COLOUR);
+    switch (list_key(key)) {
+        case LIST_UP:    g_app.settings_sel = settings_step_sel(-1); break;
+        case LIST_DOWN:  g_app.settings_sel = settings_step_sel(1); break;
+        case LIST_FIRST: g_app.settings_sel = 0; break;
+        case LIST_LAST:  g_app.settings_sel = SETTINGS_DONE; break;
+        case LIST_LEFT:  if (steps) setting_step(d->id, -1); break;
+        case LIST_RIGHT:
+            if (steps) setting_step(d->id, 1);
+            else if (d && d->id == SET_SIGN) begin_sign();
+            break;
+        case LIST_CHOOSE:
+            if (!d) settings_done();
+            else if (steps && d->id != SET_COLOUR) setting_step(d->id, 1);
+            else if (d->kind == K_TEXT || d->kind == K_SECRET) begin_setting_edit(d->id);
+            else if (d->id == SET_SIGN) begin_sign();
+            else if (d->id == SET_AGE_RECIPIENT) copy_age_recipient();
+            else if (d->id == SET_PGP_PUBKEY) copy_pgp_public_key();
+            break;
+        case LIST_BACK:
+        case LIST_CLOSE: settings_done(); break;
+        default: break;
+    }
+    settings_fix_sel();
+    g_app.dirty = 1;
+}
+
+static void sign_picker_key(const tui_key_t *key) {
+    list_key_t k = list_key(key);
+    switch (k) {
+        case LIST_CHOOSE:
+        case LIST_RIGHT:
+            sign_pick(g_app.sign_sel);
+            if (g_app.mode == MODE_SIGN_CHOICE) g_app.mode = MODE_SETTINGS;
+            break;
+        case LIST_LEFT:
+        case LIST_BACK:  g_app.mode = MODE_SETTINGS; break;
+        case LIST_CLOSE: settings_done(); break;
+        default: list_move(k, &g_app.sign_sel, N_PICKS); break;
+    }
+    g_app.dirty = 1;
+}
+
+static void browser_up(void) {
+    char up[900]; copy_str(up, g_app.browser.path, sizeof up);
+    path_parent(up);
+    browser_load(&g_app.browser, up);
+}
+
+static void browser_key(const tui_key_t *key) {
+    browser_t *b = &g_app.browser;
+    list_key_t k = list_key(key);
+    switch (k) {
+        case LIST_LEFT: browser_up(); break;
+        case LIST_CHOOSE:
+        case LIST_RIGHT: {
+            if (b->n_items == 0) break;
+            const dir_entry_t *sel = &b->items[b->selected];
+            if (strcmp(sel->name, "../") == 0) {
+                browser_up();
+            } else if (sel->is_dir) {
+                char next[1200]; browser_entry_path(b, sel, next, sizeof next);
+                browser_load(b, next);
+            } else if (try_load_key_from_browser() == 0) {
+                g_app.mode = MODE_SETTINGS;
+            }
+            break;
+        }
+        case LIST_BACK:  g_app.mode = MODE_SIGN_CHOICE; break;
+        case LIST_CLOSE: settings_done(); break;
+        default: list_move(k, &b->selected, b->n_items); break;
+    }
+    g_app.dirty = 1;
+}
+
+// Everything but Esc is the paste arriving, one key at a time.
+static void paste_key(const tui_key_t *key) {
+    if (key->type == TUI_KEY_ESCAPE) {
+        paste_clear();
+        g_app.mode = MODE_SIGN_CHOICE;
+        g_app.dirty = 1;
+        return;
+    }
+    size_t room = sizeof g_app.paste_buf - 1 - g_app.paste_len;
+    if (key->type == TUI_KEY_CHAR && room >= (size_t)key->ch_len) {
+        memcpy(g_app.paste_buf + g_app.paste_len, key->ch, (size_t)key->ch_len);
+        g_app.paste_len += (size_t)key->ch_len;
+    } else if ((key->type == TUI_KEY_ENTER || key->type == TUI_KEY_JOIN_SESSION) && room >= 1) {
+        g_app.paste_buf[g_app.paste_len++] = '\n';
+    } else if (key->type == TUI_KEY_BACKSPACE && g_app.paste_len > 0) {
+        g_app.paste_len--;
+    } else {
+        return;
+    }
+    g_app.paste_buf[g_app.paste_len] = '\0';
+    snprintf(g_app.paste_status, sizeof g_app.paste_status, "pasting: %zu bytes so far \xc2\xb7 Esc back", g_app.paste_len);
+    g_app.dirty = 1;
+    int age = g_app.load_kind == IDENT_AGE;
+    if (age) {
+        // Read when the key line ends, so a pasted file's own newline doesn't land on the settings page.
+        const char *at = strstr(g_app.paste_buf, "AGE-SECRET-KEY-1");
+        if (!at || g_app.paste_buf[g_app.paste_len - 1] != '\n'
+            || g_app.paste_len - 1 - (size_t)(at - g_app.paste_buf) < AGE_SECRET_KEY_STRLEN) return;
+    } else {
+        // Look only at the end, where the END line lands.
+        static const char end_line[] = "-----END PGP PRIVATE KEY BLOCK-----";
+        size_t el = sizeof end_line - 1;
+        if (g_app.paste_len < el || memcmp(g_app.paste_buf + g_app.paste_len - el, end_line, el) != 0) return;
+    }
+    int rc = age ? age_import_secret_key_text(g_app.paste_buf, &g_app.identity)
+                 : pgp_import_secret_key_text(g_app.paste_buf, &g_app.identity);
+    paste_clear();
+    if (rc == 0) {
+        g_app.identity_source = g_app.load_kind;
+        g_app.key_origin = KEY_PASTED;
+        identity_chosen();
+        g_app.mode = MODE_SETTINGS;
+    } else if (age) {
+        note("that isn't an AGE secret key - paste another, or Esc");
+    } else {
+        note("that isn't an unencrypted EdDSA/Ed25519 secret key - paste another, or Esc");
+    }
+}
+
+// ---- drawing the pages ----
+
+#define CRUMB " \xe2\x80\xba "   // between the levels of a page's title
+
+static void render_settings(const tui_session_row_t *srows, int n, int sel, int rows_n, int cols_n,
+                            const char *clock, const tui_bar_t *bar) {
+    tui_row_t rows[N_SETTINGS];
+    char values[N_SETTINGS][160];
+    int n_rows = 0, sel_row = -1;
+    const char *section = NULL;
     for (int i = 0; i < N_SETTINGS; i++) {
         const setting_def_t *d = &SETTINGS[i];
-        tui_setting_row_t *it = &items[i];
-        it->section = d->section;
-        copy_str(it->label, d->label, sizeof it->label);
-        setting_value(d->id, it->value, sizeof it->value);
-        it->dim = (g_app.route.mode == ROUTE_TOR && direct_only_setting(d->id))
-               || (g_app.route.mode == ROUTE_DIRECT && tor_only_setting(d->id));
+        if (d->section) section = d->section;   // the heading goes on its section's first listed row
+        if (!setting_shown(d->id)) continue;
+        if (i == g_app.settings_sel) sel_row = n_rows;
+        setting_value(d->id, values[n_rows], sizeof values[n_rows]);
+        rows[n_rows].section = section;
+        rows[n_rows].label = d->label;
+        rows[n_rows].value = values[n_rows];
+        section = NULL;
+        n_rows++;
     }
-    const setting_def_t *d = &SETTINGS[g_app.settings_sel];
-    char help[400];
-    snprintf(help, sizeof help, "%s%s", d->help,
-             items[g_app.settings_sel].dim ? (g_app.route.mode == ROUTE_TOR ? " (Not used in Tor mode.)" : " (Only used in Tor mode.)") : "");
-    const char *hint = d->kind == K_TEXT || d->kind == K_SECRET ? "up/down move \xc2\xb7 Enter edit \xc2\xb7 Esc close"
-                     : d->kind == K_ACTION ? "up/down move \xc2\xb7 Enter open \xc2\xb7 Esc close"
-                     : "up/down move \xc2\xb7 Enter/space/left/right change \xc2\xb7 Esc close";
-    int editing = g_app.mode == MODE_SETTINGS_EDIT;
-    tui_render_settings(rows_n, cols_n, rows, n, sel, items, N_SETTINGS, g_app.settings_sel, help,
-                        g_app.settings_note, hint, g_app.color_enabled,
-                        editing ? &g_app.input : NULL, editing ? d->label : NULL, editing && d->kind == K_SECRET,
-                        g_app.nick[0] ? g_app.nick : "chat");
+    if (g_app.settings_sel == SETTINGS_DONE) sel_row = n_rows;   // the Done button
+    const setting_def_t *d = g_app.settings_sel < N_SETTINGS ? &SETTINGS[g_app.settings_sel] : NULL;
+    char help[600];
+    if (!d) {
+        copy_str(help, g_app.onboarding
+                 ? "Go on to your sessions: Ctrl+N creates one, Ctrl+J joins one. Everything here applies at once "
+                   "and lasts until chat exits - it's never written to disk. Ctrl+S or :set brings this page back."
+                 : "Back to your sessions. Everything here already applies; Ctrl+S or :set brings this page back.",
+                 sizeof help);
+    } else {
+        // The row cuts a recipient off on a narrow screen, and not every terminal takes OSC 52.
+        char recipient[AGE_RECIPIENT_STRLEN + 3] = "";
+        if (d->id == SET_AGE_RECIPIENT && g_app.identity_source == IDENT_AGE) {
+            age_export_recipient(&g_app.identity, recipient);
+            strcat(recipient, ": ");
+        }
+        snprintf(help, sizeof help, "%s%s", recipient, d->help);
+    }
+    tui_page_t page = { rows, n_rows, sel_row, help, "Done" };
+    tui_render_page(rows_n, cols_n, srows, n, sel, "settings", clock, &page, bar, g_app.color_enabled);
 }
 
-static cmd_result_t app_settings(void *ctx, const char *arg) {
-    (void)ctx; (void)arg;
-    begin_settings();
+// Also draws a paste and a native key's password, which happen on this page with their row selected.
+static void render_sign_picker(const tui_session_row_t *srows, int n, int sel, int rows_n, int cols_n,
+                               const char *clock, const tui_bar_t *bar) {
+    tui_row_t rows[N_PICKS];
+    int in_use = sign_row_in_use();
+    for (int i = 0; i < N_PICKS; i++) {
+        rows[i].section = SIGN_PICKS[i].section;
+        rows[i].label = SIGN_PICKS[i].label;
+        rows[i].value = i == in_use ? "in use" : NULL;
+    }
+    char help[600];
+    if (g_app.mode == MODE_SIGN_PASTE) {
+        copy_str(help, g_app.load_kind == IDENT_AGE ? AGE_PASTE_HELP : PGP_PASTE_HELP, sizeof help);
+    } else if (g_app.mode == MODE_SIGN_PASSWORD) {
+        copy_str(help, SIGN_PASSWORD_HELP, sizeof help);
+    } else {
+        char now[160]; setting_value(SET_SIGN, now, sizeof now);
+        snprintf(help, sizeof help, "%s Now: %s.", SIGN_PICKS[g_app.sign_sel].help, now);
+    }
+    tui_page_t page = { rows, N_PICKS, g_app.sign_sel, help, NULL };
+    tui_render_page(rows_n, cols_n, srows, n, sel, "settings" CRUMB "signing identity", clock, &page, bar,
+                    g_app.color_enabled);
+}
+
+static void render_browser(const tui_session_row_t *srows, int n, int sel, int rows_n, int cols_n,
+                           const char *clock, const tui_bar_t *bar) {
+    static tui_row_t rows[MAX_DIR_ITEMS];
+    const browser_t *b = &g_app.browser;
+    for (int i = 0; i < b->n_items; i++) {
+        rows[i].section = NULL;
+        rows[i].label = b->items[i].name;
+        rows[i].value = NULL;
+    }
+    char title[1000];
+    snprintf(title, sizeof title, "settings" CRUMB "signing identity" CRUMB "%s", b->path);
+    const char *help = SIGN_PICKS[g_app.load_kind == IDENT_AGE ? PICK_AGE_FILE : PICK_PGP_FILE].help;
+    tui_page_t page = { rows, b->n_items, b->selected, help, NULL };
+    tui_render_page(rows_n, cols_n, srows, n, sel, title, clock, &page, bar, g_app.color_enabled);
+}
+
+// ---- commands ----
+
+// :set opens the settings page and :set NAME opens it on that row; :set NAME VALUE sets the row
+// without opening it, just as the page would.
+static cmd_result_t app_set(void *ctx, const char *arg) {
+    (void)ctx;
+    char key[CMD_WORD_MAX];
+    const char *value = cmd_parse(arg, key);
+    if (!key[0]) { begin_settings(); return CMD_OK; }
+    const setting_def_t *d = setting_by_key(key);
+    if (!d) { note("no setting called %s - :set opens the page with all of them", key); return CMD_OK; }
+    if (!value[0]) { settings_open_at(d->id); return CMD_OK; }
+
+    const char *const *names;
+    int n;
+    if (setting_options(d->id, &names, &n) >= 0) {
+        for (int i = 0; i < n; i++)
+            if (strcmp(value, names[i]) == 0) { setting_choose(d->id, i); return CMD_OK; }
+        note("%s takes %s, not %.40s", d->key, d->values, value);
+        return CMD_OK;
+    }
+    switch (d->kind) {
+        case K_TEXT:
+            setting_apply_text(d->id, value);
+            return CMD_OK;
+        case K_SECRET:
+            // On the command line it stands there in the clear; the page's field hides it.
+            settings_open_at(d->id);
+            if (!setting_shown(d->id)) return CMD_OK;   // settings_open_at said why it isn't there
+            begin_setting_edit(d->id);
+            note("type the %s here instead, where it's hidden", d->label);
+            return CMD_OK;
+        default:
+            break;
+    }
+    if (d->id == SET_SIGN) {
+        static const struct { const char *name; sign_pick_t pick; } SIGN_VALUES[] = {
+            { "off", PICK_OFF }, { "age", PICK_AGE_MADE }, { "pgp", PICK_PGP_MADE },
+        };
+        int pick = -1;
+        for (size_t i = 0; i < sizeof SIGN_VALUES / sizeof SIGN_VALUES[0]; i++)
+            if (strcmp(value, SIGN_VALUES[i].name) == 0) pick = SIGN_VALUES[i].pick;
+        if (pick == PICK_OFF) { sign_pick(pick); return CMD_OK; }
+        settings_open_at(SET_SIGN);
+        begin_sign();
+        if (pick < 0) { note("sign takes off, age or pgp - a key file or a pasted key is chosen here"); return CMD_OK; }
+        // The password is typed on the page, where it's hidden.
+        g_app.sign_sel = pick;
+        sign_pick(pick);
+        return CMD_OK;
+    }
+    settings_open_at(d->id);
+    if (setting_shown(d->id)) note("%s comes from your signing key and can't be set - Enter copies it", d->label);
     return CMD_OK;
 }
 
 // Checked before CHAT_COMMANDS, so entries here shadow the per-session ones of the same name.
 static const command_t APP_COMMANDS[] = {
-    { "help",    NULL,                  NULL,     "list commands and keys",                          app_help },
+    { "help",    NULL,                  NULL,     "list commands, settings and keys",                app_help },
     { "new",     NULL,                  NULL,     "create a session (Ctrl+N)",                       app_new },
     { "join",    NULL,                  NULL,     "join a session by id (Ctrl+J)",                   app_join },
-    { "quit",    "q exit close bd bw",  NULL,     "leave this session (Ctrl+W); quits if none open", app_quit },
+    { "quit",    "q exit close bd bw",  NULL,     "leave this session; quits if none is open",       app_quit },
     { "quitall", "qa qall",             NULL,     "leave every session and quit (Ctrl+C)",           app_quitall },
-    { "nick",    NULL,                  "[NAME]", "show or change your nickname everywhere",         app_nick },
-    { "sign",    NULL,                  NULL,     "set up, replace or turn off your signing key",    app_sign },
-    { "settings", "set prefs",          NULL,     "routing, identity, notifications, layout (Ctrl+S)", app_settings },
+    { "set",     NULL,        "[NAME [VALUE]]",   "change a setting; alone, opens them all (Ctrl+S)", app_set },
     { "copyid",  NULL,                  NULL,     "copy this session's id to the clipboard",         app_copyid },
     { "update",  NULL,                  NULL,     "install the latest release from GitHub",          app_update },
     { NULL, NULL, NULL, NULL, NULL }
@@ -1212,20 +1824,40 @@ static const command_t *const ALL_COMMANDS[] = { APP_COMMANDS, CHAT_COMMANDS, NU
 
 static cmd_result_t app_help(void *ctx, const char *arg) {
     (void)ctx; (void)arg;
-    push_log("* commands - type /name in INSERT, or Esc then :name. anything else is sent to the room:");
+    push_log("* commands - Esc, then :name. anything typed in INSERT is sent to the room:");
     for (const command_t *const *t = ALL_COMMANDS; *t; t++) {
         for (const command_t *cmd = *t; cmd->name; cmd++) {
             if (*t != APP_COMMANDS && cmd_find(APP_COMMANDS, cmd->name)) continue;
-            char line[160]; cmd_format_help(cmd, '/', line, sizeof line);
+            char line[160]; cmd_format_help(cmd, ':', line, sizeof line);
             push_log("%s", line);
         }
     }
-    push_log("* keys: Ctrl+N new  Ctrl+J join  Ctrl+W close  Tab/Shift+Tab switch  "
-             "Ctrl+B/Ctrl+O/Ctrl+T sidebar/console/chat  Ctrl+C quit");
+    char keys[400];
+    size_t p = 0;
+    keys[0] = '\0';
+    for (int i = 0; i < N_SETTINGS && p < sizeof keys; i++)
+        p += (size_t)snprintf(keys + p, sizeof keys - p, "%s%s", i ? " " : "", SETTINGS[i].key);
+    push_log("* settings, for :set NAME VALUE (:set NAME opens its row): %s", keys);
+    push_log("* keys: Ctrl+N new \xc2\xb7 Ctrl+J join \xc2\xb7 Ctrl+S settings \xc2\xb7 Tab/Shift+Tab, or j/k in NORMAL, "
+             "switch session \xc2\xb7 Ctrl+B/Ctrl+O/Ctrl+T sidebar/console/chat \xc2\xb7 Ctrl+W delete a word \xc2\xb7 "
+             "Ctrl+C quit");
     return CMD_OK;
 }
 
-static const char *complete_command(const char *typed) { return cmd_complete(ALL_COMMANDS, typed); }
+// Tab on the COMMAND line: a command's name, or after "set " a setting's.
+static const char *complete_command(const char *typed) {
+    if (strncmp(typed, "set ", 4) != 0) return cmd_complete(ALL_COMMANDS, typed);
+    const char *key = typed + 4;
+    size_t n = strlen(key);
+    if (n == 0 || strchr(key, ' ')) return NULL;
+    for (int i = 0; i < N_SETTINGS; i++) {
+        if (strlen(SETTINGS[i].key) <= n || strncmp(SETTINGS[i].key, key, n) != 0) continue;
+        static char out[CMD_WORD_MAX + 8];
+        snprintf(out, sizeof out, "set %s", SETTINGS[i].key);
+        return out;
+    }
+    return NULL;
+}
 
 // First online peer whose nick starts with typed, ignoring case.
 static int nick_has_prefix(const char *nick, const char *typed) {
@@ -1244,21 +1876,16 @@ static const char *complete_mention(const char *typed) {
     return NULL;
 }
 
-static int is_command(const char *line) {
-    char word[CMD_WORD_MAX]; cmd_parse(line, word);
-    return cmd_find(APP_COMMANDS, word) || cmd_find(CHAT_COMMANDS, word);
-}
-
-// Runs "name args" typed after '/' or ':'; both prefixes reach the same commands.
+// Runs "name args" typed on the COMMAND line, after ':'.
 static void run_command(const char *line) {
     char word[CMD_WORD_MAX];
     const char *arg = cmd_parse(line, word);
     if (!word[0]) return;
     const command_t *cmd = cmd_find(APP_COMMANDS, word);
     if (cmd) { cmd->run(NULL, arg); return; }
-    if (!cmd_find(CHAT_COMMANDS, word)) { push_log("* unknown command %s - try /help", word); return; }
+    if (!cmd_find(CHAT_COMMANDS, word)) { note("no command :%s - :help lists them", word); return; }
     if (!g_app.selected) {
-        push_log("* /%s needs a session - Ctrl+N (or /new) creates one, Ctrl+J (or /join) joins one", word);
+        note(":%s needs a session - Ctrl+N (or :new) creates one, Ctrl+J (or :join) joins one", word);
         return;
     }
     if (chat_run_command(&g_app.selected->engine, line) == CMD_QUIT) close_session(g_app.selected);
@@ -1305,30 +1932,25 @@ static void submit_chat_line(void) {
         char line[sizeof input->cmd];
         copy_str(line, input->cmd, sizeof line);
         input->mode = TUI_IMODE_NORMAL;
-        input->cmd_len = 0; input->cmd[0] = '\0';
+        crypto_wipe(input->cmd, sizeof input->cmd);
+        input->cmd_len = 0;
         run_command(line);
+        crypto_wipe(line, sizeof line);
         return;
     }
 
     const char *text = input->buf;
     while (*text == ' ') text++;
-    if (text[0] == '/' || (text[0] == ':' && is_command(text + 1))) {
-        char line[sizeof input->buf];
-        copy_str(line, text + 1, sizeof line);
-        tui_input_clear(input);
-        run_command(line);
-        return;
-    }
     if (!text[0]) return;
     if (!g_app.selected) {
-        push_log("* no session yet - Ctrl+N (or /new) creates one, Ctrl+J (or /join) joins one");
+        push_log("* no session yet - Ctrl+N (or :new) creates one, Ctrl+J (or :join) joins one");
         tui_input_clear(input);
         return;
     }
     if (!session_ready(g_app.selected)) {
         console_note(g_app.selected, g_app.selected->initialising
             ? "* still initialising - hold on a moment"
-            : "* not connected yet - chat opens once someone answers (your text is kept; Ctrl+W leaves)");
+            : "* not connected yet - chat opens once someone answers (your text is kept; :q leaves)");
         return;
     }
     chat_send_text(&g_app.selected->engine, input->buf, now_seconds());
@@ -1338,128 +1960,26 @@ static void submit_chat_line(void) {
 static void handle_key(const tui_key_t *key) {
     tui_input_t *input = &g_app.input;
 
-    if (g_app.mode == MODE_ROUTE_CHOICE) {
-        int ch = key->type == TUI_KEY_CHAR && key->ch_len == 1 ? key->ch[0] : 0;
-        if (key->type == TUI_KEY_ENTER) route_chosen(1);
-        else if (ch >= '1' && ch <= '3') route_chosen(ch - '0');
-        return;
-    }
-    if (g_app.mode == MODE_SETTINGS) { settings_key(key); return; }
-    if (g_app.mode == MODE_SETTINGS_EDIT) {
-        if (key->type == TUI_KEY_ESCAPE) end_setting_edit();
-        else if (key->type == TUI_KEY_ENTER) commit_setting_edit();
-        else if (tui_input_feed(input, key)) g_app.input_dirty = 1;
-        return;
-    }
+    // A message answers the key before this one; this key puts the bar back.
+    if (g_app.message[0]) { g_app.message[0] = '\0'; g_app.dirty = 1; }
 
-    if (g_app.mode == MODE_SIGN_PGP_PASTE) {
-        if (key->type == TUI_KEY_ESCAPE) {
-            crypto_wipe(g_app.paste_buf, sizeof g_app.paste_buf);
-            g_app.paste_len = 0;
-            g_app.mode = MODE_SIGN_PGP_CHOICE;
-            g_app.dirty = 1;
+    switch (g_app.mode) {
+        case MODE_SETTINGS:        settings_key(key); return;
+        case MODE_SIGN_CHOICE:     sign_picker_key(key); return;
+        case MODE_SIGN_BROWSE: browser_key(key); return;
+        case MODE_SIGN_PASTE:  paste_key(key); return;
+        case MODE_SIGN_PASSWORD:
+            if (key->type == TUI_KEY_ESCAPE) end_sign_password();
+            else if (key->type == TUI_KEY_ENTER) commit_sign_password();
+            else if (tui_input_feed(input, key)) g_app.input_dirty = 1;
             return;
-        }
-        size_t room = sizeof g_app.paste_buf - 1 - g_app.paste_len;
-        if (key->type == TUI_KEY_CHAR && room >= (size_t)key->ch_len) {
-            memcpy(g_app.paste_buf + g_app.paste_len, key->ch, (size_t)key->ch_len);
-            g_app.paste_len += (size_t)key->ch_len;
-        } else if ((key->type == TUI_KEY_ENTER || key->type == TUI_KEY_JOIN_SESSION) && room >= 1) {
-
-            g_app.paste_buf[g_app.paste_len++] = '\n';
-        } else if (key->type == TUI_KEY_BACKSPACE && g_app.paste_len > 0) {
-            g_app.paste_len--;
-        } else {
+        case MODE_SETTINGS_EDIT:
+            if (key->type == TUI_KEY_ESCAPE) end_setting_edit();
+            else if (key->type == TUI_KEY_ENTER) commit_setting_edit();
+            else if (tui_input_feed(input, key)) g_app.input_dirty = 1;
             return;
-        }
-        g_app.paste_buf[g_app.paste_len] = '\0';
-        snprintf(g_app.paste_status, sizeof g_app.paste_status,
-                 "pasting (%zu bytes so far, Esc to cancel)", g_app.paste_len);
-        g_app.dirty = 1;
-        // A paste arrives one key at a time: look only at the end, where the END line lands.
-        static const char end_line[] = "-----END PGP PRIVATE KEY BLOCK-----";
-        size_t el = sizeof end_line - 1;
-        if (g_app.paste_len >= el && memcmp(g_app.paste_buf + g_app.paste_len - el, end_line, el) == 0) {
-            if (pgp_import_secret_key_text(g_app.paste_buf, &g_app.identity) == 0) {
-                g_app.identity_source = IDENT_PGP;
-                crypto_wipe(g_app.paste_buf, sizeof g_app.paste_buf);
-                g_app.paste_len = 0;
-                show_identity_result();
-                identity_chosen();
-            } else {
-                push_log("* that didn't parse as an unencrypted EdDSA/Ed25519 secret key - try again, or Esc");
-                crypto_wipe(g_app.paste_buf, sizeof g_app.paste_buf);
-                g_app.paste_len = 0;
-            }
-        }
-        return;
-    }
-
-    if (g_app.mode == MODE_SIGN_PGP_BROWSE) {
-        switch (key->type) {
-            case TUI_KEY_UP:
-                if (g_app.browser.selected > 0) { g_app.browser.selected--; g_app.dirty = 1; }
-                return;
-            case TUI_KEY_DOWN:
-                if (g_app.browser.selected < g_app.browser.n_items - 1) { g_app.browser.selected++; g_app.dirty = 1; }
-                return;
-            case TUI_KEY_BACKSPACE: {
-                char up[900]; copy_str(up, g_app.browser.path, sizeof up);
-                path_parent(up);
-                browser_load(&g_app.browser, up);
-                g_app.dirty = 1;
-                return;
-            }
-            case TUI_KEY_ENTER: {
-                if (g_app.browser.n_items == 0) return;
-                tui_list_item_t *sel = &g_app.browser.items[g_app.browser.selected];
-                if (strcmp(sel->label, "..") == 0) {
-                    char up[900]; copy_str(up, g_app.browser.path, sizeof up);
-                    path_parent(up);
-                    browser_load(&g_app.browser, up);
-                } else if (sel->is_dir) {
-                    char next[1200]; path_join(next, sizeof next, g_app.browser.path, sel->label);
-                    browser_load(&g_app.browser, next);
-                } else {
-                    try_load_pgp_from_browser();
-                }
-                g_app.dirty = 1;
-                return;
-            }
-            case TUI_KEY_ESCAPE:
-                g_app.mode = MODE_SIGN_PGP_CHOICE;
-                g_app.dirty = 1;
-                return;
-            default:
-                return;
-        }
-    }
-
-    if (g_app.mode == MODE_SIGN_CHOICE) {
-
-        if (key->type == TUI_KEY_ESCAPE) {
-            g_app.mode = MODE_CHAT;
-            g_app.dirty = 1;
-        } else if (key->type == TUI_KEY_CHAR && tolower((unsigned char)key->ch[0]) == 'n') {
-            g_app.identity_source = IDENT_NONE;
-            identity_chosen();
-        } else if (key->type == TUI_KEY_CHAR && tolower((unsigned char)key->ch[0]) == 'a') {
-            gen_identity_keypair(&g_app.identity);
-            g_app.identity_source = IDENT_AGE;
-            show_identity_result();
-            identity_chosen();
-        } else if (key->type == TUI_KEY_CHAR && tolower((unsigned char)key->ch[0]) == 'p') {
-            g_app.mode = MODE_SIGN_PGP_CHOICE;
-            push_log("[f] browse for a key file   [p] paste key text   (Esc to go back)");
-        }
-        return;
-    }
-
-    if (g_app.mode == MODE_SIGN_PGP_CHOICE) {
-        if (key->type == TUI_KEY_ESCAPE) { begin_sign(); return; }
-        if (key->type == TUI_KEY_CHAR && tolower((unsigned char)key->ch[0]) == 'f') { begin_pgp_browse(); return; }
-        if (key->type == TUI_KEY_CHAR && tolower((unsigned char)key->ch[0]) == 'p') { begin_pgp_paste(); return; }
-        return;
+        default:
+            break;
     }
 
     if (tui_input_feed(input, key)) { g_app.input_dirty = 1; return; }
@@ -1470,12 +1990,18 @@ static void handle_key(const tui_key_t *key) {
         return;
     }
 
+    // NORMAL leaves j and k to the app: they step through the sessions, as they step through a list.
+    if (key->type == TUI_KEY_CHAR && input->mode == TUI_IMODE_NORMAL) {
+        if (key->ch[0] == 'j') select_step(1);
+        else if (key->ch[0] == 'k') select_step(-1);
+        return;
+    }
+
     switch (key->type) {
         case TUI_KEY_TAB:            select_step(1); break;
         case TUI_KEY_BACKTAB:        select_step(-1); break;
         case TUI_KEY_NEW_SESSION:    begin_prompt(MODE_NEW_PASSWORD); break;
         case TUI_KEY_JOIN_SESSION:   begin_prompt(MODE_JOIN_ID); break;
-        case TUI_KEY_CLOSE_SESSION:  if (g_app.selected) close_session(g_app.selected); break;
         case TUI_KEY_TOGGLE_SIDEBAR: g_app.show_sidebar = !g_app.show_sidebar; g_app.dirty = 1; break;
         case TUI_KEY_TOGGLE_CONSOLE: g_app.show_console = !g_app.show_console; g_app.dirty = 1; break;
         case TUI_KEY_TOGGLE_CHAT:    g_app.show_chat = !g_app.show_chat; g_app.dirty = 1; break;
@@ -1485,32 +2011,13 @@ static void handle_key(const tui_key_t *key) {
     }
 }
 
-static const char *current_prompt(int *mask) {
-    const char *mode_prompt = NULL;
-    *mask = 0;
-    switch (g_app.mode) {
-        case MODE_ROUTE_CHOICE: mode_prompt = "routing [1/2/3]"; break;
-        case MODE_SETTINGS_EDIT: {
-            for (int i = 0; i < N_SETTINGS; i++)
-                if (SETTINGS[i].id == g_edit_id) { mode_prompt = SETTINGS[i].label; *mask = SETTINGS[i].kind == K_SECRET; }
-            break;
-        }
-        case MODE_SIGN_CHOICE: mode_prompt = "[n/a/p]"; break;
-        case MODE_SIGN_PGP_CHOICE: mode_prompt = "[f/p]"; break;
-        case MODE_NEW_PASSWORD:    mode_prompt = "create password"; *mask = 1; break;
-        case MODE_JOIN_ID:         mode_prompt = "session id"; break;
-        case MODE_JOIN_PASSWORD:   mode_prompt = "password"; *mask = 1; break;
-        default: break;
-    }
-    if (g_app.mode == MODE_SIGN_PGP_PASTE) mode_prompt = g_app.paste_status;
-
-    if (g_app.mode == MODE_CHAT && g_app.selected && !session_ready(g_app.selected))
-        mode_prompt = g_app.selected->initialising ? "initialising" : "connecting";
-    return mode_prompt;
+static int on_settings_page(void) {
+    return g_app.mode == MODE_SETTINGS || g_app.mode == MODE_SETTINGS_EDIT || g_app.mode == MODE_SIGN_CHOICE
+        || g_app.mode == MODE_SIGN_BROWSE || g_app.mode == MODE_SIGN_PASTE || g_app.mode == MODE_SIGN_PASSWORD;
 }
 
 static tui_view_t current_view(char *title, size_t cap) {
-    tui_view_t v = { g_app.show_sidebar, g_app.show_console, g_app.show_chat, NULL };
+    tui_view_t v = { g_app.show_sidebar, g_app.show_console, g_app.show_chat, NULL, NULL };
     if (g_app.selected) {
         snprintf(title, cap, "%s@%s (%d online)", g_app.nick, g_app.selected->name,
                  g_app.selected->initialising ? 1 : chat_online_count(&g_app.selected->engine) + 1);
@@ -1518,28 +2025,76 @@ static tui_view_t current_view(char *title, size_t cap) {
         snprintf(title, cap, "no session yet");
     }
     v.title = title;
+    // The settings pages always show the sidebar.
+    if (on_settings_page()) v.sidebar = 1;
     return v;
 }
 
 static void build_status_right(char *buf, size_t cap) {
-    char hhmm[6]; current_hhmm(hhmm);
     if (g_app.mode == MODE_CHAT && g_app.selected && !g_app.selected->initialising)
-        snprintf(buf, cap, "%d online \xc2\xb7 %s", chat_online_count(&g_app.selected->engine) + 1, hhmm);
+        snprintf(buf, cap, "%d online", chat_online_count(&g_app.selected->engine) + 1);
     else
-        snprintf(buf, cap, "%s", hhmm);
+        buf[0] = '\0';
 }
 
-static tui_identity_badge_t identity_badge(void) {
-    return (tui_identity_badge_t)g_app.identity_source;
+// The bottom bar for wherever the user is: the chip names it, and the hint says what keys do there.
+static tui_bar_t current_bar(char *status, size_t cap) {
+    build_status_right(status, cap);
+    tui_bar_t b = {
+        .chip = "SETTINGS",
+        .message = g_app.message,
+        .badge = (tui_identity_badge_t)g_app.identity_source,
+        .status_right = status,
+    };
+    switch (g_app.mode) {
+        case MODE_SETTINGS:        b.hint = settings_hint(); break;
+        case MODE_SIGN_CHOICE:     b.hint = "j/k move \xc2\xb7 Enter choose \xc2\xb7 Esc back \xc2\xb7 q close"; break;
+        case MODE_SIGN_BROWSE:
+            b.hint = "j/k move \xc2\xb7 Enter open \xc2\xb7 h up a folder \xc2\xb7 Esc back \xc2\xb7 q close";
+            break;
+        case MODE_SIGN_PASTE:  b.hint = g_app.paste_status; break;
+        case MODE_SIGN_PASSWORD:
+            b.prompt = g_app.load_kind == IDENT_AGE ? "AGE key password" : "PGP key password";
+            b.input = &g_app.input;
+            b.mask_input = 1;
+            b.hint = "Enter make the key \xc2\xb7 Esc back";
+            break;
+        case MODE_SETTINGS_EDIT: {
+            const setting_def_t *d = setting_def(g_edit_id);
+            b.prompt = d->label;
+            b.input = &g_app.input;
+            b.mask_input = d->kind == K_SECRET;
+            b.hint = "Enter confirm \xc2\xb7 Esc cancel";
+            break;
+        }
+        case MODE_NEW_PASSWORD:
+        case MODE_JOIN_ID:
+        case MODE_JOIN_PASSWORD:
+            b.chip = g_app.mode == MODE_NEW_PASSWORD ? "NEW" : "JOIN";
+            b.prompt = g_app.mode == MODE_NEW_PASSWORD ? "create password"
+                     : g_app.mode == MODE_JOIN_ID ? "session id" : "password";
+            b.input = &g_app.input;
+            b.mask_input = g_app.mode != MODE_JOIN_ID;
+            b.hint = "Enter confirm \xc2\xb7 Esc cancel";
+            break;
+        case MODE_CHAT:
+            b.chip = tui_mode_name(g_app.input.mode);
+            b.input = &g_app.input;
+            b.prompt = g_app.nick[0] ? g_app.nick : "chat";
+            if (g_app.selected && !session_ready(g_app.selected))
+                b.prompt = g_app.selected->initialising ? "initialising" : "connecting";
+            b.hint = g_app.input.mode == TUI_IMODE_NORMAL ? ": command \xc2\xb7 i insert \xc2\xb7 j/k switch session"
+                   : "type to chat \xc2\xb7 Esc normal mode, then :help for commands";
+            break;
+    }
+    return b;
 }
 
-static void render_input(void) {
+static void render_bar(void) {
     int rows_n, cols_n; term_get_size(&rows_n, &cols_n);
-    int mask; const char *mode_prompt = current_prompt(&mask);
     char title[120]; tui_view_t view = current_view(title, sizeof title);
-    char status[64]; build_status_right(status, sizeof status);
-    tui_render_input(rows_n, cols_n, &view, g_app.nick[0] ? g_app.nick : "chat", mode_prompt,
-                     &g_app.input, g_app.color_enabled, mask, identity_badge(), status);
+    char status[64]; tui_bar_t bar = current_bar(status, sizeof status);
+    tui_render_bar(rows_n, cols_n, &view, &bar, g_app.color_enabled);
 }
 
 #define MAX_NET_LINES 6
@@ -1574,18 +2129,17 @@ static void render(void) {
     }
 
     int rows_n, cols_n; term_get_size(&rows_n, &cols_n);
+    char status[64]; tui_bar_t bar = current_bar(status, sizeof status);
+    char hhmm[6]; current_hhmm(hhmm);
 
-    if (g_app.mode == MODE_SETTINGS || g_app.mode == MODE_SETTINGS_EDIT) {
-        render_settings(rows, n, sel, rows_n, cols_n);
-        return;
-    }
-
-    if (g_app.mode == MODE_SIGN_PGP_BROWSE) {
-        tui_render_list(rows_n, cols_n, rows, n, sel, g_app.browser.path,
-                         g_app.browser.items, g_app.browser.n_items, g_app.browser.selected,
-                         "up/down move  Enter open/select  Backspace up a dir  Esc cancel",
-                         g_app.color_enabled);
-        return;
+    switch (g_app.mode) {
+        case MODE_SETTINGS:
+        case MODE_SETTINGS_EDIT:   render_settings(rows, n, sel, rows_n, cols_n, hhmm, &bar); return;
+        case MODE_SIGN_CHOICE:
+        case MODE_SIGN_PASTE:
+        case MODE_SIGN_PASSWORD: render_sign_picker(rows, n, sel, rows_n, cols_n, hhmm, &bar); return;
+        case MODE_SIGN_BROWSE: render_browser(rows, n, sel, rows_n, cols_n, hhmm, &bar); return;
+        default: break;
     }
 
     tui_peer_row_t peer_rows[MAX_PEERS + MAX_PENDING_PEERS + 1];
@@ -1604,7 +2158,8 @@ static void render(void) {
             char name[CHAT_NAME_LEN]; chat_peer_name(e, p, name);
             char *tag = strchr(name, '#');   // nicks can't hold '#': this is the id added to tell lookalikes apart
             char status[64];
-            snprintf(status, sizeof status, "%s (%s)", tag ? tag : "", chat_verify_label(p->identity_state));
+            snprintf(status, sizeof status, "%s (%s%s)", tag ? tag : "", chat_verify_label(p->identity_state),
+                     p->build_state == BUILD_MODIFIED ? ", modified" : "");
             if (tag) *tag = '\0';
             char *label = peer_rows[n_peers].label;
             size_t cap = sizeof peer_rows[0].label;
@@ -1624,33 +2179,29 @@ static void render(void) {
         }
     }
 
-    int mask = 0;
-    const char *mode_prompt = current_prompt(&mask);
-
     tui_scrollback_t *sb = g_app.selected ? &g_app.selected->sb : &g_app.log;
     tui_scrollback_t *console = g_app.selected ? &g_app.selected->console : NULL;
     char title[120]; tui_view_t view = current_view(title, sizeof title);
-    char status[64]; build_status_right(status, sizeof status);
+    view.clock = hhmm;
     char net_line_bufs[MAX_NET_LINES][32];
     int n_net_lines = build_net_lines(net_line_bufs);
     const char *net_lines[MAX_NET_LINES];
     for (int i = 0; i < n_net_lines; i++) net_lines[i] = net_line_bufs[i];
-    tui_render(rows_n, cols_n, rows, n, sel, peer_rows, n_peers, sb, console, &view,
-               g_app.nick[0] ? g_app.nick : "chat", mode_prompt, &g_app.input, g_app.color_enabled, mask,
-               identity_badge(), status, net_lines, n_net_lines);
+    tui_render(rows_n, cols_n, rows, n, sel, peer_rows, n_peers, sb, console, &view, &bar, g_app.color_enabled,
+               net_lines, n_net_lines);
 }
 
 static int run_plain(const char *session_name, const char *password, uint16_t port,
-                     const addr_t *peers, int n_peers);
+                     const char peer_args[][PEER_ARG_LEN], int n_peer_args);
 
 static int run_tui(const char *explicit_session, char *explicit_password, uint16_t explicit_port,
-                    const addr_t *peers, int n_peers) {
+                    const char peer_args[][PEER_ARG_LEN], int n_peer_args) {
     term_watch_resize();
     if (term_raw_enable() != 0) {
 
         fprintf(stderr, "chat: this terminal can't do the full-screen UI, using --simple instead\n");
         if (!g_app.nick[0]) random_nickname(g_app.nick, sizeof g_app.nick);
-        return run_plain(explicit_session, explicit_password, explicit_port, peers, n_peers);
+        return run_plain(explicit_session, explicit_password, explicit_port, peer_args, n_peer_args);
     }
 
     fputs("\x1b[22;0t\x1b]0;chat\x07\x1b[?1049h\x1b[2J\x1b[H", stdout);
@@ -1659,6 +2210,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
 
     tui_input_clear(&g_app.input);
     g_app.input.modal = 1;
+    g_app.input.mode = TUI_IMODE_NORMAL;   // chat starts in NORMAL: i to type
     g_app.input.complete = complete_command;
     g_app.input.mention = complete_mention;
     g_app.dirty = 1;
@@ -1667,23 +2219,23 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
         copy_str(g_app.pending_auto_session, explicit_session, sizeof g_app.pending_auto_session);
         copy_str(g_app.pending_auto_password, explicit_password, sizeof g_app.pending_auto_password);
         g_app.pending_auto_port = explicit_port;
-        if (n_peers > 0) memcpy(g_app.pending_auto_peers, peers, sizeof(addr_t) * (size_t)n_peers);
-        g_app.pending_auto_n_peers = n_peers;
+        for (int i = 0; i < n_peer_args && i < MAX_PEER_ARGS; i++)
+            copy_str(g_app.pending_auto_peer_args[i], peer_args[i], PEER_ARG_LEN);
+        g_app.pending_auto_n_peers = n_peer_args < MAX_PEER_ARGS ? n_peer_args : MAX_PEER_ARGS;
         crypto_wipe(explicit_password, strlen(explicit_password));
     }
 
     if (!g_app.nick[0]) {
         random_nickname(g_app.nick, sizeof g_app.nick);
-        push_log("welcome to chat. you're %s for now - /nick NAME renames you anytime",
+        push_log("welcome to chat. you're %s for now - :set nick NAME renames you anytime",
                  g_app.nick);
     }
 
-    if (g_app.route_chosen) {
-        push_log("* routing: %s", route_label());
-        finish_onboarding();
-    } else {
-        begin_route_choice();
-    }
+    // Everything is set up on the settings page first; its Done button starts chat proper.
+    g_app.onboarding = 1;
+    g_app.settings_sel = 0;
+    g_app.mode = MODE_SETTINGS;
+    note("welcome to chat - set things up, then Done");
     render();
 
     double next_ui_tick = now_seconds() + 1.0;
@@ -1725,8 +2277,10 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
         for (int i = 0; i < MAX_SESSIONS; i++)
             if (g_app.used[i]) chat_tick(&g_app.sessions[i].engine, now_seconds());
 
-        tor_link_ensure(now);
-        tor_link_step(now);
+        if (!g_app.onboarding) {
+            tor_link_ensure(now);
+            tor_link_step(now);
+        }
 
         char update_msg[UPDATE_MSG_MAX];
         if (update_poll(update_msg, sizeof update_msg)) push_log("%s", update_msg);
@@ -1734,7 +2288,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
         if (term_resized()) g_app.dirty = 1;
         if (now >= next_ui_tick) { next_ui_tick = now + 1.0; g_app.dirty = 1; }
         if (g_app.dirty) { render(); g_app.dirty = 0; g_app.input_dirty = 0; }
-        else if (g_app.input_dirty) { render_input(); g_app.input_dirty = 0; }
+        else if (g_app.input_dirty) { render_bar(); g_app.input_dirty = 0; }
     }
 
     for (int i = 0; i < MAX_SESSIONS; i++) if (g_app.used[i]) close_session(&g_app.sessions[i]);
@@ -1775,7 +2329,7 @@ static void plain_notify(void *ui, const char *nick, const char *text, int menti
 }
 
 static int run_plain(const char *session_name, const char *password, uint16_t port,
-                     const addr_t *peers, int n_peers) {
+                     const char peer_args[][PEER_ARG_LEN], int n_peer_args) {
     int tty = term_is_tty();
     g_plain = 1;
     chat_opts_t o; memset(&o, 0, sizeof o);
@@ -1799,7 +2353,6 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
     else if (platform_env_take("CHAT_PASSWORD", o.password, sizeof o.password) == 0) {  }
     else if (tty && term_read_password(o.created ? "create password: " : "password: ", o.password, sizeof o.password) != 0) return 1;
 
-    if (n_peers > 0) { memcpy(o.peers, peers, sizeof(addr_t) * (size_t)n_peers); o.n_peers = n_peers; }
     o.port = port;
     if (!g_app.route_chosen) {
         int choice = 1;
@@ -1812,6 +2365,21 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
         }
         apply_route_choice(choice);
     }
+    // --peer names are looked up only once the routing is settled, and never for Tor, where the
+    // lookup would go around it.
+    if (n_peer_args > 0 && g_app.route.mode == ROUTE_TOR) {
+        fprintf(stderr, "chat: --peer can't be used with Tor routing\n");
+        crypto_wipe(&o, sizeof o);
+        return 1;
+    }
+    for (int i = 0; i < n_peer_args && o.n_peers < (int)(sizeof o.peers / sizeof o.peers[0]); i++) {
+        if (addr_parse_hostport(peer_args[i], &o.peers[o.n_peers]) != 0) {
+            fprintf(stderr, "chat: can't find --peer %s\n", peer_args[i]);
+            crypto_wipe(&o, sizeof o);
+            return 1;
+        }
+        o.n_peers++;
+    }
     sync_update_proxy();
     o.route = g_app.route;
     if (o.route.mode == ROUTE_TOR) {
@@ -1823,6 +2391,7 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
     memcpy(o.color, g_app.color, 3);
     o.identity_source = g_app.identity_source;
     if (g_app.identity_source != IDENT_NONE) o.identity = g_app.identity;
+    set_build_opts(&o);
 
     static chat_t c;
     chat_init(&c, &o, plain_print, plain_notify, NULL);
@@ -1837,10 +2406,10 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
     c.net_verbose = g_app.net_verbose;
     char idhex[9]; hex_encode(c.my_id, 4, idhex);
     if (c.route.mode == ROUTE_TOR)
-        printf("session '%s', you are %s (peer %s). encrypted, over Tor only. /quit or EOF to stop.\n",
+        printf("session '%s', you are %s (peer %s). encrypted, over Tor only. :quit or EOF to stop.\n",
                c.session_name, c.nick, idhex);
     else
-        printf("session '%s', you are %s (peer %s). encrypted, udp/%u, routing: %s. /quit or EOF to stop.\n",
+        printf("session '%s', you are %s (peer %s). encrypted, udp/%u, routing: %s. :quit or EOF to stop.\n",
                c.session_name, c.nick, idhex, (unsigned)c.port, route_label());
 
     catch_quit_signals();
@@ -1873,11 +2442,10 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
 
 int main(int argc, char **argv) {
     char nick_arg[MAX_NICK + 1] = "";
-    char identity_arg[16] = "";
-    char pgp_key_path[512] = "";
+    char identity_arg[520] = "";   // age or pgp, then :KEYFILE for a key of your own
     char explicit_session[MAX_SESSION_NAME + 1] = "";
     uint16_t explicit_port = 0;
-    char peer_args[16][256]; int n_peer_args = 0;
+    char peer_args[MAX_PEER_ARGS][PEER_ARG_LEN]; int n_peer_args = 0;
     int has_color = 0, force_simple = 0, do_update = 0, relays_given = 0;
     routing_defaults(&g_app.route);
     g_app.notify_mode = NOTIFY_MENTIONS;
@@ -1900,7 +2468,7 @@ int main(int argc, char **argv) {
             }
             explicit_port = (uint16_t)port;
         } else if (strcmp(key, "peer") == 0 && i + 1 < argc) {
-            if (n_peer_args >= 16) { fprintf(stderr, "chat: at most 16 --peer options\n"); return 1; }
+            if (n_peer_args >= MAX_PEER_ARGS) { fprintf(stderr, "chat: at most %d --peer options\n", MAX_PEER_ARGS); return 1; }
             copy_str(peer_args[n_peer_args++], argv[++i], sizeof peer_args[0]);
         } else if (strcmp(key, "nodht") == 0) {
             g_app.route.dht4 = g_app.route.dht6 = 0;
@@ -1947,9 +2515,12 @@ int main(int argc, char **argv) {
             if (parse_color(argv[++i], color) != 0) { fprintf(stderr, "chat: unknown colour %s\n", argv[i]); return 1; }
             has_color = 1;
         } else if (strcmp(key, "identity") == 0 && i + 1 < argc) {
-            char *v = argv[++i];
-            if (strncmp(v, "pgp:", 4) == 0) { copy_str(identity_arg, "pgp", sizeof identity_arg); copy_str(pgp_key_path, v + 4, sizeof pgp_key_path); }
-            else copy_str(identity_arg, v, sizeof identity_arg);
+            const char *v = argv[++i];
+            if ((strncmp(v, "age", 3) != 0 && strncmp(v, "pgp", 3) != 0) || (v[3] != '\0' && v[3] != ':')) {
+                fprintf(stderr, "chat: --identity takes age, pgp, age:KEYFILE or pgp:KEYFILE\n");
+                return 1;
+            }
+            copy_str(identity_arg, v, sizeof identity_arg);
         } else if (strcmp(key, "update") == 0) {
             do_update = 1;
         } else if (strcmp(key, "version") == 0) {
@@ -1969,6 +2540,7 @@ int main(int argc, char **argv) {
     update_cleanup_stale();
 
     crypto_setup();
+    g_self_build.ok = update_self_hash(g_self_build.hash) == 0;
     // The signing key, a pasted key block and typed passwords pass through these for the whole
     // run. Best effort, as in chat_init.
     crypto_lock(&g_app.identity, sizeof g_app.identity);
@@ -2019,34 +2591,41 @@ int main(int argc, char **argv) {
     }
     if (nick_arg[0]) chat_clean_nick(nick_arg, g_app.nick);
 
-    addr_t peers[16]; int n_peers = 0;
     if (g_app.route_chosen && g_app.route.mode == ROUTE_TOR && n_peer_args > 0) {
         // A --peer address would be reached over UDP, which Tor mode never uses.
         fprintf(stderr, "chat: --peer can't be used with --routing tor\n");
         return 1;
     }
+    // Only the form here: nothing reaches the network before the routing is settled, so a name is
+    // looked up when the session starts.
     for (int i = 0; i < n_peer_args; i++) {
-        if (addr_parse_hostport(peer_args[i], &peers[n_peers]) != 0) {
+        if (addr_check_hostport(peer_args[i]) != 0) {
             fprintf(stderr, "chat: bad --peer %s\n", peer_args[i]);
             return 1;
         }
-        n_peers++;
     }
 
     g_app.identity_source = IDENT_NONE;
     if (identity_arg[0]) {
-        if (strcmp(identity_arg, "native") == 0) { g_app.identity_source = IDENT_NATIVE; gen_identity_keypair(&g_app.identity); }
-        else if (strcmp(identity_arg, "age") == 0) { g_app.identity_source = IDENT_AGE; gen_identity_keypair(&g_app.identity); }
-        else if (strcmp(identity_arg, "pgp") == 0) {
-            if (!pgp_key_path[0] || pgp_import_secret_key(pgp_key_path, &g_app.identity) != 0) {
-                fprintf(stderr, "chat: could not load a PGP identity from %s\n", pgp_key_path[0] ? pgp_key_path : "(no path given)");
-            } else g_app.identity_source = IDENT_PGP;
-        }
+        identity_source_t kind = identity_arg[0] == 'a' ? IDENT_AGE : IDENT_PGP;
+        const char *path = identity_arg[3] == ':' ? identity_arg + 4 : NULL;
+        if (!path) {
+            // As for a session's password: from the environment, else asked for, else blank.
+            char pw[256] = "";
+            if (platform_env_take("CHAT_SIGN_PASSWORD", pw, sizeof pw) != 0 && term_is_tty())
+                term_read_password("signing key password (always the same one keeps the same key; blank for a "
+                                   "new key): ", pw, sizeof pw);
+            const char *why = make_identity(kind, pw);
+            crypto_wipe(pw, sizeof pw);
+            if (why) fprintf(stderr, "chat: %s\n", why);
+        } else if (!path[0] || load_key_file(kind, path) != 0)
+            fprintf(stderr, "chat: could not load %s identity from %s\n", kind == IDENT_AGE ? "an AGE" : "a PGP",
+                    path[0] ? path : "(no path given)");
     }
 
     if (!interactive) {
         if (!g_app.nick[0]) random_nickname(g_app.nick, sizeof g_app.nick);
-        return run_plain(explicit_session[0] ? explicit_session : NULL, NULL, explicit_port, peers, n_peers);
+        return run_plain(explicit_session[0] ? explicit_session : NULL, NULL, explicit_port, peer_args, n_peer_args);
     }
 
     if (!explicit_session[0]) {
@@ -2058,7 +2637,7 @@ int main(int argc, char **argv) {
     if (platform_env_take("CHAT_PASSWORD", explicit_password, sizeof explicit_password) != 0) {
         if (term_read_password("password: ", explicit_password, sizeof explicit_password) != 0) return 1;
     }
-    int rc = run_tui(explicit_session, explicit_password, explicit_port, peers, n_peers);
+    int rc = run_tui(explicit_session, explicit_password, explicit_port, peer_args, n_peer_args);
     crypto_wipe(explicit_password, sizeof explicit_password);
     return rc;
 }

@@ -104,6 +104,12 @@ int session_unseal(const uint8_t message_key[32], uint32_t index, const uint8_t 
 void cookie_compute(const uint8_t secret[32], const char *addr, const uint8_t peer_id[ID_LEN],
                      const uint8_t pub[PUB_LEN], uint8_t cookie[COOKIE_LEN]);
 
+#define BUILD_HASH_LEN 32
+// An executable's SHA-256 as one session shows it to another. It is keyed with both session ids,
+// so a build that matches no release can't be recognised from one session or peer to the next.
+void build_proof(const uint8_t exe_sha256[BUILD_HASH_LEN], const uint8_t from_id[ID_LEN],
+                  const uint8_t to_id[ID_LEN], uint8_t proof[BUILD_HASH_LEN]);
+
 #define KEM_PUB_LEN 1184
 #define KEM_PRIV_LEN 2400
 #define KEM_CT_LEN 1088
@@ -128,12 +134,30 @@ void session_prk_finish(const uint8_t prk_partial[32], const uint8_t kem_ss[KEM_
 
 #define ID_FP_LEN 8
 
+// priv is libsodium's secret key (the seed, then the public key). With scalar set, it's instead
+// the signing scalar, reduced mod L, then a key for the nonces: the form an AGE key takes, since
+// an X25519 secret has no Ed25519 seed behind it.
 typedef struct {
     uint8_t pub[ID_SIGN_PUB_LEN];
     uint8_t priv[ID_SIGN_PRIV_LEN];
+    int scalar;
 } identity_keypair_t;
 
 void gen_identity_keypair(identity_keypair_t *kp);
+
+// The identity a password makes on one device: the same password and device id always give the
+// same key, and a different either gives another. The device id isn't secret (any program can
+// read it), so the password is all that keeps the key: Argon2id, as for a session, makes each
+// guess slow. idkp changes only on success; -1 when the memory for it isn't free.
+#define ID_KDF_LABEL "chat-identity-v1"
+int identity_from_password(const char *password, const char *device_id, identity_keypair_t *idkp);
+
+// An X25519 secret (an AGE key's) as an Ed25519 identity: the public key converts back to the same
+// X25519 public key, so the AGE recipient shown is the key's own. idkp changes only on success.
+int identity_from_x25519(const uint8_t secret[32], identity_keypair_t *idkp);
+
+// Ed25519 over msg, from either form of key.
+void identity_sign_bytes(const identity_keypair_t *idkp, const uint8_t *msg, size_t len, uint8_t sig[ID_SIGN_LEN]);
 
 void identity_fingerprint(const uint8_t id_pub[ID_SIGN_PUB_LEN], uint8_t fp[ID_FP_LEN]);
 

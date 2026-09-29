@@ -473,6 +473,16 @@ const char *platform_home_dir(void) {
     return home;
 }
 
+int platform_machine_id(char *out, size_t cap) {
+    wchar_t w[64];
+    DWORD size = sizeof w;
+    // The 64-bit registry view, so a 32-bit build reads the same value.
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Cryptography", L"MachineGuid",
+                     RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, NULL, w, &size) != ERROR_SUCCESS) return -1;
+    if (!w[0] || WideCharToMultiByte(CP_UTF8, 0, w, -1, out, (int)cap, NULL, NULL) <= 0) return -1;
+    return 0;
+}
+
 FILE *platform_fopen(const char *utf8_path, const char *mode) {
     wchar_t wp[1400], wm[16];
     if (!to_wide(utf8_path, wp, 1400) || !to_wide(mode, wm, 16)) return NULL;
