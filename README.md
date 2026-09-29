@@ -67,9 +67,7 @@ you get a warning when it's found, the sidebar shows `modified` next to its name
 shows its build. A build of your own from source counts as modified too, since only the release
 binaries match.
 
-This only catches clients that don't hide it. Chat takes the peer's word for its hash, so a
-client altered to lie can send the official one. "Official" is a label, not proof of what the
-other side runs.
+> This is not perfect as a client can be modified to send the correct SHA and will be marked as unmodified. I am working on a better solution for this
 
 The first time a peer names a version, chat downloads that release's `SHA256SUMS` and its
 signature from GitHub, once per version per run, in the background. In Tor mode this goes
