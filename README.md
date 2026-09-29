@@ -296,38 +296,57 @@ chat [--nick NAME] [--colour NAME|#HEX] [--identity age|pgp[:KEYFILE]] [--simple
      [--session ID --port UDP_PORT --peer HOST:PORT ...]
 ```
 
-On a real terminal, `chat` opens a full-screen UI: a session list on the left (switch with
-Tab / Shift+Tab), the selected conversation and its console filling the rest, an input line
-at the bottom.
+On a real terminal, `chat` opens a full-screen UI. On the left, a sidebar lists your sessions
+
+> NOTE: This TUI was heavily assisted by UI, as I have mentioned across most my projects, I hate, and suck at, UI / Front-End development. If any front-end devs would like to improve the functionality, performance, and/or aesthetic of this, be my guest!
+
+(switch with Tab / Shift+Tab), the peers in the selected one with how each is verified, and how
+that session reaches them: route, port or tor, relays, port mapping, DHT and traffic. The
+selected session's chat fills the rest, with its console over it, and you type in the box at
+the bottom.
+
+It draws in the terminal's own colours (its foreground, background and 16-colour palette), so
+it takes on whatever theme the terminal has, light or dark, and follows it when it changes.
+Peers' colours are exact; chat asks the terminal for its background colour and eases any that
+wouldn't read on it. `NO_COLOR` keeps it to bold, faint and reverse.
 
 It starts on the settings page, so routing, nickname, colour, signing identity and the rest
-are set up in one place. **Done** at the bottom (or `Esc`) goes on to your sessions. Nothing
-reaches the network before that: no tor is looked for or started, and no `--peer` name is
-looked up (in Tor mode it never is, since the lookup would go around Tor).
+are set up in one place. **Start chatting** at the bottom (or `Esc`) goes on to your sessions.
+Nothing reaches the network before that: no tor is looked for or started, and no `--peer` name
+is looked up (in Tor mode it never is, since the lookup would go around Tor).
 
 | Key | Action |
 | --- | --- |
 | `Ctrl+N` | create a new session (asks for a password) |
 | `Ctrl+J` | join an existing session (id, then password) |
 | `Tab` / `Shift+Tab` | next / previous session (`j` / `k` in NORMAL too) |
+| `PgUp` / `PgDn` | scroll the chat back / forward (`Ctrl+U` / `Ctrl+D` in NORMAL, `G` the newest) |
 | `Ctrl+B` / `Ctrl+O` / `Ctrl+T` | toggle sidebar / console / chat pane |
 | `Ctrl+S` | settings |
+| `F1` | every key and command on one page (`?` in NORMAL, and `:help`, too) |
 | `Ctrl+C` | quit (every session leaves cleanly first) |
 
-The bar at the bottom is the same on every screen: a chip saying where you are (`INSERT`,
-`NORMAL`, `COMMAND`, `SETTINGS`, …), what the keys do there, and the reply to what you just
-did, which stays until your next key.
+The row at the bottom is the same on every screen: a chip saying where you are (`INSERT`,
+`NORMAL`, `COMMAND`, `SETTINGS`, …), whether you sign, your nick, the reply to what you just
+did (until your next key), and what the keys do there.
 
 The input line is a small vim. It starts in NORMAL (`h`/`l` move, `0`/`$` ends, `x` delete,
 `j`/`k` switch session); `i`/`a`/`I`/`A` go to INSERT, where Enter sends, `Ctrl+W` deletes the
-word before the cursor and `Esc` goes back to NORMAL. `:` in NORMAL opens COMMAND (`Tab`
-completes, `Enter` runs, `Esc` cancels). Password and session-id prompts are plain fields: `Enter`
+word before the cursor and `Ctrl+U` everything before it, and `Esc` goes back to NORMAL. The input box's
+border takes the mode's colour. Password and session-id prompts are plain fields: `Enter`
 confirms, `Esc` cancels, and your draft comes back afterwards.
 
 Typing `@` and the start of a nick shows the rest of the name dimmed; `Tab` completes it.
 
-Commands run only from COMMAND: `Esc`, then `:name`. Everything typed in INSERT is sent as a
-message, even a line that starts with `/` or `:`. `:help` lists them all.
+`/` on an empty line, in INSERT or NORMAL (or `:` in NORMAL), opens the command line, with a
+menu of the commands that match what's typed. After `set ` it lists the settings with their
+values now, and after `set NAME ` the values that setting takes. After a command that takes a
+nick (`verify `) it lists the peers online whose nick starts with what's typed, the rest shown
+dimmed as with `@`. `Up` / `Down` pick from the menu, `Tab` completes, `Enter` runs (a command
+name only started runs what the menu has picked, so `/se` runs `/set`) and `Esc` goes back. A line started with `/` that can't be a command (`/shrug`, `/usr/bin`)
+turns back into text as you type it, and `Enter` sends it like any other message; `//` does the
+same straight away. Anything else is sent as a message. `:help` opens a page with every key and
+command; `Enter` on a command there puts it on the command line.
 
 | Command | Action |
 | --- | --- |
@@ -346,7 +365,8 @@ message, even a line that starts with `/` or `:`. `:help` lists them all.
 
 Every setting is a row on the settings page, and applies at once to every open session and the
 ones you open after. `:set NAME VALUE` sets a row without opening the page, and `:set NAME`
-opens the page on that row. `Tab` after `:set ` completes the names.
+opens the page on that row. The command line's menu lists the names after `:set `, and the
+values after a name. Under each row's help, the page shows the `:set` that does the same.
 
 | Name | Values |
 | --- | --- |
@@ -363,9 +383,10 @@ opens the page on that row. `Tab` after `:set ` completes the names.
 | `port` | the UDP port for new sessions (`0` picks a free one) |
 | `sidebar`, `console`, `chat` | `on`, `off` |
 
-The settings page and the pages under it (the signing identity picker and the key file
-browser) all take the same keys: `j`/`k` move, `g`/`G` go to the ends, `Enter` chooses,
-`h`/`l` change a value or go out of / into a page, `Esc` goes back and `q` closes the settings.
+The settings page, the pages under it (the signing identity picker and the key file browser)
+and the help page all take the same keys: `j`/`k` move, `g`/`G` go to the ends, `Tab` /
+`Shift+Tab` to the next / previous section, `Enter` chooses, `h`/`l` change a value or go out of
+/ into a page, `Esc` goes back and `q` closes the page.
 
 With `--simple`, `:set` covers `nick`, `colour`, `notify` and `net`.
 

@@ -2,9 +2,42 @@
 
 ## Unreleased
 
+### Added
+- A page of every key and command: `F1`, `?` in NORMAL, or `:help`. `Enter` on a command puts it
+  on the command line.
+- The command line shows a menu of the commands that match what's typed, the settings (with
+  their values now) after `set `, and a setting's values after its name. `Up` / `Down` pick,
+  `Tab` completes, and `Enter` on a name only started runs what the menu has picked. After a
+  command that takes a nick (`verify `), it lists the peers online that match, with each one's
+  verify state, and shows the rest of the picked one dimmed, as `@` does.
+- `/` on an empty line, in INSERT or NORMAL, opens the command line, as in other chat programs.
+  A line that can't be a command (`/shrug`, `/usr/bin`) turns back into text as it's typed and
+  is sent as a message, never refused as an unknown command; `//` does the same straight away.
+- `PgUp` / `PgDn` scroll the chat back and forward (`Ctrl+U` / `Ctrl+D` in NORMAL, `G` back to
+  the newest), and the chat's edge says how many newer messages are below.
+- `Tab` / `Shift+Tab` jump between sections on the settings and help pages.
+- `Ctrl+U` in INSERT deletes everything before the cursor.
+- `NO_COLOR` keeps the UI to bold, faint and reverse.
+
 ### Changed
 - `just test-build` names each binary after its build id, as `chat-<build id>-<system>-<arch>`:
   the source it was built from (`git describe`) and when, in UTC, as `chat --version` shows.
+- The full-screen UI is redrawn as one rounded frame split by lines, each part titled in its
+  border: a sidebar with the sessions, their peers and how the selected one reaches them, the
+  console over the chat, and the input under it, outlined in the mode's colour. A bottom row
+  shows the mode, whether you sign, your nick and what the keys do.
+- The UI draws in the terminal's own colours, so it takes on the terminal's theme, light or
+  dark, and follows it when it changes (where the terminal reports that). Peers' colours stay
+  exact, but are eased toward readable on the terminal's background once it has told chat what
+  that is.
+- The chat lines up in columns (time, nick, text); a run of messages from one peer in one
+  minute shows the time and nick once. A new session, one still connecting, and one with no
+  messages yet say so, and what to do next.
+- The peers list shows whether each is verified, and a modified client, in words while they
+  fit; a lookalike's `#id` and its state are never cut for its nick.
+- The settings page lists its sections on the left, draws switches and choices as such, and
+  shows each row's `:set` under its help. Text rows are edited in place. The page chat opens on
+  ends in **Start chatting**.
 
 ## 0.1.9
 
