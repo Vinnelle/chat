@@ -120,25 +120,32 @@ typedef enum { IDENT_NONE = 0, IDENT_NATIVE = 1, IDENT_AGE = 2, IDENT_PGP = 3 } 
 
 typedef enum { VERIFY_UNVERIFIED = 0, VERIFY_VERIFIED = 1, VERIFY_FAILED = 2 } verify_state_t;
 
-// What a peer's "v" (its version, and its executable's hash) says once checked against the
-// signed SHA256SUMS of that version's release.
+// What a peer's "v" says about the build it runs. A peer can lie about its hash, so OFFICIAL is
+// only its word; MODIFIED is a build that doesn't claim to be a release's.
 typedef enum {
     BUILD_UNKNOWN = 0,   // it sent none: a build from before "v"
-    BUILD_CHECKING,      // that release's hashes are still being fetched
-    BUILD_UNCHECKED,     // they couldn't be fetched (offline, say); tried again later
+    BUILD_UNCHECKED,     // this build has no release key to check it with
     BUILD_OFFICIAL,
-    BUILD_MODIFIED       // not a binary of that release, or there's no signed release of it
+    BUILD_MODIFIED       // not a binary of the release it names, or with no signed list of it
 } build_state_t;
 
 #define MAX_VERSION 15
 
-// Looks up the SHA-256 of each binary in the signed release of `version`. Returns how many it
-// wrote (at most max), or one of these.
-#define CHAT_BUILDS_PENDING (-1)   // still being fetched: ask again
-#define CHAT_BUILDS_NONE (-2)      // there's no signed release of that version
-#define CHAT_BUILDS_UNKNOWN (-3)   // couldn't find out
-#define CHAT_BUILDS_MAX 8
-typedef int (*chat_builds_fn)(const char *version, uint8_t hashes[][BUILD_HASH_LEN], int max);
+// A release binary ends with a list of that release's binaries (the SHA-256 of each, without the
+// list) signed with the release key: `just release` appends it. A build sends peers its own list
+// in "v", so they check it with no one else to ask. Three hashes keep "v" inside one
+// normal-sized session frame.
+#define BUILD_LIST_MAX 3
+#define BUILD_LIST_LEN (BUILD_LIST_MAX * (BUILD_HASH_LEN * 2 + 1))
+
+// This program's build, as it tells peers.
+typedef struct {
+    int ok;   // 0 if the executable couldn't be read: nothing is sent
+    char version[MAX_VERSION + 1];
+    uint8_t hash[BUILD_HASH_LEN];
+    char list[BUILD_LIST_LEN + 1];              // the list's hashes, hex, comma-separated; "" if none
+    char list_sig[MINISIGN_SIG_B64_LEN + 1];    // the list's signature line
+} chat_build_t;
 
 // What a nick looks like once lookalikes, case and invisible characters are folded away.
 #define NICK_SKEL_LEN (4 * MAX_NICK + 1)
@@ -168,8 +175,8 @@ typedef struct {
     uint8_t identity_fp[ID_FP_LEN];
 
     char build_version[MAX_VERSION + 1];
-    uint8_t build_proof[BUILD_HASH_LEN];
     build_state_t build_state;
+    int build_warn;   // a MODIFIED verdict to tell once the join is announced
 
     // When a frame last came over each kind of path (by addr_kind_t), and (Tor) the onion
     // address the peer said it has.
@@ -254,10 +261,9 @@ typedef struct {
 
     notify_mode_t notify_mode;
 
-    char version[MAX_VERSION + 1];
-    int has_build;
-    uint8_t build_hash[BUILD_HASH_LEN];
-    chat_builds_fn builds;
+    chat_build_t build;
+    int has_release_key;
+    uint8_t release_key[MINISIGN_KEY_LEN];
 
     int once, once_used;
 
@@ -336,12 +342,10 @@ typedef struct {
     int has_color;
     uint8_t color[3];
 
-    // This program's version and its executable's SHA-256 (has_build 0 if it couldn't be read),
-    // which peers check; builds checks theirs (NULL: they're left unchecked).
-    char version[MAX_VERSION + 1];
-    int has_build;
-    uint8_t build_hash[BUILD_HASH_LEN];
-    chat_builds_fn builds;
+    // What peers are told about this build, and the release key (minisign, base64) their builds'
+    // lists are checked with; "" leaves them unchecked.
+    chat_build_t build;
+    char release_key[64];
 } chat_opts_t;
 
 void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify_fn notify, void *ui);
@@ -391,7 +395,7 @@ int chat_candidate_count(const chat_t *c);
 
 int chat_ready(const chat_t *c);
 const char *chat_verify_label(verify_state_t s);
-// What p runs, for :peers: "official v0.3.0", "modified client (says v0.3.0)" and so on.
+// What p runs, for :peers: "says official v0.3.1", "modified client (says v0.3.1)" and so on.
 void chat_build_label(const peer_t *p, char *out, size_t cap);
 
 typedef struct { const char *name; uint8_t r, g, b; } named_color_t;

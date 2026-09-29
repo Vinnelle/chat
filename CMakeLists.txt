@@ -151,7 +151,7 @@ target_compile_definitions(chat PRIVATE CHAT_VERSION="${PROJECT_VERSION}${CHAT_P
 
 # /update installs only releases whose SHA256SUMS the key in minisign.pub signed (`just keygen`
 # makes one). Without the file the build still works, but refuses every update.
-set(CHAT_PUBKEY_FILE ${CMAKE_SOURCE_DIR}/minisign.pub)
+set(CHAT_PUBKEY_FILE ${CMAKE_SOURCE_DIR}/minisign.pub CACHE FILEPATH "minisign public key releases are checked with")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CHAT_PUBKEY_FILE})
 if(EXISTS ${CHAT_PUBKEY_FILE})
     file(STRINGS ${CHAT_PUBKEY_FILE} CHAT_PUBKEY_LINES)

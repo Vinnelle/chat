@@ -516,15 +516,13 @@ static void tor_link_line(char *out, size_t cap) {
     }
 }
 
-// The running executable's SHA-256, taken at startup before :update can replace the file.
-static struct { int ok; uint8_t hash[BUILD_HASH_LEN]; } g_self_build;
+// This build as peers are told it, read at startup before :update can replace the file.
+static chat_build_t g_self_build;
 
-// What peers are told about this build ("v"), and how the builds they tell of are checked.
+// What peers are told about this build ("v"), and the key the builds they tell of are checked with.
 static void set_build_opts(chat_opts_t *o) {
-    copy_str(o->version, CHAT_VERSION, sizeof o->version);
-    o->has_build = g_self_build.ok;
-    memcpy(o->build_hash, g_self_build.hash, BUILD_HASH_LEN);
-    o->builds = update_official_hashes;
+    o->build = g_self_build;
+    copy_str(o->release_key, update_release_key(), sizeof o->release_key);
 }
 
 static session_slot_t *start_session(const char *session_name, const char *password, int created,
@@ -2540,7 +2538,7 @@ int main(int argc, char **argv) {
     update_cleanup_stale();
 
     crypto_setup();
-    g_self_build.ok = update_self_hash(g_self_build.hash) == 0;
+    update_self_build(&g_self_build);
     // The signing key, a pasted key block and typed passwords pass through these for the whole
     // run. Best effort, as in chat_init.
     crypto_lock(&g_app.identity, sizeof g_app.identity);

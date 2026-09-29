@@ -110,6 +110,18 @@ void cookie_compute(const uint8_t secret[32], const char *addr, const uint8_t pe
 void build_proof(const uint8_t exe_sha256[BUILD_HASH_LEN], const uint8_t from_id[ID_LEN],
                   const uint8_t to_id[ID_LEN], uint8_t proof[BUILD_HASH_LEN]);
 
+// minisign: a public key ("Ed", key id, Ed25519 key) and a signature ("ED" or "Ed", key id,
+// Ed25519 signature), as base64 in the .pub file and on the second line of a .minisig.
+#define MINISIGN_KEY_LEN 42
+#define MINISIGN_SIG_LEN 74
+#define MINISIGN_SIG_B64_LEN 100
+// Returns -1 if b64 isn't a minisign public key.
+int minisign_pubkey(const char *b64, uint8_t key[MINISIGN_KEY_LEN]);
+// Checks a signature line over msg. On success, sig_out (if not NULL) gets the raw Ed25519
+// signature, which the .minisig's trusted comment is signed along with.
+int minisign_verify(const uint8_t key[MINISIGN_KEY_LEN], const void *msg, size_t len,
+                     const char *sig_b64, size_t sig_b64_len, uint8_t sig_out[64]);
+
 #define KEM_PUB_LEN 1184
 #define KEM_PRIV_LEN 2400
 #define KEM_CT_LEN 1088

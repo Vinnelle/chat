@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- Checking a peer's build no longer contacts GitHub. Each release binary carries a list of that
+  release's binaries, signed with the release key, and sends it along with its hash; peers
+  check the list against the release key built into chat. A build without a signed list, such
+  as one from source, shows as modified. 0.3.0 peers are checked against 0.3.0's published
+  hashes, which are built in. 0.3.0 shows newer peers' builds as unknown.
+- `just release` signs the list and appends it to each binary before making `SHA256SUMS`, so it
+  asks for the release key's password twice.
+- `:peers` shows a build that checks out as "says official v0.3.1": a client altered to lie
+  about its hash still passes, so that's only the peer's word.
+
 ## 0.3.0
 
 ### Added

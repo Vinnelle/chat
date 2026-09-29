@@ -3,7 +3,7 @@
 #ifndef CHAT_UPDATE_H
 #define CHAT_UPDATE_H
 
-#include "crypto/crypto.h"
+#include "core/chat.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -21,13 +21,11 @@ int update_run(char *msg, size_t cap);
 
 void update_cleanup_stale(void);
 
-// The SHA-256 of the running executable, for peers to check against its release. -1 if unreadable.
-int update_self_hash(uint8_t out[BUILD_HASH_LEN]);
+// The release key (minisign, base64) built in from minisign.pub, or "" if there was none.
+const char *update_release_key(void);
 
-// A chat_builds_fn. The first ask for a version fetches its SHA256SUMS and signature from the
-// GitHub release in the background, through the update proxy, and checks the signature; until
-// then it's CHAT_BUILDS_PENDING. The answer is kept until chat exits. One that couldn't be had is
-// fetched again, after a while, when asked again.
-int update_official_hashes(const char *version, uint8_t hashes[][BUILD_HASH_LEN], int max);
+// This build as peers are told it: the SHA-256 of the running executable, less the signed list
+// of its release's binaries that a release appends, and that list. Returns -1 if unreadable.
+int update_self_build(chat_build_t *b);
 
 #endif

@@ -57,23 +57,36 @@ static int log_count(const log_t *l, const char *needle) {
     return k;
 }
 
-// Release 1.2.3 is alice's and bob's binaries; carol's is another. No other version was released.
+// Release 1.2.3 is alice's and bob's binaries: its list, signed with a release key of the test's
+// own as `just release` signs it, names them. Carol's is a build from source, with no list.
 static const uint8_t BUILD_ALICE[BUILD_HASH_LEN] = { 1 }, BUILD_BOB[BUILD_HASH_LEN] = { 2 },
                      BUILD_CAROL[BUILD_HASH_LEN] = { 3 };
-static int builds_asked;
+static char release_pub[64], release_list[BUILD_LIST_LEN + 1], release_sig[MINISIGN_SIG_B64_LEN + 1];
 
-// Says "still fetching" to the first few asks, as the real one does while it downloads.
-static int fake_builds(const char *version, uint8_t hashes[][BUILD_HASH_LEN], int max) {
-    if (++builds_asked <= 3) return CHAT_BUILDS_PENDING;
-    if (strcmp(version, "1.2.3") != 0) return CHAT_BUILDS_NONE;
-    if (max < 2) return CHAT_BUILDS_UNKNOWN;
-    memcpy(hashes[0], BUILD_ALICE, BUILD_HASH_LEN);
-    memcpy(hashes[1], BUILD_BOB, BUILD_HASH_LEN);
-    return 2;
+static void make_release(void) {
+    uint8_t pk[crypto_sign_PUBLICKEYBYTES], sk[crypto_sign_SECRETKEYBYTES], key[MINISIGN_KEY_LEN];
+    crypto_sign_keypair(pk, sk);
+    memcpy(key, "Ed", 2);
+    gen_random(key + 2, 8);
+    memcpy(key + 10, pk, sizeof pk);
+    base64_encode(key, sizeof key, release_pub);
+
+    char a[BUILD_HASH_LEN * 2 + 1], b[BUILD_HASH_LEN * 2 + 1], content[256];
+    hex_encode(BUILD_ALICE, BUILD_HASH_LEN, a);
+    hex_encode(BUILD_BOB, BUILD_HASH_LEN, b);
+    snprintf(release_list, sizeof release_list, "%s,%s", a, b);
+    int len = snprintf(content, sizeof content, "chat v1.2.3\n%s\n%s\n", a, b);
+    // minisign's default signature: "ED", the key id, and Ed25519 over BLAKE2b-512 of the file.
+    uint8_t h[64], sig[MINISIGN_SIG_LEN];
+    crypto_generichash(h, sizeof h, (const uint8_t *)content, (size_t)len, NULL, 0);
+    memcpy(sig, "ED", 2);
+    memcpy(sig + 2, key + 2, 8);
+    crypto_sign_detached(sig + 10, NULL, h, sizeof h, sk);
+    base64_encode(sig, sizeof sig, release_sig);
 }
 
 static void start(chat_t *c, log_t *l, const char *nick, uint16_t port, const uint16_t *peer_ports, int n, int created,
-                  const uint8_t build[BUILD_HASH_LEN]) {
+                  const uint8_t build[BUILD_HASH_LEN], int released) {
     chat_opts_t o;
     memset(&o, 0, sizeof o);
     copy_str(o.nick, nick, sizeof o.nick);
@@ -84,10 +97,14 @@ static void start(chat_t *c, log_t *l, const char *nick, uint16_t port, const ui
     o.n_peers = n;
     o.created = created;
     o.notify_mode = NOTIFY_NONE;
-    copy_str(o.version, "1.2.3", sizeof o.version);
-    o.has_build = 1;
-    memcpy(o.build_hash, build, BUILD_HASH_LEN);
-    o.builds = fake_builds;
+    o.build.ok = 1;
+    copy_str(o.build.version, "1.2.3", sizeof o.build.version);
+    memcpy(o.build.hash, build, BUILD_HASH_LEN);
+    if (released) {
+        copy_str(o.build.list, release_list, sizeof o.build.list);
+        copy_str(o.build.list_sig, release_sig, sizeof o.build.list_sig);
+    }
+    copy_str(o.release_key, release_pub, sizeof o.release_key);
     chat_init(c, &o, on_print, NULL, l);
 }
 
@@ -227,7 +244,7 @@ static void test_lookalike_nick(double *t) {
 // gets through first. Alice still has to say carol joined, not an "anon".
 static void test_third_peer(double *t) {
     uint16_t via_alice[1] = { A.port };
-    start(&C, &log_c, "carol", 40003, via_alice, 1, 0, BUILD_CAROL);
+    start(&C, &log_c, "carol", 40003, via_alice, 1, 0, BUILD_CAROL, 0);
     n_live = 3;
     drop_t d = { 1, 40003, A.port, 0 };
     fake_net_filter = drop_one;
@@ -260,10 +277,15 @@ static void test_candidates_settle(double *t) {
     CHECK(chat_online_count(&A) == 2, "alice lost a peer");
 }
 
-// Each peer's "v" against release 1.2.3: alice and bob run its binaries, carol doesn't.
+// Rekeys carol, which sends her "v" again with whatever her build now says.
+static void resend_carol(double *t) {
+    C.next_rekey = 0;
+    for (int i = 0; i < 40; i++) { *t += 0.05; pump(4, *t); }
+}
+
+// Each peer's "v" against the signed list it came with.
 static void test_builds(double *t) {
     for (int i = 0; i < 10; i++) { *t += 0.05; pump(2, *t); }
-    CHECK(builds_asked > 3, "the release's hashes were never waited on");
     peer_t *ab = peer_named(&A, "bob"), *ba = peer_named(&B, "alice"), *ca = peer_named(&C, "alice");
     peer_t *ac = peer_named(&A, "carol"), *bc = peer_named(&B, "carol");
     CHECK(ab && ab->build_state == BUILD_OFFICIAL, "alice doesn't see bob's build as official");
@@ -273,26 +295,41 @@ static void test_builds(double *t) {
     CHECK(bc && bc->build_state == BUILD_MODIFIED, "bob doesn't see carol's build as modified");
     CHECK(log_a.modified_warnings == 1 && log_b.modified_warnings == 1, "carol's build was warned about %d and %d times, want once each",
           log_a.modified_warnings, log_b.modified_warnings);
-    CHECK(log_c.modified_warnings == 0, "carol was warned about an official build");
+    CHECK(log_c.modified_warnings == 0, "carol was warned about a release build");
+    char label[64];
+    if (ab) chat_build_label(ab, label, sizeof label);
+    CHECK(ab && strcmp(label, "says official v1.2.3") == 0, "bob's build shows as '%s'", ab ? label : "");
 
     // A rekey sends the same "v" again: no second warning.
-    A.next_rekey = B.next_rekey = C.next_rekey = 0;
-    for (int i = 0; i < 40; i++) { *t += 0.05; pump(4, *t); }
+    A.next_rekey = B.next_rekey = 0;
+    resend_carol(t);
     ac = peer_named(&A, "carol");
     CHECK(ac && ac->build_state == BUILD_MODIFIED, "carol's build isn't modified after the rekey");
     CHECK(log_a.modified_warnings == 1, "a rekey warned about carol's build again");
 
-    // A version that was never released.
-    copy_str(C.version, "9.9.9", sizeof C.version);
-    C.next_rekey = 0;
-    for (int i = 0; i < 40; i++) { *t += 0.05; pump(4, *t); }
+    // Alice's list, passed on: carol's own hash still isn't in it.
+    copy_str(C.build.list, release_list, sizeof C.build.list);
+    copy_str(C.build.list_sig, release_sig, sizeof C.build.list_sig);
+    resend_carol(t);
+    ac = peer_named(&A, "carol");
+    CHECK(ac && ac->build_state == BUILD_MODIFIED, "carol passed with someone else's list");
+
+    // The list is signed for 1.2.3: under another version, even a hash in it doesn't pass.
+    copy_str(C.build.version, "9.9.9", sizeof C.build.version);
+    memcpy(C.build.hash, BUILD_ALICE, BUILD_HASH_LEN);
+    resend_carol(t);
     ac = peer_named(&A, "carol");
     CHECK(ac && ac->build_state == BUILD_MODIFIED && strcmp(ac->build_version, "9.9.9") == 0,
-          "carol's claim of an unreleased version isn't modified");
+          "1.2.3's list passed for 9.9.9");
     CHECK(log_a.modified_warnings == 2, "alice warned %d times about carol, want 2", log_a.modified_warnings);
-    char label[64];
     if (ac) chat_build_label(ac, label, sizeof label);
     CHECK(ac && strcmp(label, "modified client (says v9.9.9)") == 0, "carol's build shows as '%s'", ac ? label : "");
+
+    // What no check can catch: carol says she runs alice's binary, and sends its list.
+    copy_str(C.build.version, "1.2.3", sizeof C.build.version);
+    resend_carol(t);
+    ac = peer_named(&A, "carol");
+    CHECK(ac && ac->build_state == BUILD_OFFICIAL, "a peer lying with an official hash wasn't taken at its word");
 }
 
 // What comes from relays, routers and Tor, taken apart without a network.
@@ -428,8 +465,9 @@ int main(int argc, char **argv) {
     net_startup();
     uint16_t to_b[1] = { 40002 }, to_a[1] = { 40001 };
     printf("deriving session keys (Argon2id, 512 MiB each)...\n");
-    start(&A, &log_a, "alice", 40001, to_b, 1, 1, BUILD_ALICE);
-    start(&B, &log_b, "bob", 40002, to_a, 1, 0, BUILD_BOB);
+    make_release();
+    start(&A, &log_a, "alice", 40001, to_b, 1, 1, BUILD_ALICE, 1);
+    start(&B, &log_b, "bob", 40002, to_a, 1, 0, BUILD_BOB, 1);
     double t = now_seconds();
 
     struct { const char *name; void (*fn)(double *); } tests[] = {

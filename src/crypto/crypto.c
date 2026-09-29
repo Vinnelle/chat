@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
 #include "crypto/crypto.h"
+#include "common/util.h"
 #include <sodium.h>
 #include <oqs/kem_ml_kem.h>
 #include <stdio.h>
@@ -328,6 +329,33 @@ void build_proof(const uint8_t exe_sha256[BUILD_HASH_LEN], const uint8_t from_id
     crypto_generichash_update(&st, to_id, ID_LEN);
     crypto_generichash_final(&st, proof, BUILD_HASH_LEN);
     sodium_memzero(&st, sizeof st);
+}
+
+int minisign_pubkey(const char *b64, uint8_t key[MINISIGN_KEY_LEN]) {
+    if (base64_decode_strict(b64, strlen(b64), key, MINISIGN_KEY_LEN) != MINISIGN_KEY_LEN) return -1;
+    return memcmp(key, "Ed", 2) == 0 ? 0 : -1;
+}
+
+int minisign_verify(const uint8_t key[MINISIGN_KEY_LEN], const void *msg, size_t len,
+                     const char *sig_b64, size_t sig_b64_len, uint8_t sig_out[64]) {
+    uint8_t sig[MINISIGN_SIG_LEN];
+    if (base64_decode_strict(sig_b64, sig_b64_len, sig, sizeof sig) != (long)sizeof sig) return -1;
+    if (memcmp(sig + 2, key + 2, 8) != 0) return -1;
+    const uint8_t *pk = key + 10, *s = sig + 10;
+    int ok;
+    if (memcmp(sig, "ED", 2) == 0) {
+        // minisign's default: the signature covers BLAKE2b-512 of the file.
+        uint8_t h[crypto_generichash_BYTES_MAX];
+        crypto_generichash(h, sizeof h, (const unsigned char *)msg, len, NULL, 0);
+        ok = crypto_sign_verify_detached(s, h, sizeof h, pk) == 0;
+    } else if (memcmp(sig, "Ed", 2) == 0) {
+        ok = crypto_sign_verify_detached(s, (const unsigned char *)msg, len, pk) == 0;
+    } else {
+        return -1;
+    }
+    if (!ok) return -1;
+    if (sig_out) memcpy(sig_out, s, 64);
+    return 0;
 }
 
 void gen_identity_keypair(identity_keypair_t *kp) {

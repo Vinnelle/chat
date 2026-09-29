@@ -126,7 +126,23 @@ dist: build-static build-win
     cp build-win/chat.exe dist/chat-windows-x86_64.exe
     strip dist/chat-linux-x86_64
     cd dist && sha256sum chat-linux-x86_64 chat-windows-x86_64.exe > SHA256SUMS
+    cd dist && { echo "chat v{{version}}"; sha256sum chat-linux-x86_64 chat-windows-x86_64.exe | cut -c1-64; } > BUILDS
     @echo "dist/ ready for v{{version}}"
+
+# Peers send each other this list to check each other's builds with (README.md, "Modified
+# clients"), so it may name 3 binaries at most. Chat reads it from its own end: the list, its
+# signature line, then the length of both in 8 digits and CHATBLD1.
+# Append BUILDS, signed (BUILDS.minisig), to the binaries in a folder
+_append-list dir:
+    #!/bin/sh
+    set -eu
+    cd {{quote(dir)}}
+    test "$(wc -l < BUILDS)" -le 4 || { echo "BUILDS names more than 3 binaries" >&2; exit 1; }
+    sig=$(sed -n 2p BUILDS.minisig)
+    len=$(( $(wc -c < BUILDS) + ${#sig} + 1 ))
+    for f in chat-linux-x86_64 chat-windows-x86_64.exe; do
+        { cat BUILDS; printf '%s\n%08dCHATBLD1' "$sig" "$len"; } >> "$f"
+    done
 
 # minisign.pub gets committed; the password-protected secret key stays offline and backed up,
 # never in the repo. Set CHAT_SIGNING_KEY to keep it somewhere other than ~/.minisign.
@@ -190,6 +206,12 @@ release version="":
     test "$(git rev-parse HEAD)" = "$(git rev-parse "v$v^{commit}")" || { echo "HEAD is not tag v$v" >&2; exit 1; }
 
     just dist
+    # Each binary gets the signed list of this release's binaries, which peers check builds with.
+    # SHA256SUMS then covers the binaries as published, list included. Two signatures: two prompts.
+    minisign -S -s "$key" -m dist/BUILDS -t "chat builds v$v"
+    minisign -V -p minisign.pub -m dist/BUILDS
+    just _append-list dist
+    (cd dist && sha256sum chat-linux-x86_64 chat-windows-x86_64.exe > SHA256SUMS)
     minisign -S -s "$key" -m dist/SHA256SUMS -t "chat v$v"
     minisign -V -p minisign.pub -m dist/SHA256SUMS
     awk -v v="$v" '$0 == "## " v { on = 1; next } on && /^## / { exit } on { print }' CHANGELOG.md > dist/notes.md
