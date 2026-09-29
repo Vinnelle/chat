@@ -59,22 +59,20 @@ rekey. If a peer drops and comes back, chat tells you its verify code changed.
 
 **Modified clients.** Each client tells its peers, over the encrypted session, which version it
 runs and the SHA-256 of its own executable. That hash is keyed with both peers' session ids, so
-a build that isn't a release can't be recognised from one session or peer to the next. Chat
-checks it against the `SHA256SUMS` of that version's GitHub release, after checking that file's
-signature against the release key built into chat. A peer that isn't running one of that
-release's binaries, or that names a version with no signed release, is marked **modified**:
-you get a warning when it's found, the sidebar shows `modified` next to its name, and `:peers`
-shows its build. A build of your own from source counts as modified too, since only the release
-binaries match.
+a build that isn't a release can't be recognised from one session or peer to the next. Each
+release binary also carries a list of that release's binaries, signed with the release key, and
+sends it along. Peers check the list against the release key built into chat, and look for the
+hash in it. Nothing is downloaded and nobody else is asked, so the check shows no one that you
+met a peer. A peer whose hash isn't in its release's list, or that has no signed list (a build
+from source, for one), is marked **modified**: a warning follows its join, the sidebar shows
+`modified` next to its name, and `:peers` says `modified client`. One that passes shows as
+`says official`, since that is only its word.
 
 > This is not perfect as a client can be modified to send the correct SHA and will be marked as unmodified. I am working on a better solution for this
 
-The first time a peer names a version, chat downloads that release's `SHA256SUMS` and its
-signature from GitHub, once per version per run, in the background. In Tor mode this goes
-through Tor. GitHub, or the Tor exit, sees that someone fetched that version's checksums, and
-when, which is around when that peer joined. In direct mode GitHub also sees your IP address,
-and your network sees a connection to GitHub. If the download fails, the peer's build shows as
-not checked, and chat tries again a few minutes later.
+0.1.8 sent its hash without a list. Chat has 0.1.8's published hashes built in and checks those
+peers against them. 0.1.8 itself can't read the list, so it shows newer peers' builds as
+unknown.
 
 > **Note:** the cryptography here has not been independently audited.
 
@@ -274,6 +272,11 @@ Changes go under `## Unreleased` at the top of [CHANGELOG.md](CHANGELOG.md). `ju
 turns that heading into the new version, sets the version in `CMakeLists.txt`, commits both as
 `Release VERSION` and tags `vVERSION`. It pushes the branch and tag only after `SHA256SUMS` is
 signed; if a step fails, run it again and it carries on from the tag.
+
+It signs twice, so minisign asks for the key's password twice. First it signs the list of the
+release's binaries (`dist/BUILDS`) and appends it to each binary, for peers to check builds
+with. Then it signs `SHA256SUMS` of the binaries as published, list included, for downloads and
+`:update`.
 
 Releases are signed offline with the release key, never in CI, so someone who takes over the
 GitHub account still can't publish an update that chat will install. `just keygen` makes the

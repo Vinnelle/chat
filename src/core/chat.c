@@ -451,14 +451,16 @@ static void build_k_message(chat_t *c, peer_t *p, char *out, size_t out_cap) {
     snprintf(out, out_cap, "k\t%s\t%s\t%dr\t%d\t%s\t%s", c->nick, colorhex, c->persist, idtype, idpubhex, sighex);
 }
 
-// "v": our version and our executable's hash, which p checks against that version's release.
+// "v": our version, our executable's hash, and our release's signed list of its binaries (empty
+// fields for a build without one), which p checks the hash against. 0.1.8 sent only the first
+// two, and ignores this.
 static void send_build(chat_t *c, peer_t *p) {
-    if (!c->has_build) return;
+    if (!c->build.ok) return;
     uint8_t proof[BUILD_HASH_LEN];
-    build_proof(c->build_hash, c->my_id, p->id, proof);
+    build_proof(c->build.hash, c->my_id, p->id, proof);
     char proofhex[BUILD_HASH_LEN * 2 + 1]; hex_encode(proof, BUILD_HASH_LEN, proofhex);
-    char msg[4 + MAX_VERSION + BUILD_HASH_LEN * 2];
-    snprintf(msg, sizeof msg, "v\t%s\t%s", c->version, proofhex);
+    char msg[8 + MAX_VERSION + BUILD_HASH_LEN * 2 + BUILD_LIST_LEN + MINISIGN_SIG_B64_LEN];
+    snprintf(msg, sizeof msg, "v\t%s\t%s\t%s\t%s", c->build.version, proofhex, c->build.list, c->build.list_sig);
     send_peer(c, p, msg);
 }
 
@@ -548,10 +550,10 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
         memcpy(slot->identity_fp, carry.identity_fp, ID_FP_LEN);
         memcpy(slot->vfy, carry.vfy, VERIFY_LEN);
         slot->vfy_set = carry.vfy_set;
-        // The same "v" comes again after the rekey: it needn't be checked, or warned about, twice.
+        // The same "v" comes again after the rekey: it mustn't be warned about twice.
         memcpy(slot->build_version, carry.build_version, sizeof slot->build_version);
-        memcpy(slot->build_proof, carry.build_proof, BUILD_HASH_LEN);
         slot->build_state = carry.build_state;
+        slot->build_warn = carry.build_warn;
         slot->ok = 1;
         slot->old_send = carry.send_chain;
         slot->old_recv = carry.recv_chain;
@@ -729,30 +731,77 @@ static int version_ok(const char *v) {
     return 1;
 }
 
-// Compares p's build with the official binaries of the version it names, once their hashes are in.
-static void check_build(chat_t *c, peer_t *p) {
-    if (!c->builds) { p->build_state = BUILD_UNCHECKED; return; }
-    // Its warning names p: wait for the join, which waits for the nick. chat_tick checks again.
-    if (!p->announced) { p->build_state = BUILD_CHECKING; return; }
-    uint8_t hashes[CHAT_BUILDS_MAX][BUILD_HASH_LEN];
-    int n = c->builds(p->build_version, hashes, CHAT_BUILDS_MAX);
-    if (n == CHAT_BUILDS_PENDING) { p->build_state = BUILD_CHECKING; return; }
-    if (n == CHAT_BUILDS_UNKNOWN || n > CHAT_BUILDS_MAX) { p->build_state = BUILD_UNCHECKED; return; }
+// 0.1.8 sent "v" before binaries carried their list: the SHA-256 of each of its binaries as
+// published, from its signed SHA256SUMS.
+static const struct { const char *version; const char *sha256[2]; } LISTLESS_RELEASES[] = {
+    { "0.1.8", { "9d50e1c7de24f14424c6f512eaa7b928d1a1a898d9b9e9daee2afefc4c148085",
+                 "69af5f3c89ff5fa59c82b4d535c47efb26ea28979ed8b61bdfb384054c723539" } },
+};
+
+// The hashes in a list a peer sent, if the release key signed it for that version. Returns how
+// many, or -1.
+static int signed_list(const chat_t *c, const char *version, const char *list, const char *sig,
+                       uint8_t hashes[BUILD_LIST_MAX][BUILD_HASH_LEN]) {
+    // What `just release` signs: "chat vVERSION", then each hash, a line each.
+    char content[16 + MAX_VERSION + BUILD_LIST_LEN];
+    size_t pos = (size_t)snprintf(content, sizeof content, "chat v%s\n", version);
+    int n = 0;
+    for (const char *item = list; *item; ) {
+        const char *end = strchr(item, ',');
+        size_t len = end ? (size_t)(end - item) : strlen(item);
+        char hex[BUILD_HASH_LEN * 2 + 1];
+        if (n == BUILD_LIST_MAX || len != sizeof hex - 1) return -1;
+        memcpy(hex, item, len); hex[len] = '\0';
+        // Lowercase only, as sha256sum writes it, so the signed text has one spelling.
+        if (strspn(hex, "0123456789abcdef") != len || hex_decode(hex, len, hashes[n]) != 0) return -1;
+        memcpy(content + pos, hex, len);
+        pos += len;
+        content[pos++] = '\n';
+        n++;
+        if (!end) break;
+        item = end + 1;
+    }
+    if (n == 0 || minisign_verify(c->release_key, content, pos, sig, strlen(sig), NULL) != 0) return -1;
+    return n;
+}
+
+// The warning names p, so it waits for p's join to be announced.
+static void tell_build(chat_t *c, peer_t *p) {
+    if (!p->build_warn || !p->announced) return;
+    p->build_warn = 0;
+    char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
+    ui_print(c, "* warning: %s runs a modified client - it says v%s, but isn't one of that release's binaries",
+             name, p->build_version);
+}
+
+// Checks the build p's "v" names: its hash against the signed list it came with (list NULL:
+// 0.1.8's format, which has none), and warns about one that isn't a release binary.
+static void check_build(chat_t *c, peer_t *p, const char *version, const uint8_t proof[BUILD_HASH_LEN],
+                        const char *list, const char *sig) {
+    // "v" comes with every k: a verdict already given isn't given again.
+    int again = p->build_state == BUILD_MODIFIED && strcmp(p->build_version, version) == 0;
+    copy_str(p->build_version, version, sizeof p->build_version);
+    if (!c->has_release_key) { p->build_state = BUILD_UNCHECKED; return; }
+    uint8_t hashes[BUILD_LIST_MAX][BUILD_HASH_LEN];
+    int n = -1;
+    if (list) {
+        n = signed_list(c, version, list, sig, hashes);
+    } else {
+        for (size_t i = 0; i < sizeof LISTLESS_RELEASES / sizeof LISTLESS_RELEASES[0]; i++) {
+            if (strcmp(LISTLESS_RELEASES[i].version, version) != 0) continue;
+            for (n = 0; n < 2; n++) hex_decode(LISTLESS_RELEASES[i].sha256[n], BUILD_HASH_LEN * 2, hashes[n]);
+        }
+    }
     int official = 0;
     for (int i = 0; i < n && !official; i++) {
         uint8_t want[BUILD_HASH_LEN];
         build_proof(hashes[i], p->id, c->my_id, want);
-        official = crypto_equal(want, p->build_proof, BUILD_HASH_LEN) == 0;
+        official = crypto_equal(want, proof, BUILD_HASH_LEN) == 0;
     }
     p->build_state = official ? BUILD_OFFICIAL : BUILD_MODIFIED;
-    if (official) return;
-    char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
-    if (n == CHAT_BUILDS_NONE)
-        ui_print(c, "* warning: %s runs a modified client - it says v%s, and there's no signed release of that",
-                 name, p->build_version);
-    else
-        ui_print(c, "* warning: %s runs a modified client - it says v%s, but isn't a binary from that release",
-                 name, p->build_version);
+    if (official) p->build_warn = 0;
+    else if (!again) p->build_warn = 1;
+    tell_build(c, p);
 }
 
 static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
@@ -832,16 +881,11 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         }
     } else if (n == 2 && strcmp(f[0], "ta") == 0) {
         if (onion_valid(f[1])) copy_str(p->onion, f[1], sizeof p->onion);
-    } else if (n == 3 && strcmp(f[0], "v") == 0) {
+    } else if ((n == 3 || n == 5) && strcmp(f[0], "v") == 0) {
         uint8_t proof[BUILD_HASH_LEN];
         if (!version_ok(f[1]) || strlen(f[2]) != BUILD_HASH_LEN * 2
             || hex_decode(f[2], BUILD_HASH_LEN * 2, proof) != 0) return;
-        // It comes with every k: only a different one needs checking again.
-        if (p->build_state != BUILD_UNKNOWN && strcmp(p->build_version, f[1]) == 0
-            && memcmp(p->build_proof, proof, BUILD_HASH_LEN) == 0) return;
-        copy_str(p->build_version, f[1], sizeof p->build_version);
-        memcpy(p->build_proof, proof, BUILD_HASH_LEN);
-        check_build(c, p);
+        check_build(c, p, f[1], proof, n == 5 ? f[3] : NULL, n == 5 ? f[4] : NULL);
     } else if (n == 5 && strcmp(f[0], "m") == 0) {
         // Only p itself is authenticated here. f[2] and f[3] (origin id, nick) are whatever p says.
         uint8_t mid_raw[4], origin[ID_LEN];
@@ -1105,6 +1149,7 @@ static void announce_join(chat_t *c, peer_t *p) {
         ui_print(c, "* %s reconnected with a new verify code (was %s, now %s) - if you had compared "
                     "codes with them, compare the new one", name, was, now_hex);
     }
+    tell_build(c, p);
 }
 
 static void on_frame(chat_t *c, uint8_t *data, size_t len, addr_t addr, double now) {
@@ -1398,7 +1443,6 @@ void chat_tick(chat_t *c, double now) {
             if (p->keygen != c->keygen) send_rk(c, p, send_chain_for(p));
             else if (p->old_until > 0.0 && p->old_send.started) send_rk(c, p, &p->old_send);
         }
-        if (p->ok && (p->build_state == BUILD_CHECKING || p->build_state == BUILD_UNCHECKED)) check_build(c, p);
         if (p->old_until > 0.0 && now > p->old_until) rekey_drop_overlap(p);
         if (p->ok && now - p->seen > PEER_TIMEOUT) drop_peer(c, p, "timed out");
     }
@@ -1497,9 +1541,9 @@ const char *chat_verify_label(verify_state_t s) {
 
 void chat_build_label(const peer_t *p, char *out, size_t cap) {
     switch (p->build_state) {
-        case BUILD_OFFICIAL:  snprintf(out, cap, "official v%s", p->build_version); break;
+        // Only its word: a client altered to lie can send an official build's hash.
+        case BUILD_OFFICIAL:  snprintf(out, cap, "says official v%s", p->build_version); break;
         case BUILD_MODIFIED:  snprintf(out, cap, "modified client (says v%s)", p->build_version); break;
-        case BUILD_CHECKING:  snprintf(out, cap, "v%s, checking the build", p->build_version); break;
         case BUILD_UNCHECKED: snprintf(out, cap, "v%s, build not checked", p->build_version); break;
         case BUILD_UNKNOWN:
         default:              snprintf(out, cap, "build unknown"); break;
@@ -1897,12 +1941,14 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
     c->identity_source = o->identity_source;
     if (c->identity_source != IDENT_NONE) c->identity = o->identity;
 
-    c->has_build = o->has_build && version_ok(o->version);
-    if (c->has_build) {
-        copy_str(c->version, o->version, sizeof c->version);
-        memcpy(c->build_hash, o->build_hash, BUILD_HASH_LEN);
-    }
-    c->builds = o->builds;
+    c->build = o->build;
+    c->build.version[MAX_VERSION] = c->build.list[BUILD_LIST_LEN] = c->build.list_sig[MINISIGN_SIG_B64_LEN] = '\0';
+    if (!version_ok(c->build.version)) c->build.ok = 0;
+    // They go out between tabs in "v".
+    if (strspn(c->build.list, "0123456789abcdef,") != strlen(c->build.list)
+        || strspn(c->build.list_sig, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=") != strlen(c->build.list_sig))
+        c->build.list[0] = c->build.list_sig[0] = '\0';
+    c->has_release_key = minisign_pubkey(o->release_key, c->release_key) == 0;
 
     gen_random(c->my_id, ID_LEN);
     gen_keypair(&c->keys);

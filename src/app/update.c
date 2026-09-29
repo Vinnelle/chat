@@ -40,8 +40,7 @@ static char g_proxy[64];
 
 void update_set_proxy(const char *socks) { copy_str(g_proxy, socks ? socks : "", sizeof g_proxy); }
 
-// headers_path, if not NULL, gets the response headers, for fetch_missing.
-static int fetch(const char *url, const char *out_path, int api, const char *headers_path) {
+static int fetch(const char *url, const char *out_path, int api) {
     // -q must come first: it stops curl reading a .curlrc that could turn off TLS checks or add a proxy.
     // --socks5-hostname leaves name lookups to the proxy, so Tor resolves GitHub, not local DNS.
     const char *argv[24] = {
@@ -52,7 +51,6 @@ static int fetch(const char *url, const char *out_path, int api, const char *hea
     };
     int n = 0;
     while (argv[n]) n++;
-    if (headers_path) { argv[n++] = "-D"; argv[n++] = headers_path; }
     char user[24];
     if (g_proxy[0]) {
         // Made-up SOCKS credentials give each download circuits of its own (Tor isolates by them),
@@ -150,9 +148,8 @@ static const char RELEASE_PUBKEY[] = "";
 // built in from minisign.pub. The trusted comment must be "chat <tag>", so a signed SHA256SUMS from
 // an older release can't be passed off as a newer one.
 static int minisign_ok(const char *msg, size_t msg_len, const char *sig_text, const char *tag) {
-    uint8_t pk[2 + 8 + crypto_sign_PUBLICKEYBYTES];
-    if (base64_decode_strict(RELEASE_PUBKEY, strlen(RELEASE_PUBKEY), pk, sizeof pk) != (long)sizeof pk || memcmp(pk, "Ed", 2) != 0)
-        return -1;
+    uint8_t pk[MINISIGN_KEY_LEN];
+    if (minisign_pubkey(RELEASE_PUBKEY, pk) != 0) return -1;
 
     // Four lines: untrusted comment, signature, trusted comment, global signature.
     const char *lines[4]; size_t lens[4];
@@ -173,29 +170,14 @@ static int minisign_ok(const char *msg, size_t msg_len, const char *sig_text, co
     int want_len = snprintf(want, sizeof want, "chat %s", tag);
     if (want_len < 0 || (size_t)want_len != comment_len || memcmp(comment, want, comment_len) != 0) return -1;
 
-    uint8_t sig[2 + 8 + crypto_sign_BYTES], global[crypto_sign_BYTES];
-    if (base64_decode_strict(lines[1], lens[1], sig, sizeof sig) != (long)sizeof sig) return -1;
+    uint8_t s[crypto_sign_BYTES], global[crypto_sign_BYTES];
     if (base64_decode_strict(lines[3], lens[3], global, sizeof global) != (long)sizeof global) return -1;
-    if (memcmp(sig + 2, pk + 2, 8) != 0) return -1;
-
-    const uint8_t *key = pk + 10, *s = sig + 10;
-    int ok;
-    if (memcmp(sig, "ED", 2) == 0) {
-        // minisign's default: the signature covers BLAKE2b-512 of the file.
-        uint8_t h[crypto_generichash_BYTES_MAX];
-        crypto_generichash(h, sizeof h, (const unsigned char *)msg, msg_len, NULL, 0);
-        ok = crypto_sign_verify_detached(s, h, sizeof h, key) == 0;
-    } else if (memcmp(sig, "Ed", 2) == 0) {
-        ok = crypto_sign_verify_detached(s, (const unsigned char *)msg, msg_len, key) == 0;
-    } else {
-        return -1;
-    }
-    if (!ok) return -1;
+    if (minisign_verify(pk, msg, msg_len, lines[1], lens[1], s) != 0) return -1;
 
     uint8_t signed_comment[crypto_sign_BYTES + 64];
     memcpy(signed_comment, s, crypto_sign_BYTES);
     memcpy(signed_comment + crypto_sign_BYTES, comment, comment_len);
-    return crypto_sign_verify_detached(global, signed_comment, crypto_sign_BYTES + comment_len, key) == 0 ? 0 : -1;
+    return crypto_sign_verify_detached(global, signed_comment, crypto_sign_BYTES + comment_len, pk + 10) == 0 ? 0 : -1;
 }
 
 static int hash_file(const char *path, uint8_t out[crypto_hash_sha256_BYTES], long *size_out) {
@@ -244,7 +226,7 @@ static void update_thread(void *unused) {
     snprintf(tmp_sig, sizeof tmp_sig, "%s.sums.minisig", exe);
     snprintf(tmp_bin, sizeof tmp_bin, "%s.download", exe);
 
-    if (fetch("https://api.github.com/repos/" UPDATE_REPO "/releases/latest", tmp_json, 1, NULL) != 0) {
+    if (fetch("https://api.github.com/repos/" UPDATE_REPO "/releases/latest", tmp_json, 1) != 0) {
         platform_remove(tmp_json);
         finish("* update: could not reach GitHub (is curl installed, and is %s's folder writable?)", exe);
         return;
@@ -258,7 +240,7 @@ static void update_thread(void *unused) {
     if (!version_newer(tag, CHAT_VERSION)) { succeed("* update: already up to date (v" CHAT_VERSION ", latest is %s)", tag); return; }
 
     snprintf(url, sizeof url, "https://github.com/" UPDATE_REPO "/releases/download/%s/SHA256SUMS", tag);
-    if (fetch(url, tmp_sums, 0, NULL) != 0) {
+    if (fetch(url, tmp_sums, 0) != 0) {
         platform_remove(tmp_sums);
         finish("* update: release %s has no SHA256SUMS - refusing to install it", tag);
         return;
@@ -271,7 +253,7 @@ static void update_thread(void *unused) {
     // The signature, made offline with the release key, is what vouches for it.
     snprintf(url, sizeof url, "https://github.com/" UPDATE_REPO "/releases/download/%s/SHA256SUMS.minisig", tag);
     char *sig = NULL;
-    if (fetch(url, tmp_sig, 0, NULL) == 0) sig = slurp(tmp_sig, 4096, NULL);
+    if (fetch(url, tmp_sig, 0) == 0) sig = slurp(tmp_sig, 4096, NULL);
     platform_remove(tmp_sig);
     int signed_ok = sums && sig && minisign_ok(sums, sums_len, sig, tag) == 0;
     free(sig);
@@ -287,7 +269,7 @@ static void update_thread(void *unused) {
     if (!ok) { finish("* update: SHA256SUMS lists no " UPDATE_ASSET " for %s - nothing installed", tag); return; }
 
     snprintf(url, sizeof url, "https://github.com/" UPDATE_REPO "/releases/download/%s/" UPDATE_ASSET, tag);
-    if (fetch(url, tmp_bin, 0, NULL) != 0) {
+    if (fetch(url, tmp_bin, 0) != 0) {
         platform_remove(tmp_bin);
         finish("* update: downloading " UPDATE_ASSET " from %s failed - nothing installed", tag);
         return;
@@ -333,148 +315,80 @@ int update_run(char *msg, size_t cap) {
     return g_ok ? 0 : -1;
 }
 
-// ---- official builds, to check the build a peer says it runs ----
+// ---- this build, as peers are told it ----
 
-int update_self_hash(uint8_t out[BUILD_HASH_LEN]) {
+const char *update_release_key(void) { return RELEASE_PUBKEY; }
+
+// What `just release` appends to each binary: the signed list ("chat vVERSION", each binary's
+// hash, then the signature line), and a footer of the list's length in 8 digits and this.
+#define LIST_MAGIC "CHATBLD1"
+#define LIST_FOOTER 16
+#define LIST_MAX 1024
+
+// Takes the list apart into b: only one for this version, with hashes as sha256sum writes them.
+static void parse_list(char *text, chat_build_t *b) {
+    char *lines[BUILD_LIST_MAX + 3];
+    int n = 0;
+    for (char *p = text; *p; ) {
+        char *end = strchr(p, '\n');
+        if (!end || n == (int)(sizeof lines / sizeof lines[0])) return;
+        *end = '\0';
+        lines[n++] = p;
+        p = end + 1;
+    }
+    if (n < 3 || strcmp(lines[0], "chat v" CHAT_VERSION) != 0 || strlen(lines[n - 1]) != MINISIGN_SIG_B64_LEN) return;
+    char list[BUILD_LIST_LEN + 1] = "";
+    size_t pos = 0;
+    for (int i = 1; i < n - 1; i++) {
+        if (strlen(lines[i]) != BUILD_HASH_LEN * 2 || strspn(lines[i], "0123456789abcdef") != BUILD_HASH_LEN * 2) return;
+        pos += (size_t)snprintf(list + pos, sizeof list - pos, "%s%s", i > 1 ? "," : "", lines[i]);
+    }
+    copy_str(b->list, list, sizeof b->list);
+    copy_str(b->list_sig, lines[n - 1], sizeof b->list_sig);
+}
+
+int update_self_build(chat_build_t *b) {
+    memset(b, 0, sizeof *b);
+    copy_str(b->version, CHAT_VERSION, sizeof b->version);
 #ifdef __linux__
     // The file this process was started from, even if an update has replaced it since.
-    return hash_file("/proc/self/exe", out, NULL);
+    FILE *f = platform_fopen("/proc/self/exe", "rb");
 #else
     char exe[1024];
-    if (platform_exe_path(exe, sizeof exe) != 0) return -1;
-    return hash_file(exe, out, NULL);
+    FILE *f = platform_exe_path(exe, sizeof exe) == 0 ? platform_fopen(exe, "rb") : NULL;
 #endif
-}
-
-// A version a release could have: MAJOR.MINOR.PATCH, as `just release` takes it.
-static int release_version(const char *v) {
-    for (int part = 0; part < 3; part++) {
-        int digits = 0;
-        while (isdigit((unsigned char)*v)) { v++; if (++digits > 5) return 0; }
-        if (digits == 0 || (part < 2 && *v++ != '.')) return 0;
-    }
-    return *v == '\0';
-}
-
-static int sums_all(const char *sums, uint8_t hashes[][BUILD_HASH_LEN], int max) {
-    int n = 0;
-    for (const char *line = sums; *line && n < max; ) {
-        const char *end = strchr(line, '\n');
-        size_t llen = end ? (size_t)(end - line) : strlen(line);
-        if (llen >= 66 && (line[64] == ' ' || line[64] == '\t')) {
-            char hex[65];
-            memcpy(hex, line, 64); hex[64] = '\0';
-            if (hex_decode(hex, 64, hashes[n]) == 0) n++;
-        }
-        if (!end) break;
-        line = end + 1;
-    }
-    return n;
-}
-
-// Whether a failed fetch failed because there's no such file: the last status line in its
-// headers (after any redirects) is a 404.
-static int fetch_missing(const char *headers_path) {
-    char *h = slurp(headers_path, 1 << 16, NULL);
-    if (!h) return 0;
-    int status = 0;
-    for (const char *line = h; line && *line; ) {
-        if (strncmp(line, "HTTP/", 5) == 0) {
-            const char *sp = strchr(line, ' ');
-            status = sp ? atoi(sp + 1) : 0;
-        }
-        line = strchr(line, '\n');
-        if (line) line++;
-    }
-    free(h);
-    return status == 404;
-}
-
-static int fetch_official(const char *version, uint8_t hashes[][BUILD_HASH_LEN], int max) {
-    if (!release_version(version)) return CHAT_BUILDS_NONE;
-    if (!RELEASE_PUBKEY[0]) return CHAT_BUILDS_UNKNOWN;
-    char dir[900], sums_path[1000], sig_path[1000], hdr_path[1000], tag[24], url[512];
-    // Not next to the executable, as :update does: that folder may not be writable, and these are
-    // fetched without anyone asking.
-    if (platform_private_tempdir("chat-sums", dir, sizeof dir) != 0) return CHAT_BUILDS_UNKNOWN;
-    snprintf(sums_path, sizeof sums_path, "%s/SHA256SUMS", dir);
-    snprintf(sig_path, sizeof sig_path, "%s/SHA256SUMS.minisig", dir);
-    snprintf(hdr_path, sizeof hdr_path, "%s/headers", dir);
-    snprintf(tag, sizeof tag, "v%s", version);
-
-    int result = CHAT_BUILDS_UNKNOWN;
-    snprintf(url, sizeof url, "https://github.com/" UPDATE_REPO "/releases/download/%s/SHA256SUMS", tag);
-    if (fetch(url, sums_path, 0, hdr_path) != 0) {
-        if (fetch_missing(hdr_path)) result = CHAT_BUILDS_NONE;
-    } else {
-        snprintf(url, sizeof url, "https://github.com/" UPDATE_REPO "/releases/download/%s/SHA256SUMS.minisig", tag);
-        if (fetch(url, sig_path, 0, hdr_path) != 0) {
-            // Every release since peers began sending "v" is signed.
-            if (fetch_missing(hdr_path)) result = CHAT_BUILDS_NONE;
-        } else {
-            size_t sums_len = 0;
-            char *sums = slurp(sums_path, 1 << 16, &sums_len), *sig = slurp(sig_path, 4096, NULL);
-            // A bad signature says nothing about the peer, only that this download went wrong.
-            if (sums && sig && minisign_ok(sums, sums_len, sig, tag) == 0) result = sums_all(sums, hashes, max);
-            free(sums);
-            free(sig);
+    if (!f) return -1;
+    long size = fseek(f, 0, SEEK_END) == 0 ? ftell(f) : -1;
+    long core = size;
+    char foot[LIST_FOOTER], text[LIST_MAX + 1];
+    if (size > LIST_FOOTER && fseek(f, size - LIST_FOOTER, SEEK_SET) == 0 && fread(foot, 1, LIST_FOOTER, f) == LIST_FOOTER
+        && memcmp(foot + 8, LIST_MAGIC, 8) == 0) {
+        long len = 0;
+        for (int i = 0; i < 8 && len >= 0; i++) len = isdigit((unsigned char)foot[i]) ? len * 10 + (foot[i] - '0') : -1;
+        if (len > 0 && len <= LIST_MAX && len <= size - LIST_FOOTER) {
+            // The hash leaves the list out: it can't hold a hash of itself.
+            core = size - LIST_FOOTER - len;
+            if (fseek(f, core, SEEK_SET) == 0 && fread(text, 1, (size_t)len, f) == (size_t)len) {
+                text[len] = '\0';
+                parse_list(text, b);
+            }
         }
     }
-    platform_remove_tree(dir);
-    return result;
-}
-
-#define BUILDS_VERSIONS 8
-// How long before a lookup that couldn't get an answer (offline, tor not up yet) is tried again.
-#define BUILDS_RETRY 300.0
-
-enum { BJ_EMPTY = 0, BJ_FETCHING = 1, BJ_DONE = 2 };
-
-// One version's lookup. The thread fetching it owns everything but state until state is BJ_DONE.
-typedef struct {
-    int state;
-    char version[MAX_VERSION + 1];
-    int result;
-    uint8_t hashes[CHAT_BUILDS_MAX][BUILD_HASH_LEN];
-    double done_at;
-} build_job_t;
-
-static build_job_t g_builds[BUILDS_VERSIONS];
-
-static void builds_thread(void *arg) {
-    build_job_t *j = arg;
-    j->result = fetch_official(j->version, j->hashes, CHAT_BUILDS_MAX);
-    j->done_at = now_seconds();
-    __atomic_store_n(&j->state, BJ_DONE, __ATOMIC_RELEASE);
-}
-
-static int builds_start(build_job_t *j) {
-    __atomic_store_n(&j->state, BJ_FETCHING, __ATOMIC_RELEASE);
-    if (platform_spawn_thread(builds_thread, j) == 0) return CHAT_BUILDS_PENDING;
-    j->result = CHAT_BUILDS_UNKNOWN;
-    j->done_at = now_seconds();
-    __atomic_store_n(&j->state, BJ_DONE, __ATOMIC_RELEASE);
-    return CHAT_BUILDS_UNKNOWN;
-}
-
-int update_official_hashes(const char *version, uint8_t hashes[][BUILD_HASH_LEN], int max) {
-    if (!release_version(version)) return CHAT_BUILDS_NONE;
-    build_job_t *free_job = NULL;
-    for (int i = 0; i < BUILDS_VERSIONS; i++) {
-        build_job_t *j = &g_builds[i];
-        int state = __atomic_load_n(&j->state, __ATOMIC_ACQUIRE);
-        if (state == BJ_EMPTY) { if (!free_job) free_job = j; continue; }
-        if (strcmp(j->version, version) != 0) continue;
-        if (state == BJ_FETCHING) return CHAT_BUILDS_PENDING;
-        if (j->result == CHAT_BUILDS_UNKNOWN && now_seconds() - j->done_at > BUILDS_RETRY) return builds_start(j);
-        int n = j->result < max ? j->result : max;
-        if (n > 0) memcpy(hashes, j->hashes, (size_t)n * BUILD_HASH_LEN);
-        return n;
+    crypto_hash_sha256_state st;
+    crypto_hash_sha256_init(&st);
+    uint8_t buf[16384];
+    long left = size >= 0 && fseek(f, 0, SEEK_SET) == 0 ? core : -1;
+    while (left > 0) {
+        size_t got = fread(buf, 1, left < (long)sizeof buf ? (size_t)left : sizeof buf, f);
+        if (got == 0) break;
+        crypto_hash_sha256_update(&st, buf, got);
+        left -= (long)got;
     }
-    // A peer can name any version: only so many are looked up in one run.
-    if (!free_job) return CHAT_BUILDS_UNKNOWN;
-    copy_str(free_job->version, version, sizeof free_job->version);
-    return builds_start(free_job);
+    fclose(f);
+    if (left != 0) return -1;
+    crypto_hash_sha256_final(&st, b->hash);
+    b->ok = 1;
+    return 0;
 }
 
 void update_cleanup_stale(void) {
