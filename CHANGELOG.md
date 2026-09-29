@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1
 
 ### Changed
 - Checking a peer's build no longer contacts GitHub. Each release binary carries a list of that
