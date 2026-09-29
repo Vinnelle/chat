@@ -29,43 +29,54 @@ static const char *USAGE =
     "       chat --update | --version\n"
     "\n"
     "With a real terminal, chat opens a full-screen UI: sessions you've joined or created\n"
-    "sit in a list on the left (switch with Tab/Shift+Tab), the selected one's messages and\n"
-    "timestamps fill the rest of the screen, who's online sits below the session list, and\n"
-    "you type at the bottom. It starts on the settings page, where routing, your nickname,\n"
-    "colour, signing key and the rest are set up in one place; Done at the bottom (or Esc)\n"
-    "goes on to your sessions. Nothing reaches the network before Done: no tor is looked\n"
-    "for or started, and no --peer name is looked up.\n"
+    "sit in a list on the left (switch with Tab/Shift+Tab), with who's online and how the\n"
+    "session reaches them below it; the selected one's chat fills the rest, and you type in\n"
+    "the box at the bottom. It draws in the terminal's own colours, so it takes on the\n"
+    "terminal's theme, light or dark, and follows it when it changes. It starts on the\n"
+    "settings page, where routing, your nickname, colour, signing key and the rest are set\n"
+    "up in one place; Start chatting at the bottom (or Esc) goes on to your sessions.\n"
+    "Nothing reaches the network before that: no tor is looked for or started, and no\n"
+    "--peer name is looked up.\n"
     "\n"
-    "  Ctrl+N   create a new session (asks for a password; blank is fine, still encrypts)\n"
-    "  Ctrl+J   join an existing session (asks for its id, then its password)\n"
-    "  Tab      next session       Shift+Tab   previous session (j/k in NORMAL too)\n"
-    "  Ctrl+B   hide/show the session sidebar   Ctrl+O   hide/show the console\n"
-    "  Ctrl+T   hide/show the chat (hide two of the three and the last one fills the screen)\n"
-    "  Ctrl+S   settings: routing, identity, notifications, layout (also :set)\n"
-    "  Ctrl+C   quit chat (every open session leaves cleanly first)\n"
+    "  Ctrl+N     create a new session (asks for a password; blank is fine, still encrypts)\n"
+    "  Ctrl+J     join an existing session (asks for its id, then its password)\n"
+    "  Tab        next session       Shift+Tab   previous session (j/k in NORMAL too)\n"
+    "  PgUp/PgDn  scroll the chat back and forward (Ctrl+U/Ctrl+D in NORMAL, G the newest)\n"
+    "  Ctrl+B     hide/show the sidebar   Ctrl+O   hide/show the console\n"
+    "  Ctrl+T     hide/show the chat (hide two of the three and the last one fills the screen)\n"
+    "  Ctrl+S     settings: routing, identity, notifications, layout (also :set)\n"
+    "  F1         every key and command on one page (also ? in NORMAL, and :help)\n"
+    "  Ctrl+C     quit chat (every open session leaves cleanly first)\n"
     "\n"
     "Each session has two sections: the conversation, and a console above it for everything\n"
     "that isn't chat - people joining and leaving, the internet lookup, command output. A\n"
-    "session you joined is locked (the prompt says \"connecting\") until someone answers.\n"
-    "The bottom bar says where you are, what the keys do there, and the reply to what you\n"
+    "session you joined is locked (the chat says \"connecting\") until someone answers.\n"
+    "The bottom row says where you are, what the keys do there, and the reply to what you\n"
     "just did, until your next key.\n"
     "\n"
-    "The input line is a small vim. It starts in NORMAL:\n"
-    "  i/a/I/A  NORMAL -> INSERT: type and press Enter to send, Ctrl+W deletes a word\n"
-    "  Esc      INSERT -> NORMAL: h/l move, 0/$ ends, x delete, j/k switch session\n"
-    "  :        NORMAL -> COMMAND: type a command, Tab completes, Enter runs, Esc cancels\n"
+    "The input line is a small vim. It starts in NORMAL: h/l move, 0/$ ends, x delete,\n"
+    "j/k switch session.\n"
+    "  i/a/I/A  NORMAL -> INSERT, where Enter sends\n"
+    "  /        on an empty line: the command line, with a menu of what fits. Once what's\n"
+    "           typed can't be a command (/shrug, /usr/bin) it's text again, sent as typed\n"
+    "  Ctrl+W   delete a word          Ctrl+U   delete back to the start of the line\n"
+    "  Esc      INSERT -> NORMAL\n"
+    "  :        NORMAL -> COMMAND: type a command, Tab completes, Up/Down pick from the\n"
+    "           menu, Enter runs, Esc cancels. After :verify it lists the peers online\n"
+    "           whose nick starts with what's typed, as @ does in INSERT\n"
     "The password and session-id prompts are plain fields: Enter confirms, Esc cancels,\n"
     "and whatever you were typing before comes back afterwards.\n"
     "\n"
-    "Commands only run from COMMAND (Esc, then :name); everything typed in INSERT is sent:\n"
+    "Commands run from the command line (/ on an empty line, or : in NORMAL); anything else\n"
+    "typed is sent:\n"
     "  :new :join :quit (:q) :quitall (:qa) :copyid :update :peers :verify NICK :net\n"
-    "  :port [N] :set [NAME [VALUE]] :help   - :help lists them all with a line each\n"
+    "  :port [N] :set [NAME [VALUE]] :help   - :help opens a page of keys and commands\n"
     "\n"
     "Each setting is a row on the settings page, and :set NAME VALUE sets it without opening\n"
     "the page (:set nick bob, :set net verbose, :set routing tor). :set alone opens the page,\n"
     "and :set NAME opens it on that row. The page and those under it take the same keys:\n"
-    "j/k move, g/G ends, Enter chooses, h/l change a value or go out/in, Esc goes back, q\n"
-    "closes.\n"
+    "j/k move, g/G ends, Enter chooses, h/l change a value or go out/in, Tab the next\n"
+    "section, Esc goes back, q closes.\n"
     "\n"
     "  --nick      display name; a random one (\"swift-otter42\"-style) is assigned if\n"
     "              omitted - :set nick renames it anytime, shared by every session\n"
@@ -130,10 +141,12 @@ typedef struct {
     tui_scrollback_t console;
     int unread;
     int initialising;
+    int scroll;   // the newest messages hidden below the chat, scrolled back past
     char name[MAX_SESSION_NAME + 1];
 } session_slot_t;
 
 typedef enum {
+    MODE_HELP,
     MODE_SETTINGS,
     MODE_SETTINGS_EDIT,
     MODE_SIGN_CHOICE,
@@ -179,6 +192,7 @@ typedef struct {
     int net_verbose;
     uint16_t default_port;
     int settings_sel;
+    int help_sel;
     char message[200];   // the bottom bar's reply to the last thing done, until the next key
     int onboarding;   // the settings page chat opens on: its Done starts chat proper
     int sign_sel;
@@ -262,6 +276,8 @@ static void session_print(void *ui, const char *hhmm, const char *text, const ui
     if (flags & LINE_CHAT) {
         tui_scrollback_push(&s->sb, hhmm, text, rgb, (flags & LINE_MENTION) != 0, color_len);
         if (s != g_app.selected) s->unread = 1;
+        // Scrolled back, the chat stays on the messages in view.
+        if (s->scroll > 0 && s->scroll < s->sb.count - 1) s->scroll++;
     } else {
         tui_scrollback_push(&s->console, hhmm, text, rgb, 0, 0);
     }
@@ -631,8 +647,6 @@ static void show_identity_result(void) {
 static void finish_onboarding(void) {
     g_app.mode = MODE_CHAT;
 
-    push_log("* ready. Ctrl+N (or :new) creates a session, Ctrl+J (or :join) joins one, "
-             "Ctrl+S (or :set) brings the settings back, :help lists everything");
     if (g_app.pending_auto_session[0]) {
         addr_t peers[MAX_PEER_ARGS];
         int n_peers = 0;
@@ -828,7 +842,7 @@ typedef struct {
 } setting_def_t;
 
 static const setting_def_t SETTINGS[] = {
-    { SET_ROUTING, "routing", "routing", "Routing", K_CHOICE, "direct|tor",
+    { SET_ROUTING, "Network", "routing", "Routing", K_CHOICE, "direct|tor",
       "direct: UDP straight between peers, found with the options below. tor: onion services, plus the Nostr "
       "relays through Tor to meet direct members - hides your IP address from everyone. Uses a running tor or "
       "starts chat's own; connecting takes longer. Applies to sessions you open from now on." },
@@ -867,7 +881,7 @@ static const setting_def_t SETTINGS[] = {
       "every 10 minutes." },
     { SET_RELAYS, NULL, "relays", "Relay list", K_TEXT, "wss://URL ... (up to 6)",
       "The relays the fallback uses: up to 6 wss:// URLs, separated by spaces or commas." },
-    { SET_NICK, "you", "nick", "Nickname", K_TEXT, "NAME", "Your name in every session." },
+    { SET_NICK, "Profile", "nick", "Nickname", K_TEXT, "NAME", "Your name in every session." },
     { SET_COLOUR, NULL, "colour", "Colour", K_TEXT, "NAME|#RRGGBB",
       "Your colour in every session. h/l step through the palette; Enter takes a name or #RRGGBB." },
     { SET_SIGN, NULL, "sign", "Signing identity", K_ACTION, "off|age|pgp",
@@ -879,15 +893,15 @@ static const setting_def_t SETTINGS[] = {
     { SET_PGP_PUBKEY, NULL, "pgpkey", "PGP public key", K_ACTION, NULL,
       "The public half of the PGP key made here, by its fingerprint, for others to gpg --import. Enter copies "
       "it to the clipboard; it's in the console too." },
-    { SET_NOTIFY, "chat", "notify", "Notifications", K_CHOICE, "all|mentions|none",
+    { SET_NOTIFY, "Chat", "notify", "Notifications", K_CHOICE, "all|mentions|none",
       "Desktop notifications, for open sessions and new ones: every message, mentions of your nick, or none." },
     { SET_NET, NULL, "net", "Network log", K_CHOICE, "normal|verbose",
       "What the console shows of the network, in every session. verbose adds every handshake packet, relay "
       "and Tor event." },
     { SET_PORT, NULL, "port", "UDP port for new sessions", K_TEXT, "N",
       "The UDP port new sessions listen on; 0 picks a free one each time. :port moves an open session to another." },
-    { SET_SIDEBAR, "layout", "sidebar", "Session sidebar", K_TOGGLE, "on|off",
-      "The list of sessions and who is online (Ctrl+B)." },
+    { SET_SIDEBAR, "Layout", "sidebar", "Sidebar", K_TOGGLE, "on|off",
+      "The sessions, who is online in the selected one, and how it reaches them (Ctrl+B)." },
     { SET_CONSOLE, NULL, "console", "Console", K_TOGGLE, "on|off", "The console above each conversation (Ctrl+O)." },
     { SET_CHAT, NULL, "chat", "Chat", K_TOGGLE, "on|off", "The conversation itself (Ctrl+T)." },
 };
@@ -962,6 +976,29 @@ static int setting_options(setting_id_t id, const char *const **names, int *n) {
         case SET_CHAT:       return g_app.show_chat != 0;
         default:             *names = NULL; *n = 0; return -1;
     }
+}
+
+static const char *const SIGN_NAMES[] = { "off", "age", "pgp" };
+
+// What :set takes for a row, for the command line's menu: its values, and the signing identity's
+// kinds (a key file or a pasted key is only chosen on the page).
+static int setting_choices(setting_id_t id, const char *const **names, int *n) {
+    if (id != SET_SIGN) return setting_options(id, names, n);
+    *names = SIGN_NAMES;
+    *n = 3;
+    return g_app.identity_source == IDENT_AGE ? 1 : g_app.identity_source == IDENT_PGP ? 2 : 0;
+}
+
+// How the page draws a row's value: a switch, a choice h/l steps through, a way into another
+// page, or text.
+static tui_value_kind_t setting_kind(const setting_def_t *d) {
+    const char *const *names;
+    int n, cur = setting_options(d->id, &names, &n);
+    if (d->kind == K_TOGGLE) return cur > 0 ? TUI_V_ON : TUI_V_OFF;
+    if (d->kind == K_CHOICE) return TUI_V_CHOICE;
+    if (d->id == SET_SIGN) return TUI_V_LINK;
+    if (d->kind == K_SECRET) return TUI_V_MUTED;
+    return TUI_V_TEXT;
 }
 
 static void setting_value(setting_id_t id, char *out, size_t cap) {
@@ -1246,6 +1283,30 @@ static void settings_fix_sel(void) {
     g_app.settings_sel = up != g_app.settings_sel ? up : settings_step_sel(1);
 }
 
+static int first_shown_from(int i) {
+    for (; i < N_SETTINGS; i++) if (setting_shown(SETTINGS[i].id)) return i;
+    return SETTINGS_DONE;
+}
+
+static int section_start(int i) {
+    if (i >= N_SETTINGS) i = N_SETTINGS - 1;
+    while (i > 0 && !SETTINGS[i].section) i--;
+    return i;
+}
+
+// Tab: the next section's first row, the Done button after the last. Shift+Tab: this section's
+// first row, or from there the one before's.
+static int settings_section_step(int dir) {
+    int sel = g_app.settings_sel;
+    if (dir > 0) {
+        for (int i = sel + 1; i < N_SETTINGS; i++) if (SETTINGS[i].section) return first_shown_from(i);
+        return SETTINGS_DONE;
+    }
+    int start = section_start(sel), first = first_shown_from(start);
+    if (sel == SETTINGS_DONE || first < sel) return first;
+    return start > 0 ? first_shown_from(section_start(start - 1)) : first;
+}
+
 static void begin_settings(void) {
     if (g_app.mode != MODE_CHAT) return;
     g_app.mode = MODE_SETTINGS;
@@ -1275,14 +1336,20 @@ static void settings_done(void) {
     g_app.dirty = 1;
 }
 
+// What the keys do on the selected row, the one that acts on it first.
 static const char *settings_hint(void) {
     const setting_def_t *d = g_app.settings_sel < N_SETTINGS ? &SETTINGS[g_app.settings_sel] : NULL;
-    if (!d) return "j/k move \xc2\xb7 Enter or Esc done";
-    if (d->id == SET_COLOUR) return "j/k move \xc2\xb7 h/l step \xc2\xb7 Enter edit \xc2\xb7 Esc done";
-    if (d->kind == K_TEXT || d->kind == K_SECRET) return "j/k move \xc2\xb7 Enter edit \xc2\xb7 Esc done";
-    if (d->id == SET_SIGN) return "j/k move \xc2\xb7 Enter choose \xc2\xb7 Esc done";
-    if (d->id == SET_AGE_RECIPIENT || d->id == SET_PGP_PUBKEY) return "j/k move \xc2\xb7 Enter copy \xc2\xb7 Esc done";
-    return "j/k move \xc2\xb7 h/l or Enter change \xc2\xb7 Esc done";
+    const char *act;
+    if (!d) act = g_app.onboarding ? "enter start" : "enter done";
+    else if (d->id == SET_COLOUR) act = "h/l step \xc2\xb7 enter type one";
+    else if (d->kind == K_TEXT || d->kind == K_SECRET) act = "enter edit";
+    else if (d->id == SET_SIGN) act = "enter choose";
+    else if (d->id == SET_AGE_RECIPIENT || d->id == SET_PGP_PUBKEY) act = "enter copy";
+    else act = "h/l change";
+    static char hint[160];
+    snprintf(hint, sizeof hint, "%s \xc2\xb7 j/k move \xc2\xb7 tab section \xc2\xb7 esc %s", act,
+             g_app.onboarding ? "start" : "done");
+    return hint;
 }
 
 // ---- the signing identity, chosen on a page under the settings ----
@@ -1298,17 +1365,17 @@ static const struct { const char *section, *label, *help; } SIGN_PICKS[N_PICKS] 
                        "(age -r). Enter asks for a password: the same password on this device and OS always makes "
                        "the same key, so always use the same one to keep an established signing identity. Blank "
                        "makes a new key that lasts until chat exits." },
-    { NULL, "AGE key file", "Your own AGE key from a file, as age-keygen writes it. Your age1... recipient stays "
-                            "the same." },
-    { NULL, "AGE key paste", "Your own AGE key pasted in: the AGE-SECRET-KEY-1... line. Kept in memory and never "
-                             "written to disk." },
+    { NULL, "Key file", "Your own AGE key from a file, as age-keygen writes it. Your age1... recipient stays "
+                        "the same." },
+    { NULL, "Paste a key", "Your own AGE key pasted in: the AGE-SECRET-KEY-1... line. Kept in memory and never "
+                           "written to disk." },
     { "PGP", "Native", "A PGP key made here, whose public key is in the settings and the console for others "
                        "to import. Enter asks for a password: the same password on this device and OS always makes "
                        "the same key, so always use the same one to keep an established signing identity. Blank "
                        "makes a new key that lasts until chat exits." },
-    { NULL, "PGP key file", "Your own key from a file: an unencrypted EdDSA/Ed25519 secret key, armored, as "
-                            "gpg --export-secret-keys --armor writes it." },
-    { NULL, "PGP key paste", "Your own key pasted in, armored. Kept in memory and never written to disk." },
+    { NULL, "Key file", "Your own key from a file: an unencrypted EdDSA/Ed25519 secret key, armored, as "
+                        "gpg --export-secret-keys --armor writes it." },
+    { NULL, "Paste a key", "Your own key pasted in, armored. Kept in memory and never written to disk." },
 };
 
 static const char AGE_PASTE_HELP[] =
@@ -1433,7 +1500,7 @@ static void begin_key_browse(identity_source_t kind) {
 static void paste_clear(void) {
     crypto_wipe(g_app.paste_buf, sizeof g_app.paste_buf);
     g_app.paste_len = 0;
-    copy_str(g_app.paste_status, "pasting: 0 bytes so far \xc2\xb7 Esc back", sizeof g_app.paste_status);
+    copy_str(g_app.paste_status, "waiting for the paste", sizeof g_app.paste_status);
 }
 
 static void begin_key_paste(identity_source_t kind) {
@@ -1494,18 +1561,21 @@ static void copy_pgp_public_key(void) {
 // ---- keys on the list pages ----
 
 typedef enum {
-    LIST_NONE, LIST_UP, LIST_DOWN, LIST_FIRST, LIST_LAST, LIST_CHOOSE, LIST_LEFT, LIST_RIGHT, LIST_BACK, LIST_CLOSE
+    LIST_NONE, LIST_UP, LIST_DOWN, LIST_FIRST, LIST_LAST, LIST_CHOOSE, LIST_LEFT, LIST_RIGHT, LIST_BACK, LIST_CLOSE,
+    LIST_NEXT_SECTION, LIST_PREV_SECTION
 } list_key_t;
 
 // The keys every list page takes alike: j/k or up/down move, g/G or Home/End go to the ends,
-// Enter or space chooses, h/l or left/right go sideways (Backspace too, as vim's h), Esc goes back
-// a level, and q or Ctrl+S closes the settings.
+// Tab/Shift+Tab to the next or previous section, Enter or space chooses, h/l or left/right go
+// sideways (Backspace too, as vim's h), Esc goes back a level, and q or Ctrl+S closes the page.
 static list_key_t list_key(const tui_key_t *key) {
     switch (key->type) {
         case TUI_KEY_UP:        return LIST_UP;
         case TUI_KEY_DOWN:      return LIST_DOWN;
         case TUI_KEY_HOME:      return LIST_FIRST;
         case TUI_KEY_END:       return LIST_LAST;
+        case TUI_KEY_TAB:       return LIST_NEXT_SECTION;
+        case TUI_KEY_BACKTAB:   return LIST_PREV_SECTION;
         case TUI_KEY_ENTER:     return LIST_CHOOSE;
         case TUI_KEY_LEFT:
         case TUI_KEY_BACKSPACE: return LIST_LEFT;
@@ -1547,6 +1617,8 @@ static void settings_key(const tui_key_t *key) {
         case LIST_DOWN:  g_app.settings_sel = settings_step_sel(1); break;
         case LIST_FIRST: g_app.settings_sel = 0; break;
         case LIST_LAST:  g_app.settings_sel = SETTINGS_DONE; break;
+        case LIST_NEXT_SECTION: g_app.settings_sel = settings_section_step(1); break;
+        case LIST_PREV_SECTION: g_app.settings_sel = settings_section_step(-1); break;
         case LIST_LEFT:  if (steps) setting_step(d->id, -1); break;
         case LIST_RIGHT:
             if (steps) setting_step(d->id, 1);
@@ -1636,7 +1708,7 @@ static void paste_key(const tui_key_t *key) {
         return;
     }
     g_app.paste_buf[g_app.paste_len] = '\0';
-    snprintf(g_app.paste_status, sizeof g_app.paste_status, "pasting: %zu bytes so far \xc2\xb7 Esc back", g_app.paste_len);
+    snprintf(g_app.paste_status, sizeof g_app.paste_status, "%zu bytes so far", g_app.paste_len);
     g_app.dirty = 1;
     int age = g_app.load_kind == IDENT_AGE;
     if (age) {
@@ -1669,8 +1741,23 @@ static void paste_key(const tui_key_t *key) {
 
 #define CRUMB " \xe2\x80\xba "   // between the levels of a page's title
 
-static void render_settings(const tui_session_row_t *srows, int n, int sel, int rows_n, int cols_n,
-                            const char *clock, const tui_bar_t *bar) {
+// The settings' sections, for the list on the left of the pages under them.
+static int settings_sections(const char **out, int cap) {
+    int n = 0;
+    for (int i = 0; i < N_SETTINGS && n < cap; i++) if (SETTINGS[i].section) out[n++] = SETTINGS[i].section;
+    return n;
+}
+
+static int settings_section_index(setting_id_t id) {
+    int n = -1;
+    for (int i = 0; i < N_SETTINGS; i++) {
+        if (SETTINGS[i].section) n++;
+        if (SETTINGS[i].id == id) return n;
+    }
+    return n;
+}
+
+static void render_settings(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar) {
     tui_row_t rows[N_SETTINGS];
     char values[N_SETTINGS][160];
     int n_rows = 0, sel_row = -1;
@@ -1681,21 +1768,21 @@ static void render_settings(const tui_session_row_t *srows, int n, int sel, int 
         if (!setting_shown(d->id)) continue;
         if (i == g_app.settings_sel) sel_row = n_rows;
         setting_value(d->id, values[n_rows], sizeof values[n_rows]);
-        rows[n_rows].section = section;
-        rows[n_rows].label = d->label;
-        rows[n_rows].value = values[n_rows];
+        rows[n_rows] = (tui_row_t){ section, d->label, values[n_rows], setting_kind(d),
+                                    d->id == SET_COLOUR ? g_app.color : NULL };
         section = NULL;
         n_rows++;
     }
     if (g_app.settings_sel == SETTINGS_DONE) sel_row = n_rows;   // the Done button
     const setting_def_t *d = g_app.settings_sel < N_SETTINGS ? &SETTINGS[g_app.settings_sel] : NULL;
-    char help[600];
+    char help[600], usage[96] = "";
     if (!d) {
         copy_str(help, g_app.onboarding
                  ? "Go on to your sessions: Ctrl+N creates one, Ctrl+J joins one. Everything here applies at once "
-                   "and lasts until chat exits - it's never written to disk. Ctrl+S or :set brings this page back."
-                 : "Back to your sessions. Everything here already applies; Ctrl+S or :set brings this page back.",
+                   "and lasts until chat exits - it's never written to disk."
+                 : "Back to your sessions. Everything here already applies.",
                  sizeof help);
+        copy_str(usage, "ctrl+s or :set brings this page back", sizeof usage);
     } else {
         // The row cuts a recipient off on a narrow screen, and not every terminal takes OSC 52.
         char recipient[AGE_RECIPIENT_STRLEN + 3] = "";
@@ -1704,22 +1791,37 @@ static void render_settings(const tui_session_row_t *srows, int n, int sel, int 
             strcat(recipient, ": ");
         }
         snprintf(help, sizeof help, "%s%s", recipient, d->help);
+        if (d->values) snprintf(usage, sizeof usage, ":set %s %s", d->key, d->values);
+        else if (d->kind == K_SECRET) snprintf(usage, sizeof usage, ":set %s", d->key);
     }
-    tui_page_t page = { rows, n_rows, sel_row, help, "Done" };
-    tui_render_page(rows_n, cols_n, srows, n, sel, "settings", clock, &page, bar, g_app.color_enabled);
+    tui_page_t page = {
+        .title = "Settings",
+        .clock = clock,
+        .intro = g_app.onboarding
+            ? "Welcome to chat: serverless and end-to-end encrypted. Look over how it reaches peers, then "
+              "Start chatting - nothing touches the network before that."
+            : NULL,
+        .rows = rows, .n_rows = n_rows, .selected = sel_row,
+        .help = help, .usage = usage[0] ? usage : NULL,
+        .button = g_app.onboarding ? "Start chatting" : "Done",
+        .editing = g_app.mode == MODE_SETTINGS_EDIT,
+    };
+    tui_render_page(rows_n, cols_n, &page, bar, g_app.color_enabled);
 }
 
 // Also draws a paste and a native key's password, which happen on this page with their row selected.
-static void render_sign_picker(const tui_session_row_t *srows, int n, int sel, int rows_n, int cols_n,
-                               const char *clock, const tui_bar_t *bar) {
+static void render_sign_picker(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar) {
     tui_row_t rows[N_PICKS];
     int in_use = sign_row_in_use();
     for (int i = 0; i < N_PICKS; i++) {
-        rows[i].section = SIGN_PICKS[i].section;
-        rows[i].label = SIGN_PICKS[i].label;
-        rows[i].value = i == in_use ? "in use" : NULL;
+        rows[i] = (tui_row_t){ SIGN_PICKS[i].section, SIGN_PICKS[i].label, NULL, TUI_V_TEXT, NULL };
+        if (i == in_use) { rows[i].value = "in use"; rows[i].kind = TUI_V_ON; }
     }
-    char help[600];
+    if (g_app.mode == MODE_SIGN_PASTE) {
+        rows[g_app.sign_sel].value = g_app.paste_status;
+        rows[g_app.sign_sel].kind = TUI_V_MUTED;
+    }
+    char help[600], usage[32] = "";
     if (g_app.mode == MODE_SIGN_PASTE) {
         copy_str(help, g_app.load_kind == IDENT_AGE ? AGE_PASTE_HELP : PGP_PASTE_HELP, sizeof help);
     } else if (g_app.mode == MODE_SIGN_PASSWORD) {
@@ -1727,27 +1829,93 @@ static void render_sign_picker(const tui_session_row_t *srows, int n, int sel, i
     } else {
         char now[160]; setting_value(SET_SIGN, now, sizeof now);
         snprintf(help, sizeof help, "%s Now: %s.", SIGN_PICKS[g_app.sign_sel].help, now);
+        static const char *const SET[N_PICKS] = { "off", "age", NULL, NULL, "pgp", NULL, NULL };
+        if (SET[g_app.sign_sel]) snprintf(usage, sizeof usage, ":set sign %s", SET[g_app.sign_sel]);
     }
-    tui_page_t page = { rows, N_PICKS, g_app.sign_sel, help, NULL };
-    tui_render_page(rows_n, cols_n, srows, n, sel, "settings" CRUMB "signing identity", clock, &page, bar,
-                    g_app.color_enabled);
+    const char *nav[8];
+    tui_page_t page = {
+        .title = "Settings" CRUMB "Signing identity",
+        .clock = clock,
+        .nav = nav, .n_nav = settings_sections(nav, 8), .nav_sel = settings_section_index(SET_SIGN),
+        .rows = rows, .n_rows = N_PICKS, .selected = g_app.sign_sel,
+        .help = help, .usage = usage[0] ? usage : NULL,
+        .editing = g_app.mode == MODE_SIGN_PASSWORD,
+    };
+    tui_render_page(rows_n, cols_n, &page, bar, g_app.color_enabled);
 }
 
-static void render_browser(const tui_session_row_t *srows, int n, int sel, int rows_n, int cols_n,
-                           const char *clock, const tui_bar_t *bar) {
+// A folder's row leads on, like a row that opens a page.
+static void render_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar) {
     static tui_row_t rows[MAX_DIR_ITEMS];
     const browser_t *b = &g_app.browser;
-    for (int i = 0; i < b->n_items; i++) {
-        rows[i].section = NULL;
-        rows[i].label = b->items[i].name;
-        rows[i].value = NULL;
-    }
+    for (int i = 0; i < b->n_items; i++)
+        rows[i] = (tui_row_t){ NULL, b->items[i].name, b->items[i].is_dir ? "" : NULL, TUI_V_LINK, NULL };
     char title[1000];
-    snprintf(title, sizeof title, "settings" CRUMB "signing identity" CRUMB "%s", b->path);
-    const char *help = SIGN_PICKS[g_app.load_kind == IDENT_AGE ? PICK_AGE_FILE : PICK_PGP_FILE].help;
-    tui_page_t page = { rows, b->n_items, b->selected, help, NULL };
-    tui_render_page(rows_n, cols_n, srows, n, sel, title, clock, &page, bar, g_app.color_enabled);
+    snprintf(title, sizeof title, "Settings" CRUMB "Signing identity" CRUMB "%s", b->path);
+    const char *nav[8];
+    tui_page_t page = {
+        .title = title,
+        .clock = clock,
+        .nav = nav, .n_nav = settings_sections(nav, 8), .nav_sel = settings_section_index(SET_SIGN),
+        .rows = rows, .n_rows = b->n_items, .selected = b->selected,
+        .help = SIGN_PICKS[g_app.load_kind == IDENT_AGE ? PICK_AGE_FILE : PICK_PGP_FILE].help,
+    };
+    tui_render_page(rows_n, cols_n, &page, bar, g_app.color_enabled);
 }
+
+// ---- the help page: every key, then every command ----
+
+static const struct { const char *section, *keys, *what; } HELP_KEYS[] = {
+    { "Sessions",    "ctrl+n",          "start a new session" },
+    { NULL,          "ctrl+j",          "join a session by its id and password" },
+    { NULL,          "tab  shift+tab",  "next / previous session" },
+    { NULL,          "ctrl+s",          "settings" },
+    { NULL,          "ctrl+c",          "quit - every session leaves cleanly first" },
+    { "Screen",      "ctrl+b",          "show or hide the sidebar" },
+    { NULL,          "ctrl+o",          "show or hide the console" },
+    { NULL,          "ctrl+t",          "show or hide the chat" },
+    { NULL,          "pgup  pgdn",      "scroll the chat back / forward" },
+    { NULL,          "f1",              "this page" },
+    { "Typing",      "enter",           "send" },
+    { NULL,          "/",               "on an empty line: a command (what isn't one stays text)" },
+    { NULL,          "@nick  tab",      "finish a nick" },
+    { NULL,          "ctrl+w  ctrl+u",  "delete a word / back to the start" },
+    { NULL,          "esc",             "NORMAL mode" },
+    { "Normal mode", "i  a  I  A",      "type: at / after the cursor, at the start / end" },
+    { NULL,          "h  l  0  $  x",   "move, to the start / end, delete" },
+    { NULL,          "j  k",            "next / previous session" },
+    { NULL,          "ctrl+u  ctrl+d",  "scroll the chat back / forward" },
+    { NULL,          "G",               "back to the newest message" },
+    { NULL,          ":  /",            "the command line" },
+    { NULL,          "?",               "this page" },
+    { "Pages",       "j  k  g  G",      "move, to the first / last" },
+    { NULL,          "h  l  enter",     "change a value, go in, choose" },
+    { NULL,          "tab  shift+tab",  "next / previous section" },
+    { NULL,          "esc  q",          "back / close" },
+};
+#define N_HELP_KEYS ((int)(sizeof HELP_KEYS / sizeof HELP_KEYS[0]))
+#define MAX_HELP_COMMANDS 32
+#define MAX_HELP_ROWS (N_HELP_KEYS + MAX_HELP_COMMANDS)
+
+static void begin_help(void) {
+    if (g_app.mode != MODE_CHAT) return;
+    g_app.mode = MODE_HELP;
+    g_app.dirty = 1;
+}
+
+// Tab and Shift+Tab: the first row of the next section, or of this one (then the one before).
+static int page_section_step(const tui_row_t *rows, int n, int sel, int dir) {
+    if (dir > 0) {
+        for (int i = sel + 1; i < n; i++) if (rows[i].section) return i;
+        return sel;
+    }
+    int start = sel;
+    while (start > 0 && !rows[start].section) start--;
+    if (start < sel) return start;
+    for (int i = start - 1; i >= 0; i--) if (rows[i].section) return i;
+    return start;
+}
+
 
 // ---- commands ----
 
@@ -1807,7 +1975,7 @@ static cmd_result_t app_set(void *ctx, const char *arg) {
 
 // Checked before CHAT_COMMANDS, so entries here shadow the per-session ones of the same name.
 static const command_t APP_COMMANDS[] = {
-    { "help",    NULL,                  NULL,     "list commands, settings and keys",                app_help },
+    { "help",    NULL,                  NULL,     "every key and command on one page (F1)",          app_help },
     { "new",     NULL,                  NULL,     "create a session (Ctrl+N)",                       app_new },
     { "join",    NULL,                  NULL,     "join a session by id (Ctrl+J)",                   app_join },
     { "quit",    "q exit close bd bw",  NULL,     "leave this session; quits if none is open",       app_quit },
@@ -1822,56 +1990,232 @@ static const command_t *const ALL_COMMANDS[] = { APP_COMMANDS, CHAT_COMMANDS, NU
 
 static cmd_result_t app_help(void *ctx, const char *arg) {
     (void)ctx; (void)arg;
-    push_log("* commands - Esc, then :name. anything typed in INSERT is sent to the room:");
-    for (const command_t *const *t = ALL_COMMANDS; *t; t++) {
-        for (const command_t *cmd = *t; cmd->name; cmd++) {
-            if (*t != APP_COMMANDS && cmd_find(APP_COMMANDS, cmd->name)) continue;
-            char line[160]; cmd_format_help(cmd, ':', line, sizeof line);
-            push_log("%s", line);
-        }
-    }
-    char keys[400];
-    size_t p = 0;
-    keys[0] = '\0';
-    for (int i = 0; i < N_SETTINGS && p < sizeof keys; i++)
-        p += (size_t)snprintf(keys + p, sizeof keys - p, "%s%s", i ? " " : "", SETTINGS[i].key);
-    push_log("* settings, for :set NAME VALUE (:set NAME opens its row): %s", keys);
-    push_log("* keys: Ctrl+N new \xc2\xb7 Ctrl+J join \xc2\xb7 Ctrl+S settings \xc2\xb7 Tab/Shift+Tab, or j/k in NORMAL, "
-             "switch session \xc2\xb7 Ctrl+B/Ctrl+O/Ctrl+T sidebar/console/chat \xc2\xb7 Ctrl+W delete a word \xc2\xb7 "
-             "Ctrl+C quit");
+    begin_help();
     return CMD_OK;
 }
 
-// Tab on the COMMAND line: a command's name, or after "set " a setting's.
-static const char *complete_command(const char *typed) {
-    if (strncmp(typed, "set ", 4) != 0) return cmd_complete(ALL_COMMANDS, typed);
-    const char *key = typed + 4;
-    size_t n = strlen(key);
-    if (n == 0 || strchr(key, ' ')) return NULL;
-    for (int i = 0; i < N_SETTINGS; i++) {
-        if (strlen(SETTINGS[i].key) <= n || strncmp(SETTINGS[i].key, key, n) != 0) continue;
-        static char out[CMD_WORD_MAX + 8];
-        snprintf(out, sizeof out, "set %s", SETTINGS[i].key);
-        return out;
+// The help page's rows, and each one's command (NULL for a key's).
+static int help_rows(tui_row_t *rows, const command_t **cmds) {
+    static char labels[MAX_HELP_COMMANDS][CMD_WORD_MAX + 24];
+    int n = 0, k = 0;
+    for (int i = 0; i < N_HELP_KEYS; i++) {
+        rows[n] = (tui_row_t){ HELP_KEYS[i].section, HELP_KEYS[i].keys, HELP_KEYS[i].what, TUI_V_TEXT, NULL };
+        cmds[n++] = NULL;
     }
-    return NULL;
+    for (const command_t *const *t = ALL_COMMANDS; *t; t++) {
+        for (const command_t *cmd = *t; cmd->name && k < MAX_HELP_COMMANDS; cmd++) {
+            if (*t != APP_COMMANDS && cmd_find(APP_COMMANDS, cmd->name)) continue;
+            snprintf(labels[k], sizeof labels[k], ":%s%s%s", cmd->name, cmd->args ? " " : "", cmd->args ? cmd->args : "");
+            rows[n] = (tui_row_t){ k == 0 ? "Commands" : NULL, labels[k], cmd->help, TUI_V_TEXT, NULL };
+            cmds[n++] = cmd;
+            k++;
+        }
+    }
+    return n;
 }
 
-// First online peer whose nick starts with typed, ignoring case.
+static void render_help(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar) {
+    tui_row_t rows[MAX_HELP_ROWS];
+    const command_t *cmds[MAX_HELP_ROWS];
+    int n = help_rows(rows, cmds);
+    if (g_app.help_sel >= n) g_app.help_sel = n - 1;
+    const command_t *c = cmds[g_app.help_sel];
+    char help[200] = "";
+    if (c) {
+        size_t p = (size_t)snprintf(help, sizeof help, "Enter puts it on the command line.");
+        const char *sep = " Also";
+        for (const char *a = c->aliases; a && *a && p < sizeof help; ) {
+            size_t len = strcspn(a, " ");
+            p += (size_t)snprintf(help + p, sizeof help - p, "%s :%.*s", sep, (int)len, a);
+            sep = ",";
+            a += len;
+            while (*a == ' ') a++;
+        }
+        if (c->aliases && p < sizeof help) snprintf(help + p, sizeof help - p, ".");
+    }
+    tui_page_t page = {
+        .title = "Keys & commands",
+        .clock = clock,
+        .rows = rows, .n_rows = n, .selected = g_app.help_sel,
+        .help = help[0] ? help : NULL,
+        .keys = 1,
+    };
+    tui_render_page(rows_n, cols_n, &page, bar, g_app.color_enabled);
+}
+
+// Enter on a command puts it on the command line, to be finished and run. F1 and ? close the page
+// as they opened it.
+static void help_key(const tui_key_t *key) {
+    tui_row_t rows[MAX_HELP_ROWS];
+    const command_t *cmds[MAX_HELP_ROWS];
+    int n = help_rows(rows, cmds);
+    list_key_t k = list_key(key);
+    if (key->type == TUI_KEY_HELP || (key->type == TUI_KEY_CHAR && key->ch[0] == '?')) k = LIST_CLOSE;
+    switch (k) {
+        case LIST_CHOOSE:
+        case LIST_RIGHT: {
+            const command_t *c = cmds[g_app.help_sel];
+            if (!c) break;
+            g_app.mode = MODE_CHAT;
+            char text[CMD_WORD_MAX + 2];
+            snprintf(text, sizeof text, "%s%s", c->name, c->args ? " " : "");
+            tui_input_command(&g_app.input, g_app.input.mode == TUI_IMODE_NORMAL ? ':' : '/', text);
+            break;
+        }
+        case LIST_LEFT:
+        case LIST_BACK:
+        case LIST_CLOSE: g_app.mode = MODE_CHAT; break;
+        case LIST_NEXT_SECTION: g_app.help_sel = page_section_step(rows, n, g_app.help_sel, 1); break;
+        case LIST_PREV_SECTION: g_app.help_sel = page_section_step(rows, n, g_app.help_sel, -1); break;
+        default: list_move(k, &g_app.help_sel, n); break;
+    }
+    g_app.dirty = 1;
+}
+
+// Whether a command's name or one of its aliases starts with word (or, whole, is word): a line
+// opened with '/' that can't be one stays text, for a message that starts with '/'.
+static int command_word(const char *word, int whole) {
+    size_t n = strlen(word);
+    for (const command_t *const *t = ALL_COMMANDS; *t; t++) {
+        for (const command_t *c = *t; c->name; c++) {
+            if (whole ? strcmp(c->name, word) == 0 : strncmp(c->name, word, n) == 0) return 1;
+            for (const char *a = c->aliases; a && *a; ) {
+                size_t len = strcspn(a, " ");
+                if ((whole ? len == n : len >= n) && strncmp(a, word, n) == 0) return 1;
+                a += len;
+                while (*a == ' ') a++;
+            }
+        }
+    }
+    return 0;
+}
+
 static int nick_has_prefix(const char *nick, const char *typed) {
     for (; *typed; nick++, typed++)
         if (tolower((unsigned char)*nick) != tolower((unsigned char)*typed)) return 0;
     return 1;
 }
 
-static const char *complete_mention(const char *typed) {
+// The selected session's engine, once there is one to name peers from.
+static chat_t *peer_engine(void) {
     if (g_app.mode != MODE_CHAT || !g_app.selected || g_app.selected->initialising) return NULL;
-    chat_t *e = &g_app.selected->engine;
+    return &g_app.selected->engine;
+}
+
+// First online peer whose nick starts with typed, ignoring case.
+static const char *complete_mention(const char *typed) {
+    chat_t *e = peer_engine();
+    if (!e) return NULL;
     for (int i = 0; i < MAX_PEERS + MAX_PENDING_PEERS; i++) {
         peer_t *p = &e->peers[i];
         if (p->used && p->ok && nick_has_prefix(p->nick, typed)) return p->nick;
     }
     return NULL;
+}
+
+// Whether word is a command whose argument is a peer's nick (its args start with NICK).
+static int takes_nick(const char *word) {
+    const command_t *c = cmd_find(APP_COMMANDS, word);
+    if (!c) c = cmd_find(CHAT_COMMANDS, word);
+    return c && c->args && strncmp(c->args, "NICK", 4) == 0;
+}
+
+// The nth online peer whose nick starts with typed, ignoring case. One that is exactly typed comes
+// first, so Enter on "id" doesn't run it as "ida"; the rest by nick.
+static const peer_t *nth_peer(const chat_t *e, const char *typed, int nth) {
+    const peer_t *m[MAX_PEERS + MAX_PENDING_PEERS];
+    size_t tn = strlen(typed);
+    int n = 0;
+    for (int i = 0; i < MAX_PEERS + MAX_PENDING_PEERS; i++) {
+        const peer_t *p = &e->peers[i];
+        if (!p->used || !p->ok || !nick_has_prefix(p->nick, typed)) continue;
+        int exact = strlen(p->nick) == tn, j = n++;
+        for (; j > 0; j--) {
+            int prev_exact = strlen(m[j - 1]->nick) == tn;
+            if (prev_exact > exact || (prev_exact == exact && strcasecmp(m[j - 1]->nick, p->nick) <= 0)) break;
+            m[j] = m[j - 1];
+        }
+        m[j] = p;
+    }
+    return nth < n ? m[nth] : NULL;
+}
+
+// The menu over the COMMAND line: commands by name; after "set ", the settings with their values
+// now; after "set NAME ", the values it takes; after a command that takes a NICK, the peers online.
+static int suggest_command(const char *typed, int nth, tui_suggestion_t *out) {
+    memset(out, 0, sizeof *out);
+    size_t wn = strcspn(typed, " ");
+    char word[CMD_WORD_MAX];
+    if (typed[wn] == ' ' && wn < sizeof word) {
+        memcpy(word, typed, wn);
+        word[wn] = '\0';
+        chat_t *e = takes_nick(word) ? peer_engine() : NULL;
+        if (e) {
+            const peer_t *p = nth_peer(e, typed + wn + 1, nth);
+            if (!p) return 0;
+            snprintf(out->line, sizeof out->line, "%s %s", word, p->nick);
+            char name[CHAT_NAME_LEN]; chat_peer_name(e, p, name);
+            copy_str(out->name, name, sizeof out->name);
+            snprintf(out->help, sizeof out->help, "%s%s",
+                     p->identity_source == IDENT_NONE ? "unsigned" : chat_verify_label(p->identity_state),
+                     p->build_state == BUILD_MODIFIED ? " \xc2\xb7 modified client" : "");
+            copy_str(out->group, "peers", sizeof out->group);
+            return 1;
+        }
+    }
+    if (strncmp(typed, "set ", 4) == 0) {
+        copy_str(out->group, "settings", sizeof out->group);
+        const char *key = typed + 4, *sp = strchr(key, ' ');
+        const char *const *names;
+        int n;
+        if (sp) {
+            char name[CMD_WORD_MAX];
+            size_t kl = (size_t)(sp - key);
+            if (kl >= sizeof name) return 0;
+            memcpy(name, key, kl);
+            name[kl] = '\0';
+            const setting_def_t *d = setting_by_key(name);
+            int cur = d ? setting_choices(d->id, &names, &n) : -1;
+            if (cur < 0) return 0;
+            const char *v = sp + 1;
+            for (int i = 0; i < n; i++) {
+                if (strncmp(names[i], v, strlen(v)) != 0 || nth-- > 0) continue;
+                snprintf(out->line, sizeof out->line, "set %s %s", d->key, names[i]);
+                copy_str(out->name, names[i], sizeof out->name);
+                snprintf(out->help, sizeof out->help, "%s%s", d->label, i == cur ? " \xc2\xb7 now" : "");
+                return 1;
+            }
+            return 0;
+        }
+        size_t kn = strlen(key);
+        for (int i = 0; i < N_SETTINGS; i++) {
+            const setting_def_t *d = &SETTINGS[i];
+            if (strncmp(d->key, key, kn) != 0 || nth-- > 0) continue;
+            int takes = setting_choices(d->id, &names, &n) >= 0 || d->kind == K_TEXT;
+            snprintf(out->line, sizeof out->line, "set %s%s", d->key, takes ? " " : "");
+            snprintf(out->name, sizeof out->name, "set %s", d->key);
+            copy_str(out->args, d->values ? d->values : "", sizeof out->args);
+            char v[96]; setting_value(d->id, v, sizeof v);
+            snprintf(out->help, sizeof out->help, "%s \xc2\xb7 %s", d->label, v);
+            return 1;
+        }
+        return 0;
+    }
+    if (strchr(typed, ' ')) return 0;
+    copy_str(out->group, "commands", sizeof out->group);
+    size_t tn = strlen(typed);
+    for (const command_t *const *t = ALL_COMMANDS; *t; t++) {
+        for (const command_t *c = *t; c->name; c++) {
+            if (*t != APP_COMMANDS && cmd_find(APP_COMMANDS, c->name)) continue;
+            if (strncmp(c->name, typed, tn) != 0 || nth-- > 0) continue;
+            snprintf(out->line, sizeof out->line, "%s%s", c->name, c->args ? " " : "");
+            copy_str(out->name, c->name, sizeof out->name);
+            copy_str(out->args, c->args ? c->args : "", sizeof out->args);
+            copy_str(out->help, c->help, sizeof out->help);
+            return 1;
+        }
+    }
+    return 0;
 }
 
 // Runs "name args" typed on the COMMAND line, after ':'.
@@ -1929,9 +2273,24 @@ static void submit_chat_line(void) {
     if (input->mode == TUI_IMODE_COMMAND) {
         char line[sizeof input->cmd];
         copy_str(line, input->cmd, sizeof line);
-        input->mode = TUI_IMODE_NORMAL;
+        // Enter on a line the menu would finish runs what the menu has selected: ":se" runs
+        // ":set", as the menu shows.
+        tui_suggestion_t s;
+        size_t n = strlen(line);
+        if ((n > 0 || input->menu_sel > 0) && tui_input_suggestion(input, &s) && strlen(s.line) > n
+            && strncmp(s.line, line, n) == 0)
+            copy_str(line, s.line, sizeof line);
+        // Opened by typing '/', a line that isn't a command after all is the start of a message:
+        // it goes back in the input as text, for Enter to send.
+        char word[CMD_WORD_MAX];
+        cmd_parse(line, word);
+        if (input->cmd_as_text && line[0] && !command_word(word, 1)) {
+            tui_input_command_to_text(input);
+            crypto_wipe(line, sizeof line);
+            return;
+        }
+        tui_input_end_command(input);
         crypto_wipe(input->cmd, sizeof input->cmd);
-        input->cmd_len = 0;
         run_command(line);
         crypto_wipe(line, sizeof line);
         return;
@@ -1941,27 +2300,55 @@ static void submit_chat_line(void) {
     while (*text == ' ') text++;
     if (!text[0]) return;
     if (!g_app.selected) {
-        push_log("* no session yet - Ctrl+N (or :new) creates one, Ctrl+J (or :join) joins one");
-        tui_input_clear(input);
+        note("no session yet - ctrl+n starts one, ctrl+j joins one");
         return;
     }
     if (!session_ready(g_app.selected)) {
-        console_note(g_app.selected, g_app.selected->initialising
-            ? "* still initialising - hold on a moment"
-            : "* not connected yet - chat opens once someone answers (your text is kept; :q leaves)");
+        note(g_app.selected->initialising ? "still starting - hold on a moment"
+                                          : "not connected yet - your text is kept until someone answers");
         return;
     }
     chat_send_text(&g_app.selected->engine, input->buf, now_seconds());
     tui_input_clear(input);
+    g_app.selected->scroll = 0;
+}
+
+// PgUp and PgDn (Ctrl+U and Ctrl+D in NORMAL) move the chat a third of the screen's rows of
+// messages; G goes back to the newest.
+static void scroll_chat(int dir) {
+    session_slot_t *s = g_app.selected;
+    if (!s) return;
+    int rows_n, cols_n;
+    term_get_size(&rows_n, &cols_n);
+    int page = rows_n / 3 > 1 ? rows_n / 3 : 1;
+    long v = dir == 0 ? 0 : (long)s->scroll + (long)dir * page;
+    if (v > s->sb.count - 1) v = s->sb.count - 1;
+    if (v < 0) v = 0;
+    s->scroll = (int)v;
+    g_app.dirty = 1;
 }
 
 static void handle_key(const tui_key_t *key) {
     tui_input_t *input = &g_app.input;
 
+    // The terminal's reports aren't keys: they leave the bar's message be.
+    if (key->type == TUI_KEY_BG_REPORT) {
+        tui_set_background((const uint8_t *)key->ch);
+        g_app.dirty = 1;
+        return;
+    }
+    if (key->type == TUI_KEY_THEME_CHANGED) {
+        platform_write_stdout(TUI_THEME_QUERY, sizeof TUI_THEME_QUERY - 1);
+        g_app.dirty = 1;
+        return;
+    }
+
     // A message answers the key before this one; this key puts the bar back.
     if (g_app.message[0]) { g_app.message[0] = '\0'; g_app.dirty = 1; }
 
+    // The pages draw their fields in their rows, so a key there redraws the page.
     switch (g_app.mode) {
+        case MODE_HELP:            help_key(key); return;
         case MODE_SETTINGS:        settings_key(key); return;
         case MODE_SIGN_CHOICE:     sign_picker_key(key); return;
         case MODE_SIGN_BROWSE: browser_key(key); return;
@@ -1969,18 +2356,24 @@ static void handle_key(const tui_key_t *key) {
         case MODE_SIGN_PASSWORD:
             if (key->type == TUI_KEY_ESCAPE) end_sign_password();
             else if (key->type == TUI_KEY_ENTER) commit_sign_password();
-            else if (tui_input_feed(input, key)) g_app.input_dirty = 1;
+            else if (tui_input_feed(input, key)) g_app.dirty = 1;
             return;
         case MODE_SETTINGS_EDIT:
             if (key->type == TUI_KEY_ESCAPE) end_setting_edit();
             else if (key->type == TUI_KEY_ENTER) commit_setting_edit();
-            else if (tui_input_feed(input, key)) g_app.input_dirty = 1;
+            else if (tui_input_feed(input, key)) g_app.dirty = 1;
             return;
         default:
             break;
     }
 
-    if (tui_input_feed(input, key)) { g_app.input_dirty = 1; return; }
+    tui_input_mode_t was = input->mode;
+    if (tui_input_feed(input, key)) {
+        // The menu over the COMMAND line covers part of the chat, so it takes a whole frame.
+        if (was == TUI_IMODE_COMMAND || input->mode == TUI_IMODE_COMMAND) g_app.dirty = 1;
+        else g_app.input_dirty = 1;
+        return;
+    }
 
     if (g_app.mode != MODE_CHAT) {
         if (key->type == TUI_KEY_ESCAPE) end_prompt();
@@ -1988,10 +2381,16 @@ static void handle_key(const tui_key_t *key) {
         return;
     }
 
-    // NORMAL leaves j and k to the app: they step through the sessions, as they step through a list.
+    // NORMAL leaves these to the app: j and k step through the sessions, as they step through a
+    // list, G goes back to the newest message and ? opens the help.
     if (key->type == TUI_KEY_CHAR && input->mode == TUI_IMODE_NORMAL) {
-        if (key->ch[0] == 'j') select_step(1);
-        else if (key->ch[0] == 'k') select_step(-1);
+        switch (key->ch[0]) {
+            case 'j': select_step(1); break;
+            case 'k': select_step(-1); break;
+            case 'G': scroll_chat(0); break;
+            case '?': begin_help(); break;
+            default: break;
+        }
         return;
     }
 
@@ -2004,110 +2403,203 @@ static void handle_key(const tui_key_t *key) {
         case TUI_KEY_TOGGLE_CONSOLE: g_app.show_console = !g_app.show_console; g_app.dirty = 1; break;
         case TUI_KEY_TOGGLE_CHAT:    g_app.show_chat = !g_app.show_chat; g_app.dirty = 1; break;
         case TUI_KEY_SETTINGS:       begin_settings(); break;
+        case TUI_KEY_HELP:           begin_help(); break;
+        case TUI_KEY_PAGE_UP:
+        case TUI_KEY_CTRL_U:         scroll_chat(1); break;
+        case TUI_KEY_PAGE_DOWN:
+        case TUI_KEY_CTRL_D:         scroll_chat(-1); break;
         case TUI_KEY_ENTER:          submit_chat_line(); break;
         default: break;
     }
 }
 
-static int on_settings_page(void) {
-    return g_app.mode == MODE_SETTINGS || g_app.mode == MODE_SETTINGS_EDIT || g_app.mode == MODE_SIGN_CHOICE
-        || g_app.mode == MODE_SIGN_BROWSE || g_app.mode == MODE_SIGN_PASTE || g_app.mode == MODE_SIGN_PASSWORD;
+static int on_chat_screen(void) {
+    return g_app.mode == MODE_CHAT || g_app.mode == MODE_NEW_PASSWORD || g_app.mode == MODE_JOIN_ID
+        || g_app.mode == MODE_JOIN_PASSWORD;
 }
 
-static tui_view_t current_view(char *title, size_t cap) {
-    tui_view_t v = { g_app.show_sidebar, g_app.show_console, g_app.show_chat, NULL, NULL };
-    if (g_app.selected) {
-        snprintf(title, cap, "%s@%s (%d online)", g_app.nick, g_app.selected->name,
-                 g_app.selected->initialising ? 1 : chat_online_count(&g_app.selected->engine) + 1);
-    } else {
-        snprintf(title, cap, "no session yet");
-    }
-    v.title = title;
-    // The settings pages always show the sidebar.
-    if (on_settings_page()) v.sidebar = 1;
+static int session_count(void) {
+    int n = 0;
+    for (int i = 0; i < MAX_SESSIONS; i++) n += g_app.used[i] != 0;
+    return n;
+}
+
+static tui_session_state_t session_state(const session_slot_t *s) {
+    if (s->initialising) return TUI_SESSION_STARTING;
+    return chat_ready(&s->engine) ? TUI_SESSION_LIVE : TUI_SESSION_CONNECTING;
+}
+
+// What the chat says while a session has no messages: how it's getting on, and what to do next.
+static const char *session_empty_text(const session_slot_t *s) {
+    static char text[400];
+    const chat_t *e = &s->engine;
+    if (s->initialising)
+        copy_str(text, "Starting the session\nDeriving its keys - this takes a moment.", sizeof text);
+    else if (!chat_ready(e))
+        snprintf(text, sizeof text, "Connecting to %s\nThe chat opens once someone in the session answers.\n"
+                 "Finding them can take a minute%s.", s->name, e->route.mode == ROUTE_TOR ? " over Tor" : "");
+    else if (chat_online_count(e) == 0)
+        snprintf(text, sizeof text, "No one else is here yet\nTo invite peers, share the session id and its "
+                 "password.\n\n%s\n/copyid copies the id", s->name);
+    else
+        copy_str(text, "No messages yet\nSay hello - it's end-to-end encrypted.", sizeof text);
+    return text;
+}
+
+// The chat pane: the selected session's name, how it's connected, and what to show while it's quiet.
+static tui_view_t current_view(char *sub, size_t cap) {
+    tui_view_t v = { g_app.show_sidebar, g_app.show_console, g_app.show_chat, NULL, NULL, TUI_SESSION_LIVE,
+                     NULL, NULL, 0 };
+    const session_slot_t *s = g_app.selected;
+    if (!s) return v;
+    v.title = s->name;
+    v.state = session_state(s);
+    v.scroll = s->scroll;
+    v.empty = session_empty_text(s);
+    if (s->initialising) snprintf(sub, cap, "starting");
+    else snprintf(sub, cap, "%d online \xc2\xb7 %s", chat_online_count(&s->engine) + 1,
+                  s->engine.route.mode == ROUTE_TOR ? "tor" : "direct");
+    v.subtitle = sub;
     return v;
 }
 
-static void build_status_right(char *buf, size_t cap) {
-    if (g_app.mode == MODE_CHAT && g_app.selected && !g_app.selected->initialising)
-        snprintf(buf, cap, "%d online", chat_online_count(&g_app.selected->engine) + 1);
-    else
-        buf[0] = '\0';
+// The chat screen's input: its faint text while it's empty, and what the keys do there.
+static void chat_input(tui_bar_t *b) {
+    static char placeholder[MAX_SESSION_NAME + 64];
+    static char hint[160];
+    const session_slot_t *s = g_app.selected;
+    tui_input_mode_t m = g_app.input.mode;
+    b->chip = tui_mode_name(m);
+    b->tone = m == TUI_IMODE_NORMAL ? TUI_TONE_NORMAL : m == TUI_IMODE_COMMAND ? TUI_TONE_COMMAND : TUI_TONE_INSERT;
+    b->input = &g_app.input;
+    b->limit = MAX_TEXT;
+    if (m == TUI_IMODE_NORMAL) {
+        b->placeholder = "i to type \xc2\xb7 : for a command";
+        b->hint = "i type \xc2\xb7 : command \xc2\xb7 j/k session \xc2\xb7 pgup/pgdn scroll \xc2\xb7 ? help";
+        return;
+    }
+    if (m == TUI_IMODE_COMMAND) {
+        b->hint = "enter run \xc2\xb7 tab complete \xc2\xb7 \xe2\x86\x91\xe2\x86\x93 choose \xc2\xb7 esc back";
+        return;
+    }
+    if (!s) {
+        b->placeholder = "No session yet \xc2\xb7 ctrl+n starts one, ctrl+j joins one, / for commands";
+        b->hint = "ctrl+n new \xc2\xb7 ctrl+j join \xc2\xb7 / commands \xc2\xb7 ctrl+s settings";
+        return;
+    }
+    if (s->initialising) snprintf(placeholder, sizeof placeholder, "Starting %s\xe2\x80\xa6", s->name);
+    else if (!session_ready(s)) snprintf(placeholder, sizeof placeholder, "Waiting for someone in %s to answer\xe2\x80\xa6", s->name);
+    else snprintf(placeholder, sizeof placeholder, "Message %s", s->name);
+    b->placeholder = placeholder;
+    snprintf(hint, sizeof hint, "enter send \xc2\xb7 / commands%s \xc2\xb7 esc normal \xc2\xb7 f1 help",
+             session_count() > 1 ? " \xc2\xb7 tab next session" : "");
+    b->hint = hint;
 }
 
-// The bottom bar for wherever the user is: the chip names it, and the hint says what keys do there.
-static tui_bar_t current_bar(char *status, size_t cap) {
-    build_status_right(status, cap);
+// The bottom row for wherever the user is: the chip names it, and the hint says what keys do there.
+static tui_bar_t current_bar(void) {
     tui_bar_t b = {
         .chip = "SETTINGS",
+        .tone = TUI_TONE_PAGE,
         .message = g_app.message,
         .badge = (tui_identity_badge_t)g_app.identity_source,
-        .status_right = status,
+        .nick = g_app.nick,
+        .nick_color = g_app.color,
     };
     switch (g_app.mode) {
-        case MODE_SETTINGS:        b.hint = settings_hint(); break;
-        case MODE_SIGN_CHOICE:     b.hint = "j/k move \xc2\xb7 Enter choose \xc2\xb7 Esc back \xc2\xb7 q close"; break;
-        case MODE_SIGN_BROWSE:
-            b.hint = "j/k move \xc2\xb7 Enter open \xc2\xb7 h up a folder \xc2\xb7 Esc back \xc2\xb7 q close";
+        case MODE_HELP:
+            b.chip = "HELP";
+            b.hint = "enter use \xc2\xb7 j/k move \xc2\xb7 tab section \xc2\xb7 esc close";
             break;
-        case MODE_SIGN_PASTE:  b.hint = g_app.paste_status; break;
+        case MODE_SETTINGS:        b.hint = settings_hint(); break;
+        case MODE_SIGN_CHOICE:     b.hint = "enter choose \xc2\xb7 j/k move \xc2\xb7 esc back \xc2\xb7 q close"; break;
+        case MODE_SIGN_BROWSE:
+            b.hint = "enter open \xc2\xb7 h up a folder \xc2\xb7 j/k move \xc2\xb7 esc back \xc2\xb7 q close";
+            break;
+        case MODE_SIGN_PASTE:      b.hint = "paste the key \xc2\xb7 esc back"; break;
         case MODE_SIGN_PASSWORD:
-            b.prompt = g_app.load_kind == IDENT_AGE ? "AGE key password" : "PGP key password";
             b.input = &g_app.input;
             b.mask_input = 1;
-            b.hint = "Enter make the key \xc2\xb7 Esc back";
+            b.placeholder = "password (blank: a new key each run)";
+            b.hint = "enter make the key \xc2\xb7 esc back";
             break;
         case MODE_SETTINGS_EDIT: {
             const setting_def_t *d = setting_def(g_edit_id);
-            b.prompt = d->label;
             b.input = &g_app.input;
             b.mask_input = d->kind == K_SECRET;
-            b.hint = "Enter confirm \xc2\xb7 Esc cancel";
+            b.placeholder = d->values;
+            b.hint = "enter save \xc2\xb7 esc cancel";
             break;
         }
         case MODE_NEW_PASSWORD:
         case MODE_JOIN_ID:
-        case MODE_JOIN_PASSWORD:
+        case MODE_JOIN_PASSWORD: {
+            static char prompt[MAX_SESSION_NAME + 32];
             b.chip = g_app.mode == MODE_NEW_PASSWORD ? "NEW" : "JOIN";
-            b.prompt = g_app.mode == MODE_NEW_PASSWORD ? "create password"
-                     : g_app.mode == MODE_JOIN_ID ? "session id" : "password";
+            b.tone = TUI_TONE_PROMPT;
+            if (g_app.mode == MODE_JOIN_PASSWORD)
+                snprintf(prompt, sizeof prompt, "Join %s \xc2\xb7 password", g_app.pending_session_id);
+            else
+                copy_str(prompt, g_app.mode == MODE_NEW_PASSWORD ? "New session \xc2\xb7 password"
+                                                                 : "Join a session \xc2\xb7 its id", sizeof prompt);
+            b.prompt = prompt;
+            b.placeholder = g_app.mode == MODE_NEW_PASSWORD ? "blank is fine - it still encrypts"
+                          : g_app.mode == MODE_JOIN_ID ? "the id you were given" : "the password you were given";
             b.input = &g_app.input;
             b.mask_input = g_app.mode != MODE_JOIN_ID;
-            b.hint = "Enter confirm \xc2\xb7 Esc cancel";
+            b.hint = "enter confirm \xc2\xb7 esc cancel";
             break;
+        }
         case MODE_CHAT:
-            b.chip = tui_mode_name(g_app.input.mode);
-            b.input = &g_app.input;
-            b.prompt = g_app.nick[0] ? g_app.nick : "chat";
-            if (g_app.selected && !session_ready(g_app.selected))
-                b.prompt = g_app.selected->initialising ? "initialising" : "connecting";
-            b.hint = g_app.input.mode == TUI_IMODE_NORMAL ? ": command \xc2\xb7 i insert \xc2\xb7 j/k switch session"
-                   : "type to chat \xc2\xb7 Esc normal mode, then :help for commands";
+            chat_input(&b);
             break;
     }
     return b;
 }
 
+static void render(void);
+
 static void render_bar(void) {
+    if (!on_chat_screen()) { render(); return; }
     int rows_n, cols_n; term_get_size(&rows_n, &cols_n);
-    char title[120]; tui_view_t view = current_view(title, sizeof title);
-    char status[64]; tui_bar_t bar = current_bar(status, sizeof status);
+    char sub[64]; tui_view_t view = current_view(sub, sizeof sub);
+    tui_bar_t bar = current_bar();
     tui_render_bar(rows_n, cols_n, &view, &bar, g_app.color_enabled);
 }
 
-#define MAX_NET_LINES 6
-static int build_net_lines(char lines[MAX_NET_LINES][32]) {
+// How the selected session reaches its peers, for the sidebar: the route, its port or tor, the
+// relays and port mapping, the DHT, and the traffic so far.
+#define MAX_NET 10
+static int build_net(tui_kv_t kv[MAX_NET], char vals[MAX_NET][32]) {
     if (!g_app.selected || g_app.selected->initialising) return 0;
-    chat_t *e = &g_app.selected->engine;
+    const chat_t *e = &g_app.selected->engine;
     int n = 0;
-    chat_route_summary(e, lines[n++], 32);
-    if (e->route.mode == ROUTE_TOR) tor_link_line(lines[n++], 32);
-    else snprintf(lines[n++], 32, "port %u", (unsigned)e->port);
-    snprintf(lines[n++], 32, "rx %u dg", e->st.rx);
-    snprintf(lines[n++], 32, "cands %d", chat_candidate_count(e));
-    snprintf(lines[n++], 32, "pending %d", chat_pending_count(e));
-    if (e->dht_on) snprintf(lines[n++], 32, "lookup %d/%d", dht_queried_count(&e->dht), dht_found_count(&e->dht));
-    else snprintf(lines[n++], 32, "lookup off");
+#define KV(l, ...) do { snprintf(vals[n], 32, __VA_ARGS__); kv[n].label = (l); kv[n].value = vals[n]; n++; } while (0)
+    if (e->route.mode == ROUTE_TOR) {
+        char t[32];
+        tor_link_line(t, sizeof t);
+        KV("route", "tor");
+        KV("tor", "%s", strncmp(t, "tor: ", 5) == 0 ? t + 5 : t);
+        KV("onion", "%s", e->tor && tor_my_onion(e->tor)[0] ? "published" : "waiting");
+    } else {
+        KV("route", "direct");
+        KV("port", "udp/%u", (unsigned)e->port);
+        KV("portmap", "%s", !e->pm ? "off" : portmap_mapped(e->pm, NULL) ? "mapped" : "not yet");
+    }
+    if (e->nostr) KV("relays", "%d/%d up", nostr_relays_up(e->nostr), nostr_relay_total(e->nostr));
+    else KV("relays", "off");
+    if (e->route.mode != ROUTE_TOR) {
+        if (e->dht_on) {
+            KV("dht", "%d nodes", dht_queried_count(&e->dht));
+            KV("found", "%d peers", dht_found_count(&e->dht));
+        } else {
+            KV("dht", "off");
+        }
+    }
+    KV("cands", "%d", chat_candidate_count(e));
+    KV("pending", "%d", chat_pending_count(e));
+    KV("rx", "%u packets", e->st.rx);
+#undef KV
     return n;
 }
 
@@ -2118,75 +2610,64 @@ static void render(void) {
         if (!g_app.used[i]) continue;
         session_slot_t *s = &g_app.sessions[i];
         tui_session_row_t *r = &rows[n];
-        snprintf(r->label, sizeof r->label, "%s@%s", g_app.nick, s->name);
+        copy_str(r->label, s->name, sizeof r->label);
         r->online = s->initialising ? 1 : chat_online_count(&s->engine) + 1;
         r->unread = s->unread;
-        memcpy(r->color, g_app.color, 3);
+        r->state = session_state(s);
         if (s == g_app.selected) sel = n;
         n++;
     }
 
     int rows_n, cols_n; term_get_size(&rows_n, &cols_n);
-    char status[64]; tui_bar_t bar = current_bar(status, sizeof status);
+    tui_bar_t bar = current_bar();
     char hhmm[6]; current_hhmm(hhmm);
 
     switch (g_app.mode) {
+        case MODE_HELP:            render_help(rows_n, cols_n, hhmm, &bar); return;
         case MODE_SETTINGS:
-        case MODE_SETTINGS_EDIT:   render_settings(rows, n, sel, rows_n, cols_n, hhmm, &bar); return;
+        case MODE_SETTINGS_EDIT:   render_settings(rows_n, cols_n, hhmm, &bar); return;
         case MODE_SIGN_CHOICE:
         case MODE_SIGN_PASTE:
-        case MODE_SIGN_PASSWORD: render_sign_picker(rows, n, sel, rows_n, cols_n, hhmm, &bar); return;
-        case MODE_SIGN_BROWSE: render_browser(rows, n, sel, rows_n, cols_n, hhmm, &bar); return;
+        case MODE_SIGN_PASSWORD:   render_sign_picker(rows_n, cols_n, hhmm, &bar); return;
+        case MODE_SIGN_BROWSE:     render_browser(rows_n, cols_n, hhmm, &bar); return;
         default: break;
     }
 
-    tui_peer_row_t peer_rows[MAX_PEERS + MAX_PENDING_PEERS + 1];
+    static tui_peer_row_t peer_rows[MAX_PEERS + MAX_PENDING_PEERS + 1];
     int n_peers = 0;
     if (g_app.selected && !g_app.selected->initialising) {
         chat_t *e = &g_app.selected->engine;
-        snprintf(peer_rows[n_peers].label, sizeof peer_rows[0].label, "%s (you)", e->nick);
-        memcpy(peer_rows[n_peers].color, e->my_color, 3);
-        n_peers++;
-        int pane_x, pane_rows;
-        int sbw = tui_pane_geometry(rows_n, cols_n, &pane_x, &pane_rows);
+        tui_peer_row_t *me = &peer_rows[n_peers++];
+        memset(me, 0, sizeof *me);
+        copy_str(me->nick, e->nick, sizeof me->nick);
+        memcpy(me->color, e->my_color, 3);
+        me->you = 1;
         for (int i = 0; i < MAX_PEERS + MAX_PENDING_PEERS && n_peers < MAX_PEERS + MAX_PENDING_PEERS + 1; i++) {
             peer_t *p = &e->peers[i];
             if (!p->used || !p->ok) continue;
-            // Cut the nick, never the status, so a long or lookalike nick can't push the real one out of view.
+            tui_peer_row_t *r = &peer_rows[n_peers++];
+            memset(r, 0, sizeof *r);
+            // Nicks can't hold '#': one here is the id added to tell lookalikes apart, which the sidebar
+            // never cuts.
             char name[CHAT_NAME_LEN]; chat_peer_name(e, p, name);
-            char *tag = strchr(name, '#');   // nicks can't hold '#': this is the id added to tell lookalikes apart
-            char status[64];
-            snprintf(status, sizeof status, "%s (%s%s)", tag ? tag : "", chat_verify_label(p->identity_state),
-                     p->build_state == BUILD_MODIFIED ? ", modified" : "");
-            if (tag) *tag = '\0';
-            char *label = peer_rows[n_peers].label;
-            size_t cap = sizeof peer_rows[0].label;
-            int room = sbw - 2 - utf8_str_cols(status);
-            if (room < 0) room = 0;
-            size_t nlen = utf8_fit_cols(name, strlen(name), room, NULL);
-            // The label buffer is bytes, not columns: the status still has to fit after the nick.
-            size_t slen = strlen(status);
-            while (nlen > 0 && nlen + slen >= cap) {
-                nlen--;
-                while (nlen > 0 && ((unsigned char)name[nlen] & 0xc0) == 0x80) nlen--;
-            }
-            memcpy(label, name, nlen);
-            copy_str(label + nlen, status, cap - nlen);
-            memcpy(peer_rows[n_peers].color, p->color, 3);
-            n_peers++;
+            char *tag = strchr(name, '#');
+            if (tag) { copy_str(r->tag, tag, sizeof r->tag); *tag = '\0'; }
+            copy_str(r->nick, name, sizeof r->nick);
+            memcpy(r->color, p->color, 3);
+            r->verify = (int)p->identity_state;
+            r->modified = p->build_state == BUILD_MODIFIED;
         }
     }
 
-    tui_scrollback_t *sb = g_app.selected ? &g_app.selected->sb : &g_app.log;
-    tui_scrollback_t *console = g_app.selected ? &g_app.selected->console : NULL;
-    char title[120]; tui_view_t view = current_view(title, sizeof title);
+    tui_scrollback_t *sb = g_app.selected ? &g_app.selected->sb : NULL;
+    tui_scrollback_t *console = g_app.selected ? &g_app.selected->console : &g_app.log;
+    char sub[64]; tui_view_t view = current_view(sub, sizeof sub);
     view.clock = hhmm;
-    char net_line_bufs[MAX_NET_LINES][32];
-    int n_net_lines = build_net_lines(net_line_bufs);
-    const char *net_lines[MAX_NET_LINES];
-    for (int i = 0; i < n_net_lines; i++) net_lines[i] = net_line_bufs[i];
-    tui_render(rows_n, cols_n, rows, n, sel, peer_rows, n_peers, sb, console, &view, &bar, g_app.color_enabled,
-               net_lines, n_net_lines);
+    tui_kv_t net[MAX_NET];
+    char net_vals[MAX_NET][32];
+    int n_net = build_net(net, net_vals);
+    tui_render(rows_n, cols_n, rows, n, sel, peer_rows, n_peers, net, n_net, sb, console, &view, &bar,
+               g_app.color_enabled);
 }
 
 static int run_plain(const char *session_name, const char *password, uint16_t port,
@@ -2202,14 +2683,16 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
         return run_plain(explicit_session, explicit_password, explicit_port, peer_args, n_peer_args);
     }
 
-    fputs("\x1b[22;0t\x1b]0;chat\x07\x1b[?1049h\x1b[2J\x1b[H", stdout);
+    // The terminal's background, and word of its theme changing, come back as keys.
+    fputs("\x1b[22;0t\x1b]0;chat\x07\x1b[?1049h\x1b[2J\x1b[H" TUI_THEME_WATCH, stdout);
     fflush(stdout);
     catch_quit_signals();
 
     tui_input_clear(&g_app.input);
     g_app.input.modal = 1;
-    g_app.input.mode = TUI_IMODE_NORMAL;   // chat starts in NORMAL: i to type
-    g_app.input.complete = complete_command;
+    g_app.input.mode = TUI_IMODE_NORMAL;   // i to type
+    g_app.input.suggest = suggest_command;
+    g_app.input.is_command = command_word;
     g_app.input.mention = complete_mention;
     g_app.dirty = 1;
 
@@ -2229,11 +2712,10 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
                  g_app.nick);
     }
 
-    // Everything is set up on the settings page first; its Done button starts chat proper.
+    // Everything is set up on the settings page first; its button starts chat proper.
     g_app.onboarding = 1;
     g_app.settings_sel = 0;
     g_app.mode = MODE_SETTINGS;
-    note("welcome to chat - set things up, then Done");
     render();
 
     double next_ui_tick = now_seconds() + 1.0;
@@ -2300,7 +2782,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
 
     // Back to the main screen with the cursor visible, its default shape and autowrap on, however
     // the last frame left them.
-    fputs("\x1b[?7h\x1b[0 q\x1b[?25h\x1b[?1049l\x1b[23;0t", stdout);
+    fputs(TUI_THEME_UNWATCH "\x1b[?7h\x1b[0 q\x1b[?25h\x1b[?1049l\x1b[23;0t", stdout);
     term_raw_disable();
     fflush(stdout);
     net_shutdown();
@@ -2580,7 +3062,9 @@ int main(int argc, char **argv) {
 
     int interactive = !force_simple && term_is_tty() && term_stdout_is_tty() && term_ansi_ok();
     g_app.show_sidebar = g_app.show_console = g_app.show_chat = 1;
-    g_app.color_enabled = interactive;
+    // NO_COLOR (no-color.org) keeps the UI to bold, faint and reverse.
+    const char *no_color = getenv("NO_COLOR");
+    g_app.color_enabled = interactive && !(no_color && no_color[0]);
     if (has_color) memcpy(g_app.color, color, 3);
     else {
         uint8_t r; gen_random(&r, 1);

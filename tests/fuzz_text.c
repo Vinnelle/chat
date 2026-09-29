@@ -23,11 +23,36 @@ static void check_clean(const char *s) {
     check(!has_control_chars(s));
 }
 
+// Three suggestions for anything typed: it with one, two and three letters more, the last too long
+// for the line.
+static int fuzz_suggest(const char *typed, int nth, tui_suggestion_t *out) {
+    if (nth > 2) return 0;
+    memset(out, 0, sizeof *out);
+    size_t n = strlen(typed);
+    if (n > sizeof out->line - 4) n = sizeof out->line - 4;
+    memcpy(out->line, typed, n);
+    memset(out->line + n, 'x', (size_t)nth + 1);
+    if (nth == 2) memset(out->line, 'y', sizeof out->line - 1);
+    copy_str(out->name, out->line, sizeof out->name);
+    copy_str(out->help, typed, sizeof out->help);
+    return 1;
+}
+
+// "set" and "quit" are commands, and "q" an alias.
+static int fuzz_command(const char *word, int whole) {
+    static const char *const WORDS[] = { "set", "quit", "q" };
+    for (size_t i = 0; i < sizeof WORDS / sizeof WORDS[0]; i++)
+        if (whole ? strcmp(WORDS[i], word) == 0 : strncmp(WORDS[i], word, strlen(word)) == 0) return 1;
+    return 0;
+}
+
 static void fuzz_editor(const uint8_t *data, size_t size) {
     tui_input_t in;
     memset(&in, 0, sizeof in);
     tui_input_clear(&in);
     in.modal = size > 0 && (data[0] & 1);
+    in.suggest = size > 0 && (data[0] & 2) ? fuzz_suggest : NULL;
+    in.is_command = size > 0 && (data[0] & 4) ? fuzz_command : NULL;
     size_t off = 0;
     while (off < size) {
         tui_key_t key;
@@ -45,6 +70,7 @@ static void fuzz_editor(const uint8_t *data, size_t size) {
         check(in.cursor >= 0 && in.cursor <= in.len);
         check(in.cmd_len >= 0 && in.cmd_len < (int)sizeof in.cmd && in.cmd[in.cmd_len] == '\0');
         check((size_t)in.len == strlen(in.buf));
+        check(in.menu_sel >= 0 && in.menu_sel < 3);
     }
 }
 
@@ -56,25 +82,48 @@ static void fuzz_render(const char *s, const uint8_t *data, size_t size) {
     int flags = size > 4 ? data[4] : 0;
     tui_scrollback_push(&sb, "12:34", s, (flags & 1) ? rgb : NULL, (flags & 2) != 0, (int)(strlen(s) / 3));
     tui_scrollback_push(&console, "12:34", s, NULL, 0, 0);
-    tui_session_row_t session = { .online = 3 };
+    // A name ending in ':' where the colour ends, as chat lines have it.
+    char line[TUI_LINE_MAX];
+    snprintf(line, sizeof line, "%.*s: %s", (int)(strlen(s) % 40), s, s);
+    int head = (int)(strlen(s) % 40) + 1;
+    tui_scrollback_push(&sb, "12:34", (flags & 32) ? line : s, (flags & 1) ? rgb : NULL, (flags & 2) != 0,
+                        (flags & 32) ? head : (int)(strlen(s) / 3));
+    tui_scrollback_push(&console, "12:34", s, (flags & 1) ? rgb : NULL, 0, 0);
+    if (size > 5) tui_set_background((const uint8_t[3]){ data[5], data[5], (uint8_t)(data[5] ^ 0x80) });
+    tui_session_row_t session = { .online = 3, .unread = flags & 1, .state = (tui_session_state_t)(flags % 3) };
     copy_str(session.label, s, sizeof session.label);
-    tui_peer_row_t peer;
-    copy_str(peer.label, s, sizeof peer.label);
+    tui_peer_row_t peer = { .verify = flags % 3, .modified = (flags & 8) != 0, .you = (flags & 16) != 0 };
+    copy_str(peer.nick, s, sizeof peer.nick);
+    copy_str(peer.tag, s, sizeof peer.tag);
+    memcpy(peer.color, rgb, 3);
     tui_input_t in;
     memset(&in, 0, sizeof in);
     tui_input_clear(&in);
     copy_str(in.buf, s, sizeof in.buf);
     in.len = (int)strlen(in.buf);
     in.cursor = in.len;
-    tui_view_t view = { (flags & 4) != 0, (flags & 8) != 0, (flags & 16) != 0, s, s };
-    const char *net[1] = { s };
-    tui_bar_t bar = { .chip = s, .prompt = (flags & 32) ? s : NULL, .input = &in, .mask_input = (flags & 128) != 0,
-                      .message = (flags & 2) ? s : NULL, .hint = s, .badge = TUI_ID_AGE, .status_right = s };
-    tui_render(rows, cols, &session, 1, 0, &peer, 1, &sb, &console, &view, &bar, (flags & 64) != 0, net, 1);
-    tui_row_t row[2] = { { s, s, (flags & 1) ? s : NULL }, { NULL, s, NULL } };
-    tui_page_t page = { row, 2, flags % 3, s, (flags & 8) ? s : NULL };
+    in.modal = 1;
+    in.suggest = fuzz_suggest;
+    if (flags & 128) { in.mode = TUI_IMODE_COMMAND; copy_str(in.cmd, s, sizeof in.cmd); in.cmd_len = (int)strlen(in.cmd); }
+    tui_view_t view = { (flags & 4) != 0, (flags & 8) != 0, (flags & 16) != 0, (flags & 2) ? s : NULL, s,
+                        (tui_session_state_t)(flags % 3), s, (flags & 4) ? s : NULL, flags % 5 };
+    const tui_kv_t net[1] = { { s, s } };
+    tui_bar_t bar = { .chip = s, .tone = (tui_tone_t)(flags % 5), .prompt = (flags & 32) ? s : NULL, .input = &in,
+                      .mask_input = (flags & 128) != 0, .message = (flags & 2) ? s : NULL, .hint = s,
+                      .badge = (tui_identity_badge_t)(flags % 4), .nick = s, .nick_color = rgb, .placeholder = s,
+                      .limit = flags % 300 };
+    tui_render(rows, cols, &session, 1, 0, &peer, 1, net, 1, &sb, &console, &view, &bar, (flags & 64) != 0);
+    tui_render_bar(rows, cols, &view, &bar, (flags & 64) != 0);
+    tui_row_t row[2] = { { s, s, (flags & 1) ? s : NULL, (tui_value_kind_t)(flags % 6), (flags & 4) ? rgb : NULL },
+                         { NULL, s, NULL, TUI_V_TEXT, NULL } };
+    const char *nav[2] = { s, s };
+    tui_page_t page = { .title = s, .clock = s, .intro = (flags & 2) ? s : NULL, .nav = (flags & 4) ? nav : NULL,
+                        .n_nav = 2, .nav_sel = flags % 3, .rows = row, .n_rows = 2, .selected = flags % 3,
+                        .help = s, .usage = (flags & 1) ? s : NULL, .button = (flags & 8) ? s : NULL,
+                        .editing = (flags & 16) != 0, .keys = (flags & 32) != 0 };
+    in.mode = TUI_IMODE_INSERT;
     bar.input = (flags & 16) ? &in : NULL;
-    tui_render_page(rows, cols, &session, 1, 0, s, s, &page, &bar, (flags & 64) != 0);
+    tui_render_page(rows, cols, &page, &bar, (flags & 64) != 0);
 }
 
 int LLVMFuzzerInitialize(int *argc, char ***argv) {
