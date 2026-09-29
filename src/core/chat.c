@@ -451,10 +451,22 @@ static void build_k_message(chat_t *c, peer_t *p, char *out, size_t out_cap) {
     snprintf(out, out_cap, "k\t%s\t%s\t%dr\t%d\t%s\t%s", c->nick, colorhex, c->persist, idtype, idpubhex, sighex);
 }
 
+// "v": our version and our executable's hash, which p checks against that version's release.
+static void send_build(chat_t *c, peer_t *p) {
+    if (!c->has_build) return;
+    uint8_t proof[BUILD_HASH_LEN];
+    build_proof(c->build_hash, c->my_id, p->id, proof);
+    char proofhex[BUILD_HASH_LEN * 2 + 1]; hex_encode(proof, BUILD_HASH_LEN, proofhex);
+    char msg[4 + MAX_VERSION + BUILD_HASH_LEN * 2];
+    snprintf(msg, sizeof msg, "v\t%s\t%s", c->version, proofhex);
+    send_peer(c, p, msg);
+}
+
 static void send_k_now(chat_t *c, peer_t *p) {
     char k[8 + MAX_NICK + 8 + 5 + 4 + 65 + 129];
     build_k_message(c, p, k, sizeof k);
     send_peer(c, p, k);
+    send_build(c, p);
 }
 
 static void finish_kem_decap(chat_t *c, peer_t *p, const uint8_t ct[KEM_CT_LEN]);
@@ -480,7 +492,7 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
             char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
             p->next_rk_warn = now + 30.0;
             ui_print(c, "* warning: a new key for %s arrived that %s never announced - refused. Someone may be "
-                        "intercepting; if it continues, compare /peers verify codes over another channel", name, name);
+                        "intercepting; if it continues, compare :peers verify codes over another channel", name, name);
         }
         return NULL;
     }
@@ -527,12 +539,19 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
         memcpy(slot->nick_skel, carry.nick_skel, sizeof slot->nick_skel);
         memcpy(slot->color, carry.color, 3);
         slot->persists = carry.persists;
+        slot->ok_since = carry.ok_since;
+        slot->k_seen = carry.k_seen;
+        slot->announced = carry.announced;
         slot->identity_source = carry.identity_source;
         slot->identity_state = carry.identity_state;
         memcpy(slot->identity_pub, carry.identity_pub, ID_SIGN_PUB_LEN);
         memcpy(slot->identity_fp, carry.identity_fp, ID_FP_LEN);
         memcpy(slot->vfy, carry.vfy, VERIFY_LEN);
         slot->vfy_set = carry.vfy_set;
+        // The same "v" comes again after the rekey: it needn't be checked, or warned about, twice.
+        memcpy(slot->build_version, carry.build_version, sizeof slot->build_version);
+        memcpy(slot->build_proof, carry.build_proof, BUILD_HASH_LEN);
+        slot->build_state = carry.build_state;
         slot->ok = 1;
         slot->old_send = carry.send_chain;
         slot->old_recv = carry.recv_chain;
@@ -701,10 +720,46 @@ static void drop_peer(chat_t *c, peer_t *p, const char *why) {
     if (was_ok && c->tor && c->tor_hosting && c->tor_republish_at == 0.0) c->tor_republish_at = now_seconds() + 5.0 + jitter(25.0);
 }
 
+// A version as a peer may name it: short, and nothing a terminal or a URL would read as more.
+static int version_ok(const char *v) {
+    size_t n = strlen(v);
+    if (n == 0 || n > MAX_VERSION) return 0;
+    for (size_t i = 0; i < n; i++)
+        if (!isalnum((unsigned char)v[i]) && v[i] != '.' && v[i] != '-') return 0;
+    return 1;
+}
+
+// Compares p's build with the official binaries of the version it names, once their hashes are in.
+static void check_build(chat_t *c, peer_t *p) {
+    if (!c->builds) { p->build_state = BUILD_UNCHECKED; return; }
+    // Its warning names p: wait for the join, which waits for the nick. chat_tick checks again.
+    if (!p->announced) { p->build_state = BUILD_CHECKING; return; }
+    uint8_t hashes[CHAT_BUILDS_MAX][BUILD_HASH_LEN];
+    int n = c->builds(p->build_version, hashes, CHAT_BUILDS_MAX);
+    if (n == CHAT_BUILDS_PENDING) { p->build_state = BUILD_CHECKING; return; }
+    if (n == CHAT_BUILDS_UNKNOWN || n > CHAT_BUILDS_MAX) { p->build_state = BUILD_UNCHECKED; return; }
+    int official = 0;
+    for (int i = 0; i < n && !official; i++) {
+        uint8_t want[BUILD_HASH_LEN];
+        build_proof(hashes[i], p->id, c->my_id, want);
+        official = crypto_equal(want, p->build_proof, BUILD_HASH_LEN) == 0;
+    }
+    p->build_state = official ? BUILD_OFFICIAL : BUILD_MODIFIED;
+    if (official) return;
+    char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
+    if (n == CHAT_BUILDS_NONE)
+        ui_print(c, "* warning: %s runs a modified client - it says v%s, and there's no signed release of that",
+                 name, p->build_version);
+    else
+        ui_print(c, "* warning: %s runs a modified client - it says v%s, but isn't a binary from that release",
+                 name, p->build_version);
+}
+
 static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
     char *f[MAX_FIELDS];
     int n = split_tabs(plain, f, MAX_FIELDS);
     if (n == 7 && strcmp(f[0], "k") == 0) {
+        p->k_seen = 1;
         set_peer_nick(p, f[1]);
         identity_source_t had_source = p->identity_source;
         verify_state_t had_state = p->identity_state;
@@ -739,7 +794,7 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
                 ui_print(c, "* warning: %s no longer presents a signing identity", name);
             } else if (memcmp(had_pub, p->identity_pub, ID_SIGN_PUB_LEN) != 0) {
                 char fphex[ID_FP_LEN * 2 + 1]; hex_encode(p->identity_fp, ID_FP_LEN, fphex);
-                ui_print(c, "* warning: %s now presents a different signing identity (fingerprint %s) - /verify it again",
+                ui_print(c, "* warning: %s now presents a different signing identity (fingerprint %s) - :verify it again",
                          name, fphex);
             } else if (p->identity_state == VERIFY_FAILED && had_state != VERIFY_FAILED) {
                 ui_print(c, "* warning: %s's identity signature is now invalid", name);
@@ -777,6 +832,16 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         }
     } else if (n == 2 && strcmp(f[0], "ta") == 0) {
         if (onion_valid(f[1])) copy_str(p->onion, f[1], sizeof p->onion);
+    } else if (n == 3 && strcmp(f[0], "v") == 0) {
+        uint8_t proof[BUILD_HASH_LEN];
+        if (!version_ok(f[1]) || strlen(f[2]) != BUILD_HASH_LEN * 2
+            || hex_decode(f[2], BUILD_HASH_LEN * 2, proof) != 0) return;
+        // It comes with every k: only a different one needs checking again.
+        if (p->build_state != BUILD_UNKNOWN && strcmp(p->build_version, f[1]) == 0
+            && memcmp(p->build_proof, proof, BUILD_HASH_LEN) == 0) return;
+        copy_str(p->build_version, f[1], sizeof p->build_version);
+        memcpy(p->build_proof, proof, BUILD_HASH_LEN);
+        check_build(c, p);
     } else if (n == 5 && strcmp(f[0], "m") == 0) {
         // Only p itself is authenticated here. f[2] and f[3] (origin id, nick) are whatever p says.
         uint8_t mid_raw[4], origin[ID_LEN];
@@ -1014,6 +1079,34 @@ static int peer_try_unseal(peer_t *p, const uint8_t *data, size_t len, uint32_t 
     return 1;
 }
 
+// "* NICK (verified) joined": once p's nick and identity are known, which "k" brings. It's the
+// first frame p sends, but it can be lost or overtaken, and another frame opening first would
+// otherwise announce an "anon (unverified)".
+static void announce_join(chat_t *c, peer_t *p) {
+    p->announced = 1;
+    const char *idlabel;
+    switch (p->identity_state) {
+        case VERIFY_VERIFIED: idlabel = " (verified)"; break;
+        case VERIFY_FAILED:   idlabel = " (\xe2\x9a\xa0 signature invalid)"; break;
+        case VERIFY_UNVERIFIED:
+        default:               idlabel = " (unverified)"; break;
+    }
+    char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
+    ui_print_colored(c, p->color, "* %s%s%s joined (%d online)", name, idlabel,
+                      p->persists ? " [logging chat locally]" : "", live_count(c) + 1);
+    // A peer that dropped and came back ran a fresh handshake, with nothing tying it to
+    // the one that may have been verified. Someone who forced the drop could be in it.
+    for (size_t g = 0; g < sizeof c->gone / sizeof c->gone[0]; g++) {
+        if (!c->gone[g].used || memcmp(c->gone[g].id, p->id, ID_LEN) != 0) continue;
+        c->gone[g].used = 0;
+        if (memcmp(c->gone[g].vfy, p->vfy, VERIFY_LEN) == 0) continue;
+        char was[VERIFY_LEN * 2 + 1], now_hex[VERIFY_LEN * 2 + 1];
+        hex_encode(c->gone[g].vfy, VERIFY_LEN, was); hex_encode(p->vfy, VERIFY_LEN, now_hex);
+        ui_print(c, "* %s reconnected with a new verify code (was %s, now %s) - if you had compared "
+                    "codes with them, compare the new one", name, was, now_hex);
+    }
+}
+
 static void on_frame(chat_t *c, uint8_t *data, size_t len, addr_t addr, double now) {
     uint8_t plain[HANDSHAKE_BUF_LEN + 128];
     size_t plain_len;
@@ -1057,6 +1150,7 @@ static void on_frame(chat_t *c, uint8_t *data, size_t len, addr_t addr, double n
             p->seen = now;
             int was_pending = !p->ok;
             p->ok = 1;
+            if (was_pending) p->ok_since = now;
             on_session(c, p, (char *)plain, now);
             if (!p->used) return;
             if (was_pending) {
@@ -1064,32 +1158,15 @@ static void on_frame(chat_t *c, uint8_t *data, size_t len, addr_t addr, double n
 
                 send_k_now(c, p);
                 if (!c->created && !c->ever_connected) ui_print(c, "* connected - chat is open");
+                // "joined" follows once the nick and identity are in.
+                char idhex[9]; hex_encode(p->id, 4, idhex);
+                ui_print(c, "* joining: peer %s - connected, waiting for its nick and identity", idhex);
                 c->ever_connected = 1;
                 c->once_used = 1;
-                const char *idlabel;
-                switch (p->identity_state) {
-                    case VERIFY_VERIFIED: idlabel = " (verified)"; break;
-                    case VERIFY_FAILED:   idlabel = " (\xe2\x9a\xa0 signature invalid)"; break;
-                    case VERIFY_UNVERIFIED:
-                    default:               idlabel = " (unverified)"; break;
-                }
-                char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
-                ui_print_colored(c, p->color, "* %s%s%s joined (%d online)", name, idlabel,
-                                  p->persists ? " [logging chat locally]" : "", live_count(c) + 1);
-                // A peer that dropped and came back ran a fresh handshake, with nothing tying it to
-                // the one that may have been verified. Someone who forced the drop could be in it.
-                for (size_t g = 0; g < sizeof c->gone / sizeof c->gone[0]; g++) {
-                    if (!c->gone[g].used || memcmp(c->gone[g].id, p->id, ID_LEN) != 0) continue;
-                    c->gone[g].used = 0;
-                    if (memcmp(c->gone[g].vfy, p->vfy, VERIFY_LEN) == 0) continue;
-                    char was[VERIFY_LEN * 2 + 1], now_hex[VERIFY_LEN * 2 + 1];
-                    hex_encode(c->gone[g].vfy, VERIFY_LEN, was); hex_encode(p->vfy, VERIFY_LEN, now_hex);
-                    ui_print(c, "* %s reconnected with a new verify code (was %s, now %s) - if you had compared "
-                                "codes with them, compare the new one", name, was, now_hex);
-                }
                 send_onion(c, p);
                 introduce(c, p);
             }
+            if (!p->announced && p->k_seen) announce_join(c, p);
             return;
         }
     }
@@ -1321,6 +1398,7 @@ void chat_tick(chat_t *c, double now) {
             if (p->keygen != c->keygen) send_rk(c, p, send_chain_for(p));
             else if (p->old_until > 0.0 && p->old_send.started) send_rk(c, p, &p->old_send);
         }
+        if (p->ok && (p->build_state == BUILD_CHECKING || p->build_state == BUILD_UNCHECKED)) check_build(c, p);
         if (p->old_until > 0.0 && now > p->old_until) rekey_drop_overlap(p);
         if (p->ok && now - p->seen > PEER_TIMEOUT) drop_peer(c, p, "timed out");
     }
@@ -1337,6 +1415,7 @@ void chat_tick(chat_t *c, double now) {
     for (int i = 0; i < c->peer_hi; i++) {
         peer_t *p = &c->peers[i];
         if (!p->used || !p->ok) continue;
+        if (!p->announced && now - p->ok_since >= JOIN_WAIT) announce_join(c, p);
         double cover_iv = cover_interval(c, p);
         if (p->next_cover == 0.0) { p->next_cover = now + jitter(cover_iv); continue; }
         if (now >= p->next_cover) send_peer(c, p, "nop");
@@ -1348,7 +1427,7 @@ void chat_tick(chat_t *c, double now) {
         // Direct and Tor sessions only meet on the relays: without them the room splits in two
         // without a word.
         if (!c->nostr)
-            ui_print(c, "* Nostr relays are off here, so members using %s routing can't reach you - /settings turns them on%s",
+            ui_print(c, "* Nostr relays are off here, so members using %s routing can't reach you - :set nostr on turns them on%s",
                      c->route.mode == ROUTE_TOR ? "direct" : "Tor", c->route.mode == ROUTE_TOR ? " (through Tor)" : "");
         net_report(c);
     }
@@ -1416,6 +1495,17 @@ const char *chat_verify_label(verify_state_t s) {
     }
 }
 
+void chat_build_label(const peer_t *p, char *out, size_t cap) {
+    switch (p->build_state) {
+        case BUILD_OFFICIAL:  snprintf(out, cap, "official v%s", p->build_version); break;
+        case BUILD_MODIFIED:  snprintf(out, cap, "modified client (says v%s)", p->build_version); break;
+        case BUILD_CHECKING:  snprintf(out, cap, "v%s, checking the build", p->build_version); break;
+        case BUILD_UNCHECKED: snprintf(out, cap, "v%s, build not checked", p->build_version); break;
+        case BUILD_UNKNOWN:
+        default:              snprintf(out, cap, "build unknown"); break;
+    }
+}
+
 static void send_to_live_peers(chat_t *c, const char *msg) {
     for (int i = 0; i < c->peer_hi; i++)
         if (c->peers[i].used && c->peers[i].ok) send_peer(c, &c->peers[i], msg);
@@ -1426,6 +1516,14 @@ void chat_set_nick(chat_t *c, const char *nick) {
     ui_print(c, "* your nickname is now %s", c->nick);
     char msg[8 + MAX_NICK];
     snprintf(msg, sizeof msg, "n\t%s", c->nick);
+    send_to_live_peers(c, msg);
+}
+
+void chat_set_colour(chat_t *c, const uint8_t rgb[3]) {
+    memcpy(c->my_color, rgb, 3);
+    char hex[7]; color_to_hex(rgb, hex);
+    ui_print_colored(c, c->my_color, "* your colour is now #%s", hex);
+    char msg[10]; snprintf(msg, sizeof msg, "c\t%s", hex);
     send_to_live_peers(c, msg);
 }
 
@@ -1440,9 +1538,9 @@ void chat_set_identity(chat_t *c, identity_source_t source, const identity_keypa
 
 static cmd_result_t cmd_help(void *ctx, const char *arg) {
     chat_t *c = ctx; (void)arg;
-    ui_print(c, "* commands - anything not starting with / is sent to the room:");
+    ui_print(c, "* commands - anything not starting with : is sent to the room:");
     for (const command_t *cmd = CHAT_COMMANDS; cmd->name; cmd++) {
-        char line[160]; cmd_format_help(cmd, '/', line, sizeof line);
+        char line[160]; cmd_format_help(cmd, ':', line, sizeof line);
         ui_print(c, "%s", line);
     }
     return CMD_OK;
@@ -1457,8 +1555,9 @@ static cmd_result_t cmd_peers(void *ctx, const char *arg) {
         if (n++ == 0) ui_print(c, "* online: %s (you), and:", c->nick);
         char idhex[9]; hex_encode(p->id, 4, idhex);
         char vfyhex[VERIFY_LEN * 2 + 1]; hex_encode(p->vfy, VERIFY_LEN, vfyhex);
-        ui_print(c, "*   %s#%s (verify %s, %s%s)", p->nick, idhex, vfyhex, chat_verify_label(p->identity_state),
-                 p->persists ? ", logging" : "");
+        char build[64]; chat_build_label(p, build, sizeof build);
+        ui_print(c, "*   %s#%s (verify %s, %s, %s%s)", p->nick, idhex, vfyhex, chat_verify_label(p->identity_state),
+                 build, p->persists ? ", logging" : "");
     }
     if (n == 0) ui_print(c, "* nobody else yet");
     return CMD_OK;
@@ -1467,7 +1566,7 @@ static cmd_result_t cmd_peers(void *ctx, const char *arg) {
 static cmd_result_t cmd_verify(void *ctx, const char *arg) {
     chat_t *c = ctx;
     if (!*arg) {
-        ui_print(c, "* usage: /verify NICK - shows their identity fingerprint to read out and compare");
+        ui_print(c, "* usage: :verify NICK - shows their identity fingerprint to read out and compare");
         return CMD_OK;
     }
     int found = 0;
@@ -1488,66 +1587,64 @@ static cmd_result_t cmd_verify(void *ctx, const char *arg) {
     return CMD_OK;
 }
 
-static cmd_result_t cmd_nick(void *ctx, const char *arg) {
-    chat_t *c = ctx;
-    if (!*arg) ui_print(c, "* current nickname: %s. usage: /nick NAME", c->nick);
-    else chat_set_nick(c, arg);
-    return CMD_OK;
+static const char *const NOTIFY_NAMES[] = { "none", "mentions", "all" };
+static const char *const NET_LOG_NAMES[] = { "normal", "verbose" };
+
+static int name_index(const char *const *names, int n, const char *s) {
+    for (int i = 0; i < n; i++) if (strcmp(names[i], s) == 0) return i;
+    return -1;
 }
 
-static cmd_result_t cmd_colour(void *ctx, const char *arg) {
+// The --simple :set, for the settings a session holds itself. The full-screen UI answers :set on
+// its own, with the settings page behind it.
+static cmd_result_t cmd_set(void *ctx, const char *arg) {
     chat_t *c = ctx;
-    if (!*arg) {
-        char list[512]; size_t pos = 0;
-        for (int i = 0; i < COLOR_PALETTE_N; i++)
-            pos += (size_t)snprintf(list + pos, sizeof(list) - pos, "%s%s", i ? ", " : "", COLOR_PALETTE[i].name);
-        char cur[7]; color_to_hex(c->my_color, cur);
-        ui_print(c, "* current colour: #%s. usage: /colour NAME|#RRGGBB. names: %s", cur, list);
-        return CMD_OK;
+    char key[CMD_WORD_MAX];
+    const char *value = cmd_parse(arg, key);
+    char hex[7]; color_to_hex(c->my_color, hex);
+    if (!key[0]) {
+        ui_print(c, "* nick %s, colour #%s, notify %s, net %s - :set NAME VALUE changes one", c->nick, hex,
+                 NOTIFY_NAMES[c->notify_mode], NET_LOG_NAMES[c->net_verbose != 0]);
+    } else if (strcmp(key, "nick") == 0) {
+        if (!value[0]) ui_print(c, "* nick: %s. usage: :set nick NAME", c->nick);
+        else chat_set_nick(c, value);
+    } else if (strcmp(key, "colour") == 0 || strcmp(key, "color") == 0) {
+        uint8_t rgb[3];
+        if (!value[0]) {
+            char list[512]; size_t pos = 0;
+            for (int i = 0; i < COLOR_PALETTE_N; i++)
+                pos += (size_t)snprintf(list + pos, sizeof(list) - pos, "%s%s", i ? ", " : "", COLOR_PALETTE[i].name);
+            ui_print(c, "* colour: #%s. usage: :set colour NAME|#RRGGBB. names: %s", hex, list);
+        } else if (parse_color(value, rgb) != 0) {
+            ui_print(c, "* unknown colour '%s' - try a name or #RRGGBB", value);
+        } else {
+            chat_set_colour(c, rgb);
+        }
+    } else if (strcmp(key, "notify") == 0) {
+        int m = name_index(NOTIFY_NAMES, 3, value);
+        if (m < 0) {
+            ui_print(c, "* notify: %s. usage: :set notify all|mentions|none", NOTIFY_NAMES[c->notify_mode]);
+        } else {
+            c->notify_mode = (notify_mode_t)m;
+            ui_print(c, "* notify: %s", NOTIFY_NAMES[m]);
+        }
+    } else if (strcmp(key, "net") == 0) {
+        int v = name_index(NET_LOG_NAMES, 2, value);
+        if (v < 0) {
+            ui_print(c, "* net: %s. usage: :set net normal|verbose", NET_LOG_NAMES[c->net_verbose != 0]);
+        } else {
+            c->net_verbose = v;
+            ui_print(c, v ? "* net: verbose - every handshake packet now gets its own console line" : "* net: normal");
+        }
+    } else {
+        ui_print(c, "* no setting %s here - :set lists them", key);
     }
-    uint8_t rgb[3];
-    if (parse_color(arg, rgb) != 0) {
-        ui_print(c, "* unknown colour '%s' - try a name or #RRGGBB", arg);
-        return CMD_OK;
-    }
-    memcpy(c->my_color, rgb, 3);
-    char hex[7]; color_to_hex(rgb, hex);
-    ui_print_colored(c, c->my_color, "* your colour is now #%s", hex);
-    char msg[10]; snprintf(msg, sizeof msg, "c\t%s", hex);
-    send_to_live_peers(c, msg);
-    return CMD_OK;
-}
-
-static cmd_result_t cmd_notify(void *ctx, const char *arg) {
-    static const char *const names[] = { "none", "mentions", "all" };
-    chat_t *c = ctx;
-    for (int m = NOTIFY_NONE; m <= NOTIFY_ALL; m++) {
-        if (strcmp(arg, names[m]) != 0) continue;
-        c->notify_mode = (notify_mode_t)m;
-        ui_print(c, "* notifications: %s", names[m]);
-        return CMD_OK;
-    }
-    ui_print(c, "* notifications: %s. usage: /notify all|mentions|none", names[c->notify_mode]);
     return CMD_OK;
 }
 
 static cmd_result_t cmd_net(void *ctx, const char *arg) {
     (void)arg;
     net_report(ctx);
-    return CMD_OK;
-}
-
-static cmd_result_t cmd_netverbose(void *ctx, const char *arg) {
-    chat_t *c = ctx;
-    if (strcmp(arg, "on") == 0) {
-        c->net_verbose = 1;
-        ui_print(c, "* net verbose logging: on - every handshake packet now gets its own console line");
-    } else if (strcmp(arg, "off") == 0) {
-        c->net_verbose = 0;
-        ui_print(c, "* net verbose logging: off");
-    } else {
-        ui_print(c, "* net verbose logging: %s. usage: /netverbose on|off", c->net_verbose ? "on" : "off");
-    }
     return CMD_OK;
 }
 
@@ -1558,13 +1655,13 @@ static cmd_result_t cmd_port(void *ctx, const char *arg) {
         return CMD_OK;
     }
     if (!arg[0]) {
-        ui_print(c, "* udp port: %u. usage: /port N (0 picks a free one)", (unsigned)c->port);
+        ui_print(c, "* udp port: %u. usage: :port N (0 picks a free one)", (unsigned)c->port);
         return CMD_OK;
     }
     char *end;
     long want = strtol(arg, &end, 10);
     if (*end || want < 0 || want > 65535) {
-        ui_print(c, "* not a port: %s. usage: /port N (0-65535, 0 picks a free one)", arg);
+        ui_print(c, "* not a port: %s. usage: :port N (0-65535, 0 picks a free one)", arg);
         return CMD_OK;
     }
     if (want != 0 && want == c->port) {
@@ -1597,14 +1694,11 @@ static cmd_result_t cmd_quit(void *ctx, const char *arg) {
 
 const command_t CHAT_COMMANDS[] = {
     { "help",       NULL,     NULL,              "list commands",                                   cmd_help },
-    { "peers",      NULL,     NULL,              "who is online, with verify codes",                cmd_peers },
+    { "peers",      NULL,     NULL,              "who is online, with verify codes and builds",     cmd_peers },
     { "verify",     NULL,     "NICK",            "show a peer's identity fingerprint",              cmd_verify },
-    { "nick",       NULL,     "[NAME]",          "show or change your nickname",                    cmd_nick },
-    { "colour",     "color",  "[NAME|#RRGGBB]",  "show or change your colour",                      cmd_colour },
-    { "notify",     NULL,     "[all|mentions|none]", "show or change desktop notifications",        cmd_notify },
     { "net",        NULL,     NULL,              "network report and diagnosis",                    cmd_net },
-    { "netverbose", NULL,     "[on|off]",        "log every handshake packet",                      cmd_netverbose },
     { "port",       NULL,     "[N]",             "show or change this session's udp port",          cmd_port },
+    { "set",        NULL,     "[NAME [VALUE]]",  "show or change nick, colour, notify or net",      cmd_set },
     { "quit",       "q exit", NULL,              "leave the session",                               cmd_quit },
     { NULL, NULL, NULL, NULL, NULL }
 };
@@ -1616,7 +1710,7 @@ cmd_result_t chat_run_command(chat_t *c, const char *line_in) {
     const char *arg = cmd_parse(line, word);
     const command_t *cmd = cmd_find(CHAT_COMMANDS, word);
     if (!cmd) {
-        ui_print(c, "* unknown command /%s - try /help", word);
+        ui_print(c, "* unknown command :%s - try :help", word);
         return CMD_UNKNOWN;
     }
     return cmd->run(c, arg);
@@ -1659,7 +1753,7 @@ void chat_send_text(chat_t *c, const char *text_in, double now) {
 int chat_submit_line(chat_t *c, const char *line_in, double now) {
     char line[MAX_TEXT + 1];
     clean_text(line_in, line, MAX_TEXT);
-    if (line[0] == '/') return chat_run_command(c, line + 1) != CMD_QUIT;
+    if (line[0] == ':') return chat_run_command(c, line + 1) != CMD_QUIT;
     chat_send_text(c, line, now);
     return 1;
 }
@@ -1802,6 +1896,13 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
 
     c->identity_source = o->identity_source;
     if (c->identity_source != IDENT_NONE) c->identity = o->identity;
+
+    c->has_build = o->has_build && version_ok(o->version);
+    if (c->has_build) {
+        copy_str(c->version, o->version, sizeof c->version);
+        memcpy(c->build_hash, o->build_hash, BUILD_HASH_LEN);
+    }
+    c->builds = o->builds;
 
     gen_random(c->my_id, ID_LEN);
     gen_keypair(&c->keys);

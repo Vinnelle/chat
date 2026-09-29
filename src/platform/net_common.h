@@ -140,15 +140,15 @@ int addr_resolve(const char *host, uint16_t port, addr_t *out) {
     return 0;
 }
 
-static int parse_hostport(const char *hostport, addr_t *out, int numeric) {
-    char host[256];
+// Splits "HOST:PORT" or "[IPv6]:PORT", with an optional %scope on the host. Looks nothing up.
+static int split_hostport(const char *hostport, char host[256], uint16_t *port_out, uint32_t *scope_out) {
     const char *portstr;
 
     if (hostport[0] == '[') {
         const char *close = strchr(hostport, ']');
         if (!close || close[1] != ':') return -1;
         size_t hlen = (size_t)(close - hostport - 1);
-        if (hlen == 0 || hlen >= sizeof host) return -1;
+        if (hlen == 0 || hlen >= 256) return -1;
         memcpy(host, hostport + 1, hlen);
         host[hlen] = '\0';
         portstr = close + 2;
@@ -156,7 +156,7 @@ static int parse_hostport(const char *hostport, addr_t *out, int numeric) {
         const char *colon = strchr(hostport, ':');
         if (!colon || strchr(colon + 1, ':')) return -1;
         size_t hlen = (size_t)(colon - hostport);
-        if (hlen == 0 || hlen >= sizeof host) return -1;
+        if (hlen == 0 || hlen >= 256) return -1;
         memcpy(host, hostport, hlen);
         host[hlen] = '\0';
         portstr = colon + 1;
@@ -176,11 +176,27 @@ static int parse_hostport(const char *hostport, addr_t *out, int numeric) {
             scope = scope * 10 + (uint32_t)(*p - '0');
         }
     }
+    *port_out = (uint16_t)port;
+    *scope_out = scope;
+    return 0;
+}
 
-    int rc = numeric ? addr_resolve_numeric(host, (uint16_t)port, out) : addr_resolve(host, (uint16_t)port, out);
+static int parse_hostport(const char *hostport, addr_t *out, int numeric) {
+    char host[256];
+    uint16_t port;
+    uint32_t scope;
+    if (split_hostport(hostport, host, &port, &scope) != 0) return -1;
+    int rc = numeric ? addr_resolve_numeric(host, port, out) : addr_resolve(host, port, out);
     if (rc != 0) return -1;
     if (out->is_v6) out->scope = scope;
     return 0;
+}
+
+int addr_check_hostport(const char *hostport) {
+    char host[256];
+    uint16_t port;
+    uint32_t scope;
+    return split_hostport(hostport, host, &port, &scope);
 }
 
 int addr_parse_hostport(const char *hostport, addr_t *out) { return parse_hostport(hostport, out, 0); }

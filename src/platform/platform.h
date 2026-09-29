@@ -51,6 +51,11 @@ int platform_list_dir(const char *path, dir_entry_cb cb, void *ctx);
 
 const char *platform_home_dir(void);
 
+// This OS install's machine id, as text: /etc/machine-id on Linux, MachineGuid on Windows. The
+// OS makes it when it's installed and keeps it until it's reinstalled. It isn't secret: any
+// program here can read it. Returns -1 if there's none.
+int platform_machine_id(char *out, size_t cap);
+
 int platform_spawn_thread(void (*fn)(void *), void *arg);
 
 #include <stdio.h>

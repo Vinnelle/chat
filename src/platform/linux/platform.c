@@ -307,6 +307,25 @@ const char *platform_home_dir(void) {
     return (h && h[0]) ? h : NULL;
 }
 
+int platform_machine_id(char *out, size_t cap) {
+    static const char *const PATHS[] = { "/etc/machine-id", "/var/lib/dbus/machine-id" };
+    for (size_t i = 0; i < sizeof PATHS / sizeof PATHS[0]; i++) {
+        FILE *f = fopen(PATHS[i], "r");
+        if (!f) continue;
+        char line[64];
+        char *got = fgets(line, sizeof line, f);
+        fclose(f);
+        if (!got) continue;
+        line[strcspn(line, "\r\n")] = '\0';
+        // 32 hex digits; systemd writes "uninitialized" there until the first boot is done.
+        if (strlen(line) == 32 && strspn(line, "0123456789abcdef") == 32 && cap > 32) {
+            copy_str(out, line, cap);
+            return 0;
+        }
+    }
+    return -1;
+}
+
 FILE *platform_fopen(const char *utf8_path, const char *mode) {
     return fopen(utf8_path, mode);
 }

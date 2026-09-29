@@ -384,9 +384,9 @@ static void on_protocolinfo(tor_t *t, double now) {
         char why[260];
         if (strstr(m, "COOKIE"))
             snprintf(why, sizeof why, "can't read Tor's auth cookie (%.120s) - run chat as a user allowed to, "
-                     "or set a control password in tor and in /settings", t->cookie_path[0] ? t->cookie_path : "no path given");
+                     "or set a control password in tor and with :set torpassword", t->cookie_path[0] ? t->cookie_path : "no path given");
         else if (strstr(m, "HASHEDPASSWORD"))
-            snprintf(why, sizeof why, "Tor's control port wants a password - set it in /settings");
+            snprintf(why, sizeof why, "Tor's control port wants a password - set it with :set torpassword");
         else
             snprintf(why, sizeof why, "Tor's control port offers no way to log in chat knows (%s)", methods);
         ctl_fail(t, now, why, 1);
@@ -473,7 +473,7 @@ static void on_reply(tor_t *t, double now) {
             on_challenge(t, now);
             return;
         case C_AUTH:
-            if (!ok) { ctl_fail(t, now, "Tor's control port refused the login - check the password in /settings", 1); return; }
+            if (!ok) { ctl_fail(t, now, "Tor's control port refused the login - check :set torpassword", 1); return; }
             t->ctl_state = C_READY;
             if (t->probe) { t->probe_done = 1; close_ctl(t); return; }
             send_add_me(t);
@@ -546,7 +546,7 @@ static void ctl_step(tor_t *t, double now) {
                 char why[320];
                 int defaults = strcmp(t->o.control, TOR_DEFAULTS.control) == 0;
                 snprintf(why, sizeof why, "can't reach Tor's control port at %s%s - is tor running with ControlPort on? "
-                         "(retrying; /settings sets the ports)", t->o.control, defaults ? " or Tor Browser's " "at 127.0.0.1:9151" : "");
+                         "(retrying; :set torsocks and :set torcontrol change the ports)", t->o.control, defaults ? " or Tor Browser's " "at 127.0.0.1:9151" : "");
                 ctl_fail(t, now, why, 0);
                 return;
             }

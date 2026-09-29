@@ -112,7 +112,7 @@ size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out) {
     if (b0 == 0x7f || b0 == 0x08) { out->type = TUI_KEY_BACKSPACE; return 1; }
     if (b0 == '\t') { out->type = TUI_KEY_TAB; return 1; }
     if (b0 == 0x0e) { out->type = TUI_KEY_NEW_SESSION; return 1; }
-    if (b0 == 0x17) { out->type = TUI_KEY_CLOSE_SESSION; return 1; }
+    if (b0 == 0x17) { out->type = TUI_KEY_DELETE_WORD; return 1; }
     if (b0 == 0x02) { out->type = TUI_KEY_TOGGLE_SIDEBAR; return 1; }
     if (b0 == 0x0f) { out->type = TUI_KEY_TOGGLE_CONSOLE; return 1; }
     if (b0 == 0x14) { out->type = TUI_KEY_TOGGLE_CHAT; return 1; }
@@ -143,7 +143,7 @@ void tui_input_clear(tui_input_t *in) {
     in->cmd_len = 0; in->cmd[0] = '\0';
 }
 
-static const char *mode_name(tui_input_mode_t mode) {
+const char *tui_mode_name(tui_input_mode_t mode) {
     switch (mode) {
         case TUI_IMODE_NORMAL:  return "NORMAL";
         case TUI_IMODE_COMMAND: return "COMMAND";
@@ -237,6 +237,17 @@ static int insert_feed(tui_input_t *in, const tui_key_t *key) {
             return 1;
         }
         case TUI_KEY_DELETE: delete_at_cursor(in); return 1;
+        case TUI_KEY_DELETE_WORD: {
+            // Back over spaces, then the word before them, as vim and readline do.
+            int start = in->cursor;
+            while (start > 0 && in->buf[start - 1] == ' ') start--;
+            while (start > 0 && in->buf[start - 1] != ' ') start--;
+            memmove(in->buf + start, in->buf + in->cursor, (size_t)(in->len - in->cursor));
+            in->len -= in->cursor - start;
+            in->cursor = start;
+            in->buf[in->len] = '\0';
+            return 1;
+        }
         case TUI_KEY_LEFT:  in->cursor = step_left(in, in->cursor); return 1;
         case TUI_KEY_RIGHT: in->cursor = step_right(in, in->cursor); return 1;
         case TUI_KEY_HOME: in->cursor = 0; return 1;
@@ -254,7 +265,8 @@ static int normal_feed(tui_input_t *in, const tui_key_t *key) {
         switch (key->ch[0]) {
             case 'h': in->cursor = step_left(in, in->cursor); return 1;
             case 'l': in->cursor = step_right(in, in->cursor); normal_clamp(in); return 1;
-            case 'j': case 'k': return 1;
+            // Left to the caller: on a one-line input they step through the sessions instead.
+            case 'j': case 'k': return 0;
             case 'i': in->mode = TUI_IMODE_INSERT; return 1;
             case 'a': in->cursor = step_right(in, in->cursor); in->mode = TUI_IMODE_INSERT; return 1;
             case 'I': in->cursor = 0; in->mode = TUI_IMODE_INSERT; return 1;
@@ -302,6 +314,11 @@ static int command_feed(tui_input_t *in, const tui_key_t *key) {
             if (in->cmd_len == 0) { enter_normal(in); return 1; }
             in->cmd_len--;
             while (in->cmd_len > 0 && (in->cmd[in->cmd_len] & 0xc0) == 0x80) in->cmd_len--;
+            in->cmd[in->cmd_len] = '\0';
+            return 1;
+        case TUI_KEY_DELETE_WORD:
+            while (in->cmd_len > 0 && in->cmd[in->cmd_len - 1] == ' ') in->cmd_len--;
+            while (in->cmd_len > 0 && in->cmd[in->cmd_len - 1] != ' ') in->cmd_len--;
             in->cmd[in->cmd_len] = '\0';
             return 1;
         case TUI_KEY_ESCAPE:
@@ -396,13 +413,23 @@ static void draw_chrome(wbuf_t *w, int rows, int cols, int sbw, int color_enable
     wapp(w, " chat");
     used += 5;
     wapp(w, "\x1b[22m");
-    char crumb[200];
+    char crumb[1100];   // the file browser's title ends in its folder's path
     if (view->title && view->title[0]) snprintf(crumb, sizeof crumb, "  \xc2\xb7  %s", view->title);
     else crumb[0] = '\0';
     if (color_enabled) wapp(w, CHROME_DIM_FG);
-    int room = cols - used; if (room < 0) room = 0;
+    // The clock keeps its place at the right, a space either side: a long title is cut short first.
+    int clock_w = view->clock && view->clock[0] ? utf8_str_cols(view->clock) : 0;
+    int reserve = clock_w > 0 ? clock_w + 2 : 0;
+    int room = cols - used - reserve; if (room < 0) room = 0;
     used += wapp_trunc(w, crumb, room);
-    wapp_pad(w, used, cols);
+    if (reserve > 0 && used + reserve <= cols) {
+        wapp_pad(w, used, cols - clock_w - 1);
+        if (color_enabled) wapp(w, CHROME_WASH_FG);
+        wapp_trunc(w, view->clock, clock_w);
+        wapp(w, " ");
+    } else {
+        wapp_pad(w, used, cols);
+    }
     wapp(w, "\x1b[0m");
 
     int sidebar_rows = rows - 1;
@@ -500,38 +527,44 @@ static int draw_identity_gap(wbuf_t *w, tui_identity_badge_t badge, int color_en
 static int draw_version_gap(wbuf_t *w, int room) {
     const char *v = "v" CHAT_VERSION;
     int vlen = (int)strlen(v);
-    if (vlen + 1 > room) { v++; vlen--; }
-    if (vlen + 1 > room) return 0;
-    int trail = vlen + 2 <= room;
-    wapp_pad(w, 0, room - vlen - trail);
-    wapp(w, "\x1b[2m%s\x1b[22m", v);
-    if (trail) wapp(w, " ");
+    // A space on either side, so it never runs into the chip or the prompt.
+    if (vlen + 2 > room) { v++; vlen--; }
+    if (vlen + 2 > room) return 0;
+    wapp_pad(w, 0, room - vlen - 1);
+    wapp(w, "\x1b[2m%s\x1b[22m ", v);
     return room;
 }
 
-static void draw_input(wbuf_t *w, int rows, int cols, int pane_x,
-                       const char *nick, const char *mode_prompt,
-                       const tui_input_t *input, int color_enabled, int mask_input,
-                       tui_identity_badge_t identity_badge, const char *status_right) {
-    int input_row = rows;
-    wapp(w, "\x1b[%d;1H", input_row);
+static void draw_bar(wbuf_t *w, int rows, int cols, int pane_x, const tui_bar_t *bar, int color_enabled) {
+    wapp(w, "\x1b[%d;1H", rows);
     wapp(w, color_enabled ? STATUS_BAR_BG STATUS_BAR_FG "\x1b[K" : "\x1b[7m\x1b[K");
     int used = 0;
 
     wapp(w, color_enabled ? STATUS_CHIP_BG STATUS_CHIP_FG : "\x1b[7m");
-    const char *name = mode_name(input->mode);
-    wapp(w, " %s ", name);
-    used += (int)strlen(name) + 2;
+    wapp(w, " ");
+    used += 2 + wapp_trunc(w, bar->chip, cols - 2);
+    wapp(w, " ");
     wapp(w, color_enabled ? STATUS_BAR_BG STATUS_BAR_FG : "\x1b[7m");
 
     int align_to = pane_x - 1;
-    used += draw_identity_gap(w, identity_badge, color_enabled, align_to - used);
+    used += draw_identity_gap(w, bar->badge, color_enabled, align_to - used);
     used += draw_version_gap(w, align_to - used);
     if (align_to > used) { wapp_pad(w, used, align_to); used = align_to; }
 
-    int cursor_used;
+    const tui_input_t *input = bar->input;
+    int cursor_used = -1;   // no cursor
 
-    if (input->mode == TUI_IMODE_COMMAND) {
+    if (bar->message && bar->message[0]) {
+        int room = cols - used; if (room < 0) room = 0;
+        wapp(w, "\x1b[1m");
+        used += wapp_trunc(w, bar->message, room);
+        wapp(w, "\x1b[22m");
+    } else if (!input) {
+        int room = cols - used; if (room < 0) room = 0;
+        wapp(w, "\x1b[2m");
+        used += wapp_trunc(w, bar->hint ? bar->hint : "", room);
+        wapp(w, "\x1b[22m");
+    } else if (input->mode == TUI_IMODE_COMMAND) {
         wapp(w, ":"); used += 1;
         int room = cols - used; if (room < 0) room = 0;
         used += wapp_trunc(w, input->cmd, room);
@@ -544,19 +577,24 @@ static void draw_input(wbuf_t *w, int rows, int cols, int pane_x,
             if (room2 > 0) {
                 wapp(w, "\x1b[2m");
                 used += wapp_trunc(w, rest, room2);
-                wapp(w, color_enabled ? STATUS_BAR_FG : "\x1b[7m");
+                wapp(w, "\x1b[22m");
             }
         }
     } else {
-        const char *label = mode_prompt ? mode_prompt : nick;
-        char lbl[64]; snprintf(lbl, sizeof lbl, "%s> ", label);
-        int room0 = cols - used; if (room0 < 0) room0 = 0;
-        used += wapp_trunc(w, lbl, room0);
+        if (bar->prompt) {
+            char lbl[64]; snprintf(lbl, sizeof lbl, "%s> ", bar->prompt);
+            int room0 = cols - used; if (room0 < 0) room0 = 0;
+            used += wapp_trunc(w, lbl, room0);
+        }
         int content_start = used;
         int room = cols - used; if (room < 1) room = 1;
 
-        int show_hint = input->len == 0 && !mask_input;
-        if (mask_input) {
+        if (input->len == 0) {
+            wapp(w, "\x1b[2m");
+            used += wapp_trunc(w, bar->hint ? bar->hint : "", room);
+            wapp(w, "\x1b[22m");
+            cursor_used = content_start;
+        } else if (bar->mask_input) {
             // One dot per character, not per byte.
             int dots = 0, before = 0;
             for (size_t i = 0, adv; i < (size_t)input->len; i += adv) {
@@ -566,15 +604,6 @@ static void draw_input(wbuf_t *w, int rows, int cols, int pane_x,
             }
             used += dots;
             cursor_used = content_start + (before < room ? before : room - 1);
-        } else if (show_hint) {
-            const char *hint = input->hint ? input->hint : !input->modal ? "Enter confirm \xc2\xb7 Esc cancel"
-                : input->mode == TUI_IMODE_NORMAL
-                ? "i/a/I/A insert \xc2\xb7 h/l move \xc2\xb7 0/$ ends \xc2\xb7 x del \xc2\xb7 : command"
-                : "type to chat \xc2\xb7 /help commands \xc2\xb7 Esc normal mode";
-            wapp(w, "\x1b[2m");
-            used += wapp_trunc(w, hint, room);
-            wapp(w, color_enabled ? STATUS_BAR_FG : "\x1b[7m");
-            cursor_used = content_start;
         } else {
             // A line wider than the field scrolls: it starts far enough in that the text before
             // the cursor fits, with a column left for the cursor itself.
@@ -602,6 +631,7 @@ static void draw_input(wbuf_t *w, int rows, int cols, int pane_x,
         }
     }
 
+    const char *status_right = bar->status_right;
     if (status_right && status_right[0]) {
         int slen = utf8_str_cols(status_right);
         int remaining = cols - used;
@@ -619,10 +649,11 @@ static void draw_input(wbuf_t *w, int rows, int cols, int pane_x,
     }
     wapp(w, "\x1b[0m");
 
+    if (cursor_used < 0) { wapp(w, "\x1b[?25l"); return; }
     int cursor_col = 1 + cursor_used;
     if (cursor_col > cols) cursor_col = cols;
     const char *shape = input->mode == TUI_IMODE_INSERT ? "\x1b[6 q" : "\x1b[2 q";
-    wapp(w, "%s\x1b[%d;%dH\x1b[?25h", shape, input_row, cursor_col);
+    wapp(w, "%s\x1b[%d;%dH\x1b[?25h", shape, rows, cursor_col);
 }
 
 #define GRID_MAXROWS 200
@@ -755,10 +786,7 @@ void tui_render(int rows, int cols,
                  const tui_session_row_t *sessions, int n_sessions, int selected,
                  const tui_peer_row_t *peers, int n_peers,
                  const tui_scrollback_t *sb, const tui_scrollback_t *console,
-                 const tui_view_t *view,
-                 const char *nick, const char *mode_prompt,
-                 const tui_input_t *input, int color_enabled, int mask_input,
-                 tui_identity_badge_t identity_badge, const char *status_right,
+                 const tui_view_t *view, const tui_bar_t *bar, int color_enabled,
                  const char *const *net_lines, int n_net_lines) {
     static char frame[FRAME_CAP];
     wbuf_t w = { frame, FRAME_CAP, 0 };
@@ -795,20 +823,17 @@ void tui_render(int rows, int cols,
         grid_scroll(&g_grid, sb, 0, pane_rows, color_enabled, 0);
     } else {
         wbuf_t hw = grid_row(&g_grid, 0);
-        const char *hint = "  chat and console are hidden - ^T shows the chat, ^O shows the console";
+        const char *hint = "  chat and console are hidden - Ctrl+T shows the chat, Ctrl+O the console";
         wapp(&hw, "\x1b[2m"); wapp_trunc(&hw, hint, pane_w); wapp(&hw, "\x1b[0m");
         grid_commit(&g_grid, 0, &hw);
     }
     grid_emit(&w, &g_grid, 2, pane_x);
 
-    draw_input(&w, rows, cols, pane_x, nick, mode_prompt, input, color_enabled, mask_input, identity_badge, status_right);
+    draw_bar(&w, rows, cols, pane_x, bar, color_enabled);
     end_frame(&w);
 }
 
-void tui_render_input(int rows, int cols, const tui_view_t *view,
-                      const char *nick, const char *mode_prompt,
-                      const tui_input_t *input, int color_enabled, int mask_input,
-                      tui_identity_badge_t identity_badge, const char *status_right) {
+void tui_render_bar(int rows, int cols, const tui_view_t *view, const tui_bar_t *bar, int color_enabled) {
     static char frame[8192];
     wbuf_t w = { frame, sizeof frame, 0 };
     if (rows < 6) rows = 6;
@@ -817,14 +842,14 @@ void tui_render_input(int rows, int cols, const tui_view_t *view,
 
     geometry(rows, cols, view->sidebar, &pane_x, &pane_rows);
     begin_frame(&w);
-    draw_input(&w, rows, cols, pane_x, nick, mode_prompt, input, color_enabled, mask_input, identity_badge, status_right);
+    draw_bar(&w, rows, cols, pane_x, bar, color_enabled);
     end_frame(&w);
 }
 
-void tui_render_list(int rows, int cols,
-                      const tui_session_row_t *sessions, int n_sessions, int selected_session,
-                      const char *title, const tui_list_item_t *items, int n_items, int selected,
-                      const char *hint, int color_enabled) {
+void tui_render_page(int rows, int cols,
+                     const tui_session_row_t *sessions, int n_sessions, int selected_session,
+                     const char *title, const char *clock, const tui_page_t *page, const tui_bar_t *bar,
+                     int color_enabled) {
     static char frame[FRAME_CAP];
     wbuf_t w = { frame, FRAME_CAP, 0 };
 
@@ -835,123 +860,77 @@ void tui_render_list(int rows, int cols,
     int pane_w = cols - pane_x + 1;
 
     begin_frame(&w);
-    static const tui_view_t full = { 1, 1, 1, NULL };
+    const tui_view_t full = { 1, 1, 1, title, clock };
     draw_chrome(&w, rows, cols, sbw, color_enabled, &full, sessions, n_sessions, selected_session, NULL, 0, NULL, 0);
 
-    wapp(&w, "\x1b[2;%dH\x1b[0K\x1b[2m", pane_x);
-    wapp_trunc(&w, title, pane_w);
-    wapp(&w, "\x1b[0m");
-
-    int list_rows = pane_rows - 1;
-    int scroll = 0;
-    if (selected >= list_rows) scroll = selected - list_rows + 1;
-    if (scroll > n_items - list_rows) scroll = n_items - list_rows;
-    if (scroll < 0) scroll = 0;
-
-    for (int row = 0; row < list_rows; row++) {
-        int screen_row = row + 3;
-        wapp(&w, "\x1b[%d;%dH\x1b[0K", screen_row, pane_x);
-        int idx = row + scroll;
-        if (idx < n_items) {
-            int is_sel = (idx == selected);
-            if (is_sel) wapp(&w, "\x1b[7m");
-            char cell[TUI_LIST_LABEL_MAX + 4];
-            snprintf(cell, sizeof cell, "%s%s%s", is_sel ? "> " : "  ",
-                     items[idx].label, items[idx].is_dir ? "/" : "");
-            int shown = wapp_trunc(&w, cell, pane_w);
-            if (is_sel) wapp_pad(&w, shown, pane_w);
-            if (is_sel) wapp(&w, "\x1b[0m");
-        }
-    }
-
-    int input_row = rows;
-    wapp(&w, "\x1b[%d;%dH\x1b[0K\x1b[2m", input_row, pane_x);
-    wapp_trunc(&w, hint, pane_w);
-    wapp(&w, "\x1b[0m\x1b[?25l");
-    end_frame(&w);
-}
-
-void tui_render_settings(int rows, int cols,
-                         const tui_session_row_t *sessions, int n_sessions, int selected_session,
-                         const tui_setting_row_t *items, int n_items, int selected,
-                         const char *help, const char *note, const char *hint, int color_enabled,
-                         const tui_input_t *input, const char *prompt, int mask_input, const char *nick) {
-    static char frame[FRAME_CAP];
-    wbuf_t w = { frame, FRAME_CAP, 0 };
-
-    if (rows < 6) rows = 6;
-    if (cols < 30) cols = 30;
-    int pane_x, pane_rows;
-    int sbw = tui_pane_geometry(rows, cols, &pane_x, &pane_rows);
-    int pane_w = cols - pane_x + 1;
-
-    begin_frame(&w);
-    static const tui_view_t full = { 1, 1, 1, "settings" };
-    draw_chrome(&w, rows, cols, sbw, color_enabled, &full, sessions, n_sessions, selected_session, NULL, 0, NULL, 0);
-
-    // The help text under the list: wrapped, up to six rows, then the note, then a blank row.
+    // The help under the list: wrapped, up to six rows.
     int help_rows = 0;
     size_t off[6], len[6];
     {
-        const char *tx = help ? help : "";
+        const char *tx = page->help ? page->help : "";
         size_t remain = strlen(tx);
         int width = pane_w - 2;
         while (remain > 0 && help_rows < 6) {
             size_t take = wrap_chunk(tx, remain, width);
-            off[help_rows] = (size_t)(tx - help);
+            off[help_rows] = (size_t)(tx - page->help);
             len[help_rows] = take;
             help_rows++;
             tx += take; remain -= take;
             while (remain > 0 && *tx == ' ') { tx++; remain--; }
         }
     }
-    int foot = help_rows + 2;
-    int list_rows = pane_rows - foot - 1;
+    // Under the list: a blank row and the help, then a blank row and the button.
+    int foot = 1 + help_rows + (page->button ? 2 : 0);
+    int list_rows = pane_rows - foot;
     if (list_rows < 3) list_rows = 3;
 
-    // Rows on screen: section headings and settings, headings taking a row of their own.
-    int line_of[64], total = 0;
-    for (int i = 0; i < n_items && i < 64; i++) {
-        if (items[i].section) total++;
-        line_of[i] = total++;
+    // A section heading takes a row of its own above its first row. The list scrolls to keep the
+    // selected row in view, with its heading; with the button selected, it stays at its end.
+    int anchor = page->selected < page->n_rows ? page->selected : page->n_rows - 1;
+    int anchor_line = 0, line = 0;
+    for (int i = 0; i < page->n_rows; i++) {
+        if (page->rows[i].section) line++;
+        if (i == anchor) anchor_line = line;
+        line++;
     }
     int scroll = 0;
-    if (selected >= 0 && selected < n_items) {
-        int want = line_of[selected];
-        if (selected > 0 && items[selected].section) want--;
-        if (line_of[selected] >= list_rows) scroll = line_of[selected] - list_rows + 1;
+    if (anchor >= 0) {
+        int want = anchor_line - (page->rows[anchor].section ? 1 : 0);
+        if (anchor_line >= list_rows) scroll = anchor_line - list_rows + 1;
         if (want < scroll) scroll = want;
     }
     int label_w = pane_w / 2 - 2;
     if (label_w > 30) label_w = 30;
     if (label_w < 12) label_w = 12;
 
-    for (int r = 0; r < list_rows + 1; r++) wapp(&w, "\x1b[%d;%dH\x1b[0m\x1b[K", 2 + r, pane_x);
-    int line = 0;
-    for (int i = 0; i < n_items && i < 64; i++) {
-        for (int pass = 0; pass < 2; pass++) {
-            if (pass == 0 && !items[i].section) continue;
-            int shown = line - scroll;
-            line++;
+    for (int r = 0; r < pane_rows; r++) wapp(&w, "\x1b[%d;%dH\x1b[0m\x1b[K", 2 + r, pane_x);
+    line = 0;
+    for (int i = 0; i < page->n_rows && line - scroll < list_rows; i++) {
+        const tui_row_t *row = &page->rows[i];
+        for (int pass = row->section ? 0 : 1; pass < 2; pass++) {
+            int shown = line++ - scroll;
             if (shown < 0 || shown >= list_rows) continue;
             wapp(&w, "\x1b[%d;%dH", 2 + shown, pane_x);
             if (pass == 0) {
                 wapp(&w, "\x1b[2m\xe2\x94\x80 ");
-                int used = 2 + wapp_trunc(&w, items[i].section, pane_w - 4);
+                int used = 2 + wapp_trunc(&w, row->section, pane_w - 4);
                 wapp(&w, " "); used++;
                 for (; used < pane_w; used++) wapp(&w, "\xe2\x94\x80");
                 wapp(&w, "\x1b[0m");
                 continue;
             }
-            int sel = i == selected;
+            int sel = i == page->selected;
             if (sel) wapp(&w, "\x1b[7m");
-            else if (items[i].dim) wapp(&w, "\x1b[2m");
             int used = wapp_trunc(&w, sel ? "> " : "  ", pane_w);
-            int lw = wapp_trunc(&w, items[i].label, label_w);
-            wapp_pad(&w, lw, label_w);
-            used += label_w;
-            if (used < pane_w) { wapp(&w, " "); used++; }
-            used += wapp_trunc(&w, items[i].value, pane_w - used);
+            if (row->value) {
+                int lw = wapp_trunc(&w, row->label, label_w);
+                wapp_pad(&w, lw, label_w);
+                used += label_w;
+                if (used < pane_w) { wapp(&w, " "); used++; }
+                used += wapp_trunc(&w, row->value, pane_w - used);
+            } else {
+                used += wapp_trunc(&w, row->label, pane_w - used);
+            }
             if (sel) wapp_pad(&w, used, pane_w);
             wapp(&w, "\x1b[0m");
         }
@@ -959,27 +938,26 @@ void tui_render_settings(int rows, int cols,
 
     int help_top = 2 + list_rows + 1;
     for (int r = 0; r < help_rows; r++) {
-        wapp(&w, "\x1b[%d;%dH\x1b[0m\x1b[K", help_top + r, pane_x);
         char piece[TUI_LINE_MAX + 1];
         size_t n = len[r] < TUI_LINE_MAX ? len[r] : TUI_LINE_MAX;
-        memcpy(piece, help + off[r], n);
+        memcpy(piece, page->help + off[r], n);
         piece[n] = '\0';
-        wapp(&w, "  ");
+        wapp(&w, "\x1b[%d;%dH  ", help_top + r, pane_x);
         wapp_trunc(&w, piece, pane_w - 2);
     }
-    for (int r = help_top + help_rows; r < rows; r++) wapp(&w, "\x1b[%d;%dH\x1b[0m\x1b[K", r, pane_x);
-    if (note && note[0]) {
-        wapp(&w, "\x1b[%d;%dH\x1b[1m  ", rows - 1, pane_x);
-        wapp_trunc(&w, note, pane_w - 2);
+    if (page->button) {
+        // Lined up with the rows above it: "> " when selected, and inverted like a selected row.
+        int sel = page->selected == page->n_rows;
+        char text[64];
+        snprintf(text, sizeof text, color_enabled ? "  %s  " : "[ %s ]", page->button);
+        wapp(&w, "\x1b[%d;%dH", rows - 1, pane_x);
+        int used = wapp_trunc(&w, sel ? "> " : "  ", pane_w);
+        if (color_enabled) wapp(&w, CHROME_CHIP_BG CHROME_CHIP_FG);
+        wapp(&w, sel ? "\x1b[1m\x1b[7m" : "\x1b[1m");
+        wapp_trunc(&w, text, pane_w - used);
         wapp(&w, "\x1b[0m");
     }
 
-    if (input) {
-        draw_input(&w, rows, cols, pane_x, nick, prompt, input, color_enabled, mask_input, TUI_ID_NONE, "");
-    } else {
-        wapp(&w, "\x1b[%d;%dH\x1b[0K\x1b[2m", rows, pane_x);
-        wapp_trunc(&w, hint, pane_w);
-        wapp(&w, "\x1b[0m\x1b[?25l");
-    }
+    draw_bar(&w, rows, cols, pane_x, bar, color_enabled);
     end_frame(&w);
 }

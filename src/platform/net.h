@@ -63,6 +63,8 @@ int host_is_onion(const char *host);
 int addr_resolve_numeric(const char *host, uint16_t port, addr_t *out);
 void addr_to_string(addr_t a, char out[ADDR_STR_LEN]);
 int addr_parse_hostport(const char *hostport, addr_t *out);
+// 0 if hostport has addr_parse_hostport's form; the host isn't looked up.
+int addr_check_hostport(const char *hostport);
 // Like addr_parse_hostport, for addresses from the network: "IP:PORT" or "[IPv6]:PORT" only.
 int addr_parse_ip_port(const char *hostport, addr_t *out);
 int addr_equal(addr_t a, addr_t b);

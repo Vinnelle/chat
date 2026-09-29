@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
 #include "app/update.h"
+#include "core/chat.h"
 #include "platform/platform.h"
 #include "common/util.h"
 #include <sodium.h>
@@ -39,16 +40,30 @@ static char g_proxy[64];
 
 void update_set_proxy(const char *socks) { copy_str(g_proxy, socks ? socks : "", sizeof g_proxy); }
 
-static int fetch(const char *url, const char *out_path, int api) {
+// headers_path, if not NULL, gets the response headers, for fetch_missing.
+static int fetch(const char *url, const char *out_path, int api, const char *headers_path) {
     // -q must come first: it stops curl reading a .curlrc that could turn off TLS checks or add a proxy.
     // --socks5-hostname leaves name lookups to the proxy, so Tor resolves GitHub, not local DNS.
-    const char *argv[] = {
+    const char *argv[24] = {
         "curl", "-q", "-fsL", "--proto", "=https", "--proto-redir", "=https", "--tlsv1.2",
         "--max-time", "300", "--max-filesize", UPDATE_MAX_BYTES,
         "-H", api ? "Accept: application/vnd.github+json" : "Accept: application/octet-stream",
         "-o", out_path, url,
-        g_proxy[0] ? "--socks5-hostname" : NULL, g_proxy, NULL
     };
+    int n = 0;
+    while (argv[n]) n++;
+    if (headers_path) { argv[n++] = "-D"; argv[n++] = headers_path; }
+    char user[24];
+    if (g_proxy[0]) {
+        // Made-up SOCKS credentials give each download circuits of its own (Tor isolates by them),
+        // so the exit can't tie one download to another, or to chat's own streams.
+        uint8_t r[8];
+        randombytes_buf(r, sizeof r);
+        hex_encode(r, sizeof r, user);
+        copy_str(user + 16, ":x", sizeof user - 16);
+        argv[n++] = "--socks5-hostname"; argv[n++] = g_proxy;
+        argv[n++] = "--proxy-user"; argv[n++] = user;
+    }
     return platform_run_quiet(argv);
 }
 
@@ -229,7 +244,7 @@ static void update_thread(void *unused) {
     snprintf(tmp_sig, sizeof tmp_sig, "%s.sums.minisig", exe);
     snprintf(tmp_bin, sizeof tmp_bin, "%s.download", exe);
 
-    if (fetch("https://api.github.com/repos/" UPDATE_REPO "/releases/latest", tmp_json, 1) != 0) {
+    if (fetch("https://api.github.com/repos/" UPDATE_REPO "/releases/latest", tmp_json, 1, NULL) != 0) {
         platform_remove(tmp_json);
         finish("* update: could not reach GitHub (is curl installed, and is %s's folder writable?)", exe);
         return;
@@ -243,7 +258,7 @@ static void update_thread(void *unused) {
     if (!version_newer(tag, CHAT_VERSION)) { succeed("* update: already up to date (v" CHAT_VERSION ", latest is %s)", tag); return; }
 
     snprintf(url, sizeof url, "https://github.com/" UPDATE_REPO "/releases/download/%s/SHA256SUMS", tag);
-    if (fetch(url, tmp_sums, 0) != 0) {
+    if (fetch(url, tmp_sums, 0, NULL) != 0) {
         platform_remove(tmp_sums);
         finish("* update: release %s has no SHA256SUMS - refusing to install it", tag);
         return;
@@ -256,7 +271,7 @@ static void update_thread(void *unused) {
     // The signature, made offline with the release key, is what vouches for it.
     snprintf(url, sizeof url, "https://github.com/" UPDATE_REPO "/releases/download/%s/SHA256SUMS.minisig", tag);
     char *sig = NULL;
-    if (fetch(url, tmp_sig, 0) == 0) sig = slurp(tmp_sig, 4096, NULL);
+    if (fetch(url, tmp_sig, 0, NULL) == 0) sig = slurp(tmp_sig, 4096, NULL);
     platform_remove(tmp_sig);
     int signed_ok = sums && sig && minisign_ok(sums, sums_len, sig, tag) == 0;
     free(sig);
@@ -272,7 +287,7 @@ static void update_thread(void *unused) {
     if (!ok) { finish("* update: SHA256SUMS lists no " UPDATE_ASSET " for %s - nothing installed", tag); return; }
 
     snprintf(url, sizeof url, "https://github.com/" UPDATE_REPO "/releases/download/%s/" UPDATE_ASSET, tag);
-    if (fetch(url, tmp_bin, 0) != 0) {
+    if (fetch(url, tmp_bin, 0, NULL) != 0) {
         platform_remove(tmp_bin);
         finish("* update: downloading " UPDATE_ASSET " from %s failed - nothing installed", tag);
         return;
@@ -316,6 +331,150 @@ int update_run(char *msg, size_t cap) {
     update_thread(NULL);
     update_poll(msg, cap);
     return g_ok ? 0 : -1;
+}
+
+// ---- official builds, to check the build a peer says it runs ----
+
+int update_self_hash(uint8_t out[BUILD_HASH_LEN]) {
+#ifdef __linux__
+    // The file this process was started from, even if an update has replaced it since.
+    return hash_file("/proc/self/exe", out, NULL);
+#else
+    char exe[1024];
+    if (platform_exe_path(exe, sizeof exe) != 0) return -1;
+    return hash_file(exe, out, NULL);
+#endif
+}
+
+// A version a release could have: MAJOR.MINOR.PATCH, as `just release` takes it.
+static int release_version(const char *v) {
+    for (int part = 0; part < 3; part++) {
+        int digits = 0;
+        while (isdigit((unsigned char)*v)) { v++; if (++digits > 5) return 0; }
+        if (digits == 0 || (part < 2 && *v++ != '.')) return 0;
+    }
+    return *v == '\0';
+}
+
+static int sums_all(const char *sums, uint8_t hashes[][BUILD_HASH_LEN], int max) {
+    int n = 0;
+    for (const char *line = sums; *line && n < max; ) {
+        const char *end = strchr(line, '\n');
+        size_t llen = end ? (size_t)(end - line) : strlen(line);
+        if (llen >= 66 && (line[64] == ' ' || line[64] == '\t')) {
+            char hex[65];
+            memcpy(hex, line, 64); hex[64] = '\0';
+            if (hex_decode(hex, 64, hashes[n]) == 0) n++;
+        }
+        if (!end) break;
+        line = end + 1;
+    }
+    return n;
+}
+
+// Whether a failed fetch failed because there's no such file: the last status line in its
+// headers (after any redirects) is a 404.
+static int fetch_missing(const char *headers_path) {
+    char *h = slurp(headers_path, 1 << 16, NULL);
+    if (!h) return 0;
+    int status = 0;
+    for (const char *line = h; line && *line; ) {
+        if (strncmp(line, "HTTP/", 5) == 0) {
+            const char *sp = strchr(line, ' ');
+            status = sp ? atoi(sp + 1) : 0;
+        }
+        line = strchr(line, '\n');
+        if (line) line++;
+    }
+    free(h);
+    return status == 404;
+}
+
+static int fetch_official(const char *version, uint8_t hashes[][BUILD_HASH_LEN], int max) {
+    if (!release_version(version)) return CHAT_BUILDS_NONE;
+    if (!RELEASE_PUBKEY[0]) return CHAT_BUILDS_UNKNOWN;
+    char dir[900], sums_path[1000], sig_path[1000], hdr_path[1000], tag[24], url[512];
+    // Not next to the executable, as :update does: that folder may not be writable, and these are
+    // fetched without anyone asking.
+    if (platform_private_tempdir("chat-sums", dir, sizeof dir) != 0) return CHAT_BUILDS_UNKNOWN;
+    snprintf(sums_path, sizeof sums_path, "%s/SHA256SUMS", dir);
+    snprintf(sig_path, sizeof sig_path, "%s/SHA256SUMS.minisig", dir);
+    snprintf(hdr_path, sizeof hdr_path, "%s/headers", dir);
+    snprintf(tag, sizeof tag, "v%s", version);
+
+    int result = CHAT_BUILDS_UNKNOWN;
+    snprintf(url, sizeof url, "https://github.com/" UPDATE_REPO "/releases/download/%s/SHA256SUMS", tag);
+    if (fetch(url, sums_path, 0, hdr_path) != 0) {
+        if (fetch_missing(hdr_path)) result = CHAT_BUILDS_NONE;
+    } else {
+        snprintf(url, sizeof url, "https://github.com/" UPDATE_REPO "/releases/download/%s/SHA256SUMS.minisig", tag);
+        if (fetch(url, sig_path, 0, hdr_path) != 0) {
+            // Every release since peers began sending "v" is signed.
+            if (fetch_missing(hdr_path)) result = CHAT_BUILDS_NONE;
+        } else {
+            size_t sums_len = 0;
+            char *sums = slurp(sums_path, 1 << 16, &sums_len), *sig = slurp(sig_path, 4096, NULL);
+            // A bad signature says nothing about the peer, only that this download went wrong.
+            if (sums && sig && minisign_ok(sums, sums_len, sig, tag) == 0) result = sums_all(sums, hashes, max);
+            free(sums);
+            free(sig);
+        }
+    }
+    platform_remove_tree(dir);
+    return result;
+}
+
+#define BUILDS_VERSIONS 8
+// How long before a lookup that couldn't get an answer (offline, tor not up yet) is tried again.
+#define BUILDS_RETRY 300.0
+
+enum { BJ_EMPTY = 0, BJ_FETCHING = 1, BJ_DONE = 2 };
+
+// One version's lookup. The thread fetching it owns everything but state until state is BJ_DONE.
+typedef struct {
+    int state;
+    char version[MAX_VERSION + 1];
+    int result;
+    uint8_t hashes[CHAT_BUILDS_MAX][BUILD_HASH_LEN];
+    double done_at;
+} build_job_t;
+
+static build_job_t g_builds[BUILDS_VERSIONS];
+
+static void builds_thread(void *arg) {
+    build_job_t *j = arg;
+    j->result = fetch_official(j->version, j->hashes, CHAT_BUILDS_MAX);
+    j->done_at = now_seconds();
+    __atomic_store_n(&j->state, BJ_DONE, __ATOMIC_RELEASE);
+}
+
+static int builds_start(build_job_t *j) {
+    __atomic_store_n(&j->state, BJ_FETCHING, __ATOMIC_RELEASE);
+    if (platform_spawn_thread(builds_thread, j) == 0) return CHAT_BUILDS_PENDING;
+    j->result = CHAT_BUILDS_UNKNOWN;
+    j->done_at = now_seconds();
+    __atomic_store_n(&j->state, BJ_DONE, __ATOMIC_RELEASE);
+    return CHAT_BUILDS_UNKNOWN;
+}
+
+int update_official_hashes(const char *version, uint8_t hashes[][BUILD_HASH_LEN], int max) {
+    if (!release_version(version)) return CHAT_BUILDS_NONE;
+    build_job_t *free_job = NULL;
+    for (int i = 0; i < BUILDS_VERSIONS; i++) {
+        build_job_t *j = &g_builds[i];
+        int state = __atomic_load_n(&j->state, __ATOMIC_ACQUIRE);
+        if (state == BJ_EMPTY) { if (!free_job) free_job = j; continue; }
+        if (strcmp(j->version, version) != 0) continue;
+        if (state == BJ_FETCHING) return CHAT_BUILDS_PENDING;
+        if (j->result == CHAT_BUILDS_UNKNOWN && now_seconds() - j->done_at > BUILDS_RETRY) return builds_start(j);
+        int n = j->result < max ? j->result : max;
+        if (n > 0) memcpy(hashes, j->hashes, (size_t)n * BUILD_HASH_LEN);
+        return n;
+    }
+    // A peer can name any version: only so many are looked up in one run.
+    if (!free_job) return CHAT_BUILDS_UNKNOWN;
+    copy_str(free_job->version, version, sizeof free_job->version);
+    return builds_start(free_job);
 }
 
 void update_cleanup_stale(void) {

@@ -23,24 +23,67 @@ Messages are encrypted with a hybrid, post-quantum construction:
 A session's **id + password** together key both the encryption and the DHT lookup, so only
 people who hold both can find and read each other. A blank password still encrypts.
 
-Optional **identity signing** lets peers verify who they're talking to:
+Optional **identity signing** lets peers verify who they're talking to. Choose it under
+**Signing identity** on the settings page (or `:set sign`), or with `--identity`:
 
-- `native` — a fresh Ed25519 identity
-- `age` — same, plus an `age1...` recipient string others can `age -r` encrypt files to
+- `age` — an Ed25519 identity made from a password, with an `age1...` recipient string others
+  can `age -r` encrypt files to (settings shows it and copies it to the clipboard)
+- `pgp` — the same as a PGP key; settings copies its public key for others to `gpg --import`
+- `age:KEYFILE` — sign with your own AGE key, as `age-keygen` writes it; your `age1...`
+  recipient stays the same
 - `pgp:KEYFILE` — sign with an unencrypted armored EdDSA secret key exported from real gpg
 
-Use `/verify NICK` to compare a peer's identity out-of-band.
+In settings, the picker lists **Off**, then **AGE** and **PGP**, each with **Native** (a key
+made there), a key file (picked in a browser) and a key paste. A key of your own is never
+written to disk.
+
+A **Native** key asks for a password (`--identity age` or `pgp` asks at startup, or takes it
+from `CHAT_SIGN_PASSWORD`). The key is made from that password and this OS install's machine
+id (`/etc/machine-id`, or `MachineGuid` on Windows) with Argon2id, so the same password on
+the same device and OS always makes the same key and fingerprint, and nothing is stored.
+**Always use the same password if you want to keep an established signing identity**: a
+different password, or a typo, makes a different key, and peers see a new fingerprint. The
+same password makes the same key whether you pick AGE or PGP. Reinstalling the OS changes the
+machine id, and with it the key.
+
+The machine id isn't secret, since any program on the device can read it, so the password is
+what protects the key. Anyone who has your machine id can guess passwords against the
+public key you show peers, so use a long one. A blank password makes a new random key that
+lasts until chat exits instead.
+
+Use `:verify NICK` to compare a peer's identity out-of-band.
 
 Each peer rekeys every few minutes. Before it does, it announces its new key over the current
 encrypted session, so a room member sitting between two peers can't swap in its own key at a
 rekey. If a peer drops and comes back, chat tells you its verify code changed.
 
+**Modified clients.** Each client tells its peers, over the encrypted session, which version it
+runs and the SHA-256 of its own executable. That hash is keyed with both peers' session ids, so
+a build that isn't a release can't be recognised from one session or peer to the next. Chat
+checks it against the `SHA256SUMS` of that version's GitHub release, after checking that file's
+signature against the release key built into chat. A peer that isn't running one of that
+release's binaries, or that names a version with no signed release, is marked **modified**:
+you get a warning when it's found, the sidebar shows `modified` next to its name, and `:peers`
+shows its build. A build of your own from source counts as modified too, since only the release
+binaries match.
+
+This only catches clients that don't hide it. Chat takes the peer's word for its hash, so a
+client altered to lie can send the official one. "Official" is a label, not proof of what the
+other side runs.
+
+The first time a peer names a version, chat downloads that release's `SHA256SUMS` and its
+signature from GitHub, once per version per run, in the background. In Tor mode this goes
+through Tor. GitHub, or the Tor exit, sees that someone fetched that version's checksums, and
+when, which is around when that peer joined. In direct mode GitHub also sees your IP address,
+and your network sees a connection to GitHub. If the download fails, the peer's build shows as
+not checked, and chat tries again a few minutes later.
+
 > **Note:** the cryptography here has not been independently audited.
 
 ## Routing
 
-When chat starts, it asks how sessions should reach people. `--routing` answers ahead of
-time, and the settings page (`Ctrl+S` or `/settings`) changes it later.
+chat opens on its settings page, and **Routing** heads it. `--routing` presets it, and
+`Ctrl+S` or `:set` brings the page back later.
 
 1. **Direct + Nostr fallback** (recommended). Peers talk over UDP, straight to each other.
 2. **Direct only.** The same without relays. Some peers behind strict NATs won't connect, and
@@ -212,7 +255,7 @@ just clean              # remove build directories
 delivery with a lost packet, rekey, junk from outside the room, and a third peer joining. It
 also checks the parsers for what relays, routers and Tor send. The fuzz targets (libFuzzer,
 so clang) cover bencode and DHT replies (IPv4 and IPv6), relay JSON and UPnP gateway replies,
-PGP key import, text cleaning and the input line, and everything a session receives,
+PGP and AGE key import, text cleaning and the input line, and everything a session receives,
 including messages from a room member or a connected peer.
 
 ```sh
@@ -241,7 +284,7 @@ key: commit `minisign.pub`, and keep the secret key backed up and off GitHub.
 ## Usage
 
 ```
-chat [--nick NAME] [--colour NAME|#HEX] [--identity native|age|pgp:KEYFILE] [--simple]
+chat [--nick NAME] [--colour NAME|#HEX] [--identity age|pgp[:KEYFILE]] [--simple]
      [--routing direct+nostr|direct|tor] [--nodht] [--noipv6] [--nolan] [--noportmap]
      [--nonostr] [--relay wss://HOST ...] [--tor-socks HOST:PORT] [--tor-control HOST:PORT]
      [--session ID --port UDP_PORT --peer HOST:PORT ...]
@@ -251,45 +294,78 @@ On a real terminal, `chat` opens a full-screen UI: a session list on the left (s
 Tab / Shift+Tab), the selected conversation and its console filling the rest, an input line
 at the bottom.
 
+It starts on the settings page, so routing, nickname, colour, signing identity and the rest
+are set up in one place. **Done** at the bottom (or `Esc`) goes on to your sessions. Nothing
+reaches the network before that: no tor is looked for or started, and no `--peer` name is
+looked up (in Tor mode it never is, since the lookup would go around Tor).
+
 | Key | Action |
 | --- | --- |
 | `Ctrl+N` | create a new session (asks for a password) |
 | `Ctrl+J` | join an existing session (id, then password) |
-| `Ctrl+W` | leave the current session |
-| `Tab` / `Shift+Tab` | next / previous session |
+| `Tab` / `Shift+Tab` | next / previous session (`j` / `k` in NORMAL too) |
 | `Ctrl+B` / `Ctrl+O` / `Ctrl+T` | toggle sidebar / console / chat pane |
 | `Ctrl+S` | settings |
 | `Ctrl+C` | quit (every session leaves cleanly first) |
 
-The input line is a small vim. It starts in INSERT, where Enter sends. `Esc` drops to NORMAL
-(`h`/`l` move, `0`/`$` ends, `x` delete, `i`/`a`/`I`/`A` back to INSERT); `:` opens
-COMMAND (`Tab` completes, `Enter` runs, `Esc` cancels). Password and session-id prompts are
-plain fields: `Enter` confirms, `Esc` cancels, and your draft comes back afterwards.
+The bar at the bottom is the same on every screen: a chip saying where you are (`INSERT`,
+`NORMAL`, `COMMAND`, `SETTINGS`, …), what the keys do there, and the reply to what you just
+did, which stays until your next key.
+
+The input line is a small vim. It starts in NORMAL (`h`/`l` move, `0`/`$` ends, `x` delete,
+`j`/`k` switch session); `i`/`a`/`I`/`A` go to INSERT, where Enter sends, `Ctrl+W` deletes the
+word before the cursor and `Esc` goes back to NORMAL. `:` in NORMAL opens COMMAND (`Tab`
+completes, `Enter` runs, `Esc` cancels). Password and session-id prompts are plain fields: `Enter`
+confirms, `Esc` cancels, and your draft comes back afterwards.
 
 Typing `@` and the start of a nick shows the rest of the name dimmed; `Tab` completes it.
 
-Every command works as `/name` in INSERT or `:name` in COMMAND. `/help` lists them all.
+Commands run only from COMMAND: `Esc`, then `:name`. Everything typed in INSERT is sent as a
+message, even a line that starts with `/` or `:`. `:help` lists them all.
 
 | Command | Action |
 | --- | --- |
-| `/new`, `/join` | create / join a session (same as `Ctrl+N` / `Ctrl+J`) |
-| `/quit` (`/q`) | leave this session; quits when none is open |
-| `/quitall` (`/qa`) | leave every session and quit |
-| `/nick [NAME]` | show or change your nickname in every session |
-| `/colour [NAME\|#HEX]` | show or change your colour |
-| `/sign` | set up, replace or turn off your signing key |
-| `/verify NICK` | show a peer's identity fingerprint |
-| `/peers` | who is online, with verify codes |
-| `/notify [all\|mentions\|none]` | show or change desktop notifications |
-| `/net`, `/netverbose [on\|off]` | network report / per-packet logging |
-| `/settings` | routing, identity, notifications and layout (same as `Ctrl+S`) |
-| `/port [N]` | show or change this session's UDP port (`0` picks a free one) |
-| `/copyid` | copy the session id to the clipboard |
-| `/update` | install the latest release |
+| `:new`, `:join` | create / join a session (same as `Ctrl+N` / `Ctrl+J`) |
+| `:quit` (`:q`) | leave this session; quits when none is open |
+| `:quitall` (`:qa`) | leave every session and quit |
+| `:set [NAME [VALUE]]` | change a setting (see below); alone, opens the settings page (`Ctrl+S`) |
+| `:verify NICK` | show a peer's identity fingerprint |
+| `:peers` | who is online, with verify codes and builds |
+| `:net` | network report and diagnosis |
+| `:port [N]` | show or move this session's UDP port (`0` picks a free one) |
+| `:copyid` | copy the session id to the clipboard |
+| `:update` | install the latest release |
+
+### Settings
+
+Every setting is a row on the settings page, and applies at once to every open session and the
+ones you open after. `:set NAME VALUE` sets a row without opening the page, and `:set NAME`
+opens the page on that row. `Tab` after `:set ` completes the names.
+
+| Name | Values |
+| --- | --- |
+| `routing` | `direct`, `tor` |
+| `dht`, `dht6`, `portmap`, `lan`, `nostr` | `on`, `off` |
+| `relays` | up to 6 `wss://` URLs |
+| `torlaunch` | `auto`, `always`, `never` |
+| `torpath`, `torsocks`, `torcontrol` | a path, `HOST:PORT`, `HOST:PORT` |
+| `torpassword` | only on the page, where it's hidden |
+| `nick`, `colour` | a name; a colour name or `#RRGGBB` |
+| `sign` | `off`, or an `age` or `pgp` key made from a password typed on the page; a key file or pasted key is chosen there too |
+| `notify` | `all`, `mentions`, `none` |
+| `net` | `normal`, `verbose` (every handshake packet, relay and Tor event) |
+| `port` | the UDP port for new sessions (`0` picks a free one) |
+| `sidebar`, `console`, `chat` | `on`, `off` |
+
+The settings page and the pages under it (the signing identity picker and the key file
+browser) all take the same keys: `j`/`k` move, `g`/`G` go to the ends, `Enter` chooses,
+`h`/`l` change a value or go out of / into a page, `Esc` goes back and `q` closes the settings.
+
+With `--simple`, `:set` covers `nick`, `colour`, `notify` and `net`.
 
 ### Updating
 
-`/update` inside chat, or `chat --update` from the shell without opening chat, checks the
+`:update` inside chat, or `chat --update` from the shell without opening chat, checks the
 [latest GitHub release](https://github.com/Vinnelle/chat/releases/latest). If it is newer
 than the running build, chat checks that the release's `SHA256SUMS` carries a valid signature
 from the release key built into chat, downloads the binary for your platform, checks its
@@ -304,7 +380,7 @@ write access to the folder that holds the executable.
 | --- | --- |
 | `--nick NAME` | Display name (random `swift-otter42`-style if omitted) |
 | `--colour NAME\|#HEX` | Display colour (random by default; `--color` too) |
-| `--routing` | `direct+nostr`, `direct` or `tor`, instead of asking at startup (see [Routing](#routing)) |
+| `--routing` | `direct+nostr`, `direct` or `tor`, preset on the settings page (see [Routing](#routing)) |
 | `--nodht` | Skip the BitTorrent DHT (IPv4 and IPv6) |
 | `--noipv6` | Skip the IPv6 DHT only |
 | `--nolan` | Skip LAN broadcast discovery |
@@ -314,8 +390,8 @@ write access to the folder that holds the executable.
 | `--tor-launch auto\|always\|never` | Which tor Tor mode uses: a running one if possible, else chat's own (`auto`); always chat's own; or only a running one |
 | `--tor-path PATH` | The tor program chat starts (default: `tor` on `PATH` or in the usual folders) |
 | `--tor-socks`, `--tor-control` | Where to look for a running tor's SOCKS and control ports (`HOST:PORT`) |
-| `--identity ...` | `native`, `age`, or `pgp:KEYFILE` (see [Security](#security)) |
-| `--simple` | Plain `[HH:MM] ...` lines, one session, stdin — the automatic fallback when stdout isn't a tty |
+| `--identity ...` | `age` or `pgp` for a key made from a password (asked for, or `CHAT_SIGN_PASSWORD`), or `age:KEYFILE` or `pgp:KEYFILE` for your own (see [Security](#security)) |
+| `--simple` | Plain `[HH:MM] ...` lines, one session, stdin, `:name` runs a command — the automatic fallback when stdout isn't a tty |
 | `--session ID` | Join a session at startup (with `--port`, `--peer`) |
 | `--update` | Install the latest release and exit, without opening chat (see [Updating](#updating)) |
 | `--version` | Print the version and exit |

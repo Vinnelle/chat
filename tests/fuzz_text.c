@@ -66,13 +66,15 @@ static void fuzz_render(const char *s, const uint8_t *data, size_t size) {
     copy_str(in.buf, s, sizeof in.buf);
     in.len = (int)strlen(in.buf);
     in.cursor = in.len;
-    tui_view_t view = { (flags & 4) != 0, (flags & 8) != 0, (flags & 16) != 0, s };
+    tui_view_t view = { (flags & 4) != 0, (flags & 8) != 0, (flags & 16) != 0, s, s };
     const char *net[1] = { s };
-    tui_render(rows, cols, &session, 1, 0, &peer, 1, &sb, &console, &view, s, (flags & 32) ? s : NULL,
-               &in, (flags & 64) != 0, (flags & 128) != 0, TUI_ID_AGE, s, net, 1);
-    tui_list_item_t item = { .is_dir = flags & 1 };
-    copy_str(item.label, s, sizeof item.label);
-    tui_render_list(rows, cols, &session, 1, 0, s, &item, 1, 0, s, (flags & 64) != 0);
+    tui_bar_t bar = { .chip = s, .prompt = (flags & 32) ? s : NULL, .input = &in, .mask_input = (flags & 128) != 0,
+                      .message = (flags & 2) ? s : NULL, .hint = s, .badge = TUI_ID_AGE, .status_right = s };
+    tui_render(rows, cols, &session, 1, 0, &peer, 1, &sb, &console, &view, &bar, (flags & 64) != 0, net, 1);
+    tui_row_t row[2] = { { s, s, (flags & 1) ? s : NULL }, { NULL, s, NULL } };
+    tui_page_t page = { row, 2, flags % 3, s, (flags & 8) ? s : NULL };
+    bar.input = (flags & 16) ? &in : NULL;
+    tui_render_page(rows, cols, &session, 1, 0, s, s, &page, &bar, (flags & 64) != 0);
 }
 
 int LLVMFuzzerInitialize(int *argc, char ***argv) {

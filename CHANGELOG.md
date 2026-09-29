@@ -1,5 +1,79 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- A native AGE or PGP signing key is made from a password and this OS install's machine id,
+  so the same password on the same device and OS always gives the same key and fingerprint,
+  without storing anything. Always use the same password to keep an established signing
+  identity. The settings picker asks for it after **Native**, and `--identity age|pgp` asks
+  at startup or takes `CHAT_SIGN_PASSWORD`. A blank password makes a new random key, as
+  before. `:set sign age|pgp` opens the picker to type it there, where it's hidden.
+- Peers tell each other which version they run and the SHA-256 of their executable, and each
+  checks it against the signed `SHA256SUMS` of that version's release. A peer that isn't
+  running one of that release's binaries, or names a version with no signed release, is marked
+  modified: a warning when it's found, `modified` next to its name, and its build in `:peers`.
+  The first time a version comes up, its checksums are fetched from GitHub, through Tor in Tor
+  mode. A client altered to lie about its hash still passes.
+
+### Changed
+- Commands only run from COMMAND mode: `Esc`, then `:name`. Everything typed in INSERT is sent
+  as a message, including lines that start with `/` or `:`. `--simple` takes `:name` instead
+  of `/name`.
+- Commands do things and settings hold values. Every setting is a row on the settings page,
+  and `:set NAME VALUE` sets one without opening it (`:set nick bob`, `:set net verbose`);
+  `:set` opens the page and `:set NAME` opens it on that row. `:nick`, `:colour`, `:notify`,
+  `:netverbose`, `:sign` and `:settings` are gone. `--simple` has `:set` for `nick`, `colour`,
+  `notify` and `net`.
+- The network log setting is `normal` or `verbose`, and "Start chat's own tor" is `auto`,
+  `always` or `never`, matching `--tor-launch`.
+- The settings page, the signing identity picker and the key file browser take the same keys:
+  `j`/`k` move, `g`/`G` go to the ends, `Enter` chooses, `h`/`l` change a value or go out of /
+  into a page, `Esc` goes back, `q` closes. `Tab` no longer moves down a list. The picker and
+  browser show where they are in the title (settings › signing identity › folder) and explain
+  the selected choice under the list.
+- The bottom bar is the same on every screen: a chip saying where you are, what the keys do,
+  and the reply to what you just did until the next key. Settings changes and `:set` answer
+  there, instead of on a line of the settings page.
+- The time is at the right end of the top bar instead of the bottom bar.
+- The signing identity picker lists Off, then AGE and PGP, each with Native, a key file and a
+  key paste. Your own AGE key (as `age-keygen` writes it) can sign now, from a file, pasted in,
+  or with `--identity age:KEYFILE`, and keeps its `age1...` recipient. `pgp` (`--identity pgp`,
+  `:set sign pgp`) makes a new PGP key, whose public key the settings copy for `gpg --import`.
+  The plain native key is gone: `--identity native` and `:set sign native` are refused.
+- `Ctrl+W` deletes the word before the cursor, as in vim and readline, instead of closing the
+  session; `:q` closes it. In NORMAL, `j` and `k` switch sessions.
+- The input line starts in NORMAL; `i` (or `a`, `I`, `A`) starts typing.
+- Nothing reaches the network while the settings page chat opens on is up: a tor is looked for
+  or started, and `--peer` names are looked up, only after **Done**, whatever the page is
+  switched to. In Tor mode a `--peer` name isn't looked up at all, since the lookup would go
+  around Tor. With `--simple`, the lookup waits for the routing answer.
+- chat opens on the settings page, so everything is set up in one place before the first
+  session, and a **Done** button at the bottom (or `Esc`) goes on to the sessions. This
+  replaces the routing question at startup; `--routing` presets the page.
+- The signing identity is chosen on the settings page itself instead of at the input line:
+  off, a new native or AGE key, or a PGP key picked in a file browser or pasted in. A native
+  key used to need `--identity native`. `:set sign` opens the same choice. A key file that
+  doesn't load, or a paste that doesn't parse, says so on the page.
+- An **AGE recipient** row in settings shows the `age1...` string and copies it to the
+  clipboard.
+- Settings that don't apply right now are left off the page instead of greyed out: the DHT,
+  LAN and port mapping switches in Tor mode, the Tor ones in direct mode, the relay list while
+  the relays are off, and the AGE recipient without an AGE identity.
+
+### Fixed
+- A peer could join as `anon (unverified)` in the console while the sidebar showed its real
+  nick as verified: the join was announced on the peer's first frame to open, and when the one
+  carrying its nick and signing identity was lost or overtaken, another got there first. Now
+  `* joining: peer ID` shows as soon as the connection is made, and the usual `joined` line
+  follows once the nick and identity are in (or after 5 seconds, so nobody joins unannounced).
+  The modified-client warning waits for the join.
+- `:colour`, `:notify` and `:netverbose` changed only the session you were in, while the
+  settings rows of the same names changed every session, so the page could show a value the
+  session didn't have, and a new session went back to the old one. Both now go through the
+  same setting.
+- The version on the bottom bar could run into the prompt.
+
 ## 0.3.0-beta.1
 
 ### Added
