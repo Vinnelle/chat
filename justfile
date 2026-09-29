@@ -45,7 +45,8 @@ fuzz target="engine" seconds="300":
 
 # linux, windows or all (the default). This system's binary builds natively, the other is
 # cross-built with zig. With all, a failed cross build only leaves that binary out. Only with a
-# terminal to answer on does it ask; any further arguments go to chat if it runs.
+# terminal to answer on does it ask; any further arguments go to chat if it runs. Each binary is
+# chat-<build id>-<system>-<arch>, the build id saying which source it's from and when it was built.
 # Build into test-builds/<date>-<time>/ (all, linux or windows), then offer to run this system's
 [positional-arguments]
 test-build target="all" *args:
@@ -65,14 +66,22 @@ test-build target="all" *args:
     have_zig() {
         command -v "${ZIG:-zig}" >/dev/null 2>&1 || { echo "no zig on PATH - can't cross-build for $1" >&2; return 1; }
     }
+    # Copies $2, built in $1, into $dir as chat-<build id>-$3 and leaves its path in $out. The
+    # build id is CHAT_BUILD_ID from that build's stamp.
+    keep() {
+        id=$(sed -n 's/^#define CHAT_BUILD_ID "\(.*\)"$/\1/p' "$1/build_stamp.h")
+        [ -n "$id" ] || { echo "no CHAT_BUILD_ID in $1/build_stamp.h" >&2; return 1; }
+        out="$dir/chat-$id-$3"
+        cp "$2" "$out"
+    }
     build_linux() {
         if [ "$host" = linux ]; then
             "$just" build || return 1
-            cp build/chat "$dir/chat-linux-{{arch()}}" || return 1
-            native="$dir/chat-linux-{{arch()}}"
+            keep build build/chat linux-{{arch()}} || return 1
+            native="$out"
         else
             have_zig Linux && "$just" build-static || return 1
-            cp build-static/chat "$dir/chat-linux-x86_64" || return 1
+            keep build-static build-static/chat linux-x86_64 || return 1
         fi
     }
     build_windows() {
@@ -81,8 +90,8 @@ test-build target="all" *args:
             # A multi-config generator (Visual Studio) puts it under Release/.
             for exe in build/chat.exe build/Release/chat.exe; do
                 if [ -f "$exe" ]; then
-                    cp "$exe" "$dir/chat-windows-{{arch()}}.exe" || return 1
-                    native="$dir/chat-windows-{{arch()}}.exe"
+                    keep build "$exe" windows-{{arch()}}.exe || return 1
+                    native="$out"
                     return 0
                 fi
             done
@@ -90,7 +99,7 @@ test-build target="all" *args:
             return 1
         else
             have_zig Windows && "$just" build-win || return 1
-            cp build-win/chat.exe "$dir/chat-windows-x86_64.exe" || return 1
+            keep build-win build-win/chat.exe windows-x86_64.exe || return 1
         fi
     }
     fail() { echo "$1" >&2; rmdir "$dir" 2>/dev/null || true; exit 1; }

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- `just test-build` names each binary after its build id, as `chat-<build id>-<system>-<arch>`:
+  the source it was built from (`git describe`) and when, in UTC, as `chat --version` shows.
+
 ## 0.1.9
 
 ### Changed

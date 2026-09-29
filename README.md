@@ -245,6 +245,11 @@ just test-build linux   # the same for one system (or: windows); the other syste
 just clean              # remove build directories
 ```
 
+Test builds are named `chat-<build id>-<system>-<arch>`, such as
+`chat-v0.1.9-3-g1a2b3c4-20260929-141502-linux-x86_64`. The build id is the source it came from
+(`git describe`) and when it was built, in UTC, the same two things `chat --version` prints, so
+a copy taken to another machine still says which build it is.
+
 ### Tests
 
 `tests/` runs real sessions against each other over an in-memory network: handshake, message
