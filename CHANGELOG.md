@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.8
 
 ### Added
 - A native AGE or PGP signing key is made from a password and this OS install's machine id,
