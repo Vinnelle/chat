@@ -24,11 +24,11 @@
   identity was confirmed this way and comes back with a fresh handshake signed by the same key
   needs no second comparison. **Compare verify codes** on the settings page (`:set verify
   optional`, `--verify-optional`) sends to everyone, compared or not.
-- Direct routing goes to the Nostr relays only while it needs them: while nobody is reached
+- DHT routing goes to the Nostr relays only while it needs them: while nobody is reached
   yet, while a peer is reached only through them, or while one's UDP has gone quiet. It leaves
-  them a minute after. Before, every direct-routed member's address stayed connected to the
+  them a minute after. Before, every DHT-routed member's address stayed connected to the
   relays for the whole session. `:set nostr always` (or `--nostr-always`) keeps the old way, for
-  rooms with Tor members, who meet direct members only on the relays.
+  rooms with Tor members, who meet DHT members only on the relays.
 - Each ten minutes' relay tag has connections of its own, asking for that tag alone: a new one
   to each relay a minute or two before the ten minutes start, and the last one closed a minute
   or two after they end. Each connection asked for the previous, current and next tags and
