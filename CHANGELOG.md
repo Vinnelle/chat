@@ -152,6 +152,8 @@
   linked.
 - The full-screen UI sends nothing to the terminal while the screen stays the same. It redrew
   the whole screen every second, which over SSH was a steady stream.
+- Direct routing is now called DHT routing: `--routing dht+nostr` and `--routing dht`, and
+  `dht` on the settings page. `--routing direct+nostr` and `--routing direct` still work.
 - A handshake takes a few seconds, and a re-handshake up to half a minute, going a slot at a
   time.
 
