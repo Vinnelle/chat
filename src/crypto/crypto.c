@@ -45,7 +45,7 @@ static void kh(uint8_t *out, size_t outlen, const uint8_t *key, size_t keylen,
     crypto_generichash(out, outlen, (const unsigned char *)data, datalen, key, keylen);
 }
 
-void derive_master(const char *password, const char *session_id, uint8_t master[MASTER_LEN]) {
+int derive_master(const char *password, const char *session_id, uint8_t master[MASTER_LEN]) {
 
     uint8_t salt[crypto_pwhash_SALTBYTES];
     crypto_generichash_state st;
@@ -55,17 +55,17 @@ void derive_master(const char *password, const char *session_id, uint8_t master[
     crypto_generichash_final(&st, salt, sizeof salt);
     sodium_memzero(&st, sizeof st);
 
-    if (crypto_pwhash(master, MASTER_LEN, password, strlen(password), salt,
-                       KDF_OPSLIMIT, KDF_MEMLIMIT, crypto_pwhash_ALG_ARGON2ID13) != 0) {
-
-        fprintf(stderr, "chat: could not derive the session key - this needs %u MiB of free "
-                         "memory for a few seconds\n", (unsigned)(KDF_MEMLIMIT / (1024u * 1024u)));
-        exit(1);
-    }
+    // Out of memory is a session that can't start, not a reason to take the others down with it.
+    return crypto_pwhash(master, MASTER_LEN, password, strlen(password), salt,
+                         KDF_OPSLIMIT, KDF_MEMLIMIT, crypto_pwhash_ALG_ARGON2ID13) == 0 ? 0 : -1;
 }
 
 void derive_room_key(const uint8_t master[MASTER_LEN], uint8_t room_key[ROOM_KEY_LEN]) {
     kh(room_key, ROOM_KEY_LEN, master, MASTER_LEN, "room", 4);
+}
+
+void derive_dht_key(const uint8_t master[MASTER_LEN], uint8_t key[DHT_KEY_LEN]) {
+    kh(key, DHT_KEY_LEN, master, MASTER_LEN, "dht-key", 7);
 }
 
 // Keyed hash truncated to outlen, without leaving the untruncated rest on the stack.
@@ -77,12 +77,30 @@ static void kh_trunc(uint8_t *out, size_t outlen, const uint8_t *key, size_t key
     sodium_memzero(full, sizeof full);
 }
 
-void derive_dht_infohash(const uint8_t master[MASTER_LEN], uint8_t infohash[DHT_INFOHASH_LEN]) {
-    kh_trunc(infohash, DHT_INFOHASH_LEN, master, MASTER_LEN, "dht", 3);
+void dht_epoch_infohash(const uint8_t key[DHT_KEY_LEN], long long epoch, uint8_t infohash[DHT_INFOHASH_LEN]) {
+    uint8_t msg[9 + 8];
+    memcpy(msg, "dht-epoch", 9);
+    for (int i = 0; i < 8; i++) msg[9 + i] = (uint8_t)((unsigned long long)epoch >> (56 - 8 * i));
+    kh_trunc(infohash, DHT_INFOHASH_LEN, key, DHT_KEY_LEN, msg, sizeof msg);
 }
 
-void derive_fingerprint(const uint8_t master[MASTER_LEN], uint8_t fp[FP_LEN]) {
-    kh_trunc(fp, FP_LEN, master, MASTER_LEN, "fp", 2);
+void derive_udp_key(const uint8_t master[MASTER_LEN], uint8_t key[UDP_KEY_LEN]) {
+    kh(key, UDP_KEY_LEN, master, MASTER_LEN, "udp-mask", 8);
+}
+
+int udp_mask(const uint8_t key[UDP_KEY_LEN], uint8_t *d, size_t len) {
+    // The rest has to be long enough that the IV is never part of a header.
+    if (len < 2 * UDP_MASK_IV_LEN) return -1;
+    uint8_t nonce[crypto_stream_xchacha20_NONCEBYTES] = { 0 };
+    memcpy(nonce, d + len - UDP_MASK_IV_LEN, UDP_MASK_IV_LEN);
+    crypto_stream_xchacha20_xor(d, d, len - UDP_MASK_IV_LEN, nonce, key);
+    return 0;
+}
+
+uint16_t derive_lan_port(const uint8_t master[MASTER_LEN]) {
+    uint8_t h[2];
+    kh_trunc(h, sizeof h, master, MASTER_LEN, "lan-port", 8);
+    return (uint16_t)(49152u + ((((unsigned)h[0] << 8) | h[1]) % 16384u));
 }
 
 void derive_nostr_keys(const uint8_t master[MASTER_LEN], uint8_t tag_key[NOSTR_KEY_LEN], uint8_t wrap_key[NOSTR_KEY_LEN]) {

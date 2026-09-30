@@ -4,18 +4,8 @@
 #define CHAT_DHT_H
 
 #include "platform/net.h"
+#include "crypto/crypto.h"
 #include <stdint.h>
-
-#if defined(__STDC_NO_ATOMICS__)
-typedef volatile int dht_flag_t;
-#define DHT_LOAD(p) (*(p))
-#define DHT_STORE(p, v) (*(p) = (v))
-#else
-#include <stdatomic.h>
-typedef _Atomic int dht_flag_t;
-#define DHT_LOAD(p) atomic_load_explicit((p), memory_order_acquire)
-#define DHT_STORE(p, v) atomic_store_explicit((p), (v), memory_order_release)
-#endif
 
 #define DHT_MAX_CANDS 128
 #define DHT_MAX_INFLIGHT 8
@@ -27,6 +17,9 @@ typedef _Atomic int dht_flag_t;
 #define DHT_RELOOKUP_CONNECTED 300.0
 #define DHT_BOOT_MAX 12
 #define DHT_RESOLVE_BACKOFF_MAX 300.0
+// For this long either side of the hour, the other hour's lookup key is looked up (and announced
+// under) as well: clocks differ, and members only move to the new key at their next lookup.
+#define DHT_EPOCH_OVERLAP 600
 
 typedef struct {
     addr_t addr;
@@ -61,14 +54,24 @@ typedef struct {
 #define DHT_V4 0
 #define DHT_V6 1
 
+typedef struct dht_boot_job dht_boot_job_t;
+
 typedef struct {
     addr_t boot[DHT_BOOT_MAX];
-    dht_flag_t n_boot;
-    dht_flag_t resolving;
+    int n_boot;
+    // The bootstrap servers' names are looked up on a thread. The session can end, or turn the
+    // DHT off and on, first: the thread only ever writes to its job, and whichever side finishes
+    // last frees it.
+    dht_boot_job_t *job;
     double next_resolve;
     int resolve_tries;
     uint8_t node_id[20];
+    // The room's DHT key, and the hourly lookup key of the round under way. Near the hour's change
+    // a second round follows for the other hour's key (alt_epoch).
+    uint8_t key[DHT_KEY_LEN];
     uint8_t infohash[20];
+    long long alt_epoch;
+    int alt_pending;
     uint16_t my_port;
     // Announce my_port as given (a port mapping's external port) instead of the source port the
     // node sees.
@@ -80,8 +83,13 @@ typedef struct {
     int peers_now;
 } dht_state_t;
 
-void dht_init(dht_state_t *d, const uint8_t infohash[20], uint16_t my_port, int want_v4, int want_v6);
+void dht_init(dht_state_t *d, const uint8_t key[DHT_KEY_LEN], uint16_t my_port, int want_v4, int want_v6);
 void dht_start_bootstrap_resolve(dht_state_t *d);
+// Lets go of a bootstrap lookup still running (it frees itself) and wipes the key. Call before
+// dht_init on a state that was used, and when the session ends.
+void dht_stop(dht_state_t *d);
+// Looks the bootstrap servers up again, for the families wanted now.
+void dht_rebootstrap(dht_state_t *d);
 
 int dht_step(dht_state_t *d, sock_t sock, double now,
              void (*on_candidate)(void *ctx, addr_t a), void *ctx);

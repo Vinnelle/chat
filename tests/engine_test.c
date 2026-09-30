@@ -8,10 +8,13 @@
 #include "common/util.h"
 #include "crypto/age.h"
 #include "crypto/pgp.h"
+#include "platform/platform.h"
 #include <sodium.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #define LOG_LINES 512
 
@@ -202,7 +205,162 @@ static void test_rekey(double *t) {
     CHECK(log_count(&log_a, "bob: after the rekey") == 1, "alice didn't get bob's message after the rekey");
 }
 
-// Junk from outside the room, some of it sized like real frames or chunks: nothing may break.
+// A message lost just before the peer rekeys: its retry has to outlive the re-handshake, which
+// reuses the peer's slot.
+static void test_message_across_rekey(double *t) {
+    drop_t d = { 1, A.port, B.port, 0 };
+    fake_net_filter = drop_one;
+    fake_net_filter_ctx = &d;
+    chat_send_text(&A, "sent as bob rekeys", *t);
+    fake_net_filter = NULL;
+    CHECK(d.dropped == 1, "the message frame wasn't dropped");
+    CHECK(pending_msgs(&A) == 1, "alice isn't waiting on the message's ack");
+    // Bob's rekey runs to the end at this instant, before alice's retry is due.
+    uint32_t gen_b = B.keygen;
+    B.next_rekey = 0;
+    pump(8, *t);
+    CHECK(B.keygen == gen_b + 1, "bob didn't rekey");
+    for (int i = 0; i < 60 && log_count(&log_b, "sent as bob rekeys") == 0; i++) { *t += 0.1; pump(4, *t); }
+    CHECK(log_count(&log_b, "sent as bob rekeys") == 1, "bob got the message %d times across his rekey, want 1",
+          log_count(&log_b, "sent as bob rekeys"));
+    for (int i = 0; i < 20 && pending_msgs(&A) > 0; i++) { *t += 0.1; pump(4, *t); }
+    CHECK(pending_msgs(&A) == 0, "alice still waits on %d acks", pending_msgs(&A));
+}
+
+// Counts (and drops) what goes to one port.
+typedef struct { uint16_t port; int n; } count_t;
+
+static int count_to(void *ctx, addr_t from, addr_t to, const void *data, size_t len) {
+    count_t *c = ctx;
+    (void)from; (void)data; (void)len;
+    if (to.port != c->port) return 0;
+    c->n++;
+    return 1;
+}
+
+// A hi recorded once can be replayed from any forged address, and each unknown one gets a cookie
+// challenge as big as itself: those are rate-limited, so chat can't be made a reflector.
+static void test_cookie_rate(double *t) {
+    char msg[HANDSHAKE_BUF_LEN];
+    copy_str(msg, A.hi_msg, sizeof msg);
+    uint8_t id[ID_LEN];
+    gen_random(id, sizeof id);
+    char idhex[ID_LEN * 2 + 1];
+    hex_encode(id, ID_LEN, idhex);
+    memcpy(msg + 3, idhex, ID_LEN * 2);   // "hi\t" and then the id: someone bob has never met
+    uint8_t frame[HANDSHAKE_BUF_LEN + 128];
+    size_t len;
+    CHECK(room_seal(A.room_key, msg, strlen(msg), frame, sizeof frame, &len) == 0, "couldn't seal a hi");
+
+    // Unmasked, as 0.1.9 sent it over UDP, it's junk now: no challenge.
+    count_t old = { 5558, 0 };
+    fake_net_filter = count_to;
+    fake_net_filter_ctx = &old;
+    fake_net_inject(fake_net_addr(5558), fake_net_addr(B.port), frame, len);
+    pump(2, *t);
+    fake_net_filter = NULL;
+    CHECK(old.n == 0, "an unmasked hi over UDP was answered (%d datagrams)", old.n);
+
+    // Masked, as any datagram of the room's is over UDP (whole here: the fake net takes it).
+    udp_mask(A.udp_key, frame, len);
+    count_t c = { 5557, 0 };
+    fake_net_filter = count_to;
+    fake_net_filter_ctx = &c;
+    for (int i = 0; i < 200; i++) fake_net_inject(fake_net_addr(5557), fake_net_addr(B.port), frame, len);
+    pump(8, *t);
+    fake_net_filter = NULL;
+    // Each challenge goes out in three pieces.
+    CHECK(c.n > 0, "an unknown hi got no cookie challenge");
+    CHECK(c.n <= 3 * (int)CK_BURST, "200 replayed hellos drew %d datagrams, want at most %d", c.n, 3 * (int)CK_BURST);
+    CHECK(chat_online_count(&B) == 1, "the replays dropped a peer");
+}
+
+// What alice sends bob over UDP, as the network sees it and as bob unmasks it.
+typedef struct { int n, clear, chunks, frames; uint32_t max_index; } wire_t;
+
+static int watch_wire(void *ctx, addr_t from, addr_t to, const void *data, size_t len) {
+    wire_t *w = ctx;
+    uint8_t d[HANDSHAKE_BUF_LEN + 128];
+    if (from.port != A.port || to.port != B.port || len > sizeof d) return 0;
+    w->n++;
+    memcpy(d, data, len);
+    // Masked, a datagram's first eight bytes are never what they unmask to (2^-64 that they are).
+    if (udp_mask(A.udp_key, d, len) != 0 || memcmp(d, data, 8) == 0) { w->clear++; return 0; }
+    if (d[0] == CHUNK_MAGIC0 && d[1] == CHUNK_MAGIC1) {
+        w->chunks++;
+    } else if (sealed_len_ok(len, SESSION_HEADER_LEN, SESSION_PAD_TARGET)) {
+        uint32_t index = ((uint32_t)d[0] << 24) | ((uint32_t)d[1] << 16) | ((uint32_t)d[2] << 8) | d[3];
+        w->frames++;
+        if (index > w->max_index) w->max_index = index;
+    }
+    return 0;
+}
+
+// Nothing goes over UDP in the clear: each datagram is masked, and unmasks to a piece of a room
+// frame or to a session frame with its ratchet counter. The room's LAN port is its own.
+static void test_udp_masked(double *t) {
+    wire_t w = { 0 };
+    fake_net_filter = watch_wire;
+    fake_net_filter_ctx = &w;
+    chat_send_text(&A, "on the wire", *t);
+    *t += KEEPALIVE + 4.0;   // past a keepalive hi: a room frame, in three pieces
+    pump(4, *t);
+    fake_net_filter = NULL;
+    CHECK(log_count(&log_b, "on the wire") == 1, "bob didn't get the message");
+    CHECK(w.n > 0 && w.clear == 0, "%d of %d datagrams to bob went out unmasked", w.clear, w.n);
+    CHECK(w.chunks >= 3, "only %d masked pieces of room frames went to bob", w.chunks);
+    CHECK(w.frames >= 1 && w.max_index < 100000, "%d session frames unmasked with a counter, the highest %u",
+          w.frames, (unsigned)w.max_index);
+    CHECK(A.lan_port == B.lan_port && A.lan_port >= 49152, "alice's LAN port is %u, bob's %u",
+          (unsigned)A.lan_port, (unsigned)B.lan_port);
+}
+
+// Every member makes the same lookup key for an hour, and a different one the next hour.
+static void test_dht_keys(double *t) {
+    (void)t;
+    uint8_t ka[DHT_KEY_LEN], kb[DHT_KEY_LEN], h1[DHT_INFOHASH_LEN], h2[DHT_INFOHASH_LEN], h1b[DHT_INFOHASH_LEN];
+    derive_dht_key(A.master, ka);
+    derive_dht_key(B.master, kb);
+    CHECK(memcmp(ka, kb, sizeof ka) == 0, "two members of one room made different DHT keys");
+    dht_epoch_infohash(ka, 494000, h1);
+    dht_epoch_infohash(kb, 494000, h1b);
+    dht_epoch_infohash(ka, 494001, h2);
+    CHECK(memcmp(h1, h1b, sizeof h1) == 0, "two members looked up different keys in the same hour");
+    CHECK(memcmp(h1, h2, sizeof h1) != 0, "the lookup key didn't change with the hour");
+    CHECK(memcmp(h1, ka, sizeof h1) != 0, "the lookup key is the DHT key itself");
+
+    static const uint8_t code[5] = { 0xa1, 0xb2, 0xc3, 0xd4, 0xe5 };
+    char grouped[HEX_GROUPS_LEN(5)];
+    hex_groups(code, sizeof code, grouped);
+    CHECK(strcmp(grouped, "a1b2 c3d4 e5") == 0, "a code came out grouped as '%s'", grouped);
+}
+
+// Key files and Tor's cookie are read without blocking, and only from regular files: a FIFO
+// would otherwise hang chat.
+static void test_read_file(double *t) {
+    (void)t;
+    char dir[] = "/tmp/chat-test-XXXXXX";
+    if (!mkdtemp(dir)) { CHECK(0, "no temporary folder for the file test"); return; }
+    char fifo[64], file[64];
+    snprintf(fifo, sizeof fifo, "%s/fifo", dir);
+    snprintf(file, sizeof file, "%s/key", dir);
+    char buf[64];
+    CHECK(mkfifo(fifo, 0600) == 0, "couldn't make a FIFO");
+    CHECK(platform_read_file(fifo, buf, sizeof buf) == -1, "a FIFO was read as a file");
+    FILE *f = fopen(file, "wb");
+    if (f) { fputs("hello", f); fclose(f); }
+    CHECK(platform_read_file(file, buf, sizeof buf) == 5 && memcmp(buf, "hello", 5) == 0, "a regular file didn't read back");
+    CHECK(platform_read_file(file, buf, 3) == 3, "a read past cap");
+    CHECK(platform_read_file(dir, buf, sizeof buf) == -1, "a folder was read as a file");
+    identity_keypair_t id;
+    CHECK(age_import_secret_key(fifo, &id) != 0 && pgp_import_secret_key(fifo, &id) != 0, "a key loaded from a FIFO");
+    unlink(fifo);
+    unlink(file);
+    rmdir(dir);
+}
+
+// Junk from outside the room, some of it sized like real frames or chunks, and chunks of nothing
+// from inside it (masked, so they unmask to a chunk header): nothing may break.
 static void test_junk(double *t) {
     addr_t stranger = fake_net_addr(5555), a_addr = fake_net_addr(A.port);
     static const size_t sizes[] = { 0, 1, 4, 27, 428, 492, 1008, 2600, 2664, 3000 };
@@ -210,7 +368,10 @@ static void test_junk(double *t) {
     for (size_t k = 0; k < sizeof sizes / sizeof sizes[0]; k++) {
         for (int rep = 0; rep < 4; rep++) {
             gen_random(junk, sizeof junk);
-            if (rep == 1 && sizes[k] >= 8) { junk[0] = CHUNK_MAGIC0; junk[1] = CHUNK_MAGIC1; junk[6] = 0; junk[7] = 3; }
+            if (rep == 1 && sizes[k] >= 8) {
+                junk[0] = CHUNK_MAGIC0; junk[1] = CHUNK_MAGIC1; junk[6] = 0; junk[7] = 3;
+                udp_mask(A.udp_key, junk, sizes[k]);
+            }
             if (rep == 2 && sizes[k] >= 1) junk[0] = 'd';
             if (rep == 3 && sizes[k] >= 4) memset(junk, 0, 4);
             fake_net_inject(stranger, a_addr, junk, sizes[k]);
@@ -472,9 +633,12 @@ int main(int argc, char **argv) {
 
     struct { const char *name; void (*fn)(double *); } tests[] = {
         { "connect", test_connect }, { "message", test_message }, { "lost message", test_lost_message },
-        { "rekey", test_rekey }, { "junk", test_junk }, { "lookalike nick", test_lookalike_nick },
+        { "rekey", test_rekey }, { "rekey mid-message", test_message_across_rekey }, { "cookie rate", test_cookie_rate },
+        { "udp masked", test_udp_masked },
+        { "junk", test_junk }, { "lookalike nick", test_lookalike_nick },
         { "third peer", test_third_peer }, { "candidates settle", test_candidates_settle }, { "builds", test_builds },
-        { "parsers", test_parsers }, { "identity keys", test_identity_keys },
+        { "parsers", test_parsers }, { "dht keys", test_dht_keys }, { "read file", test_read_file },
+        { "identity keys", test_identity_keys },
     };
     size_t n_tests = sizeof tests / sizeof tests[0];
     int failed[sizeof tests / sizeof tests[0]], n_failed = 0;

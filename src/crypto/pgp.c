@@ -315,11 +315,9 @@ static int read_packet_header(const uint8_t *data, size_t len, size_t *pos, int 
 static uint16_t mpi_read_len(const uint8_t *p) { return (uint16_t)((p[0] << 8) | p[1]); }
 
 int pgp_import_secret_key(const char *path, identity_keypair_t *idkp) {
-    FILE *f = platform_fopen(path, "rb");
-    if (!f) return -1;
     char text[16384];
-    size_t n = fread(text, 1, sizeof(text) - 1, f);
-    fclose(f);
+    long n = platform_read_file(path, text, sizeof(text) - 1);
+    if (n < 0) return -1;
     text[n] = '\0';
     int rc = pgp_import_secret_key_text(text, idkp);
     sodium_memzero(text, sizeof text);

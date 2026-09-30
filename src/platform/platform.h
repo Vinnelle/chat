@@ -63,6 +63,11 @@ FILE *platform_fopen(const char *utf8_path, const char *mode);
 
 FILE *platform_fopen_private(const char *utf8_path, const char *mode);
 
+// Up to cap bytes of a regular file, read without blocking: a FIFO, a device or a folder is
+// refused, since a path picked in the key browser or named by a Tor control port could be one
+// (and a FIFO would hang chat). Returns the bytes read, or -1.
+long platform_read_file(const char *utf8_path, void *buf, size_t cap);
+
 int platform_remove(const char *utf8_path);
 
 int platform_exe_path(char *out, size_t cap);

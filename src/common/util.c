@@ -55,6 +55,16 @@ void hex_encode(const uint8_t *in, size_t len, char *out) {
     out[len * 2] = '\0';
 }
 
+void hex_groups(const uint8_t *in, size_t len, char *out) {
+    size_t o = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (i > 0 && i % 2 == 0) out[o++] = ' ';
+        out[o++] = HEXCH[in[i] >> 4];
+        out[o++] = HEXCH[in[i] & 0xf];
+    }
+    out[o] = '\0';
+}
+
 static int hexval(char c) {
     if (c >= '0' && c <= '9') return c - '0';
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;

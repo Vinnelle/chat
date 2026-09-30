@@ -13,9 +13,12 @@
 #define ROOM_KEY_LEN 32
 #define CHAIN_LEN 32
 
-#define VERIFY_LEN 8
-#define FP_LEN 2
+// 128 bits: a room member in the middle picks both handshakes' keys, so it could search two sets
+// of codes for a match, which 64 bits would let it find in time. The first 8 bytes are what 0.1.9
+// and earlier show, so codes still compare with theirs.
+#define VERIFY_LEN 16
 #define DHT_INFOHASH_LEN 20
+#define DHT_KEY_LEN 32
 #define COOKIE_LEN 16
 #define AEAD_NONCE_LEN 24
 #define AEAD_TAG_LEN 16
@@ -58,10 +61,27 @@ void crypto_unlock(void *buf, size_t len);
 #define KDF_OPSLIMIT 4
 #define KDF_MEMLIMIT (512u * 1024u * 1024u)
 #define KDF_LABEL "chat-kdf-v2"
-void derive_master(const char *password, const char *session_id, uint8_t master[MASTER_LEN]);
+// 0, or -1 when the memory for it isn't free.
+int derive_master(const char *password, const char *session_id, uint8_t master[MASTER_LEN]);
 void derive_room_key(const uint8_t master[MASTER_LEN], uint8_t room_key[ROOM_KEY_LEN]);
-void derive_dht_infohash(const uint8_t master[MASTER_LEN], uint8_t infohash[DHT_INFOHASH_LEN]);
-void derive_fingerprint(const uint8_t master[MASTER_LEN], uint8_t fp[FP_LEN]);
+// The room's DHT key, and the lookup key it gives for one hour (epoch: Unix time / DHT_EPOCH). The
+// lookup key changes every hour, so nothing the DHT sees stays the same for the room's lifetime.
+#define DHT_EPOCH 3600
+void derive_dht_key(const uint8_t master[MASTER_LEN], uint8_t key[DHT_KEY_LEN]);
+void dht_epoch_infohash(const uint8_t key[DHT_KEY_LEN], long long epoch, uint8_t infohash[DHT_INFOHASH_LEN]);
+
+// Everything chat sends over UDP is masked with a key of the room's, so that to anyone else each
+// datagram is random bytes: no ratchet counter, no chunk header, nothing the same from one packet
+// to the next. udp_mask XORs all but the last UDP_MASK_IV_LEN bytes with a keystream those bytes
+// pick; they're always an AEAD tag or ciphertext, random already, so it costs no extra bytes. It
+// runs in place, masking twice unmasks, and it returns -1 for a datagram too short to mask.
+#define UDP_KEY_LEN 32
+#define UDP_MASK_IV_LEN 16
+void derive_udp_key(const uint8_t master[MASTER_LEN], uint8_t key[UDP_KEY_LEN]);
+int udp_mask(const uint8_t key[UDP_KEY_LEN], uint8_t *d, size_t len);
+// The UDP port the room's LAN beacons go to, 49152-65535: one of the room's own, where a fixed
+// port would tell anyone on the network that chat is running.
+uint16_t derive_lan_port(const uint8_t master[MASTER_LEN]);
 
 // Nostr: tag_key makes the rotating tag room members' events carry, wrap_key seals each event's
 // whole payload (addressing, datagram and padding) under a fresh nonce.
@@ -144,7 +164,8 @@ void session_prk_finish(const uint8_t prk_partial[32], const uint8_t kem_ss[KEM_
 #define ID_SIGN_PRIV_LEN 64
 #define ID_SIGN_LEN 64
 
-#define ID_FP_LEN 8
+// 128 bits, so no one can make a key that shows the same. The first 8 bytes are 0.1.9's.
+#define ID_FP_LEN 16
 
 // priv is libsodium's secret key (the seed, then the public key). With scalar set, it's instead
 // the signing scalar, reduced mod L, then a key for the nonces: the form an AGE key takes, since

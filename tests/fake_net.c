@@ -2,8 +2,8 @@
 // Copyright (C) 2026 finlay@tuta.com
 // net.h over an in-memory queue, for the engine tests and fuzz targets. Every socket is
 // 127.0.0.1:PORT; a datagram sent to that address waits in the queue until the socket's owner
-// reads it. The LAN beacon port can't be opened, so sessions only find each other through the
-// peers they're given.
+// reads it. The LAN beacon socket (the one opened with NET_REUSE) can't be opened, so sessions
+// only find each other through the peers they're given.
 #define _POSIX_C_SOURCE 200809L
 #include "platform/net.h"
 #include "fake_net.h"
@@ -22,7 +22,6 @@
 #include "platform/net_common.h"
 #pragma GCC diagnostic pop
 
-#define FAKE_LAN_PORT 47474
 #define FAKE_SOCKS 16
 #define FAKE_QUEUE 2048
 #define FAKE_DGRAM_MAX 4096
@@ -46,8 +45,7 @@ static fake_sock_t *sock_of(sock_t s) {
 }
 
 sock_t net_udp_open(uint16_t port, unsigned flags, uint16_t *bound_port) {
-    (void)flags;
-    if (port == FAKE_LAN_PORT) return SOCK_INVALID;
+    if (flags & NET_REUSE) return SOCK_INVALID;
     if (port == 0) port = g_next_port++;
     for (int i = 0; i < FAKE_SOCKS; i++)
         if (g_socks[i].used && g_socks[i].port == port) return SOCK_INVALID;

@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
 // The whole receive path of a session, alice, already connected to bob. The first input byte
-// picks what the rest becomes:
-//   0  a datagram from a stranger          1  a datagram from bob's address
+// (mod 5) picks what the rest becomes, as a UDP datagram to alice:
+//   0  a datagram from a stranger, as it is    1  the same from bob's address
 //   2  a room message (sealed with the room key, as any room member could send)
 //   3  a session message from bob (sealed on bob's chain to alice: an authenticated peer)
-// Both sessions go back to the connected snapshot before every input. tests/seeds/engine holds
-// one input per message type.
+//   4  from bob's address, a datagram that unmasks to the rest as it is: pieces of room frames,
+//      and anything else a room member could put under the mask
+// 2 to 4 are masked, as everything is over UDP. Both sessions go back to the connected snapshot
+// before every input. tests/seeds/engine holds one input per message type.
 #include "core/chat.h"
 #include "fake_net.h"
 #include "common/util.h"
@@ -80,7 +82,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     A = A0;
     B = B0;
     fake_net_clear();
-    int mode = data[0] & 3;
+    int mode = data[0] % 5;
     static uint8_t text[4096];
     size = expand_ids(data + 1, size - 1, text, sizeof text);
     data = text;
@@ -88,7 +90,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     addr_t to = fake_net_addr(A.port), from = mode == 0 ? fake_net_addr(5555) : fake_net_addr(B.port);
     uint8_t frame[4096];
     size_t len = 0;
-    if (mode <= 1) {
+    if (mode <= 1 || mode == 4) {
         if (size > sizeof frame) return 0;
         memcpy(frame, data, size);
         len = size;
@@ -101,6 +103,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
         if (!p || ratchet_peek(&p->send_chain, p->send_chain.index, mk, &next) != 0) return 0;
         if (session_seal(mk, p->send_chain.index, data, size, frame, sizeof frame, &len) != 0) return 0;
     }
+    if (mode >= 2 && udp_mask(A.udp_key, frame, len) != 0) return 0;
     fake_net_inject(from, to, frame, len);
     chat_on_socket_readable(&A, A.sock, t0 + 1.0);
     chat_tick(&A, t0 + 1.0);
