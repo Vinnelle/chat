@@ -1,0 +1,63 @@
+name: test
+
+# Runs the engine test on every push and pull request, and each fuzz target for a minute, so a
+# change that breaks a session or trips a sanitizer shows before a release is cut.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  engine:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure
+        run: cmake -B build-test -DCHAT_TESTS=ON
+
+      - name: Build
+        run: cmake --build build-test -j "$(nproc)" --target engine_test chat
+
+      - name: Engine test
+        run: ./build-test/tests/engine_test
+
+  fuzz:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [bencode, json, pgp, text, engine]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install libFuzzer's runtime
+        run: sudo apt-get update -q && sudo apt-get install -y -q clang-18 libclang-rt-18-dev
+
+      - name: Configure
+        run: cmake -B build-fuzz -DCHAT_FUZZ=ON -DCMAKE_C_COMPILER=clang-18 -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build build-fuzz -j "$(nproc)" --target fuzz_${{ matrix.target }}
+
+      - name: Fuzz for a minute
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          mkdir -p corpus crashes
+          seeds=""
+          if [ -d tests/seeds/${{ matrix.target }} ]; then seeds=tests/seeds/${{ matrix.target }}; fi
+          ./build-fuzz/tests/fuzz_${{ matrix.target }} corpus $seeds -dict=tests/fuzz.dict \
+            -max_total_time=60 -artifact_prefix=crashes/
+
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: fuzz-${{ matrix.target }}-crash
+          path: crashes/
+          if-no-files-found: ignore
