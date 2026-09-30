@@ -203,19 +203,24 @@ bridges`) or `--tor-bridges`:
 
 - **`snowflake`**: Tor Browser's built-in Snowflake bridges. Traffic goes over WebRTC through
   volunteers' short-lived proxies, found through a broker reached by domain fronting, so there's
-  no bridge address to block. It needs `snowflake-client`, and nothing else.
+  no bridge address to block. It needs Snowflake's client (Arch: `snowflake-pt-client` from the
+  AUR), and nothing else.
 - **bridge lines** from [bridges.torproject.org](https://bridges.torproject.org/) (or its
   Telegram bot, or email), separated by `;`: `obfs4` looks like random bytes, and `webtunnel`
-  like HTTPS to an ordinary website. Both need `lyrebird` (Tor Browser's) or `obfs4proxy`. These
-  bridges are handed out a few at a time, so they're harder to block than the public ones.
+  like HTTPS to an ordinary website. obfs4 needs `lyrebird` (Tor Browser's) or `obfs4proxy`
+  (Arch: from the AUR); webtunnel needs `lyrebird` or `webtunnel-client`. These bridges are
+  handed out a few at a time, so they're harder to block than the public ones.
 
 With bridges set, chat always starts its own tor, even in **when none is running** mode, since a
 running tor would connect without them; changing them restarts it. **never** keeps to a running
-tor, which uses whatever its own torrc says. chat finds each transport's program on `PATH`, in
-the usual folders, and next to tor, where Tor Browser and the Tor Expert Bundle keep theirs.
-Where it has another name, give its path with **Transport programs** (`:set torpt`) or
-`--tor-pt`. On NixOS the `snowflake` package calls it `client`:
-`--tor-pt snowflake=/run/current-system/sw/bin/client`. Bridges only apply to Tor mode:
+tor, which uses whatever its own torrc says. chat finds each transport's program on `PATH` and
+in the usual folders, next to tor (where Tor Browser and the Tor Expert Bundle keep theirs), and
+in the Tor Browser that `torbrowser-launcher` installs under `~/.local/share/torbrowser`. So on
+Arch, `sudo pacman -S torbrowser-launcher` and starting Tor Browser once gives chat all of Tor
+Browser's transports. A script found under a transport's name is left out, since Tor's are
+compiled programs: the AUR's `lyrebird` is a voice changer. Where a transport's program has
+another name, give its path with **Transport programs** (`:set torpt`) or `--tor-pt`, such as
+`--tor-pt snowflake=/opt/snowflake/client`. Bridges only apply to Tor mode:
 DHT routing talks to BitTorrent DHT nodes and Nostr relays run by other people, and nothing
 chat sends them can be disguised as something else.
 
@@ -469,7 +474,7 @@ values after a name. Under each row's help, the page shows the `:set` that does 
 | `torlaunch` | `auto`, `always`, `never` |
 | `torpath`, `torsocks`, `torcontrol` | a path, `HOST:PORT`, `HOST:PORT` |
 | `bridges` | `snowflake`, bridge lines separated by `;`, or `off` |
-| `torpt` | `TRANSPORT=PATH` pairs, e.g. `snowflake=/run/current-system/sw/bin/client` |
+| `torpt` | `TRANSPORT=PATH` pairs, e.g. `snowflake=/opt/snowflake/client` |
 | `torpassword` | only on the page, where it's hidden |
 | `nick`, `colour` | a name; a colour name or `#RRGGBB` |
 | `sign` | `off`, or an `age` or `pgp` key made from a password typed on the page; a key file or pasted key is chosen there too |

@@ -22,9 +22,10 @@ static const char *const SNOWFLAKE[] = {
 };
 
 // Each transport and the programs that speak it, most usual first. lyrebird is obfs4proxy's
-// successor, and what Tor Browser ships.
-static const struct { const char *transport; const char *programs[2]; } TRANSPORTS[] = {
-    { "snowflake", { "snowflake-client", NULL } },
+// successor, and what Tor Browser ships; Arch's AUR package calls Snowflake's snowflake-pt-client.
+#define PROGRAM_NAMES 2
+static const struct { const char *transport; const char *programs[PROGRAM_NAMES]; } TRANSPORTS[] = {
+    { "snowflake", { "snowflake-client", "snowflake-pt-client" } },
     { "obfs4", { "lyrebird", "obfs4proxy" } },
     { "webtunnel", { "lyrebird", "webtunnel-client" } },
     { "meek_lite", { "lyrebird", "obfs4proxy" } },
@@ -217,7 +218,7 @@ int bridges_torrc(const bridges_t *b, bridge_find_fn find, void *ctx, char *out,
             return fail(why, why_cap, msg);
         }
         int found = 0;
-        for (int m = 0; m < 2 && TRANSPORTS[k].programs[m] && !found; m++)
+        for (int m = 0; m < PROGRAM_NAMES && TRANSPORTS[k].programs[m] && !found; m++)
             found = find(ctx, t, TRANSPORTS[k].programs[m], program[n_t], sizeof program[n_t]) == 0;
         if (!found) {
             const char *const *pr = TRANSPORTS[k].programs;

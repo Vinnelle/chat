@@ -128,10 +128,12 @@
 - `NO_COLOR` keeps the UI to bold, faint and reverse.
 - **Tor bridges** (`:set bridges`, `--tor-bridges`): chat's own tor reaches the Tor network
   through bridges and a pluggable transport, so your network doesn't see a connection to Tor.
-  `snowflake` uses Tor Browser's built-in Snowflake bridges (needs `snowflake-client`); bridge
-  lines from bridges.torproject.org take `obfs4` or `webtunnel` (needs `lyrebird` or
-  `obfs4proxy`). With bridges set, chat always starts its own tor. `:set torpt` and `--tor-pt`
-  say where a transport's program is when it isn't found by name.
+  `snowflake` uses Tor Browser's built-in Snowflake bridges (needs `snowflake-client`, or
+  Arch's `snowflake-pt-client`); bridge lines from bridges.torproject.org take `obfs4` (needs
+  `lyrebird` or `obfs4proxy`) or `webtunnel` (needs `lyrebird` or `webtunnel-client`). The
+  transports that come with Tor Browser, the Tor Expert Bundle, or torbrowser-launcher's Tor
+  Browser are found too. With bridges set, chat always starts its own tor. `:set torpt` and
+  `--tor-pt` say where a transport's program is when it isn't found by name.
 
 ### Changed
 - `just test-build` names each binary after its build id, as `chat-<build id>-<system>-<arch>`:
