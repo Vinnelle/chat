@@ -345,7 +345,8 @@ and written into tor's configuration as they should be. The fuzz targets (libFuz
 clang) cover bencode and DHT replies (IPv4 and IPv6), relay JSON and UPnP gateway replies,
 PGP and AGE key import, text cleaning, the input line and pasted bridge lines, and everything a session receives,
 including messages from a room member or a connected peer, and datagrams that unmask to
-anything at all.
+anything at all. GitHub Actions runs the engine test, and each fuzz target for a minute, on
+every push and pull request.
 
 ```sh
 just test               # build and run the engine test
