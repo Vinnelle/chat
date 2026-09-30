@@ -194,6 +194,31 @@ tor. If chat crashes, tor notices and quits within seconds. On Windows a job obj
 once. The next chat deletes the folder the crash left. A fresh private tor downloads the Tor
 network's directory each time, so it can take a minute or more before it connects.
 
+**Bridges** hide that you use Tor at all. Without them your network sees connections to Tor
+relays, whose addresses are public, and deep packet inspection can spot Tor's own handshake.
+With them, chat's own tor reaches the Tor network through bridges and a pluggable transport,
+and your network only sees the transport's traffic. The bridges are run by volunteers, so
+there's no server of your own to set up. Set them with **Tor bridges** in settings (`:set
+bridges`) or `--tor-bridges`:
+
+- **`snowflake`**: Tor Browser's built-in Snowflake bridges. Traffic goes over WebRTC through
+  volunteers' short-lived proxies, found through a broker reached by domain fronting, so there's
+  no bridge address to block. It needs `snowflake-client`, and nothing else.
+- **bridge lines** from [bridges.torproject.org](https://bridges.torproject.org/) (or its
+  Telegram bot, or email), separated by `;`: `obfs4` looks like random bytes, and `webtunnel`
+  like HTTPS to an ordinary website. Both need `lyrebird` (Tor Browser's) or `obfs4proxy`. These
+  bridges are handed out a few at a time, so they're harder to block than the public ones.
+
+With bridges set, chat always starts its own tor, even in **when none is running** mode, since a
+running tor would connect without them; changing them restarts it. **never** keeps to a running
+tor, which uses whatever its own torrc says. chat finds each transport's program on `PATH`, in
+the usual folders, and next to tor, where Tor Browser and the Tor Expert Bundle keep theirs.
+Where it has another name, give its path with **Transport programs** (`:set torpt`) or
+`--tor-pt`. On NixOS the `snowflake` package calls it `client`:
+`--tor-pt snowflake=/run/current-system/sw/bin/client`. Bridges only apply to Tor mode:
+DHT routing talks to BitTorrent DHT nodes and Nostr relays run by other people, and nothing
+chat sends them can be disguised as something else.
+
 > **Note:** Tor and DHT members of a room can only reach each other through the Nostr
 > relays, so both need them on: a DHT member with option 1 (DHT + Nostr fallback), and a
 > Tor member with the relays left on, as they are by default. With option 2 (DHT only) or
@@ -315,9 +340,10 @@ peer rekeys), replayed hellos and junk from outside the room, a third peer joini
 goes over UDP unmasked, that every datagram is one cell sent in a slot however many messages
 are sent, and that the DHT asks as a read-only node and stops starting from the bootstrap
 servers once it knows enough nodes. It also checks the parsers for what relays, routers and Tor send, the hourly DHT
-keys, and that key files are only read from regular files. The fuzz targets (libFuzzer, so
+keys, that key files are only read from regular files, and that Tor bridge lines are checked
+and written into tor's configuration as they should be. The fuzz targets (libFuzzer, so
 clang) cover bencode and DHT replies (IPv4 and IPv6), relay JSON and UPnP gateway replies,
-PGP and AGE key import, text cleaning and the input line, and everything a session receives,
+PGP and AGE key import, text cleaning, the input line and pasted bridge lines, and everything a session receives,
 including messages from a room member or a connected peer, and datagrams that unmask to
 anything at all.
 
@@ -355,7 +381,9 @@ key: commit `minisign.pub`, and keep the secret key backed up and off GitHub.
 chat [--nick NAME] [--colour NAME|#HEX] [--identity age|pgp[:KEYFILE]] [--simple]
      [--routing dht+nostr|dht|tor] [--nodht] [--noipv6] [--nolan]
      [--noportmap] [--nonostr] [--nostr-always] [--relay wss://HOST ...]
-     [--tor-socks HOST:PORT] [--tor-control HOST:PORT] [--verify-optional]
+     [--tor-launch auto|always|never] [--tor-path PATH] [--tor-socks HOST:PORT]
+     [--tor-control HOST:PORT] [--tor-bridges snowflake|LINE ...]
+     [--tor-pt TRANSPORT=PATH ...] [--verify-optional]
      [--session ID --port UDP_PORT --peer HOST:PORT ...]
 ```
 
@@ -439,6 +467,8 @@ values after a name. Under each row's help, the page shows the `:set` that does 
 | `relays` | up to 6 `wss://` URLs |
 | `torlaunch` | `auto`, `always`, `never` |
 | `torpath`, `torsocks`, `torcontrol` | a path, `HOST:PORT`, `HOST:PORT` |
+| `bridges` | `snowflake`, bridge lines separated by `;`, or `off` |
+| `torpt` | `TRANSPORT=PATH` pairs, e.g. `snowflake=/run/current-system/sw/bin/client` |
 | `torpassword` | only on the page, where it's hidden |
 | `nick`, `colour` | a name; a colour name or `#RRGGBB` |
 | `sign` | `off`, or an `age` or `pgp` key made from a password typed on the page; a key file or pasted key is chosen there too |
@@ -485,6 +515,8 @@ write access to the folder that holds the executable.
 | `--tor-launch auto\|always\|never` | Which tor Tor mode uses: a running one if possible, else chat's own (`auto`); always chat's own; or only a running one |
 | `--tor-path PATH` | The tor program chat starts (default: `tor` on `PATH` or in the usual folders) |
 | `--tor-socks`, `--tor-control` | Where to look for a running tor's SOCKS and control ports (`HOST:PORT`) |
+| `--tor-bridges snowflake\|LINE` | Reach the Tor network through bridges (see [Tor](#routing)): `snowflake`, or bridge lines separated by `;`; repeatable |
+| `--tor-pt TRANSPORT=PATH` | A bridge transport's program, where it isn't found by its usual name; repeatable |
 | `--identity ...` | `age` or `pgp` for a key made from a password (asked for, or `CHAT_SIGN_PASSWORD`), or `age:KEYFILE` or `pgp:KEYFILE` for your own (see [Security](#security)) |
 | `--simple` | Plain `[HH:MM] ...` lines, one session, stdin, `:name` runs a command — the automatic fallback when stdout isn't a tty |
 | `--session ID` | Join a session at startup (with `--port`, `--peer`) |
