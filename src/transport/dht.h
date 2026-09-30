@@ -96,7 +96,7 @@ typedef struct {
     dht_known_t known[2][DHT_KNOWN_MAX];
     dht_send_fn send;
     void *send_ctx;
-    // Bootstrap servers go out by name, never through local DNS (Shadowsocks resolves them).
+    // Bootstrap servers go out by name, never through local DNS (a proxy resolves them).
     int names_remote;
     uint16_t my_port;
     // Announce my_port as given (a port mapping's external port) instead of the source port the

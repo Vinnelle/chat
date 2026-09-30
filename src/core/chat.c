@@ -33,7 +33,7 @@ void routing_defaults(routing_t *r) {
     r->tor = TOR_DEFAULTS;
 }
 
-const char *routing_mode_name(route_mode_t m) { return m == ROUTE_TOR ? "tor" : m == ROUTE_SS ? "shadowsocks" : "direct"; }
+const char *routing_mode_name(route_mode_t m) { return m == ROUTE_TOR ? "tor" : "direct"; }
 static void ui_print_colored(chat_t *c, const uint8_t rgb[3], const char *fmt, ...);
 static void ui_chat(chat_t *c, const uint8_t rgb[3], int mention, const char *name, const char *text);
 
@@ -313,26 +313,13 @@ static void rekey_drop_overlap(peer_t *p) {
     p->old_until = 0.0;
 }
 
-// A datagram out of a UDP socket: straight to its address, or with Shadowsocks routing, sealed
-// for the server's relay, which takes names too (host), to look up at its end.
-static void udp_out(chat_t *c, sock_t sock, const void *data, size_t len, const addr_t *to, const char *host,
-                    uint16_t port) {
-    if (c->ss_udp) {
-        if (sock != c->sock) return;
-        uint8_t pkt[2048];
-        long n = ss_udp_seal(c->ss_udp, to, host, port, data, len, pkt, sizeof pkt);
-        if (n > 0) net_send(c->sock, pkt, (size_t)n, c->ss_server);
-        return;
-    }
-    if (to) net_send(sock, data, len, *to);
-}
-
-// The DHT's datagrams, never masked: they're ordinary DHT traffic. A name goes out only through
-// Shadowsocks.
+// The DHT's datagrams, never masked: they're ordinary DHT traffic. Names never go out: the
+// bootstrap servers are looked up here.
 static void dht_out(void *ctx, const void *data, size_t len, const addr_t *to, const char *host, uint16_t port) {
     chat_t *c = ctx;
-    if (c->sock == SOCK_INVALID || (host && !c->ss_udp)) return;
-    udp_out(c, c->sock, data, len, to, host, port);
+    (void)port;
+    if (c->sock == SOCK_INVALID || host || !to) return;
+    net_send(c->sock, data, len, *to);
 }
 
 // Every datagram leaves through here, to UDP, the relays or Tor as its address says. In Tor mode
@@ -351,7 +338,7 @@ static void xmit(chat_t *c, sock_t sock, const void *data, size_t len, addr_t to
             uint8_t masked[HANDSHAKE_BUF_LEN + 128];
             if (len > sizeof masked) return;
             memcpy(masked, data, len);
-            if (udp_mask(c->udp_key, masked, len) == 0) udp_out(c, sock, masked, len, &to, NULL, 0);
+            if (udp_mask(c->udp_key, masked, len) == 0) net_send(sock, masked, len, to);
         }
     }
 }
@@ -1504,19 +1491,11 @@ static void transports_step(chat_t *c, double now) {
 void chat_on_socket_readable(chat_t *c, sock_t which, double now) {
     if (which == SOCK_INVALID) return;
     if (which != c->sock && which != c->lan_sock) { transports_step(c, now); return; }
-    uint8_t buf[HANDSHAKE_BUF_LEN + SS_UDP_TARGET];
+    uint8_t buf[HANDSHAKE_BUF_LEN + 128];
     addr_t from;
     for (int i = 0; i < 64; i++) {
         int n = net_recv(which, buf, sizeof buf, &from);
         if (n < 0) break;
-        if (c->ss_udp && which == c->sock) {
-            // Only the server talks to this socket; what it relays says where it came from.
-            const uint8_t *d;
-            addr_t origin;
-            long dl = addr_equal(from, c->ss_server) ? ss_udp_open(c->ss_udp, buf, (size_t)n, &origin, &d, now) : -1;
-            if (dl >= 0) on_udp(c, d, (size_t)dl, origin, now);
-            continue;
-        }
         on_udp(c, buf, (size_t)n, from, now);
     }
 }
@@ -1793,17 +1772,14 @@ static void net_report(chat_t *c) {
         for (int i = 0; i < c->peer_hi; i++) if (c->peers[i].used && c->peers[i].ok && c->peers[i].addr.kind == ADDR_NOSTR) relayed++;
         ui_print(c, "* nostr relays through Tor: %s | peers through relays: %d", ns, relayed);
     } else if (c->dht_on) {
-        char via[SS_HOST_MAX + 32];
-        if (c->ss_udp) snprintf(via, sizeof via, "shadowsocks via %s", c->ss_host);
-        else snprintf(via, sizeof via, "udp/%u", (unsigned)c->port);
-        ui_print(c, "* net: %s | internet lookup: IPv4 %s%d nodes, %d peers | IPv6 %s%d nodes, %d peers | candidates to try: %d | handshakes in progress: %d | connected: %d",
-                 via, c->dht.want[DHT_V4] ? "" : "(off) ", dht_queried_count_fam(&c->dht, DHT_V4),
+        ui_print(c, "* net: udp/%u | internet lookup: IPv4 %s%d nodes, %d peers | IPv6 %s%d nodes, %d peers | candidates to try: %d | handshakes in progress: %d | connected: %d",
+                 (unsigned)c->port, c->dht.want[DHT_V4] ? "" : "(off) ", dht_queried_count_fam(&c->dht, DHT_V4),
                  dht_found_count_fam(&c->dht, DHT_V4), c->dht.want[DHT_V6] ? "" : "(off) ",
                  dht_queried_count_fam(&c->dht, DHT_V6), dht_found_count_fam(&c->dht, DHT_V6),
                  cands, pending_peer_count(c), live_count(c));
     } else {
-        ui_print(c, "* net: %s%s | internet lookup: off | candidates to try: %d | handshakes in progress: %d | connected: %d",
-                 c->ss_udp ? "shadowsocks via " : "udp/", c->ss_udp ? c->ss_host : "", cands, pending_peer_count(c), live_count(c));
+        ui_print(c, "* net: udp/%u | internet lookup: off | candidates to try: %d | handshakes in progress: %d | connected: %d",
+                 (unsigned)c->port, cands, pending_peer_count(c), live_count(c));
     }
     if (c->route.mode != ROUTE_TOR) {
         char pm[160] = "off", ns[300] = "off";
@@ -1826,7 +1802,6 @@ static void net_report(chat_t *c) {
     }
     const char *why;
     if (st->rx == 0 && c->route.mode == ROUTE_TOR) why = "nothing has reached this session through Tor yet - publishing and finding onion services takes a minute or two";
-    else if (st->rx == 0 && c->ss_udp) why = "nothing has come back through the Shadowsocks server - check the link's key, that the server relays UDP, and that both clocks are right to within 30 seconds";
     else if (st->rx == 0) why = "nothing at all has reached this session's port - a firewall/NAT is blocking inbound UDP, or nobody is sending to you yet";
     else if (st->room_ok == 0 && st->other > 0) why = "packets arrive but none are readable - wrong session id or password, or the other side runs an incompatible build";
     else if (st->hi > 0 && st->connects == 0) why = "a handshake started but never finished - typically a NAT that can't be hole-punched, or handshake pieces being lost";
@@ -2063,8 +2038,7 @@ static cmd_result_t cmd_net(void *ctx, const char *arg) {
 static cmd_result_t cmd_port(void *ctx, const char *arg) {
     chat_t *c = ctx;
     if (c->route.mode != ROUTE_DIRECT) {
-        ui_print(c, "* this session runs over %s and has no udp port of its own",
-                 c->route.mode == ROUTE_TOR ? "Tor" : "a Shadowsocks server");
+        ui_print(c, "* this session runs over Tor and has no udp port of its own");
         return CMD_OK;
     }
     if (!arg[0]) {
@@ -2208,9 +2182,8 @@ static void start_dht(chat_t *c) {
     derive_dht_key(c->master, key);
     dht_init(&c->dht, key, c->port, c->route.dht4, c->route.dht6);
     crypto_wipe(key, sizeof key);
-    // Through Shadowsocks the bootstrap servers' names go to the server as they are.
-    dht_set_output(&c->dht, dht_out, c, c->ss_udp != NULL);
-    if (!c->ss_udp) dht_start_bootstrap_resolve(&c->dht);
+    dht_set_output(&c->dht, dht_out, c, 0);
+    dht_start_bootstrap_resolve(&c->dht);
     c->dht_on = 1;
 }
 
@@ -2230,43 +2203,15 @@ static void start_nostr(chat_t *c) {
                          proxy, module_deliver, module_log, c);
     crypto_wipe(tag_key, sizeof tag_key);
     crypto_wipe(wrap_key, sizeof wrap_key);
-    if (c->nostr && c->route.mode == ROUTE_SS) {
-        ss_config_t cfg;
-        if (ss_parse_url(c->route.ss, &cfg, NULL, 0) == 0) nostr_set_ss(c->nostr, &cfg, c->ss_server);
-        crypto_wipe(&cfg, sizeof cfg);
-    }
     c->next_beacon = 0;
     c->relays_until = 0;
 }
 
 static void start_direct(chat_t *c) {
-    // Through Shadowsocks nothing goes on the LAN or to the router: both would show this machine.
-    if (c->route.lan && !c->ss_udp) c->lan_sock = net_udp_open(c->lan_port, NET_REUSE, NULL);
+    if (c->route.lan) c->lan_sock = net_udp_open(c->lan_port, NET_REUSE, NULL);
     start_dht(c);
-    if (c->route.portmap && !c->ss_udp) c->pm = portmap_new(c->port, module_log, c);
+    if (c->route.portmap) c->pm = portmap_new(c->port, module_log, c);
     start_nostr(c);
-}
-
-// Shadowsocks routing: the server from the link, and a UDP socket that only ever talks to it.
-static int start_ss(chat_t *c) {
-    ss_config_t cfg;
-    if (ss_parse_url(c->route.ss, &cfg, c->start_why, sizeof c->start_why) != 0) {
-        c->start_error = c->route.ss[0] ? c->start_why : "no Shadowsocks server set (the settings page takes its ss:// link)";
-        return -1;
-    }
-    copy_str(c->ss_host, cfg.host, sizeof c->ss_host);
-    // The one name looked up here: the server's own, unless the link gives its address.
-    if (addr_resolve_numeric(cfg.host, cfg.port, &c->ss_server) != 0 && addr_resolve(cfg.host, cfg.port, &c->ss_server) != 0) {
-        snprintf(c->start_why, sizeof c->start_why, "can't find the Shadowsocks server %.100s", cfg.host);
-        c->start_error = c->start_why;
-        crypto_wipe(&cfg, sizeof cfg);
-        return -1;
-    }
-    c->sock = net_udp_open(0, NET_DUAL, &c->port);
-    c->ss_udp = c->sock != SOCK_INVALID ? ss_udp_new(&cfg, 0) : NULL;
-    crypto_wipe(&cfg, sizeof cfg);
-    if (!c->ss_udp) { c->start_error = "could not open a UDP socket"; return -1; }
-    return 0;
 }
 
 static int relays_differ(const routing_t *a, const routing_t *b) {
@@ -2290,18 +2235,7 @@ int chat_apply_routing(chat_t *c, const routing_t *r) {
     }
     start_nostr(c);
     if (c->route.mode == ROUTE_TOR) return later;
-    later |= c->route.mode == ROUTE_SS && strcmp(r->ss, c->route.ss) != 0;
     c->route.dht4 = r->dht4; c->route.dht6 = r->dht6;
-    if (c->route.mode == ROUTE_SS) {
-        // No LAN, no router: only the DHT's families apply.
-        if (!r->dht4 && !r->dht6) stop_dht(c);
-        else if (!c->dht_on) start_dht(c);
-        else if (was.dht4 != r->dht4 || was.dht6 != r->dht6) {
-            c->dht.want[DHT_V4] = r->dht4;
-            c->dht.want[DHT_V6] = r->dht6;
-        }
-        return later;
-    }
     c->route.lan = r->lan;
     c->route.portmap = r->portmap;
 
@@ -2340,7 +2274,7 @@ void chat_route_summary(const chat_t *c, char *out, size_t cap) {
         if (c->nostr && p < cap) snprintf(out + p, cap - p, "+nostr %d/%d", nostr_relays_up(c->nostr), nostr_relay_total(c->nostr));
         return;
     }
-    size_t p = (size_t)snprintf(out, cap, "%s", c->route.mode == ROUTE_SS ? "shadowsocks" : "direct");
+    size_t p = (size_t)snprintf(out, cap, "direct");
     if (c->pm && portmap_mapped(c->pm, NULL) && p < cap) p += (size_t)snprintf(out + p, cap - p, "+map");
     if (c->nostr && p < cap) snprintf(out + p, cap - p, "+nostr %d/%d", nostr_relays_up(c->nostr), nostr_relay_total(c->nostr));
 }
@@ -2410,9 +2344,6 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
         if (!c->started) c->start_error = "could not set up Tor";
         if (c->tor && c->created) { tor_host_room(c->tor, 0); c->tor_hosting = 1; }
         if (c->tor) { knock_room_slots(c); start_nostr(c); }
-    } else if (c->route.mode == ROUTE_SS) {
-        c->started = start_ss(c) == 0;
-        if (c->started) start_direct(c);
     } else {
         // Without the main socket the caller gives up on this session, so nothing else is started.
         c->sock = net_udp_open(o->port, NET_DUAL, &c->port);
@@ -2453,7 +2384,6 @@ void chat_shutdown(chat_t *c) {
     stop_dht(c);
     net_close(c->sock);
     net_close(c->lan_sock);
-    ss_udp_free(c->ss_udp);
     if (c->log_fp) fclose(c->log_fp);
 
     crypto_unlock((uint8_t *)c + SECRETS_OFFSET, SECRETS_LEN);

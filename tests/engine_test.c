@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
 // Sessions talking over fake_net: handshake, verify codes, delivery, loss, rekey, the traffic's
-// shape on the wire, junk, a third peer, and two sessions through a Shadowsocks server.
+// shape on the wire, junk and a third peer.
 #include "core/chat.h"
 #include "fake_net.h"
 #include "common/json.h"
 #include "transport/portmap.h"
-#include "transport/ss.h"
 #include "common/util.h"
 #include "crypto/age.h"
 #include "crypto/pgp.h"
@@ -31,9 +30,8 @@ typedef struct {
     int held;              // "not sent to ...: compare verify codes first"
 } log_t;
 
-static chat_t A, B, C, D, E;
-static log_t log_a = { .who = "alice" }, log_b = { .who = "bob" }, log_c = { .who = "carol" },
-             log_d = { .who = "dave" }, log_e = { .who = "erin" };
+static chat_t A, B, C;
+static log_t log_a = { .who = "alice" }, log_b = { .who = "bob" }, log_c = { .who = "carol" };
 static int checks, failures;
 // -v: everything the sessions print, and every check as written, pass or fail.
 static int verbose;
@@ -122,20 +120,18 @@ static void start(chat_t *c, log_t *l, const char *nick, uint16_t port, const ui
     chat_init(c, &o, on_print, NULL, l);
 }
 
-static chat_t *const ALL[] = { &A, &B, &C, &D, &E };
+static chat_t *const ALL[] = { &A, &B, &C };
 static const log_t *const ALL_LOGS[] = { &log_a, &log_b, &log_c };
 static int n_live = 2;
 static int live_mask = 0x3;   // which of ALL run
 static double g_now;          // the time the sessions last ran at, for filters that note when
-static void ss_server_pump(void);
 
 // Delivers everything queued and ticks every session, `rounds` times, at time t.
 static void pump(int rounds, double t) {
     g_now = t;
     for (int r = 0; r < rounds; r++) {
-        ss_server_pump();
-        for (int i = 0; i < 5; i++) if (live_mask & (1 << i)) chat_on_socket_readable(ALL[i], ALL[i]->sock, t);
-        for (int i = 0; i < 5; i++) if (live_mask & (1 << i)) chat_tick(ALL[i], t);
+        for (int i = 0; i < 3; i++) if (live_mask & (1 << i)) chat_on_socket_readable(ALL[i], ALL[i]->sock, t);
+        for (int i = 0; i < 3; i++) if (live_mask & (1 << i)) chat_tick(ALL[i], t);
     }
 }
 
@@ -829,262 +825,6 @@ static void test_parsers(double *t) {
     CHECK(nostr_unwrap(key, sealed, sizeof sealed, back) != 0, "a tampered event opened");
 }
 
-// ---- Shadowsocks ----
-
-static const char *const SS_LINKS[3] = {
-    // SIP002's own example of a 2022 link: percent-encoded userinfo.
-    "ss://2022-blake3-aes-256-gcm:YctPZ6U7xPPcU%2Bgp3u%2BOs0ZZzoDMhelUP99%2Bfn4%2F0QE%3D@127.0.0.1:41000#Example3",
-    "ss://2022-blake3-aes-128-gcm:AAECAwQFBgcICQoLDA0ODw==@127.0.0.1:41000",
-    "ss://2022-blake3-chacha20-poly1305:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=@127.0.0.1:41000/?#x",
-};
-
-static void test_ss_links(double *t) {
-    (void)t;
-    ss_config_t c;
-    char why[160];
-    CHECK(ss_parse_url(SS_LINKS[0], &c, why, sizeof why) == 0 && c.method == SS_AES_256_GCM && c.key_len == 32
-          && strcmp(c.host, "127.0.0.1") == 0 && c.port == 41000 && c.psk[0] == 0x61, "SIP002's example link didn't parse");
-    CHECK(ss_parse_url(SS_LINKS[1], &c, why, sizeof why) == 0 && c.method == SS_AES_128_GCM && c.key_len == 16 && c.psk[15] == 15,
-          "an aes-128 link didn't parse");
-    CHECK(ss_parse_url(SS_LINKS[2], &c, why, sizeof why) == 0 && c.method == SS_CHACHA20_POLY1305 && c.psk[31] == 31,
-          "a chacha20 link didn't parse");
-    // The older form: base64url of "method:key", and an IPv6 server.
-    char info[128], b64[200], link[300];
-    snprintf(info, sizeof info, "2022-blake3-chacha20-poly1305:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=");
-    base64_encode((const uint8_t *)info, strlen(info), b64);
-    for (char *p = b64; *p; p++) { if (*p == '+') *p = '-'; else if (*p == '/') *p = '_'; }
-    snprintf(link, sizeof link, "ss://%s@[2001:db8::1]:8388#name", b64);
-    CHECK(ss_parse_url(link, &c, why, sizeof why) == 0 && c.method == SS_CHACHA20_POLY1305 && strcmp(c.host, "2001:db8::1") == 0
-          && c.port == 8388, "a base64url link to an IPv6 server didn't parse: %s", why);
-    static const char *const BAD[] = {
-        "http://x", "ss://aes-256-gcm:password@1.2.3.4:8388",
-        "ss://2022-blake3-aes-256-gcm:AAECAwQFBgcICQoLDA0ODw==@1.2.3.4:8388",
-        "ss://2022-blake3-aes-128-gcm:AAECAwQFBgcICQoLDA0ODw==@1.2.3.4",
-        "ss://2022-blake3-aes-128-gcm:AAECAwQFBgcICQoLDA0ODw==@1.2.3.4:8388/?plugin=obfs-local",
-        "ss://2022-blake3-aes-128-gcm:AAECAwQFBgcICQoLDA0ODw==:AAECAwQFBgcICQoLDA0ODw==@1.2.3.4:8388",
-        "ss://2022-blake3-aes-128-gcm:AAECAwQFBgcICQoLDA0ODw==@bad host:8388",
-    };
-    for (size_t i = 0; i < sizeof BAD / sizeof BAD[0]; i++)
-        CHECK(ss_parse_url(BAD[i], &c, why, sizeof why) != 0, "a bad link parsed: %s", BAD[i]);
-}
-
-static void test_ss_udp(double *t) {
-    for (int m = 0; m < 3; m++) {
-        ss_config_t cfg;
-        ss_parse_url(SS_LINKS[m], &cfg, NULL, 0);
-        ss_udp_t *client = ss_udp_new(&cfg, 0), *server = ss_udp_new(&cfg, 1);
-        addr_t peer;
-        uint8_t ip[4] = { 192, 0, 2, 7 };
-        addr_set_v4(&peer, ip, 5678);
-        uint8_t data[UDP_CELL], pkt[2048], copy[2048];
-        gen_random(data, sizeof data);
-        long n = ss_udp_seal(client, &peer, NULL, 0, data, sizeof data, pkt, sizeof pkt);
-        CHECK(n > 0 && n <= SS_UDP_TARGET + 16, "%s: a cell sealed to %ld bytes", ss_method_name(cfg.method), n);
-        long small = ss_udp_seal(client, &peer, NULL, 0, data, 60, copy, sizeof copy);
-        CHECK(small > 900, "%s: a short datagram wasn't padded (%ld bytes)", ss_method_name(cfg.method), small);
-        memcpy(copy, pkt, (size_t)n);
-        const uint8_t *got;
-        addr_t to;
-        long gl = ss_udp_open(server, pkt, (size_t)n, &to, &got, *t);
-        CHECK(gl == (long)sizeof data && memcmp(got, data, sizeof data) == 0 && addr_equal(to, peer),
-              "%s: the server didn't open the client's packet", ss_method_name(cfg.method));
-        CHECK(ss_udp_open(server, copy, (size_t)n, &to, &got, *t) < 0, "%s: a replayed packet opened", ss_method_name(cfg.method));
-
-        uint8_t reply[40] = "a reply";
-        n = ss_udp_seal(server, &peer, NULL, 0, reply, sizeof reply, pkt, sizeof pkt);
-        memcpy(copy, pkt, (size_t)n);
-        copy[n - 3] ^= 1;
-        CHECK(ss_udp_open(client, copy, (size_t)n, &to, &got, *t) < 0, "%s: a tampered reply opened", ss_method_name(cfg.method));
-        gl = ss_udp_open(client, pkt, (size_t)n, &to, &got, *t);
-        CHECK(gl == (long)sizeof reply && memcmp(got, reply, sizeof reply) == 0 && addr_equal(to, peer),
-              "%s: the client didn't open the server's reply", ss_method_name(cfg.method));
-        ss_udp_free(client);
-        ss_udp_free(server);
-    }
-}
-
-// Two ends of a TCP tunnel over byte pipes that take at most a few hundred bytes a call.
-typedef struct { uint8_t buf[1 << 18]; size_t len; } pipe_t;
-static pipe_t g_to_server, g_to_client;
-
-static int pipe_write(pipe_t *p, const void *d, size_t n) {
-    if (n > 333) n = 333;
-    if (p->len + n > sizeof p->buf) return 0;
-    memcpy(p->buf + p->len, d, n);
-    p->len += n;
-    return (int)n;
-}
-static int pipe_read(pipe_t *p, void *b, size_t cap) {
-    size_t n = p->len < cap ? p->len : cap;
-    if (n > 777) n = 777;
-    memcpy(b, p->buf, n);
-    memmove(p->buf, p->buf + n, p->len - n);
-    p->len -= n;
-    return (int)n;
-}
-static int cl_send(void *c, const void *d, size_t n) { (void)c; return pipe_write(&g_to_server, d, n); }
-static int cl_recv(void *c, void *b, size_t n) { (void)c; return pipe_read(&g_to_client, b, n); }
-static int sv_send(void *c, const void *d, size_t n) { (void)c; return pipe_write(&g_to_client, d, n); }
-static int sv_recv(void *c, void *b, size_t n) { (void)c; return pipe_read(&g_to_server, b, n); }
-
-// Sends all of it, draining the other end into got as it goes. Returns how much arrived.
-static size_t stream_move(ss_stream_t *from, ss_stream_t *to, const uint8_t *data, size_t len, uint8_t *got, size_t cap) {
-    size_t sent = 0, have = 0;
-    for (int i = 0; i < 100000 && (sent < len || have < len); i++) {
-        if (sent < len) {
-            int n = ss_stream_send(from, data + sent, len - sent);
-            if (n < 0) break;
-            sent += (size_t)n;
-        }
-        ss_stream_flush(from);
-        int r = ss_stream_recv(to, got + have, cap - have);
-        if (r < 0) break;
-        have += (size_t)r;
-    }
-    return have;
-}
-
-static void test_ss_tcp(double *t) {
-    (void)t;
-    static uint8_t data[60000], got[60000];
-    gen_random(data, sizeof data);
-    for (int m = 0; m < 3; m++) {
-        ss_config_t cfg;
-        ss_parse_url(SS_LINKS[m], &cfg, NULL, 0);
-        g_to_server.len = g_to_client.len = 0;
-        ss_io_t cio = { cl_send, cl_recv, NULL }, sio = { sv_send, sv_recv, NULL };
-        ss_stream_t *cl = ss_stream_new(&cfg, &cio, "relay.example", 443, 0), *sv = ss_stream_new(&cfg, &sio, NULL, 0, 1);
-        size_t up = stream_move(cl, sv, data, 41000, got, sizeof got);
-        char host[256] = "";
-        uint16_t port = 0;
-        CHECK(up == 41000 && memcmp(got, data, up) == 0, "%s: %zu of 41000 bytes went up the tunnel", ss_method_name(cfg.method), up);
-        CHECK(ss_stream_target(sv, host, sizeof host, &port) == 0 && strcmp(host, "relay.example") == 0 && port == 443,
-              "%s: the server read the target as %s:%u", ss_method_name(cfg.method), host, (unsigned)port);
-        size_t down = stream_move(sv, cl, data, sizeof data, got, sizeof got);
-        CHECK(down == sizeof data && memcmp(got, data, down) == 0, "%s: %zu of %zu bytes came down the tunnel",
-              ss_method_name(cfg.method), down, sizeof data);
-        ss_stream_free(cl);
-        ss_stream_free(sv);
-    }
-    // A server with another key: the client gives up, and says why.
-    ss_config_t a, b;
-    ss_parse_url(SS_LINKS[2], &a, NULL, 0);
-    b = a;
-    b.psk[0] ^= 1;
-    g_to_server.len = g_to_client.len = 0;
-    ss_io_t cio = { cl_send, cl_recv, NULL }, sio = { sv_send, sv_recv, NULL };
-    ss_stream_t *cl = ss_stream_new(&a, &cio, "relay.example", 443, 0), *sv = ss_stream_new(&b, &sio, NULL, 0, 1);
-    stream_move(cl, sv, data, 100, got, sizeof got);
-    CHECK(ss_stream_dead(sv), "a server with another key opened the request");
-    ss_stream_free(cl);
-    ss_stream_free(sv);
-}
-
-// A Shadowsocks server on the fake net: 41000 takes clients' packets, and each client gets an
-// outbound port of its own (42000, 42001, ...), from which it sends, and to which anyone may send
-// back (full cone).
-#define SS_SERVER_PORT 41000
-static struct {
-    int on;
-    ss_config_t cfg;
-    sock_t sock;
-    struct { addr_t client; ss_udp_t *u; sock_t out; uint16_t port; } c[4];
-    int n;
-    int from_d_elsewhere, from_d, from_d_odd;
-} g_ss;
-
-static void ss_server_pump(void) {
-    if (!g_ss.on) return;
-    uint8_t buf[4096];
-    addr_t from;
-    int n;
-    while ((n = net_recv(g_ss.sock, buf, sizeof buf, &from)) >= 0) {
-        int i = 0;
-        while (i < g_ss.n && !addr_equal(g_ss.c[i].client, from)) i++;
-        if (i == g_ss.n) {
-            if (g_ss.n == 4) continue;
-            g_ss.c[i].client = from;
-            g_ss.c[i].u = ss_udp_new(&g_ss.cfg, 1);
-            g_ss.c[i].port = (uint16_t)(42000 + i);
-            g_ss.c[i].out = net_udp_open(g_ss.c[i].port, 0, NULL);
-            g_ss.n++;
-        }
-        const uint8_t *d;
-        addr_t to;
-        long dl = ss_udp_open(g_ss.c[i].u, buf, (size_t)n, &to, &d, g_now);
-        if (dl >= 0) net_send(g_ss.c[i].out, d, (size_t)dl, to);
-    }
-    for (int i = 0; i < g_ss.n; i++) {
-        while ((n = net_recv(g_ss.c[i].out, buf, sizeof buf, &from)) >= 0) {
-            uint8_t pkt[4096];
-            long pl = ss_udp_seal(g_ss.c[i].u, &from, NULL, 0, buf, (size_t)n, pkt, sizeof pkt);
-            if (pl > 0) net_send(g_ss.sock, pkt, (size_t)pl, g_ss.c[i].client);
-        }
-    }
-}
-
-static int watch_ss(void *ctx, addr_t from, addr_t to, const void *data, size_t len) {
-    (void)ctx; (void)data;
-    if (from.port != D.port) return 0;
-    if (to.port == SS_SERVER_PORT) { g_ss.from_d++; if (len < 1000 || len > SS_UDP_TARGET + 16) g_ss.from_d_odd++; }
-    else g_ss.from_d_elsewhere++;
-    return 0;
-}
-
-// Two sessions through the server: each reaches the other at the server's outbound address, and
-// sends nothing anywhere but to the server, every packet about the same size.
-static void test_ss_session(double *t) {
-    for (int m = 0; m < 3; m++) {
-        memset(&g_ss, 0, sizeof g_ss);
-        ss_parse_url(SS_LINKS[m], &g_ss.cfg, NULL, 0);
-        g_ss.sock = net_udp_open(SS_SERVER_PORT, 0, NULL);
-        g_ss.on = 1;
-        char link[SS_URL_MAX];
-        copy_str(link, SS_LINKS[m], sizeof link);
-        chat_opts_t o;
-        // Dave first, so the server gives him 42000, and erin 42001.
-        base_opts(&o, "dave", 0, (const uint16_t[]){ 42001 }, 1, 1);
-        copy_str(o.session_name, "SSSESSION", sizeof o.session_name);
-        o.route.mode = ROUTE_SS;
-        copy_str(o.route.ss, link, sizeof o.route.ss);
-        chat_init(&D, &o, on_print, NULL, &log_d);
-        CHECK(chat_started(&D), "dave's session didn't start: %s", chat_start_error(&D));
-        live_mask = 0x8;
-        fake_net_filter = watch_ss;
-        RUN_FOR(t, 1);
-        base_opts(&o, "erin", 0, (const uint16_t[]){ 42000 }, 1, 0);
-        copy_str(o.session_name, "SSSESSION", sizeof o.session_name);
-        o.route.mode = ROUTE_SS;
-        copy_str(o.route.ss, link, sizeof o.route.ss);
-        chat_init(&E, &o, on_print, NULL, &log_e);
-        live_mask = 0x18;
-        RUN_UNTIL(t, 60, peer_named(&D, "erin") && peer_named(&E, "dave") && D.peers[0].announced && E.peers[0].announced);
-        peer_t *de = peer_named(&D, "erin"), *ed = peer_named(&E, "dave");
-        CHECK(de && ed, "%s: dave and erin didn't connect through the server", ss_method_name(g_ss.cfg.method));
-        CHECK(ed && ed->addr.kind == ADDR_UDP && ed->addr.port == 42000, "%s: erin reaches dave at port %u, not the server's",
-              ss_method_name(g_ss.cfg.method), ed ? (unsigned)ed->addr.port : 0u);
-        if (de && ed) {
-            confirm(&D, "erin", &E, "dave");
-            char text[40];
-            snprintf(text, sizeof text, "through %s", ss_method_name(g_ss.cfg.method));
-            chat_send_text(&D, text, *t);
-            RUN_UNTIL(t, 10, log_count(&log_e, text) == 1);
-            CHECK(log_count(&log_e, text) == 1, "erin didn't get dave's message %s", text);
-        }
-        fake_net_filter = NULL;
-        CHECK(g_ss.from_d > 0 && g_ss.from_d_elsewhere == 0, "dave sent %d datagrams elsewhere than the server (%d to it)",
-              g_ss.from_d_elsewhere, g_ss.from_d);
-        CHECK(g_ss.from_d_odd == 0, "%d of dave's %d packets to the server were an odd size", g_ss.from_d_odd, g_ss.from_d);
-        live_mask = 0x7;
-        chat_shutdown(&D);
-        chat_shutdown(&E);
-        for (int i = 0; i < g_ss.n; i++) { ss_udp_free(g_ss.c[i].u); net_close(g_ss.c[i].out); }
-        net_close(g_ss.sock);
-        g_ss.on = 0;
-        fake_net_clear();
-    }
-}
-
 int main(int argc, char **argv) {
     verbose = argc > 1 && (strcmp(argv[1], "-v") == 0 || strcmp(argv[1], "--verbose") == 0);
     double t_start = now_seconds();
@@ -1105,8 +845,7 @@ int main(int argc, char **argv) {
         { "junk", test_junk }, { "lookalike nick", test_lookalike_nick },
         { "third peer", test_third_peer }, { "candidates settle", test_candidates_settle }, { "builds", test_builds },
         { "parsers", test_parsers }, { "dht keys", test_dht_keys }, { "dht", test_dht }, { "read file", test_read_file },
-        { "identity keys", test_identity_keys }, { "ss links", test_ss_links }, { "ss udp", test_ss_udp },
-        { "ss tcp", test_ss_tcp }, { "ss session", test_ss_session },
+        { "identity keys", test_identity_keys },
     };
     size_t n_tests = sizeof tests / sizeof tests[0];
     int failed[sizeof tests / sizeof tests[0]], n_failed = 0;

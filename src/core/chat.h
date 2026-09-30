@@ -10,7 +10,6 @@
 #include "transport/nostr.h"
 #include "transport/tor.h"
 #include "transport/portmap.h"
-#include "transport/ss.h"
 #include <stdint.h>
 #include <stdio.h>
 
@@ -109,23 +108,20 @@
 // A joiner in Tor mode that hasn't reached anyone by then publishes the room's onion itself.
 #define TOR_HOST_AFTER 120.0
 
-typedef enum { ROUTE_DIRECT = 0, ROUTE_TOR = 1, ROUTE_SS = 2 } route_mode_t;
+typedef enum { ROUTE_DIRECT = 0, ROUTE_TOR = 1 } route_mode_t;
 
-// The relays: off, only while something needs them (direct routing and Shadowsocks), or always.
+// The relays: off, only while something needs them (direct routing), or always.
 enum { NOSTR_OFF = 0, NOSTR_FALLBACK = 1, NOSTR_ALWAYS = 2 };
 
 // How a session reaches peers. Direct: UDP, found through the DHT (IPv4, IPv6), LAN broadcast
 // and relays, with a router port mapping to let more of them in, and Nostr relays carrying
 // traffic when UDP can't. Tor: onion services only; nothing else touches the network.
-// Shadowsocks: as direct, but everything goes through a Shadowsocks server, and nothing on the
-// LAN or the router.
 typedef struct {
     route_mode_t mode;
     int dht4, dht6, lan, portmap, nostr;
     char relays[NOSTR_MAX_RELAYS][NOSTR_URL_MAX];
     int n_relays;
     tor_opts_t tor;
-    char ss[SS_URL_MAX];   // an ss:// link, key and all
 } routing_t;
 
 void routing_defaults(routing_t *r);
@@ -370,15 +366,10 @@ typedef struct {
     routing_t route;
     int started;
     const char *start_error;   // why it didn't start, when it didn't
-    char start_why[160];
     nostr_t *nostr;
-    double relays_until;   // the relays stay on until then (direct and Shadowsocks routing)
+    double relays_until;   // the relays stay on until then (direct routing)
     tor_t *tor;
     portmap_t *pm;
-    // Shadowsocks routing: every UDP datagram goes to this server, sealed for its relay.
-    ss_udp_t *ss_udp;
-    addr_t ss_server;
-    char ss_host[SS_HOST_MAX];
     double next_beacon;
     int tor_hosting;
     double tor_republish_at;

@@ -6,8 +6,8 @@
 #include <stddef.h>
 #include "platform/net.h"
 
-// A TLS client over a non-blocking TCP socket, or anything that moves bytes like one (a
-// Shadowsocks tunnel), checked against the system's root certificates.
+// A TLS client over a non-blocking TCP socket, or anything that moves bytes like one, checked
+// against the system's root certificates.
 
 typedef struct tls_conn tls_conn_t;
 
