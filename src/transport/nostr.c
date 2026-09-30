@@ -86,6 +86,10 @@ typedef struct {
     double deadline, next_try, opened_at, last_rx, next_ping, resub_at;
     int fails;
     int subscribed;
+    // A new one for each connection: the same id at several relays, or on one relay from one
+    // connection to the next, would tie those connections to one member (and, through Tor, the
+    // circuits it gives each relay).
+    char subid[17];
     char challenge[160];
     int warned, refusals;
     double tokens, tokens_at;
@@ -111,7 +115,6 @@ struct nostr {
     // Tags of the previous, current and next ten minutes: clocks differ a little.
     long long epoch;
     char tags[3][65];
-    char subid[17];
     uint8_t seen_ids[SEEN_IDS][8];
     int seen_head;
     nostr_deliver_fn deliver;
@@ -204,9 +207,6 @@ nostr_t *nostr_new(const uint8_t tag_key[NOSTR_KEY_LEN], const uint8_t wrap_key[
     memcpy(n->wrap_key, wrap_key, NOSTR_KEY_LEN);
     memcpy(n->my_id, my_id, ID_LEN);
     set_epoch(n, current_epoch());
-    uint8_t sid[8];
-    gen_random(sid, sizeof sid);
-    hex_encode(sid, sizeof sid, n->subid);
     for (int i = 0; i < n_relays && n->n_relays < NOSTR_MAX_RELAYS; i++) {
         if (nostr_url_ok(relays[i]) != 0) continue;
         relay_t *r = &n->relays[n->n_relays++];
@@ -371,7 +371,7 @@ static void send_req(nostr_t *n, relay_t *r) {
     char req[400];
     long since = (long)time(NULL) - 120;
     int len = snprintf(req, sizeof req, "[\"REQ\",\"%s\",{\"#e\":[\"%s\",\"%s\",\"%s\"],\"since\":%ld}]",
-                       n->subid, n->tags[0], n->tags[1], n->tags[2], since);
+                       r->subid, n->tags[0], n->tags[1], n->tags[2], since);
     if (ws_queue(r, 1, req, (size_t)len) == 0) r->subscribed = 1;
 }
 
@@ -462,7 +462,7 @@ static void on_message(nostr_t *n, relay_t *r, const char *msg, size_t len, doub
     if (!type) return;
     if (strcmp(type, "EVENT") == 0 && v->n >= 3) {
         const char *sub = js_str(&v->items[1]);
-        if (sub && strcmp(sub, n->subid) == 0 && v->items[2].type == JS_OBJ) on_event(n, &v->items[2], now);
+        if (sub && strcmp(sub, r->subid) == 0 && v->items[2].type == JS_OBJ) on_event(n, &v->items[2], now);
     } else if (strcmp(type, "OK") == 0 && v->n >= 4) {
         if (v->items[2].type == JS_BOOL && !v->items[2].b) {
             const char *why = js_str(&v->items[3]);
@@ -809,9 +809,8 @@ static void relay_step(nostr_t *n, relay_t *r, double now) {
                 return;
             }
             start_tls(n, r, now);
-            if (r->state != R_TLS) return;
+            return;
         }
-        /* fall through */
         case R_SOCKS: {
             for (;;) {
                 if (r->in_len >= IN_CAP) { relay_fail(n, r, now, "SOCKS overflow"); return; }
@@ -855,6 +854,9 @@ static void relay_step(nostr_t *n, relay_t *r, double now) {
                     r->next_ping = now + PING_EVERY;
                     r->tokens = SEND_BURST;
                     r->tokens_at = now;
+                    uint8_t sid[8];
+                    gen_random(sid, sizeof sid);
+                    hex_encode(sid, sizeof sid, r->subid);
                     if (r->warned) logf_(n, 0, "* nostr: %s is back", r->host);
                     else logf_(n, 1, "* nostr: connected to %s", r->host);
                     r->warned = 0;

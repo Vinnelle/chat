@@ -8,6 +8,9 @@
 
 void hex_encode(const uint8_t *in, size_t len, char *out);
 int hex_decode(const char *in, size_t hexlen, uint8_t *out);
+// Hex in groups of four digits, "a1b2 c3d4 ...", for codes people read out to each other.
+#define HEX_GROUPS_LEN(n) ((n) * 2 + (n) / 2 + 1)
+void hex_groups(const uint8_t *in, size_t len, char *out);
 
 size_t clean_text(const char *in, char *out, size_t max_len);
 

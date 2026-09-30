@@ -365,9 +365,9 @@ static int normal_feed(tui_input_t *in, const tui_key_t *key) {
         switch (key->ch[0]) {
             case 'h': in->cursor = step_left(in, in->cursor); return 1;
             case 'l': in->cursor = step_right(in, in->cursor); normal_clamp(in); return 1;
-            // Left to the caller: they step through the sessions, jump to the newest message and
-            // open the help.
-            case 'j': case 'k': case 'G': case '?': return 0;
+            // Left to the caller: they step through the sessions, jump to the newest message, open
+            // the help and show or hide the console, the chat and the sidebar.
+            case 'j': case 'k': case 'G': case '?': case 'c': case 'C': case 's': return 0;
             case 'i': in->mode = TUI_IMODE_INSERT; return 1;
             case 'a': in->cursor = step_right(in, in->cursor); in->mode = TUI_IMODE_INSERT; return 1;
             case 'I': in->cursor = 0; in->mode = TUI_IMODE_INSERT; return 1;
@@ -782,12 +782,36 @@ static void brand(span_t *title, span_t *right, int width) {
     ptext(&title->p, S_ACCENT_BOLD, G_DIAMOND " chat");
 }
 
+// The last whole frame sent, by its hash.
+static uint8_t g_last_frame[32];
+static int g_last_frame_valid;
+
+void tui_invalidate(void) { g_last_frame_valid = 0; }
+
+static void lock_buffers(void);
+
 // Autowrap is off while a frame draws: a character the width table guesses too narrow is clipped
 // at the right edge instead of pushing the rest of the frame down a row.
-static void begin_frame(wbuf_t *w) { wapp(w, "\x1b[?2026h\x1b[?25l\x1b[?7l"); }
-static void end_frame(wbuf_t *w) {
+static void begin_frame(wbuf_t *w) {
+    lock_buffers();
+    wapp(w, "\x1b[?2026h\x1b[?25l\x1b[?7l");
+}
+
+// whole: the frame covers the screen, and isn't sent if it's the one already there (the clock
+// redraws every second, but shows minutes).
+static void end_frame(wbuf_t *w, int whole) {
     // Written on its own so a frame that filled its buffer still turns autowrap back on.
     static const char tail[] = "\x1b[0m\x1b[?7h\x1b[?2026l";
+    if (whole) {
+        uint8_t h[32];
+        sha256_hash(w->buf, w->len, h);
+        int same = g_last_frame_valid && memcmp(h, g_last_frame, sizeof h) == 0;
+        memcpy(g_last_frame, h, sizeof h);
+        g_last_frame_valid = 1;
+        if (same) return;
+    } else {
+        g_last_frame_valid = 0;
+    }
     platform_write_stdout(w->buf, w->len);
     platform_write_stdout(tail, sizeof tail - 1);
 }
@@ -819,6 +843,15 @@ typedef struct {
 } grid_t;
 
 static grid_t g_grid;
+
+// The frame and the grid hold the conversation as drawn: kept out of swap like the scrollbacks.
+static void lock_buffers(void) {
+    static int locked;
+    if (locked) return;
+    locked = 1;
+    crypto_lock(g_frame, sizeof g_frame);
+    crypto_lock(&g_grid, sizeof g_grid);
+}
 
 static void grid_reset(grid_t *g, int rows, int w) {
     if (rows > MAX_ROWS) rows = MAX_ROWS;
@@ -1510,7 +1543,7 @@ void tui_render(int rows, int cols,
     draw_input(&w, input, boxed, bar, view, main_r, &cr, &cc);
     draw_status(&w, rows, cols, bar);
     place_cursor(&w, cr, cc, bar->input);
-    end_frame(&w);
+    end_frame(&w, 1);
 }
 
 void tui_render_bar(int rows, int cols, const tui_view_t *view, const tui_bar_t *bar, int color_enabled) {
@@ -1527,7 +1560,7 @@ void tui_render_bar(int rows, int cols, const tui_view_t *view, const tui_bar_t 
     draw_input(&w, input, boxed, bar, view, main_r, &cr, &cc);
     draw_status(&w, rows, cols, bar);
     place_cursor(&w, cr, cc, bar->input);
-    end_frame(&w);
+    end_frame(&w, 0);
 }
 
 // ---- list pages ----
@@ -1796,5 +1829,5 @@ void tui_render_page(int rows, int cols, const tui_page_t *page, const tui_bar_t
 
     draw_status(&w, rows, cols, bar);
     place_cursor(&w, cr, cc, bar->input);
-    end_frame(&w);
+    end_frame(&w, 1);
 }

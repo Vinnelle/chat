@@ -44,9 +44,10 @@ typedef struct {
 
 typedef struct {
     int used;
+    int room;            // one of the room's own onion services: never let go of
     char host[TOR_ADDR_LEN + 1];
     uint8_t id[16];
-    double next_try;
+    double next_try, last_used;
     int fails, opened;
 } target_t;
 
@@ -156,15 +157,32 @@ static void target_id(const char *host, uint8_t id[16]) {
     memcpy(id, h, 16);
 }
 
+static int target_has_stream(const tor_t *t, int target) {
+    for (int i = 0; i < MAX_STREAMS; i++)
+        if (t->streams[i] && t->streams[i]->target == target) return 1;
+    return 0;
+}
+
+// Every member's session has an onion address of its own, new each time, so over a long session
+// the table fills: the target used longest ago that no stream holds makes room.
 static int add_target(tor_t *t, const char *host) {
+    double now = now_seconds();
     for (int i = 0; i < MAX_TARGETS; i++)
-        if (t->targets[i].used && strcmp(t->targets[i].host, host) == 0) return i;
+        if (t->targets[i].used && strcmp(t->targets[i].host, host) == 0) { t->targets[i].last_used = now; return i; }
     int slot = -1;
     for (int i = 0; i < MAX_TARGETS && slot < 0; i++) if (!t->targets[i].used) slot = i;
+    if (slot < 0) {
+        for (int i = 0; i < MAX_TARGETS; i++) {
+            const target_t *g = &t->targets[i];
+            if (g->room || target_has_stream(t, i)) continue;
+            if (slot < 0 || g->last_used < t->targets[slot].last_used) slot = i;
+        }
+    }
     if (slot < 0) return -1;
     target_t *g = &t->targets[slot];
     memset(g, 0, sizeof *g);
     g->used = 1;
+    g->last_used = now;
     copy_str(g->host, host, sizeof g->host);
     target_id(host, g->id);
     return slot;
@@ -187,12 +205,19 @@ tor_t *tor_new(const tor_opts_t *o, const uint8_t room_keys[TOR_ROOM_SLOTS][64],
     for (int i = 0; i < TOR_ROOM_SLOTS; i++) {
         onion_address(room_pubs[i], t->room_onion[i]);
         t->room_targets[i] = add_target(t, t->room_onion[i]);
+        t->targets[t->room_targets[i]].room = 1;
     }
     uint8_t user[8];
     gen_random(user, sizeof user);
     hex_encode(user, sizeof user, t->socks_user);
     t->listener = net_tcp_listen_loopback(&t->listen_port);
-    if (t->listener == SOCK_INVALID) { free(t); return NULL; }
+    if (t->listener == SOCK_INVALID) {
+        // The room's keys are in there: wiped, as tor_free would.
+        crypto_unlock(t->room_keys, sizeof t->room_keys);
+        crypto_wipe(t, sizeof *t);
+        free(t);
+        return NULL;
+    }
     return t;
 }
 
@@ -329,13 +354,16 @@ static int reply_field(const char *line, const char *key, char *out, size_t cap)
     return -1;
 }
 
+// The path comes from whatever answered on the control port: only a regular file of exactly a
+// cookie's size is read, so it can't be a FIFO that hangs chat, or a file of some other kind.
 static int read_cookie(tor_t *t) {
     if (!t->cookie_path[0]) return -1;
-    FILE *f = platform_fopen(t->cookie_path, "rb");
-    if (!f) return -1;
-    size_t n = fread(t->cookie, 1, sizeof t->cookie, f);
-    fclose(f);
-    return n == sizeof t->cookie ? 0 : -1;
+    uint8_t buf[sizeof t->cookie + 1];
+    long n = platform_read_file(t->cookie_path, buf, sizeof buf);
+    int ok = n == (long)sizeof t->cookie;
+    if (ok) memcpy(t->cookie, buf, sizeof t->cookie);
+    crypto_wipe(buf, sizeof buf);
+    return ok ? 0 : -1;
 }
 
 static void on_protocolinfo(tor_t *t, double now) {
@@ -355,20 +383,15 @@ static void on_protocolinfo(tor_t *t, double now) {
         t->ctl_state = C_AUTH;
         ctl_send(t, "AUTHENTICATE\r\n");
     } else if (strstr(m, ",SAFECOOKIE,") && read_cookie(t) == 0) {
+        // Only SAFECOOKIE: the plain COOKIE login hands the file's bytes to whatever answers on
+        // the port, and anything can listen there while tor isn't running. Every tor since
+        // 0.2.3 offers SAFECOOKIE, which has the other side prove it read the cookie first.
         gen_random(t->client_nonce, sizeof t->client_nonce);
         char hex[65], line[120];
         hex_encode(t->client_nonce, 32, hex);
         snprintf(line, sizeof line, "AUTHCHALLENGE SAFECOOKIE %s\r\n", hex);
         t->ctl_state = C_CHALLENGE;
         ctl_send(t, line);
-    } else if (strstr(m, ",COOKIE,") && read_cookie(t) == 0) {
-        char hex[65], line[100];
-        hex_encode(t->cookie, 32, hex);
-        snprintf(line, sizeof line, "AUTHENTICATE %s\r\n", hex);
-        t->ctl_state = C_AUTH;
-        ctl_send(t, line);
-        crypto_wipe(hex, sizeof hex);
-        crypto_wipe(line, sizeof line);
     } else if (strstr(m, ",HASHEDPASSWORD,") && t->o.password[0]) {
         char line[300];
         size_t p = (size_t)snprintf(line, sizeof line, "AUTHENTICATE \"");
@@ -382,9 +405,12 @@ static void on_protocolinfo(tor_t *t, double now) {
         crypto_wipe(line, sizeof line);
     } else {
         char why[260];
-        if (strstr(m, "COOKIE"))
+        if (strstr(m, ",SAFECOOKIE,"))
             snprintf(why, sizeof why, "can't read Tor's auth cookie (%.120s) - run chat as a user allowed to, "
                      "or set a control password in tor and with :set torpassword", t->cookie_path[0] ? t->cookie_path : "no path given");
+        else if (strstr(m, "COOKIE"))
+            snprintf(why, sizeof why, "the control port only offers the old COOKIE login, which shows its cookie file "
+                     "to whatever answers there - chat needs SAFECOOKIE (any tor since 0.2.3) or a password");
         else if (strstr(m, "HASHEDPASSWORD"))
             snprintf(why, sizeof why, "Tor's control port wants a password - set it with :set torpassword");
         else
@@ -421,6 +447,7 @@ static void on_challenge(tor_t *t, double now) {
     }
     hmac_sha256((const uint8_t *)CK, sizeof CK - 1, msg, sizeof msg, mine);
     crypto_wipe(msg, sizeof msg);
+    crypto_wipe(t->cookie, sizeof t->cookie);
     char hex[65], line[100];
     hex_encode(mine, 32, hex);
     snprintf(line, sizeof line, "AUTHENTICATE %s\r\n", hex);
@@ -779,10 +806,12 @@ int tor_send(tor_t *t, addr_t to, const uint8_t *data, size_t len, double now) {
         for (int i = 0; i < MAX_TARGETS; i++)
             if (t->targets[i].used && memcmp(t->targets[i].id, to.ip, 16) == 0) { target = i; break; }
         if (target < 0) return -1;
+        t->targets[target].last_used = now;
         idx = open_stream(t, target, now);
         if (idx < 0) return -1;
     }
     stream_t *s = t->streams[idx];
+    if (s->target >= 0) t->targets[s->target].last_used = now;
     // A stream still opening holds a few datagrams; past that they're lost, as UDP ones would be.
     if (s->tx_len + 2 + len > TX_CAP) return -1;
     s->tx[s->tx_len++] = (uint8_t)(len >> 8);

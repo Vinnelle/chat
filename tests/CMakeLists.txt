@@ -28,7 +28,7 @@ set(CHAT_CORE_SOURCES
 function(chat_test_executable name)
     add_executable(${name} ${ARGN} ${CHAT_CORE_SOURCES})
     add_dependencies(${name} libsodium_ext liboqs_ext mbedtls_ext secp256k1_ext)
-    target_compile_definitions(${name} PRIVATE CHAT_VERSION="test")
+    target_compile_definitions(${name} PRIVATE CHAT_VERSION="test" MBEDTLS_USER_CONFIG_FILE="${CHAT_MBEDTLS_CONFIG}")
     target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/src
                                ${PROJECT_SOURCE_DIR}/src/platform/${CHAT_OS} ${SODIUM_INCLUDE_DIRS} ${OQS_INCLUDE_DIRS}
                                ${MBEDTLS_INCLUDE_DIRS} ${SECP256K1_INCLUDE_DIRS})

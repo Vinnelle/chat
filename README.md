@@ -51,7 +51,9 @@ what protects the key. Anyone who has your machine id can guess passwords agains
 public key you show peers, so use a long one. A blank password makes a new random key that
 lasts until chat exits instead.
 
-Use `:verify NICK` to compare a peer's identity out-of-band.
+Use `:verify NICK` to compare a peer's identity out-of-band. Identity fingerprints and the
+verify codes `:peers` shows are 128 bits, in groups of four hex digits; 0.3.1 and earlier show
+the first 16 digits of the same codes.
 
 Each peer rekeys every few minutes. Before it does, it announces its new key over the current
 encrypted session, so a room member sitting between two peers can't swap in its own key at a
@@ -74,6 +76,14 @@ from source, for one), is marked **modified**: a warning follows its join, the s
 peers against them. 0.3.0 itself can't read the list, so it shows newer peers' builds as
 unknown.
 
+Keys, and the conversation as it's shown, are locked in memory so they aren't written to swap,
+as far as the system's memory-lock limit allows. Core dumps are off, and on Windows a crash ends
+chat before Windows Error Reporting can dump its memory. Desktop notifications only say that a
+message came, unless **Notification preview** (`:set preview nick` or `message`) lets them
+show who sent it, or who and what they said. Desktops keep notifications (Windows writes them
+to disk), so that's off by default, and a notification never names the session: its id is all
+it takes to join one with a blank password.
+
 > **Note:** the cryptography here has not been independently audited.
 
 ## Routing
@@ -91,14 +101,23 @@ Direct routing uses these, and each one can be turned off:
 
 | Part | What it does | Who sees what |
 | --- | --- | --- |
-| BitTorrent DHT (IPv4) | finds peers on the internet | DHT nodes see your IP next to a lookup key only room members can compute |
+| BitTorrent DHT (IPv4) | finds peers on the internet | DHT nodes see your IP next to a lookup key only room members can compute, and which changes every hour |
 | IPv6 DHT ([BEP 32](https://www.bittorrent.org/beps/bep_0032.html)) | the same on the IPv6 DHT, where there's usually no NAT to punch through | as above |
 | Router port mapping | asks the router (PCP, NAT-PMP or UPnP-IGD) to forward the session's UDP port, so peers behind NATs that can't be hole-punched still get in; removed when the session ends | your router, which may log it |
-| LAN discovery | an encrypted broadcast beacon on the local network | the local network sees that something broadcasts |
+| LAN discovery | an encrypted broadcast beacon on the local network, to a UDP port of the room's own (made from its id and password, 49152-65535) | the local network sees that something broadcasts |
 | Nostr relay fallback | public relays carry the traffic when UDP can't get through | the relays: see below |
 
 Chat prefers direct UDP. A peer moves to the relays only while UDP to it stays quiet, and
 moves back as soon as UDP works again.
+
+**What the network sees of UDP.** Everything chat sends over UDP is masked with a key made from
+the session id and password, so to anyone else every datagram is random bytes: no ratchet
+counter that could follow a peer from one address to the next, no header on the pieces of a
+handshake, nothing the same from one packet to the next. What still shows is the addresses and
+ports, the sizes (the same for most packets, since everything is padded) and the timing. The
+BitTorrent DHT's own messages are ordinary DHT traffic. 0.3.1 and earlier sent UDP unmasked and
+beaconed on port 47474, so they and this version can't reach each other over UDP or find each
+other on the LAN; they still meet through the Nostr relays, or over Tor.
 
 **What a Nostr relay sees.** Each datagram is one ephemeral event, so relays pass it on
 without storing it. Every event is signed with a key made for that event alone, has a random
@@ -107,9 +126,10 @@ ten minutes, and only room members can compute it. The content is always the sam
 sender, the recipient, the datagram and random padding, sealed together with XChaCha20-Poly1305
 under a key derived from the session id and password, with a fresh nonce each time. So a relay
 can't tell which events come from the same person, who they're for, or what kind of message
-they hold. It can't link a room's traffic from one ten minutes to the next. It still sees
-your IP address, when you send and receive, and which tags your connection asks for. The
-defaults are `wss://relay.primal.net`, `wss://nostr.mom` and `wss://relay.nostr.net`.
+they hold. It can't link a room's traffic from one ten minutes to the next. Each connection
+subscribes under an id of its own, so relays comparing notes can't tie one member's
+connections together by it. A relay still sees your IP address, when you send and receive, and
+which tags your connection asks for. The defaults are `wss://relay.primal.net`, `wss://nostr.mom` and `wss://relay.nostr.net`.
 `--relay` or the settings page picks others. A relay that rate-limits gets fewer events. A
 relay whose policy refuses throwaway keys (web of trust, payment, proof of work) is only read
 from.
@@ -120,8 +140,9 @@ the tor to use like this (`--tor-launch`, or **Start chat's own tor** in setting
 
 - **when none is running** (the default): chat first looks for a tor that's already running,
   such as the system service on 9050/9051 or Tor Browser on 9150/9151, whose control port lets
-  it log in. It logs in with tor's cookie file if it can read it, a password from the settings
-  page, or no login if tor allows that. Such a tor is the better one to use. It keeps its entry
+  it log in. It logs in with tor's cookie file if it can read it (SAFECOOKIE only, where tor
+  proves it read the cookie before chat shows anything), a password from the settings page, or
+  no login if tor allows that. Such a tor is the better one to use. It keeps its entry
   guards from run to run, and any bridges its torrc sets up. If there's none, chat starts a tor
   of its own.
 - **always**: chat's own tor every time, kept apart from any other. It picks new entry guards
@@ -213,7 +234,9 @@ Both would stay off unless you turn them on.
 Requires CMake ≥ 3.15 and a C compiler. libsodium (1.0.20), liboqs (0.16.0, ML-KEM-768
 only), Mbed TLS (3.6.7, for the relays' `wss://` connections) and libsecp256k1 (0.7.1, for
 Nostr's Schnorr signatures) are fetched and built statically by CMake. TLS certificates are
-checked against the system's root store.
+checked against the system's root store. Mbed TLS is configured as a TLS client with
+forward-secret key exchanges only ([`cmake/mbedtls-config.h`](cmake/mbedtls-config.h)), and
+libsecp256k1 keeps only what signing needs, since chat never verifies Nostr signatures.
 
 ```sh
 cmake -B build
@@ -253,11 +276,14 @@ a copy taken to another machine still says which build it is.
 ### Tests
 
 `tests/` runs real sessions against each other over an in-memory network: handshake, message
-delivery with a lost packet, rekey, junk from outside the room, and a third peer joining. It
-also checks the parsers for what relays, routers and Tor send. The fuzz targets (libFuzzer,
-so clang) cover bencode and DHT replies (IPv4 and IPv6), relay JSON and UPnP gateway replies,
+delivery with a lost packet, rekey (and a message lost just as the peer rekeys), replayed
+hellos and junk from outside the room, a third peer joining, and that nothing goes over UDP
+unmasked. It also checks the parsers for what relays, routers and Tor send, the hourly DHT
+keys, and that key files are only read from regular files. The fuzz targets (libFuzzer, so
+clang) cover bencode and DHT replies (IPv4 and IPv6), relay JSON and UPnP gateway replies,
 PGP and AGE key import, text cleaning and the input line, and everything a session receives,
-including messages from a room member or a connected peer.
+including messages from a room member or a connected peer, and datagrams that unmask to
+anything at all.
 
 ```sh
 just test               # build and run the engine test
@@ -321,7 +347,7 @@ is looked up (in Tor mode it never is, since the lookup would go around Tor).
 | `Ctrl+J` | join an existing session (id, then password) |
 | `Tab` / `Shift+Tab` | next / previous session (`j` / `k` in NORMAL too) |
 | `PgUp` / `PgDn` | scroll the chat back / forward (`Ctrl+U` / `Ctrl+D` in NORMAL, `G` the newest) |
-| `Ctrl+B` / `Ctrl+O` / `Ctrl+T` | toggle sidebar / console / chat pane |
+| `Ctrl+B` / `Ctrl+O` / `Ctrl+T` | toggle sidebar / console / chat pane (`s` / `c` / `C` in NORMAL) |
 | `Ctrl+S` | settings |
 | `F1` | every key and command on one page (`?` in NORMAL, and `:help`, too) |
 | `Ctrl+C` | quit (every session leaves cleanly first) |
@@ -331,7 +357,7 @@ The row at the bottom is the same on every screen: a chip saying where you are (
 did (until your next key), and what the keys do there.
 
 The input line is a small vim. It starts in NORMAL (`h`/`l` move, `0`/`$` ends, `x` delete,
-`j`/`k` switch session); `i`/`a`/`I`/`A` go to INSERT, where Enter sends, `Ctrl+W` deletes the
+`j`/`k` switch session, `s`/`c`/`C` toggle the sidebar/console/chat); `i`/`a`/`I`/`A` go to INSERT, where Enter sends, `Ctrl+W` deletes the
 word before the cursor and `Ctrl+U` everything before it, and `Esc` goes back to NORMAL. The input box's
 border takes the mode's colour. Password and session-id prompts are plain fields: `Enter`
 confirms, `Esc` cancels, and your draft comes back afterwards.
@@ -379,6 +405,7 @@ values after a name. Under each row's help, the page shows the `:set` that does 
 | `nick`, `colour` | a name; a colour name or `#RRGGBB` |
 | `sign` | `off`, or an `age` or `pgp` key made from a password typed on the page; a key file or pasted key is chosen there too |
 | `notify` | `all`, `mentions`, `none` |
+| `preview` | what a notification shows: `off` (only that a message came), `nick` (who from), `message` (who, and what); never the session |
 | `net` | `normal`, `verbose` (every handshake packet, relay and Tor event) |
 | `port` | the UDP port for new sessions (`0` picks a free one) |
 | `sidebar`, `console`, `chat` | `on`, `off` |
@@ -388,7 +415,7 @@ and the help page all take the same keys: `j`/`k` move, `g`/`G` go to the ends, 
 `Shift+Tab` to the next / previous section, `Enter` chooses, `h`/`l` change a value or go out of
 / into a page, `Esc` goes back and `q` closes the page.
 
-With `--simple`, `:set` covers `nick`, `colour`, `notify` and `net`.
+With `--simple`, `:set` covers `nick`, `colour`, `notify`, `preview` and `net`.
 
 ### Updating
 

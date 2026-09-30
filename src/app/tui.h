@@ -223,6 +223,10 @@ void tui_render(int rows, int cols,
 // Redraws only the input box and the bottom row.
 void tui_render_bar(int rows, int cols, const tui_view_t *view, const tui_bar_t *bar, int color_enabled);
 
+// A whole frame the same as the last one drawn isn't sent again. After anything that may have
+// changed the screen behind chat's back (a resize), this makes the next one go out regardless.
+void tui_invalidate(void);
+
 // How a row's value is drawn: as it is, as a switch, as a choice h/l steps through, as a way into
 // another page, or dim.
 typedef enum { TUI_V_TEXT = 0, TUI_V_ON, TUI_V_OFF, TUI_V_CHOICE, TUI_V_LINK, TUI_V_MUTED } tui_value_kind_t;

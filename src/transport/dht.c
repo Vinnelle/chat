@@ -7,8 +7,26 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <time.h>
 
 #include "platform/platform.h"
+
+#if defined(__STDC_NO_ATOMICS__)
+typedef volatile int job_state_t;
+#define JOB_ATOMIC 0
+#else
+#include <stdatomic.h>
+typedef _Atomic int job_state_t;
+#define JOB_ATOMIC 1
+#endif
+enum { JOB_RUNNING, JOB_DONE, JOB_ABANDONED };
+
+struct dht_boot_job {
+    job_state_t state;
+    int want[2];
+    addr_t out[DHT_BOOT_MAX];
+    int n;
+};
 
 static const struct { const char *host; uint16_t port; } BOOTSTRAP[4] = {
     { "router.bittorrent.com", 6881 },
@@ -17,22 +35,17 @@ static const struct { const char *host; uint16_t port; } BOOTSTRAP[4] = {
     { "dht.libtorrent.org", 25401 },
 };
 
-void dht_init(dht_state_t *d, const uint8_t infohash[20], uint16_t my_port, int want_v4, int want_v6) {
+void dht_init(dht_state_t *d, const uint8_t key[DHT_KEY_LEN], uint16_t my_port, int want_v4, int want_v6) {
     memset(d, 0, sizeof *d);
-    memcpy(d->infohash, infohash, 20);
+    memcpy(d->key, key, DHT_KEY_LEN);
     d->my_port = my_port;
     d->want[DHT_V4] = want_v4;
     d->want[DHT_V6] = want_v6;
     gen_random(d->node_id, 20);
-    DHT_STORE(&d->n_boot, 0);
-    DHT_STORE(&d->resolving, 0);
 }
 
-typedef struct { dht_state_t *d; } resolve_arg_t;
-
 static void resolve_thread(void *arg) {
-    dht_state_t *d = ((resolve_arg_t *)arg)->d;
-    addr_t got[DHT_BOOT_MAX];
+    dht_boot_job_t *job = arg;
     int n = 0, per_fam[2] = { 0, 0 };
     for (int i = 0; i < 4 && n < DHT_BOOT_MAX; i++) {
         addr_t found[ADDR_RESOLVE_MAX];
@@ -40,29 +53,89 @@ static void resolve_thread(void *arg) {
         for (int j = 0; j < k && n < DHT_BOOT_MAX; j++) {
             int fam = found[j].is_v6 ? DHT_V6 : DHT_V4;
             // Half the slots each, so one family's many addresses can't crowd out the other's.
-            if (!d->want[fam] || per_fam[fam] >= DHT_BOOT_MAX / 2) continue;
+            if (!job->want[fam] || per_fam[fam] >= DHT_BOOT_MAX / 2) continue;
             int dup = 0;
-            for (int m = 0; m < n; m++) if (addr_equal(got[m], found[j])) { dup = 1; break; }
-            if (!dup) { got[n++] = found[j]; per_fam[fam]++; }
+            for (int m = 0; m < n; m++) if (addr_equal(job->out[m], found[j])) { dup = 1; break; }
+            if (!dup) { job->out[n++] = found[j]; per_fam[fam]++; }
         }
     }
-    if (n > 0) memcpy(d->boot, got, sizeof(addr_t) * (size_t)n);
-    DHT_STORE(&d->n_boot, n);
-    DHT_STORE(&d->resolving, 0);
-    free(arg);
+    job->n = n;
+#if JOB_ATOMIC
+    if (atomic_exchange(&job->state, JOB_DONE) == JOB_ABANDONED) free(job);
+#else
+    job->state = JOB_DONE;
+#endif
+}
+
+static void drop_job(dht_state_t *d) {
+    if (!d->job) return;
+#if JOB_ATOMIC
+    if (atomic_exchange(&d->job->state, JOB_ABANDONED) == JOB_DONE) free(d->job);
+#else
+    if (d->job->state == JOB_DONE) free(d->job);
+    else d->job->state = JOB_ABANDONED;   // left for good: without atomics, never freed
+#endif
+    d->job = NULL;
+}
+
+// Takes the bootstrap list from a lookup that has finished.
+static void collect_job(dht_state_t *d) {
+    if (!d->job) return;
+#if JOB_ATOMIC
+    if (atomic_load(&d->job->state) != JOB_DONE) return;
+#else
+    if (d->job->state != JOB_DONE) return;
+#endif
+    d->n_boot = d->job->n;
+    memcpy(d->boot, d->job->out, sizeof(addr_t) * (size_t)d->n_boot);
+    free(d->job);
+    d->job = NULL;
 }
 
 void dht_start_bootstrap_resolve(dht_state_t *d) {
-    if (DHT_LOAD(&d->resolving)) return;
-    resolve_arg_t *arg = malloc(sizeof *arg);
-    if (!arg) return;
-    arg->d = d;
-    DHT_STORE(&d->resolving, 1);
-    if (platform_spawn_thread(resolve_thread, arg) != 0) { DHT_STORE(&d->resolving, 0); free(arg); }
+    if (d->job) return;
+    dht_boot_job_t *job = calloc(1, sizeof *job);
+    if (!job) return;
+    job->state = JOB_RUNNING;
+    job->want[DHT_V4] = d->want[DHT_V4];
+    job->want[DHT_V6] = d->want[DHT_V6];
+    d->job = job;
+    if (platform_spawn_thread(resolve_thread, job) != 0) { free(job); d->job = NULL; }
 }
 
-int dht_bootstrap_ready(const dht_state_t *d) {
-    return DHT_LOAD(&((dht_state_t *)d)->n_boot) > 0;
+void dht_stop(dht_state_t *d) {
+    drop_job(d);
+    crypto_wipe(d->key, sizeof d->key);
+    d->n_boot = 0;
+    d->lk[DHT_V4].active = d->lk[DHT_V6].active = 0;
+}
+
+void dht_rebootstrap(dht_state_t *d) {
+    drop_job(d);
+    d->n_boot = 0;
+    d->next_resolve = 0;
+    d->resolve_tries = 0;
+    d->next_lookup = 0;
+}
+
+int dht_bootstrap_ready(const dht_state_t *d) { return d->n_boot > 0; }
+
+// This round's lookup key: this hour's, or the other hour's in a round straight after while the
+// hour's change is near.
+static void pick_infohash(dht_state_t *d) {
+    long long wall = (long long)time(NULL);
+    long long epoch = wall / DHT_EPOCH, into = wall % DHT_EPOCH, use = epoch;
+    if (d->alt_pending) {
+        use = d->alt_epoch;
+        d->alt_pending = 0;
+    } else if (into < DHT_EPOCH_OVERLAP) {
+        d->alt_epoch = epoch - 1;
+        d->alt_pending = 1;
+    } else if (into >= DHT_EPOCH - DHT_EPOCH_OVERLAP) {
+        d->alt_epoch = epoch + 1;
+        d->alt_pending = 1;
+    }
+    dht_epoch_infohash(d->key, use, d->infohash);
 }
 
 static void xor_distance(const uint8_t a[20], const uint8_t b[20], uint8_t out[20]) {
@@ -175,15 +248,13 @@ static void start_lookup(dht_state_t *d, dht_lookup_t *lk, int fam, double now) 
     lk->t0 = now;
     lk->active = 1;
     lk->dirty = 1;
-    int n_boot = DHT_LOAD(&d->n_boot);
-    if (n_boot > DHT_BOOT_MAX) n_boot = DHT_BOOT_MAX;
-    for (int i = 0; i < n_boot; i++)
+    for (int i = 0; i < d->n_boot; i++)
         if (d->boot[i].is_v6 == (fam == DHT_V6)) find_or_add_cand(lk, d->boot[i]);
     // A family no bootstrap server answers for starts empty and fills from the other's replies.
 }
 
 static void maybe_reresolve(dht_state_t *d, double now) {
-    if (DHT_LOAD(&d->resolving) || DHT_LOAD(&d->n_boot) > 0) return;
+    if (d->job || d->n_boot > 0) return;
     if (now < d->next_resolve) return;
     int shift = d->resolve_tries < 6 ? d->resolve_tries : 6;
     double delay = 5.0 * (double)(1u << shift);
@@ -246,10 +317,12 @@ static int lookup_step(dht_state_t *d, dht_lookup_t *lk, sock_t sock, double now
 int dht_step(dht_state_t *d, sock_t sock, double now,
              void (*on_candidate)(void *ctx, addr_t a), void *ctx) {
     (void)on_candidate; (void)ctx;
+    collect_job(d);
     int any_active = d->lk[DHT_V4].active || d->lk[DHT_V6].active;
     if (!any_active) {
         maybe_reresolve(d, now);
-        if (now >= d->next_lookup && !DHT_LOAD(&d->resolving) && DHT_LOAD(&d->n_boot) > 0) {
+        if (now >= d->next_lookup && !d->job && d->n_boot > 0) {
+            pick_infohash(d);
             for (int fam = 0; fam < 2; fam++)
                 if (d->want[fam]) start_lookup(d, &d->lk[fam], fam, now);
         }
@@ -259,7 +332,7 @@ int dht_step(dht_state_t *d, sock_t sock, double now,
     for (int fam = 0; fam < 2; fam++)
         if (d->lk[fam].active) finished |= lookup_step(d, &d->lk[fam], sock, now);
     if (finished && !d->lk[DHT_V4].active && !d->lk[DHT_V6].active) {
-        d->next_lookup = now + (d->peers_now ? DHT_RELOOKUP_CONNECTED : DHT_RELOOKUP_IDLE);
+        d->next_lookup = d->alt_pending ? now : now + (d->peers_now ? DHT_RELOOKUP_CONNECTED : DHT_RELOOKUP_IDLE);
         if (!d->told_dht) d->told_dht = 1;
         return 1;
     }

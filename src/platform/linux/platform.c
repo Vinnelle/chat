@@ -48,6 +48,10 @@ void platform_harden_process(void) {
         ml.rlim_cur = ml.rlim_max;
         setrlimit(RLIMIT_MEMLOCK, &ml);
     }
+
+    // A write to a pipe whose reader has gone (--simple into a pager that quit, say) is an
+    // error to handle, not a signal that kills chat before its sessions say bye.
+    signal(SIGPIPE, SIG_IGN);
 }
 
 int platform_env_take(const char *name, char *out, size_t outlen) {
@@ -66,11 +70,36 @@ int term_stdout_is_tty(void) { return isatty(STDOUT_FILENO); }
 
 extern char **environ;
 
+// Standard handles on /dev/null, every signal back to its default (chat ignores SIGPIPE) and none
+// blocked: how chat runs curl and notify-send. path is absolute, never searched for.
+static int spawn_quiet(pid_t *pid, const char *path, char *const argv[]) {
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_addopen(&fa, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+    posix_spawn_file_actions_adddup2(&fa, STDOUT_FILENO, STDERR_FILENO);
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
+    sigset_t none, all;
+    sigemptyset(&none);
+    sigfillset(&all);
+    posix_spawnattr_setsigmask(&attr, &none);
+    posix_spawnattr_setsigdefault(&attr, &all);
+    int rc = posix_spawn(pid, path, &fa, &attr, argv, environ);
+    posix_spawnattr_destroy(&attr);
+    posix_spawn_file_actions_destroy(&fa);
+    return rc;
+}
+
 #define NOTIFY_MAX_INFLIGHT 4
 
 typedef struct { char title[160]; char body[1400]; } notify_job_t;
 
 static int g_notify_inflight;
+// notify-send, looked for once (on the main thread, before any notification thread reads it).
+static char g_notify_prog[4096];
+static int g_notify_found;   // 0 not looked for yet, 1 found, -1 not installed
 
 static void markup_escape(const char *in, char *out, size_t outlen) {
     size_t o = 0;
@@ -90,21 +119,18 @@ static void markup_escape(const char *in, char *out, size_t outlen) {
 
 static void notify_run(void *arg) {
     notify_job_t *j = (notify_job_t *)arg;
-    posix_spawn_file_actions_t fa;
-    posix_spawn_file_actions_init(&fa);
-    posix_spawn_file_actions_addopen(&fa, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
-    posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
-    posix_spawn_file_actions_adddup2(&fa, STDOUT_FILENO, STDERR_FILENO);
     char *argv[] = { (char *)"notify-send", (char *)"--app-name=chat", (char *)"--", j->title, j->body, NULL };
     pid_t pid;
-    if (posix_spawnp(&pid, "notify-send", &fa, NULL, argv, environ) == 0)
+    if (spawn_quiet(&pid, g_notify_prog, argv) == 0)
         while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
-    posix_spawn_file_actions_destroy(&fa);
     free(j);
     __atomic_sub_fetch(&g_notify_inflight, 1, __ATOMIC_RELAXED);
 }
 
 void platform_notify(const char *title, const char *body) {
+    if (!g_notify_found)
+        g_notify_found = platform_find_program("notify-send", NULL, g_notify_prog, sizeof g_notify_prog) == 0 ? 1 : -1;
+    if (g_notify_found < 0) return;
     if (__atomic_add_fetch(&g_notify_inflight, 1, __ATOMIC_RELAXED) > NOTIFY_MAX_INFLIGHT) {
         __atomic_sub_fetch(&g_notify_inflight, 1, __ATOMIC_RELAXED);
         return;
@@ -153,6 +179,8 @@ void platform_write_stdout(const char *buf, size_t len) {
     fflush(stdout);
     while (len > 0) {
         ssize_t n = write(STDOUT_FILENO, buf, len);
+        // A resize (SIGWINCH) mid-frame mustn't cut the frame short.
+        if (n < 0 && errno == EINTR) continue;
         if (n <= 0) return;
         buf += n; len -= (size_t)n;
     }
@@ -171,6 +199,7 @@ void term_get_size(int *rows, int *cols) {
 void term_watch_resize(void) {
     struct sigaction sa; memset(&sa, 0, sizeof sa);
     sa.sa_handler = on_winch;
+    sa.sa_flags = SA_RESTART;
     sigaction(SIGWINCH, &sa, NULL);
 }
 
@@ -346,6 +375,25 @@ FILE *platform_fopen_private(const char *utf8_path, const char *mode) {
     return f;
 }
 
+long platform_read_file(const char *utf8_path, void *buf, size_t cap) {
+    int fd = open(utf8_path, O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    struct stat st;
+    long got = -1;
+    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) {
+        size_t n = 0;
+        while (n < cap) {
+            ssize_t r = read(fd, (char *)buf + n, cap - n);
+            if (r < 0 && errno == EINTR) continue;
+            if (r <= 0) break;
+            n += (size_t)r;
+        }
+        got = (long)n;
+    }
+    close(fd);
+    return got;
+}
+
 double now_seconds(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -395,16 +443,13 @@ int platform_exe_path(char *out, size_t cap) {
 }
 
 int platform_run_quiet(const char *const argv[]) {
-    posix_spawn_file_actions_t fa;
-    posix_spawn_file_actions_init(&fa);
-    posix_spawn_file_actions_addopen(&fa, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
-    posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
-    posix_spawn_file_actions_adddup2(&fa, STDOUT_FILENO, STDERR_FILENO);
+    // Found as tor is: from an absolute PATH entry or a usual folder, and a program nobody but root
+    // or this user can change. posix_spawnp would also try relative entries, "." among them.
+    char path[4096];
+    if (platform_find_program(argv[0], NULL, path, sizeof path) != 0) return -1;
     pid_t pid;
     int status = -1;
-    int rc = posix_spawnp(&pid, argv[0], &fa, NULL, (char *const *)argv, environ);
-    posix_spawn_file_actions_destroy(&fa);
-    if (rc != 0) return -1;
+    if (spawn_quiet(&pid, path, (char *const *)argv) != 0) return -1;
     while (waitpid(pid, &status, 0) < 0) if (errno != EINTR) return -1;
     return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : -1;
 }
@@ -454,21 +499,28 @@ void platform_ca_roots(void (*add_der)(void *ctx, const uint8_t *der, size_t len
         if (add_file(ctx, BUNDLES[i]) == 0) return;
 }
 
+// Owned by root or this user, and writable by no one else: no other user, and no group but
+// root's or this user's own (any other group could hold anyone).
+static int only_ours(const struct stat *st) {
+    if (st->st_uid != 0 && st->st_uid != geteuid()) return 0;
+    if (st->st_mode & S_IWOTH) return 0;
+    return !(st->st_mode & S_IWGRP) || st->st_gid == 0 || st->st_gid == getegid();
+}
+
 // A program chat will run: a regular executable file nobody else can swap out, in a folder
 // nobody else can write to.
 static int program_ok(const char *path, char *out, size_t cap) {
     char real[4096];
     if (path[0] != '/' || !realpath(path, real)) return -1;
     struct stat st;
-    if (stat(real, &st) != 0 || !S_ISREG(st.st_mode) || access(real, X_OK) != 0) return -1;
-    if ((st.st_mode & S_IWOTH) || (st.st_uid != 0 && st.st_uid != geteuid())) return -1;
+    if (stat(real, &st) != 0 || !S_ISREG(st.st_mode) || access(real, X_OK) != 0 || !only_ours(&st)) return -1;
     char dir[4096];
     copy_str(dir, real, sizeof dir);
     char *slash = strrchr(dir, '/');
     if (!slash) return -1;
     if (slash == dir) slash[1] = '\0'; else *slash = '\0';
     struct stat ds;
-    if (stat(dir, &ds) != 0 || (ds.st_mode & S_IWOTH) || (ds.st_uid != 0 && ds.st_uid != geteuid())) return -1;
+    if (stat(dir, &ds) != 0 || !only_ours(&ds)) return -1;
     if (strlen(real) >= cap) return -1;
     copy_str(out, real, cap);
     return 0;

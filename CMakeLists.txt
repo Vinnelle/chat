@@ -20,6 +20,12 @@ endif()
 
 include(ExternalProject)
 
+# Each function and object in a section of its own, so --gc-sections drops what chat never calls.
+set(DEP_SECTION_FLAGS "")
+if(NOT MSVC)
+    set(DEP_SECTION_FLAGS "-ffunction-sections -fdata-sections")
+endif()
+
 set(DEP_CC_ARGS "")
 set(OQS_CROSS_ARGS "")
 if(CMAKE_CROSSCOMPILING)
@@ -31,15 +37,23 @@ endif()
 
 set(SODIUM_VERSION 1.0.20-stable)
 set(SODIUM_PREFIX ${CMAKE_BINARY_DIR}/libsodium-ext)
+# As many compilers at once as there are CPUs: a bare -j starts one per file, which can run a
+# small machine out of memory in the middle of the build.
+include(ProcessorCount)
+ProcessorCount(DEP_JOBS)
+if(DEP_JOBS EQUAL 0)
+    set(DEP_JOBS 2)
+endif()
 ExternalProject_Add(libsodium_ext
     URL https://download.libsodium.org/libsodium/releases/libsodium-${SODIUM_VERSION}.tar.gz
     URL_HASH SHA256=b6b1d2a8802cd8bfa611638c0e9ce31d14ef324e16062c39a76854091cba6d7f
     DOWNLOAD_EXTRACT_TIMESTAMP true
     PREFIX ${SODIUM_PREFIX}
     BUILD_IN_SOURCE 1
+    # CFLAGS given replace libsodium's default -O3, so it's named here along with the sections.
     CONFIGURE_COMMAND <SOURCE_DIR>/configure --disable-shared --enable-static --with-pic
-                       --prefix=${SODIUM_PREFIX}/install ${DEP_CC_ARGS}
-    BUILD_COMMAND ${CMAKE_MAKE_PROGRAM} -j
+                       --prefix=${SODIUM_PREFIX}/install ${DEP_CC_ARGS} "CFLAGS=-O3 ${DEP_SECTION_FLAGS}"
+    BUILD_COMMAND ${CMAKE_MAKE_PROGRAM} -j${DEP_JOBS}
     INSTALL_COMMAND ${CMAKE_MAKE_PROGRAM} install
     BUILD_BYPRODUCTS ${SODIUM_PREFIX}/install/lib/libsodium.a
 )
@@ -48,6 +62,15 @@ set(SODIUM_STATIC_LIB ${SODIUM_PREFIX}/install/lib/libsodium.a)
 
 set(OQS_VERSION 0.16.0)
 set(OQS_PREFIX ${CMAKE_BINARY_DIR}/liboqs-ext)
+# A native build without OQS_DIST_BUILD takes the build machine's CPU features for granted, and a
+# copy on another machine (just test-build) dies on a CPU without them: it picks AVX2 code at run
+# time instead. A cross build (the releases, through zig) has plain C only, since zig's assembler
+# leaves the AVX2 assembly empty; a handshake's ML-KEM takes well under a millisecond either way.
+if(CMAKE_CROSSCOMPILING)
+    set(OQS_DIST OFF)
+else()
+    set(OQS_DIST ON)
+endif()
 ExternalProject_Add(liboqs_ext
     URL https://github.com/open-quantum-safe/liboqs/archive/refs/tags/${OQS_VERSION}.tar.gz
     URL_HASH SHA256=162d5b510518ee5f285f82fa1f16402a885176e818bf1b1a4c3c91c9a2f01eae
@@ -60,16 +83,18 @@ ExternalProject_Add(liboqs_ext
         -DOQS_BUILD_ONLY_LIB=ON
         -DOQS_USE_OPENSSL=OFF
         -DOQS_MINIMAL_BUILD=KEM_ml_kem_768
-        -DOQS_DIST_BUILD=OFF
+        -DOQS_DIST_BUILD=${OQS_DIST}
+        "-DCMAKE_C_FLAGS=${DEP_SECTION_FLAGS}"
         ${OQS_CROSS_ARGS}
     BUILD_BYPRODUCTS ${OQS_PREFIX}/install/lib/liboqs.a
 )
 set(OQS_INCLUDE_DIRS ${OQS_PREFIX}/install/include)
 set(OQS_STATIC_LIB ${OQS_PREFIX}/install/lib/liboqs.a)
 
-# TLS for the Nostr relays' wss:// connections.
+# TLS for the Nostr relays' wss:// connections, configured down to a client (cmake/mbedtls-config.h).
 set(MBEDTLS_VERSION 3.6.7)
 set(MBEDTLS_PREFIX ${CMAKE_BINARY_DIR}/mbedtls-ext)
+set(CHAT_MBEDTLS_CONFIG ${CMAKE_SOURCE_DIR}/cmake/mbedtls-config.h)
 ExternalProject_Add(mbedtls_ext
     URL https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-${MBEDTLS_VERSION}/mbedtls-${MBEDTLS_VERSION}.tar.bz2
     URL_HASH SHA256=a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6
@@ -85,10 +110,14 @@ ExternalProject_Add(mbedtls_ext
         -DUSE_STATIC_MBEDTLS_LIBRARY=ON
         -DMBEDTLS_FATAL_WARNINGS=OFF
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+        -DMBEDTLS_USER_CONFIG_FILE=${CHAT_MBEDTLS_CONFIG}
+        "-DCMAKE_C_FLAGS=${DEP_SECTION_FLAGS}"
         ${OQS_CROSS_ARGS}
     BUILD_BYPRODUCTS ${MBEDTLS_PREFIX}/install/lib/libmbedtls.a ${MBEDTLS_PREFIX}/install/lib/libmbedx509.a
                      ${MBEDTLS_PREFIX}/install/lib/libmbedcrypto.a
 )
+# A change to the config rebuilds the library, as it does chat.
+ExternalProject_Add_StepDependencies(mbedtls_ext configure ${CHAT_MBEDTLS_CONFIG})
 set(MBEDTLS_INCLUDE_DIRS ${MBEDTLS_PREFIX}/install/include)
 set(MBEDTLS_STATIC_LIBS ${MBEDTLS_PREFIX}/install/lib/libmbedtls.a ${MBEDTLS_PREFIX}/install/lib/libmbedx509.a
                         ${MBEDTLS_PREFIX}/install/lib/libmbedcrypto.a)
@@ -114,7 +143,12 @@ ExternalProject_Add(secp256k1_ext
         -DSECP256K1_ENABLE_MODULE_ECDH=OFF
         -DSECP256K1_ENABLE_MODULE_MUSIG=OFF
         -DSECP256K1_ENABLE_MODULE_ELLSWIFT=OFF
+        # chat only signs (each Nostr event, with a key of its own) and never verifies: the
+        # smallest verification tables (1 MiB less), and the middle signing one (64 KiB less).
+        -DSECP256K1_ECMULT_WINDOW_SIZE=2
+        -DSECP256K1_ECMULT_GEN_KB=22
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+        "-DCMAKE_C_FLAGS=${DEP_SECTION_FLAGS}"
         ${OQS_CROSS_ARGS}
     BUILD_BYPRODUCTS ${SECP256K1_PREFIX}/install/lib/libsecp256k1.a
 )
@@ -147,7 +181,7 @@ add_custom_target(build_stamp ALL
     COMMAND ${CMAKE_COMMAND} -DOUT=${CMAKE_BINARY_DIR}/build_stamp.h -DSRC=${CMAKE_SOURCE_DIR} -P ${CMAKE_SOURCE_DIR}/cmake/stamp.cmake
     BYPRODUCTS ${CMAKE_BINARY_DIR}/build_stamp.h)
 add_dependencies(chat libsodium_ext liboqs_ext mbedtls_ext secp256k1_ext build_stamp)
-target_compile_definitions(chat PRIVATE CHAT_VERSION="${PROJECT_VERSION}${CHAT_PRERELEASE}")
+target_compile_definitions(chat PRIVATE CHAT_VERSION="${PROJECT_VERSION}${CHAT_PRERELEASE}" MBEDTLS_USER_CONFIG_FILE="${CHAT_MBEDTLS_CONFIG}")
 
 # /update installs only releases whose SHA256SUMS the key in minisign.pub signed (`just keygen`
 # makes one). Without the file the build still works, but refuses every update.
@@ -267,6 +301,10 @@ if(APPLE)
     chat_try_link_flag(-Wl,-dead_strip)
 else()
     chat_try_link_flag(-Wl,--gc-sections)
+endif()
+# Symbols only make a release bigger: stripped as it's linked. Debug builds keep them.
+if(NOT MSVC AND (CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "MinSizeRel"))
+    chat_try_link_flag(-s)
 endif()
 
 option(CHAT_TESTS "Build the engine test (tests/)" OFF)

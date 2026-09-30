@@ -2,6 +2,73 @@
 
 ## Unreleased
 
+### Security
+- Verify codes and identity fingerprints are 128 bits, shown in groups of four hex digits. A
+  room member between two peers picks both handshakes' keys, so it could search two sets of
+  64-bit codes for a pair that match. The first 16 digits are still what 0.3.1 shows.
+- chat logs in to a tor control port with SAFECOOKIE or a password only. The old COOKIE login
+  sent the cookie file's bytes to whatever answered on the port, and while tor isn't running
+  any local program can listen there and name any file chat can read. The cookie file is read
+  only if it's a regular file of a cookie's size.
+- On Linux, `:update` runs curl and notifications run notify-send only from an absolute `PATH`
+  entry or a usual folder, and only a program no one but root or you can change, as for tor.
+  A relative `PATH` entry such as `.` could run one from the current folder. A program or
+  folder writable by a group other than root's or yours is refused too.
+- Desktop notifications only say that a message came, or that you were mentioned. They showed
+  the sender, the text and the session's id; desktops keep notifications (Windows writes them
+  to disk), and with a blank password the id is all it takes to join. **Notification preview**
+  on the settings page (`:set preview off|nick|message`, also in `--simple`) brings back the
+  sender, or the sender and the text, for whoever wants them. A notification never names the
+  session.
+- Everything chat sends over UDP is masked with a key made from the session id and password,
+  so on the network each datagram is random bytes. The ratchet counter at the front of every
+  session frame, and the marker, id and numbering at the front of every piece of a handshake,
+  went in the clear: enough to pick chat's traffic out of anything else, and to follow a peer
+  from one address to the next by its counter. What still shows is addresses, ports, sizes and
+  timing. The relays and Tor already hide what they carry, and carry it as before.
+- LAN beacons go to a UDP port of the room's own (49152-65535, made from its id and password),
+  not to 47474, which told everyone on the network that chat was running.
+- The DHT lookup key changes every hour. It was the same for a room's whole life, so anyone
+  who saw it once, a DHT node or a crawler, could watch who joined the room for as long as it
+  was used. For ten minutes either side of the hour, the other hour's key is looked up too.
+- With the three changes above, 0.3.1 and this version can't find each other through the DHT
+  or on the LAN, or reach each other over UDP. They meet through the Nostr relays, on by
+  default, or over Tor, which work between them as before.
+- Each connection to a relay subscribes under an id of its own. The same id at every relay,
+  kept through reconnections, let relays that compare notes tie one member's connections
+  together, Tor circuits included.
+- Mbed TLS is built as a TLS client with forward-secret key exchanges only: no server or DTLS
+  code, no renegotiation, no static RSA or DH key exchange, no legacy ciphers, and no PSA key
+  store, which would keep keys in files.
+- The conversation and console as shown, and the screen's buffers, are locked in memory like
+  the keys, so they aren't written to swap (as far as `RLIMIT_MEMLOCK` allows).
+- On Windows, a crash ends chat at once, so Windows Error Reporting can't write a dump of its
+  memory to disk.
+- Cookie challenges are rate-limited, so hellos replayed from a forged address can't make chat
+  a traffic reflector. A session frame from an address no peer has is tried against every
+  peer's keys at a limited rate, so junk of the right size can't use up the CPU.
+- LAN beacons are only taken from real broadcasts, not from room members over the relays or
+  Tor.
+
+### Fixed
+- A message sent just before a peer rekeyed or rejoined could be lost: the re-handshake threw
+  away its retries.
+- Joining or creating a session without the 512 MiB of free memory its key takes quit chat on
+  the spot, leaving the terminal in raw mode and the other sessions without a goodbye. The
+  session now doesn't start, and chat says why.
+- In Tor mode, a long session could no longer reach new members once it had heard of 58 onion
+  addresses. The one used longest ago now makes room.
+- The DHT's bootstrap lookup, which runs on a thread, could write into a session after it
+  closed.
+- A key file, or a Tor cookie file, that was a FIFO or a device hung chat.
+- A native build (`just build`, `just test-build`) used the build machine's CPU features in
+  liboqs unconditionally, so a copy could crash on a CPU without them. It picks AVX2 code at run
+  time now.
+- `--simple` writing into a pipe that closes no longer kills chat before its sessions leave,
+  and a terminal resize no longer cuts a frame short.
+- libsodium's build started a compiler per file at once, which could run a small machine out
+  of memory.
+
 ### Added
 - A page of every key and command: `F1`, `?` in NORMAL, or `:help`. `Enter` on a command puts it
   on the command line.
@@ -15,6 +82,8 @@
   is sent as a message, never refused as an unknown command; `//` does the same straight away.
 - `PgUp` / `PgDn` scroll the chat back and forward (`Ctrl+U` / `Ctrl+D` in NORMAL, `G` back to
   the newest), and the chat's edge says how many newer messages are below.
+- In NORMAL, `s`, `c` and `C` show or hide the sidebar, the console and the chat, as `Ctrl+B`,
+  `Ctrl+O` and `Ctrl+T` do.
 - `Tab` / `Shift+Tab` jump between sections on the settings and help pages.
 - `Ctrl+U` in INSERT deletes everything before the cursor.
 - `NO_COLOR` keeps the UI to bold, faint and reverse.
@@ -38,6 +107,12 @@
 - The settings page lists its sections on the left, draws switches and choices as such, and
   shows each row's `:set` under its help. Text rows are edited in place. The page chat opens on
   ends in **Start chatting**.
+- Release binaries are less than half the size: Linux 1.3 MB instead of 2.9 MB, Windows 1.2 MB
+  instead of 3.0 MB. libsecp256k1 keeps only its signing tables, Mbed TLS only a client,
+  unused code in every dependency is left out when linking, and builds are stripped as they're
+  linked.
+- The full-screen UI sends nothing to the terminal while the screen stays the same. It redrew
+  the whole screen every second, which over SSH was a steady stream.
 
 ## 0.3.1
 

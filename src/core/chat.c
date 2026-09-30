@@ -258,6 +258,16 @@ static double jitter(double spread) {
     return spread * ((double)r / 4294967296.0);
 }
 
+// A token from a bucket that fills at rate a second, up to burst: 1 if there was one to take.
+static int take_token(double *tokens, double *at, double now, double rate, double burst) {
+    if (now > *at) *tokens += (now - *at) * rate;
+    if (*tokens > burst) *tokens = burst;
+    *at = now;
+    if (*tokens < 1.0) return 0;
+    *tokens -= 1.0;
+    return 1;
+}
+
 static double retry_delay(int tries) {
     int shift = tries < HELLO_MAX_BACKOFF ? tries : HELLO_MAX_BACKOFF;
     double d = RETRY_BASE * (double)(1u << shift);
@@ -299,7 +309,8 @@ static void rekey_drop_overlap(peer_t *p) {
 }
 
 // Every datagram leaves through here, to UDP, the relays or Tor as its address says. In Tor mode
-// nothing goes out over UDP at all.
+// nothing goes out over UDP at all. What goes over UDP is masked first, so on the network it's
+// random bytes; the relays and Tor hide what they carry already, and take it as 0.3.1 sends it.
 static void xmit(chat_t *c, sock_t sock, const void *data, size_t len, addr_t to) {
     switch (to.kind) {
         case ADDR_NOSTR:
@@ -308,9 +319,13 @@ static void xmit(chat_t *c, sock_t sock, const void *data, size_t len, addr_t to
         case ADDR_TOR:
             if (c->tor) tor_send(c->tor, to, data, len, now_seconds());
             return;
-        default:
+        default: {
             if (c->route.mode == ROUTE_TOR || sock == SOCK_INVALID) return;
-            net_send(sock, data, len, to);
+            uint8_t masked[HANDSHAKE_BUF_LEN + 128];
+            if (len > sizeof masked) return;
+            memcpy(masked, data, len);
+            if (udp_mask(c->udp_key, masked, len) == 0) net_send(sock, masked, len, to);
+        }
     }
 }
 
@@ -519,11 +534,12 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
     peer_t carry;
     int rejoin = 0;
     if (existing && existing->ok) { carry = *existing; rejoin = 1; }
-    if (existing) forget_peer(c, existing);
     {
         int si = (int)(slot - c->peers) + 1;
         if (si > c->peer_hi) c->peer_hi = si;
     }
+    // The same peer again takes its own slot, wiped here rather than forgotten: its messages still
+    // waiting for an ack stay, and go out again on the new chains, so a rekey can't lose one.
     crypto_wipe(slot, sizeof *slot);
     slot->used = 1;
     memcpy(slot->id, peer_id, ID_LEN);
@@ -842,7 +858,7 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
             if (p->identity_source == IDENT_NONE) {
                 ui_print(c, "* warning: %s no longer presents a signing identity", name);
             } else if (memcmp(had_pub, p->identity_pub, ID_SIGN_PUB_LEN) != 0) {
-                char fphex[ID_FP_LEN * 2 + 1]; hex_encode(p->identity_fp, ID_FP_LEN, fphex);
+                char fphex[HEX_GROUPS_LEN(ID_FP_LEN)]; hex_groups(p->identity_fp, ID_FP_LEN, fphex);
                 ui_print(c, "* warning: %s now presents a different signing identity (fingerprint %s) - :verify it again",
                          name, fphex);
             } else if (p->identity_state == VERIFY_FAILED && had_state != VERIFY_FAILED) {
@@ -912,8 +928,10 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         if (direct) copy_str(shown, via, sizeof shown);
         else snprintf(shown, sizeof shown, "%s#%.8s (via %s)", nick, f[2], via);
         ui_chat(c, direct ? p->color : NULL, mentioned, shown, text);
+        // Only as much as the preview setting lets out: desktops keep what a notification shows.
         if (c->notify && (c->notify_mode == NOTIFY_ALL || (c->notify_mode == NOTIFY_MENTIONS && mentioned)))
-            c->notify(c->ui, shown, text, mentioned);
+            c->notify(c->ui, c->notify_preview >= PREVIEW_NICK ? shown : NULL,
+                      c->notify_preview == PREVIEW_MESSAGE ? text : NULL, mentioned);
         char rejoin[MSG_LINE_LEN];
         snprintf(rejoin, sizeof rejoin, "m\t%s\t%s\t%s\t%s", f[1], f[2], nick, text);
         for (int i = 0; i < c->peer_hi; i++) {
@@ -973,7 +991,8 @@ static void on_room(chat_t *c, char *plain, addr_t addr, double now) {
             connect_peer(c, peer_id, addr, pub, kem_pub, now);
             peer_t *p = find_peer_by_id(c, peer_id);
             if (p) probe_path(c, p, addr);
-        } else if (existing || !(c->once && c->once_used)) {
+        } else if ((existing || !(c->once && c->once_used))
+                   && take_token(&c->ck_tokens, &c->ck_at, now, CK_RATE, CK_BURST)) {
             uint8_t cookie[COOKIE_LEN];
             cookie_compute(c->cookie_secret, addr_str, peer_id, pub, cookie);
             char cookiehex[33]; hex_encode(cookie, COOKIE_LEN, cookiehex);
@@ -1034,7 +1053,9 @@ static void on_room(chat_t *c, char *plain, addr_t addr, double now) {
         peer_t *known = find_peer_by_id(c, peer_id);
         if (known && known->ok && now - known->seen < UDP_STALE) return;
         add_candidate(c, addr_virtual(ADDR_NOSTR, peer_id));
-    } else if (n == 3 && strcmp(f[0], "lan") == 0 && strcmp(f[1], my_idhex) != 0) {
+    } else if (n == 3 && strcmp(f[0], "lan") == 0 && addr.kind == ADDR_UDP && strcmp(f[1], my_idhex) != 0) {
+        // Only a real broadcast says where on the LAN someone is: over the relays or a Tor stream
+        // the port would be rewritten onto an address that stands for a peer.
         c->st.lan++;
         int port = atoi(f[2]);
         if (port > 0 && port <= 65535) {
@@ -1045,7 +1066,8 @@ static void on_room(chat_t *c, char *plain, addr_t addr, double now) {
     }
 }
 
-static void on_frame(chat_t *c, uint8_t *data, size_t len, addr_t addr, double now);
+// 1 if data was a frame: the room's, or a peer's session frame.
+static int on_frame(chat_t *c, uint8_t *data, size_t len, addr_t addr, double now);
 
 static int on_chunk(chat_t *c, const uint8_t *d, size_t len, addr_t addr, double now) {
     if (len <= CHUNK_HDR || len > CHUNK_HDR + CHUNK_PAYLOAD) return 0;
@@ -1080,7 +1102,7 @@ static int on_chunk(chat_t *c, const uint8_t *d, size_t len, addr_t addr, double
     memcpy(whole, slot->buf, total);
     slot->used = 0;
     c->st.rx_chunk_done++;
-    on_frame(c, whole, total, addr, now);
+    if (!on_frame(c, whole, total, addr, now)) c->st.other++;
     return 1;
 }
 
@@ -1091,11 +1113,26 @@ static void note_source(chat_t *c, addr_t a) {
     st->src[slot] = a; st->src_n[slot] = 1;
 }
 
-static void on_packet(chat_t *c, uint8_t *data, size_t len, addr_t addr, double now) {
+// A datagram off a UDP socket, unmasked: a piece of a room frame, or a frame. What isn't one is
+// handed to the DHT as it came, since DHT messages are never masked.
+static void on_udp(chat_t *c, const uint8_t *raw, size_t len, addr_t addr, double now) {
     c->st.rx++;
     note_source(c, addr);
-    if (on_chunk(c, data, len, addr, now)) return;
-    on_frame(c, data, len, addr, now);
+    uint8_t d[HANDSHAKE_BUF_LEN + 128];
+    if (len <= sizeof d) {
+        memcpy(d, raw, len);
+        if (udp_mask(c->udp_key, d, len) == 0 && (on_chunk(c, d, len, addr, now) || on_frame(c, d, len, addr, now)))
+            return;
+    }
+    c->st.other++;
+    if (c->dht_on && addr.kind == ADDR_UDP) dht_on_packet(&c->dht, raw, len, addr, dht_candidate_cb, c);
+}
+
+// A datagram through the relays or Tor, which carry frames whole, and unmasked.
+static void on_relayed(chat_t *c, uint8_t *data, size_t len, addr_t addr, double now) {
+    c->st.rx++;
+    note_source(c, addr);
+    if (!on_frame(c, data, len, addr, now)) c->st.other++;
 }
 
 static int in_window(const ratchet_t *r, uint32_t index, uint32_t max_skip) {
@@ -1144,33 +1181,35 @@ static void announce_join(chat_t *c, peer_t *p) {
         if (!c->gone[g].used || memcmp(c->gone[g].id, p->id, ID_LEN) != 0) continue;
         c->gone[g].used = 0;
         if (memcmp(c->gone[g].vfy, p->vfy, VERIFY_LEN) == 0) continue;
-        char was[VERIFY_LEN * 2 + 1], now_hex[VERIFY_LEN * 2 + 1];
-        hex_encode(c->gone[g].vfy, VERIFY_LEN, was); hex_encode(p->vfy, VERIFY_LEN, now_hex);
+        char was[HEX_GROUPS_LEN(VERIFY_LEN)], now_hex[HEX_GROUPS_LEN(VERIFY_LEN)];
+        hex_groups(c->gone[g].vfy, VERIFY_LEN, was); hex_groups(p->vfy, VERIFY_LEN, now_hex);
         ui_print(c, "* %s reconnected with a new verify code (was %s, now %s) - if you had compared "
                     "codes with them, compare the new one", name, was, now_hex);
     }
     tell_build(c, p);
 }
 
-static void on_frame(chat_t *c, uint8_t *data, size_t len, addr_t addr, double now) {
+static int on_frame(chat_t *c, uint8_t *data, size_t len, addr_t addr, double now) {
     uint8_t plain[HANDSHAKE_BUF_LEN + 128];
     size_t plain_len;
     if (room_unseal(c->room_key, data, len, plain, sizeof plain - 1, &plain_len) == 0) {
         plain[plain_len] = '\0';
         c->st.room_ok++;
         on_room(c, (char *)plain, addr, now);
-        return;
+        return 1;
     }
     // Checked before the peer loop: a frame no sealer could make shouldn't cost ratchet steps.
     if (sealed_len_ok(len, SESSION_HEADER_LEN, SESSION_PAD_TARGET)) {
         uint32_t index = ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) | ((uint32_t)data[2] << 8) | data[3];
         int hit = -1, fast = -1, on_old = 0;
-        for (int i = 0; i < c->peer_hi; i++)
-            if (c->peers[i].used && addr_equal(c->peers[i].addr, addr)) { fast = i; break; }
+        for (int i = 0; i < c->peer_hi && fast < 0; i++)
+            if (c->peers[i].used && addr_equal(c->peers[i].addr, addr)) fast = i;
+        for (int i = 0; i < c->peer_hi && fast < 0; i++)
+            if (c->peers[i].used && c->peers[i].prev_addr.port && addr_equal(c->peers[i].prev_addr, addr)) fast = i;
         if (fast >= 0 && peer_try_unseal(&c->peers[fast], data, len, index, RATCHET_MAX_SKIP, plain,
                                           sizeof plain - 1, &plain_len, &on_old))
             hit = fast;
-        if (hit < 0) {
+        if (hit < 0 && take_token(&c->roam_tokens, &c->roam_at, now, ROAM_RATE, ROAM_BURST)) {
             for (int i = 0; i < c->peer_hi; i++) {
                 if (i == fast || !c->peers[i].used) continue;
                 if (peer_try_unseal(&c->peers[i], data, len, index, ROAM_MAX_SKIP, plain, sizeof plain - 1,
@@ -1189,15 +1228,17 @@ static void on_frame(chat_t *c, uint8_t *data, size_t len, addr_t addr, double n
             // The best path that works: direct UDP, then Tor (end to end, no relay in the middle),
             // then the relays. A worse path takes over only once the better one goes quiet.
             if (!addr_equal(p->addr, addr)
-                && (path_rank(addr) >= path_rank(p->addr) || now - p->path_seen[p->addr.kind] > UDP_STALE))
+                && (path_rank(addr) >= path_rank(p->addr) || now - p->path_seen[p->addr.kind] > UDP_STALE)) {
+                p->prev_addr = p->addr;
                 p->addr = addr;
+            }
             p->path_seen[addr.kind] = now;
             p->seen = now;
             int was_pending = !p->ok;
             p->ok = 1;
             if (was_pending) p->ok_since = now;
             on_session(c, p, (char *)plain, now);
-            if (!p->used) return;
+            if (!p->used) return 1;
             if (was_pending) {
                 c->st.connects++;
 
@@ -1212,11 +1253,10 @@ static void on_frame(chat_t *c, uint8_t *data, size_t len, addr_t addr, double n
                 introduce(c, p);
             }
             if (!p->announced && p->k_seen) announce_join(c, p);
-            return;
+            return 1;
         }
     }
-    c->st.other++;
-    if (c->dht_on && addr.kind == ADDR_UDP) dht_on_packet(&c->dht, data, len, addr, dht_candidate_cb, c);
+    return 0;
 }
 
 int chat_sockets(chat_t *c, sock_t out[CHAT_MAX_SOCKS]) {
@@ -1230,6 +1270,11 @@ int chat_sockets(chat_t *c, sock_t out[CHAT_MAX_SOCKS]) {
 }
 
 int chat_started(const chat_t *c) { return c->started; }
+
+const char *chat_start_error(const chat_t *c) {
+    if (c->started) return NULL;
+    return c->start_error ? c->start_error : "it couldn't start";
+}
 
 int chat_online_count(const chat_t *c) { return live_count((chat_t *)c); }
 int chat_pending_count(const chat_t *c) { return pending_peer_count((chat_t *)c); }
@@ -1254,7 +1299,7 @@ void chat_on_socket_readable(chat_t *c, sock_t which, double now) {
     for (int i = 0; i < 64; i++) {
         int n = net_recv(which, buf, sizeof buf, &from);
         if (n < 0) break;
-        on_packet(c, buf, (size_t)n, from, now);
+        on_udp(c, buf, (size_t)n, from, now);
     }
 }
 
@@ -1412,6 +1457,7 @@ void chat_tick(chat_t *c, double now) {
             // Its path gone quiet (UDP, or a Tor stream): try the relays. Frames that come back
             // through them move the peer there.
             if (c->nostr && p->addr.kind != ADDR_NOSTR && now - p->seen > UDP_STALE) {
+                p->prev_addr = p->addr;
                 p->addr = addr_virtual(ADDR_NOSTR, p->id);
                 if (c->net_verbose) ui_print(c, "* %s went quiet - trying the relays", p->nick);
             }
@@ -1429,8 +1475,8 @@ void chat_tick(chat_t *c, double now) {
         if (c->net_verbose) ui_print(c, "* lan beacon sent");
         char idhex[33]; hex_encode(c->my_id, ID_LEN, idhex);
         char beacon[64]; snprintf(beacon, sizeof beacon, "lan\t%s\t%u", idhex, (unsigned)c->port);
-        send_room(c, beacon, addr_broadcast_lan(LAN_PORT), c->lan_sock);
-        send_room(c, beacon, addr_loopback(LAN_PORT), c->lan_sock);
+        send_room(c, beacon, addr_broadcast_lan(c->lan_port), c->lan_sock);
+        send_room(c, beacon, addr_loopback(c->lan_port), c->lan_sock);
     }
     for (int i = 0; i < c->peer_hi; i++) {
         peer_t *p = &c->peers[i];
@@ -1598,7 +1644,7 @@ static cmd_result_t cmd_peers(void *ctx, const char *arg) {
         if (!p->used || !p->ok) continue;
         if (n++ == 0) ui_print(c, "* online: %s (you), and:", c->nick);
         char idhex[9]; hex_encode(p->id, 4, idhex);
-        char vfyhex[VERIFY_LEN * 2 + 1]; hex_encode(p->vfy, VERIFY_LEN, vfyhex);
+        char vfyhex[HEX_GROUPS_LEN(VERIFY_LEN)]; hex_groups(p->vfy, VERIFY_LEN, vfyhex);
         char build[64]; chat_build_label(p, build, sizeof build);
         ui_print(c, "*   %s#%s (verify %s, %s, %s%s)", p->nick, idhex, vfyhex, chat_verify_label(p->identity_state),
                  build, p->persists ? ", logging" : "");
@@ -1622,7 +1668,7 @@ static cmd_result_t cmd_verify(void *ctx, const char *arg) {
         if (p->identity_source == IDENT_NONE) {
             ui_print(c, "* %s#%s presented no identity - nothing to verify", p->nick, idhex);
         } else {
-            char fphex[ID_FP_LEN * 2 + 1]; hex_encode(p->identity_fp, ID_FP_LEN, fphex);
+            char fphex[HEX_GROUPS_LEN(ID_FP_LEN)]; hex_groups(p->identity_fp, ID_FP_LEN, fphex);
             ui_print(c, "* %s#%s fingerprint %s (%s) - read it out over another channel to be sure it's really them",
                      p->nick, idhex, fphex, chat_verify_label(p->identity_state));
         }
@@ -1632,6 +1678,7 @@ static cmd_result_t cmd_verify(void *ctx, const char *arg) {
 }
 
 static const char *const NOTIFY_NAMES[] = { "none", "mentions", "all" };
+static const char *const PREVIEW_NAMES[] = { "off", "nick", "message" };
 static const char *const NET_LOG_NAMES[] = { "normal", "verbose" };
 
 static int name_index(const char *const *names, int n, const char *s) {
@@ -1647,8 +1694,8 @@ static cmd_result_t cmd_set(void *ctx, const char *arg) {
     const char *value = cmd_parse(arg, key);
     char hex[7]; color_to_hex(c->my_color, hex);
     if (!key[0]) {
-        ui_print(c, "* nick %s, colour #%s, notify %s, net %s - :set NAME VALUE changes one", c->nick, hex,
-                 NOTIFY_NAMES[c->notify_mode], NET_LOG_NAMES[c->net_verbose != 0]);
+        ui_print(c, "* nick %s, colour #%s, notify %s, preview %s, net %s - :set NAME VALUE changes one", c->nick, hex,
+                 NOTIFY_NAMES[c->notify_mode], PREVIEW_NAMES[c->notify_preview], NET_LOG_NAMES[c->net_verbose != 0]);
     } else if (strcmp(key, "nick") == 0) {
         if (!value[0]) ui_print(c, "* nick: %s. usage: :set nick NAME", c->nick);
         else chat_set_nick(c, value);
@@ -1671,6 +1718,15 @@ static cmd_result_t cmd_set(void *ctx, const char *arg) {
         } else {
             c->notify_mode = (notify_mode_t)m;
             ui_print(c, "* notify: %s", NOTIFY_NAMES[m]);
+        }
+    } else if (strcmp(key, "preview") == 0) {
+        int m = name_index(PREVIEW_NAMES, 3, value);
+        if (m < 0) {
+            ui_print(c, "* preview: %s. usage: :set preview off|nick|message - what a notification shows besides "
+                        "that a message came (desktops keep notifications)", PREVIEW_NAMES[c->notify_preview]);
+        } else {
+            c->notify_preview = (notify_preview_t)m;
+            ui_print(c, "* preview: %s", PREVIEW_NAMES[m]);
         }
     } else if (strcmp(key, "net") == 0) {
         int v = name_index(NET_LOG_NAMES, 2, value);
@@ -1742,7 +1798,7 @@ const command_t CHAT_COMMANDS[] = {
     { "verify",     NULL,     "NICK",            "show a peer's identity fingerprint",              cmd_verify },
     { "net",        NULL,     NULL,              "network report and diagnosis",                    cmd_net },
     { "port",       NULL,     "[N]",             "show or change this session's udp port",          cmd_port },
-    { "set",        NULL,     "[NAME [VALUE]]",  "show or change nick, colour, notify or net",      cmd_set },
+    { "set",        NULL,     "[NAME [VALUE]]",  "show or change nick, colour, notify, preview, net", cmd_set },
     { "quit",       "q exit", NULL,              "leave the session",                               cmd_quit },
     { NULL, NULL, NULL, NULL, NULL }
 };
@@ -1811,7 +1867,7 @@ static void module_deliver(void *ctx, const uint8_t *data, size_t len, addr_t fr
     uint8_t buf[HANDSHAKE_BUF_LEN + 128];
     if (len > sizeof buf) return;
     memcpy(buf, data, len);
-    on_packet((chat_t *)ctx, buf, len, from, now);
+    on_relayed((chat_t *)ctx, buf, len, from, now);
 }
 
 // The room slots someone else may publish: always worth a hi, since members publishing different
@@ -1823,9 +1879,17 @@ static void knock_room_slots(chat_t *c) {
 
 static void start_dht(chat_t *c) {
     if (c->dht_on || c->sock == SOCK_INVALID || !(c->route.dht4 || c->route.dht6)) return;
-    dht_init(&c->dht, c->infohash, c->port, c->route.dht4, c->route.dht6);
+    uint8_t key[DHT_KEY_LEN];
+    derive_dht_key(c->master, key);
+    dht_init(&c->dht, key, c->port, c->route.dht4, c->route.dht6);
+    crypto_wipe(key, sizeof key);
     dht_start_bootstrap_resolve(&c->dht);
     c->dht_on = 1;
+}
+
+static void stop_dht(chat_t *c) {
+    if (c->dht_on) dht_stop(&c->dht);
+    c->dht_on = 0;
 }
 
 static void start_nostr(chat_t *c) {
@@ -1843,7 +1907,7 @@ static void start_nostr(chat_t *c) {
 }
 
 static void start_direct(chat_t *c) {
-    if (c->route.lan) c->lan_sock = net_udp_open(LAN_PORT, NET_REUSE, NULL);
+    if (c->route.lan) c->lan_sock = net_udp_open(c->lan_port, NET_REUSE, NULL);
     start_dht(c);
     if (c->route.portmap) c->pm = portmap_new(c->port, module_log, c);
     start_nostr(c);
@@ -1873,18 +1937,16 @@ int chat_apply_routing(chat_t *c, const routing_t *r) {
     c->route.dht4 = r->dht4; c->route.dht6 = r->dht6; c->route.lan = r->lan;
     c->route.portmap = r->portmap;
 
-    if (r->lan && c->lan_sock == SOCK_INVALID) c->lan_sock = net_udp_open(LAN_PORT, NET_REUSE, NULL);
+    if (r->lan && c->lan_sock == SOCK_INVALID) c->lan_sock = net_udp_open(c->lan_port, NET_REUSE, NULL);
     if (!r->lan && c->lan_sock != SOCK_INVALID) { net_close(c->lan_sock); c->lan_sock = SOCK_INVALID; }
 
-    if (!r->dht4 && !r->dht6) c->dht_on = 0;
+    if (!r->dht4 && !r->dht6) stop_dht(c);
     else if (!c->dht_on) start_dht(c);
     else if (was.dht4 != r->dht4 || was.dht6 != r->dht6) {
         c->dht.want[DHT_V4] = r->dht4;
         c->dht.want[DHT_V6] = r->dht6;
         // The bootstrap list only holds the families that were wanted: look it up again.
-        DHT_STORE(&c->dht.n_boot, 0);
-        c->dht.next_resolve = 0;
-        c->dht.next_lookup = 0;
+        dht_rebootstrap(&c->dht);
     }
 
     if (r->portmap && !c->pm) c->pm = portmap_new(c->port, module_log, c);
@@ -1930,6 +1992,7 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
     c->route = o->route;
     c->once = o->once;
     c->notify_mode = o->notify_mode;
+    c->notify_preview = o->notify_preview;
 
     if (o->has_color) memcpy(c->my_color, o->color, 3);
     else {
@@ -1955,13 +2018,16 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
     kem_gen_keypair(&c->kem_keys);
     c->keygen = 1;
     gen_random(c->cookie_secret, 32);
-    derive_master(o->password, o->session_name, c->master);
+    c->sock = c->lan_sock = SOCK_INVALID;
+    if (derive_master(o->password, o->session_name, c->master) != 0) {
+        c->start_error = "not enough free memory to derive the session key (it needs 512 MiB for a few seconds)";
+        return;
+    }
     derive_room_key(c->master, c->room_key);
-    derive_fingerprint(c->master, c->fingerprint);
+    derive_udp_key(c->master, c->udp_key);
+    c->lan_port = derive_lan_port(c->master);
     refresh_hi(c);
 
-    derive_dht_infohash(c->master, c->infohash);
-    c->sock = c->lan_sock = SOCK_INVALID;
     if (c->route.mode == ROUTE_TOR) {
         // No UDP socket at all: whatever goes out, goes through Tor.
         uint8_t room_keys[TOR_ROOM_SLOTS][64], room_pubs[TOR_ROOM_SLOTS][32];
@@ -1970,12 +2036,14 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
                          module_deliver, module_log, c);
         crypto_wipe(room_keys, sizeof room_keys);
         c->started = c->tor != NULL;
+        if (!c->started) c->start_error = "could not set up Tor";
         if (c->tor && c->created) { tor_host_room(c->tor, 0); c->tor_hosting = 1; }
         if (c->tor) { knock_room_slots(c); start_nostr(c); }
     } else {
         // Without the main socket the caller gives up on this session, so nothing else is started.
         c->sock = net_udp_open(o->port, NET_DUAL, &c->port);
         c->started = c->sock != SOCK_INVALID;
+        if (!c->started) c->start_error = "could not open a UDP socket (is the port in use?)";
         if (c->started) start_direct(c);
     }
 
@@ -1996,6 +2064,10 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
     c->next_rekey = c->start + REKEY_INTERVAL + jitter(REKEY_INTERVAL * 0.2);
     c->probe_tokens = PROBE_BURST;
     c->probe_at = c->start;
+    c->ck_tokens = CK_BURST;
+    c->ck_at = c->start;
+    c->roam_tokens = ROAM_BURST;
+    c->roam_at = c->start;
 }
 
 void chat_shutdown(chat_t *c) {
@@ -2004,6 +2076,7 @@ void chat_shutdown(chat_t *c) {
     nostr_free(c->nostr);
     tor_free(c->tor);
     portmap_free(c->pm);
+    stop_dht(c);
     net_close(c->sock);
     net_close(c->lan_sock);
     if (c->log_fp) fclose(c->log_fp);

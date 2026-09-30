@@ -36,9 +36,18 @@ typedef struct { DWORD Flags; } chat_extension_point_policy_t;
 
 typedef BOOL (WINAPI *set_mitigation_fn)(int policy, PVOID buf, SIZE_T len);
 
+// A crash ends the process on the spot. Left to the default handler, Windows Error Reporting may
+// write a dump of its memory, keys and messages included, to disk.
+static LONG WINAPI die_quietly(EXCEPTION_POINTERS *info) {
+    (void)info;
+    TerminateProcess(GetCurrentProcess(), 3);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
 void platform_harden_process(void) {
 
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+    SetUnhandledExceptionFilter(die_quietly);
 
     HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
     if (k32) {
@@ -492,6 +501,27 @@ FILE *platform_fopen(const char *utf8_path, const char *mode) {
 FILE *platform_fopen_private(const char *utf8_path, const char *mode) {
 
     return platform_fopen(utf8_path, mode);
+}
+
+long platform_read_file(const char *utf8_path, void *buf, size_t cap) {
+    wchar_t wp[1400];
+    if (!to_wide(utf8_path, wp, 1400)) return -1;
+    // A folder won't open without FILE_FLAG_BACKUP_SEMANTICS; a pipe or device isn't FILE_TYPE_DISK.
+    HANDLE h = CreateFileW(wp, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return -1;
+    long got = -1;
+    if (GetFileType(h) == FILE_TYPE_DISK) {
+        size_t n = 0;
+        while (n < cap) {
+            DWORD want = cap - n > 65536 ? 65536 : (DWORD)(cap - n), r = 0;
+            if (!ReadFile(h, (char *)buf + n, want, &r, NULL) || r == 0) break;
+            n += r;
+        }
+        got = (long)n;
+    }
+    CloseHandle(h);
+    return got;
 }
 
 double now_seconds(void) {

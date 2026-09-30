@@ -20,7 +20,6 @@
 #define MAX_NICK 24
 #define MAX_TEXT 250
 #define MAX_SESSION_NAME 64
-#define LAN_PORT 47474
 #define KEEPALIVE 10.0
 #define PEER_TIMEOUT 40.0
 #define PENDING_TTL 45.0
@@ -32,6 +31,14 @@
 #define CAND_PER_HOST 4
 #define PROBE_RATE 4.0
 #define PROBE_BURST 16.0
+// A cookie challenge is as big as the hi it answers, and anyone who recorded a hi can replay it
+// with a forged source address: a rate keeps chat from being a reflector for those.
+#define CK_RATE 8.0
+#define CK_BURST 32.0
+// A session frame from an address no peer has is tried against every peer's chain. Real ones
+// (a peer that moved) are rare; a rate keeps junk of the right size from eating the CPU.
+#define ROAM_RATE 50.0
+#define ROAM_BURST 100.0
 
 #define RK_RESEND 2.0
 #define HELLO_MAX_BACKOFF 5
@@ -40,6 +47,9 @@
 
 #define HANDSHAKE_BUF_LEN 2700
 
+// A room frame over UDP goes in pieces: magic, id (4), index, count, then up to CHUNK_PAYLOAD of
+// the frame. Like everything chat sends over UDP they're masked (udp_mask), so the magic only
+// shows once unmasked with the room's key. Relays and Tor carry frames whole.
 #define CHUNK_MAGIC0 0xC5
 #define CHUNK_MAGIC1 0x7A
 #define CHUNK_HDR 8
@@ -116,6 +126,10 @@ typedef struct {
 } reasm_t;
 
 typedef enum { NOTIFY_NONE = 0, NOTIFY_MENTIONS = 1, NOTIFY_ALL = 2 } notify_mode_t;
+// What a desktop notification shows: only that a message came (the default), who it's from, or
+// who and what it says. Never the session: its id is all it takes to join one with a blank
+// password, and desktops keep notifications.
+typedef enum { PREVIEW_OFF = 0, PREVIEW_NICK = 1, PREVIEW_MESSAGE = 2 } notify_preview_t;
 typedef enum { IDENT_NONE = 0, IDENT_NATIVE = 1, IDENT_AGE = 2, IDENT_PGP = 3 } identity_source_t;
 
 typedef enum { VERIFY_UNVERIFIED = 0, VERIFY_VERIFIED = 1, VERIFY_FAILED = 2 } verify_state_t;
@@ -156,6 +170,9 @@ typedef struct {
     char nick[MAX_NICK + 1];
     char nick_skel[NICK_SKEL_LEN];
     addr_t addr;
+    // The address before addr: frames from a peer that just moved, or that come over two Tor
+    // streams at once, keep turning up there too.
+    addr_t prev_addr;
     double seen, born, next_hello;
     int hello_tries;
     int ok;
@@ -235,6 +252,8 @@ typedef void (*chat_print_fn)(void *ui, const char *hhmm, const char *text, cons
 #define LINE_CHAT 1u
 #define LINE_MENTION 2u
 
+// A message worth a notification. nick and text are NULL unless the session's notify_preview
+// lets the notification show them.
 typedef void (*chat_notify_fn)(void *ui, const char *nick, const char *text, int mentioned);
 
 typedef struct {
@@ -248,7 +267,7 @@ typedef struct {
     kem_keypair_t kem_keys;
     uint8_t master[MASTER_LEN];
     uint8_t room_key[ROOM_KEY_LEN];
-    uint8_t fingerprint[FP_LEN];
+    uint8_t udp_key[UDP_KEY_LEN];
     uint8_t cookie_secret[32];
     int created;
     uint8_t my_color[3];
@@ -260,6 +279,7 @@ typedef struct {
     FILE *log_fp;
 
     notify_mode_t notify_mode;
+    notify_preview_t notify_preview;
 
     chat_build_t build;
     int has_release_key;
@@ -270,10 +290,11 @@ typedef struct {
     int net_verbose;
 
     sock_t sock, lan_sock;
-    uint16_t port;
+    uint16_t port, lan_port;
 
     routing_t route;
     int started;
+    const char *start_error;   // why it didn't start, when it didn't
     nostr_t *nostr;
     tor_t *tor;
     portmap_t *pm;
@@ -293,7 +314,6 @@ typedef struct {
 
     int dht_on;
     dht_state_t dht;
-    uint8_t infohash[DHT_INFOHASH_LEN];
 
     double start, next_alive, next_lan;
     uint32_t keygen;
@@ -309,8 +329,11 @@ typedef struct {
     struct { int used; uint8_t id[ID_LEN]; uint8_t vfy[VERIFY_LEN]; } gone[16];
     int gone_head;
 
-    // Token bucket for hellos to candidates, which come from the DHT and other peers unchecked.
+    // Token buckets: hellos to candidates, which come from the DHT and other peers unchecked;
+    // cookie challenges; and session frames tried against every peer (see CK_RATE, ROAM_RATE).
     double probe_tokens, probe_at;
+    double ck_tokens, ck_at;
+    double roam_tokens, roam_at;
 
     char my_idhex[ID_LEN * 2 + 1];
     char hi_msg[HANDSHAKE_BUF_LEN];
@@ -334,6 +357,7 @@ typedef struct {
     int created;
     int once;
     notify_mode_t notify_mode;
+    notify_preview_t notify_preview;
     int persist;
     char log_path[512];
 
@@ -380,8 +404,10 @@ void chat_set_identity(chat_t *c, identity_source_t source, const identity_keypa
 
 #define CHAT_MAX_SOCKS 12
 int chat_sockets(chat_t *c, sock_t out[CHAT_MAX_SOCKS]);
-// Whether the session is up: its UDP socket (direct) or its Tor link (Tor) could be made.
+// Whether the session is up: its keys could be made, and its UDP socket (direct) or its Tor link
+// (Tor). If not, chat_start_error says why.
 int chat_started(const chat_t *c);
+const char *chat_start_error(const chat_t *c);
 // Applies changed routing toggles to a running session. The mode and the Tor settings only
 // apply to sessions opened afterwards; returns 1 if those differ from this session's.
 int chat_apply_routing(chat_t *c, const routing_t *r);

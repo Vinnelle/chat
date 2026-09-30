@@ -55,7 +55,7 @@ static const char *USAGE =
     "just did, until your next key.\n"
     "\n"
     "The input line is a small vim. It starts in NORMAL: h/l move, 0/$ ends, x delete,\n"
-    "j/k switch session.\n"
+    "j/k switch session, s/c/C hide/show the sidebar/console/chat.\n"
     "  i/a/I/A  NORMAL -> INSERT, where Enter sends\n"
     "  /        on an empty line: the command line, with a menu of what fits. Once what's\n"
     "           typed can't be a command (/shrug, /usr/bin) it's text again, sent as typed\n"
@@ -189,6 +189,7 @@ typedef struct {
     routing_t route;
     int route_chosen;
     notify_mode_t notify_mode;
+    notify_preview_t notify_preview;
     int net_verbose;
     uint16_t default_port;
     int settings_sel;
@@ -286,16 +287,29 @@ static void session_print(void *ui, const char *hhmm, const char *text, const ui
 
 static int session_ready(const session_slot_t *s) { return !s->initialising && chat_ready(&s->engine); }
 
-static void send_notification(const char *session, const char *nick, const char *text, int mentioned) {
-    char title[MAX_NICK + MAX_SESSION_NAME + 32];
-    if (session) snprintf(title, sizeof title, mentioned ? "%s mentioned you in %s" : "%s in %s", nick, session);
-    else snprintf(title, sizeof title, mentioned ? "%s mentioned you" : "%s", nick);
-    platform_notify(title, text);
+// That something came, and who sent it and what it says only if the preview setting let the
+// engine pass them on (nick, text NULL otherwise). Never the session: desktops keep a history of
+// notifications (Windows writes it to disk), and with a blank password a session's id is all it
+// takes to join it.
+static void send_notification(const char *nick, const char *text, int mentioned) {
+    char title[CHAT_NAME_LEN * 2 + 48], body[MAX_TEXT + CHAT_NAME_LEN * 2 + 48];
+    if (nick && text) {
+        snprintf(title, sizeof title, mentioned ? "%s mentioned you" : "%s", nick);
+        copy_str(body, text, sizeof body);
+    } else if (nick) {
+        copy_str(title, "chat", sizeof title);
+        snprintf(body, sizeof body, mentioned ? "%s mentioned you" : "new message from %s", nick);
+    } else {
+        copy_str(title, "chat", sizeof title);
+        copy_str(body, mentioned ? "you were mentioned" : "new message", sizeof body);
+    }
+    platform_notify(title, body);
+    crypto_wipe(body, sizeof body);
 }
 
 static void session_notify(void *ui, const char *nick, const char *text, int mentioned) {
-    session_slot_t *s = (session_slot_t *)ui;
-    send_notification(s->engine.session_name, nick, text, mentioned);
+    (void)ui;
+    send_notification(nick, text, mentioned);
 }
 
 static int slot_index(session_slot_t *s) { return (int)(s - g_app.sessions); }
@@ -305,12 +319,24 @@ static session_slot_t *find_free_slot(void) {
     return NULL;
 }
 
+// The conversation and console as shown are kept out of swap, as the keys are. Best effort: past
+// RLIMIT_MEMLOCK they're only kept in memory as usual.
+static void lock_scrollbacks(session_slot_t *s) {
+    crypto_lock(&s->sb, sizeof s->sb);
+    crypto_lock(&s->console, sizeof s->console);
+}
+
+// Zeroes them as it unlocks them.
+static void release_scrollbacks(session_slot_t *s) {
+    crypto_unlock(&s->sb, sizeof s->sb);
+    crypto_unlock(&s->console, sizeof s->console);
+}
+
 static void close_session(session_slot_t *s) {
     if (!s) return;
     int idx = slot_index(s);
     chat_shutdown(&s->engine);
-    tui_scrollback_clear(&s->sb);
-    tui_scrollback_clear(&s->console);
+    release_scrollbacks(s);
     g_app.used[idx] = 0;
     if (g_app.selected == s) {
         g_app.selected = NULL;
@@ -547,6 +573,7 @@ static session_slot_t *start_session(const char *session_name, const char *passw
     if (!s) { push_log("* too many sessions open already"); return NULL; }
     int idx = slot_index(s);
     memset(s, 0, sizeof *s);
+    lock_scrollbacks(s);
     copy_str(s->name, session_name, sizeof s->name);
 
     char pw[256];
@@ -575,6 +602,7 @@ static session_slot_t *start_session(const char *session_name, const char *passw
     }
     o.created = created;
     o.notify_mode = g_app.notify_mode;
+    o.notify_preview = g_app.notify_preview;
     o.has_color = 1;
     memcpy(o.color, g_app.color, 3);
     o.identity_source = g_app.identity_source;
@@ -584,13 +612,13 @@ static session_slot_t *start_session(const char *session_name, const char *passw
     chat_init(&s->engine, &o, session_print, session_notify, s);
     crypto_wipe(&o, sizeof o);
     if (!chat_started(&s->engine)) {
+        const char *why = chat_start_error(&s->engine);
         chat_shutdown(&s->engine);
-        tui_scrollback_clear(&s->console);
+        release_scrollbacks(s);
         g_app.used[idx] = 0;
         g_app.selected = NULL;
         for (int i = 0; i < MAX_SESSIONS; i++) if (g_app.used[i]) { g_app.selected = &g_app.sessions[i]; break; }
-        push_log(g_app.route.mode == ROUTE_TOR ? "* could not set up Tor for that session"
-                                               : "* could not open a network socket for that session");
+        push_log("* couldn't start that session: %s", why);
         return NULL;
     }
     s->engine.net_verbose = g_app.net_verbose;
@@ -623,7 +651,7 @@ static void pgp_public_key(char armor[PGP_ARMOR_MAX], uint8_t fp[PGP_FP_LEN]) {
 static void show_identity_result(void) {
     if (g_app.identity_source == IDENT_NONE) return;
     uint8_t fp[ID_FP_LEN]; identity_fingerprint(g_app.identity.pub, fp);
-    char fphex[ID_FP_LEN * 2 + 1]; hex_encode(fp, ID_FP_LEN, fphex);
+    char fphex[HEX_GROUPS_LEN(ID_FP_LEN)]; hex_groups(fp, ID_FP_LEN, fphex);
     push_log("your identity fingerprint: %s - read it out to peers to verify you independently", fphex);
     if (g_app.identity_source == IDENT_AGE) {
         char recipient[AGE_RECIPIENT_STRLEN + 1];
@@ -827,7 +855,7 @@ typedef enum {
     SET_TOR_LAUNCH, SET_TOR_PATH, SET_TOR_SOCKS, SET_TOR_CONTROL, SET_TOR_PASSWORD,
     SET_NOSTR, SET_RELAYS,
     SET_NICK, SET_COLOUR, SET_SIGN, SET_AGE_RECIPIENT, SET_PGP_PUBKEY,
-    SET_NOTIFY, SET_NET, SET_PORT,
+    SET_NOTIFY, SET_PREVIEW, SET_NET, SET_PORT,
     SET_SIDEBAR, SET_CONSOLE, SET_CHAT
 } setting_id_t;
 
@@ -895,6 +923,10 @@ static const setting_def_t SETTINGS[] = {
       "it to the clipboard; it's in the console too." },
     { SET_NOTIFY, "Chat", "notify", "Notifications", K_CHOICE, "all|mentions|none",
       "Desktop notifications, for open sessions and new ones: every message, mentions of your nick, or none." },
+    { SET_PREVIEW, NULL, "preview", "Notification preview", K_CHOICE, "off|nick|message",
+      "What a notification shows. off: only that a message came. nick: who it's from. message: who, and what "
+      "they said. Desktops keep notifications (Windows writes them to disk), so what they show can outlast chat. "
+      "The session never shows: its id is all it takes to join one with a blank password." },
     { SET_NET, NULL, "net", "Network log", K_CHOICE, "normal|verbose",
       "What the console shows of the network, in every session. verbose adds every handshake packet, relay "
       "and Tor event." },
@@ -908,6 +940,7 @@ static const setting_def_t SETTINGS[] = {
 #define N_SETTINGS ((int)(sizeof SETTINGS / sizeof SETTINGS[0]))
 
 static const char *const NOTIFY_NAMES[] = { "none", "mentions", "all" };
+static const char *const PREVIEW_NAMES[] = { "off", "nick", "message" };
 static const char *const ON_OFF[] = { "off", "on" };
 static const char *const ROUTE_NAMES[] = { "direct", "tor" };
 static const char *const NET_LOG_NAMES[] = { "normal", "verbose" };
@@ -970,6 +1003,7 @@ static int setting_options(setting_id_t id, const char *const **names, int *n) {
         case SET_NOSTR:      return r->nostr != 0;
         case SET_TOR_LAUNCH: *names = TOR_LAUNCH_NAMES; *n = 3; return g_app.tor_launch;
         case SET_NOTIFY:     *names = NOTIFY_NAMES; *n = 3; return (int)g_app.notify_mode;
+        case SET_PREVIEW:    *names = PREVIEW_NAMES; *n = 3; return (int)g_app.notify_preview;
         case SET_NET:        *names = NET_LOG_NAMES; return g_app.net_verbose != 0;
         case SET_SIDEBAR:    return g_app.show_sidebar != 0;
         case SET_CONSOLE:    return g_app.show_console != 0;
@@ -1038,7 +1072,7 @@ static void setting_value(setting_id_t id, char *out, size_t cap) {
         case SET_SIGN: {
             if (g_app.identity_source == IDENT_NONE) { snprintf(out, cap, "off"); break; }
             uint8_t fp[ID_FP_LEN]; identity_fingerprint(g_app.identity.pub, fp);
-            char fphex[ID_FP_LEN * 2 + 1]; hex_encode(fp, ID_FP_LEN, fphex);
+            char fphex[HEX_GROUPS_LEN(ID_FP_LEN)]; hex_groups(fp, ID_FP_LEN, fphex);
             snprintf(out, cap, "%s%s, fingerprint %s", g_app.identity_source == IDENT_AGE ? "age" : "pgp",
                      g_app.key_origin == KEY_DERIVED ? " from password" : "", fphex);
             break;
@@ -1113,6 +1147,11 @@ static void setting_choose(setting_id_t id, int i) {
             g_app.notify_mode = (notify_mode_t)i;
             for (int s = 0; s < MAX_SESSIONS; s++)
                 if (g_app.used[s] && !g_app.sessions[s].initialising) g_app.sessions[s].engine.notify_mode = g_app.notify_mode;
+            break;
+        case SET_PREVIEW:
+            g_app.notify_preview = (notify_preview_t)i;
+            for (int s = 0; s < MAX_SESSIONS; s++)
+                if (g_app.used[s] && !g_app.sessions[s].initialising) g_app.sessions[s].engine.notify_preview = g_app.notify_preview;
             break;
         case SET_NET:
             g_app.net_verbose = i;
@@ -1886,6 +1925,7 @@ static const struct { const char *section, *keys, *what; } HELP_KEYS[] = {
     { NULL,          "j  k",            "next / previous session" },
     { NULL,          "ctrl+u  ctrl+d",  "scroll the chat back / forward" },
     { NULL,          "G",               "back to the newest message" },
+    { NULL,          "s  c  C",         "show or hide the sidebar / console / chat" },
     { NULL,          ":  /",            "the command line" },
     { NULL,          "?",               "this page" },
     { "Pages",       "j  k  g  G",      "move, to the first / last" },
@@ -2382,13 +2422,17 @@ static void handle_key(const tui_key_t *key) {
     }
 
     // NORMAL leaves these to the app: j and k step through the sessions, as they step through a
-    // list, G goes back to the newest message and ? opens the help.
+    // list, G goes back to the newest message, ? opens the help, and c, C and s show or hide the
+    // console, the chat and the sidebar.
     if (key->type == TUI_KEY_CHAR && input->mode == TUI_IMODE_NORMAL) {
         switch (key->ch[0]) {
             case 'j': select_step(1); break;
             case 'k': select_step(-1); break;
             case 'G': scroll_chat(0); break;
             case '?': begin_help(); break;
+            case 'c': g_app.show_console = !g_app.show_console; g_app.dirty = 1; break;
+            case 'C': g_app.show_chat = !g_app.show_chat; g_app.dirty = 1; break;
+            case 's': g_app.show_sidebar = !g_app.show_sidebar; g_app.dirty = 1; break;
             default: break;
         }
         return;
@@ -2688,6 +2732,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
     fflush(stdout);
     catch_quit_signals();
 
+    crypto_lock(&g_app.log, sizeof g_app.log);
     tui_input_clear(&g_app.input);
     g_app.input.modal = 1;
     g_app.input.mode = TUI_IMODE_NORMAL;   // i to type
@@ -2765,7 +2810,8 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
         char update_msg[UPDATE_MSG_MAX];
         if (update_poll(update_msg, sizeof update_msg)) push_log("%s", update_msg);
 
-        if (term_resized()) g_app.dirty = 1;
+        // The terminal may have redrawn or reflowed the screen: the next frame goes out whole.
+        if (term_resized()) { g_app.dirty = 1; tui_invalidate(); }
         if (now >= next_ui_tick) { next_ui_tick = now + 1.0; g_app.dirty = 1; }
         if (g_app.dirty) { render(); g_app.dirty = 0; g_app.input_dirty = 0; }
         else if (g_app.input_dirty) { render_bar(); g_app.input_dirty = 0; }
@@ -2805,7 +2851,7 @@ static void plain_print(void *ui, const char *hhmm, const char *text, const uint
 }
 static void plain_notify(void *ui, const char *nick, const char *text, int mentioned) {
     (void)ui;
-    send_notification(NULL, nick, text, mentioned);
+    send_notification(nick, text, mentioned);
 }
 
 static int run_plain(const char *session_name, const char *password, uint16_t port,
@@ -2867,6 +2913,7 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
         o.route.tor.socks[0] = o.route.tor.control[0] = '\0';
     }
     o.notify_mode = g_app.notify_mode;
+    o.notify_preview = g_app.notify_preview;
     o.has_color = 1;
     memcpy(o.color, g_app.color, 3);
     o.identity_source = g_app.identity_source;
@@ -2878,9 +2925,10 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
     g_plain_engine = &c;
     crypto_wipe(&o, sizeof o);
     if (!chat_started(&c)) {
-        if (g_app.route.mode == ROUTE_TOR) fprintf(stderr, "chat: could not set up Tor\n");
-        else fprintf(stderr, "chat: cannot bind udp port %u\n", (unsigned)port);
+        fprintf(stderr, "chat: %s\n", chat_start_error(&c));
         chat_shutdown(&c);
+        g_plain_engine = NULL;
+        tor_link_stop();
         return 1;
     }
     c.net_verbose = g_app.net_verbose;
@@ -3004,7 +3052,7 @@ int main(int argc, char **argv) {
         } else if (strcmp(key, "update") == 0) {
             do_update = 1;
         } else if (strcmp(key, "version") == 0) {
-            printf("chat " CHAT_VERSION ", built %s (wire: hybrid X25519+ML-KEM-768, chunked handshake)\n", CHAT_BUILD_STAMP);
+            printf("chat " CHAT_VERSION ", built %s (wire: hybrid X25519+ML-KEM-768, masked UDP)\n", CHAT_BUILD_STAMP);
             return 0;
         } else if (strcmp(key, "h") == 0 || strcmp(key, "help") == 0 || strcmp(key, "?") == 0) {
             fputs(USAGE, stdout);
