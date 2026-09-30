@@ -10,6 +10,7 @@
 #include "transport/nostr.h"
 #include "transport/tor.h"
 #include "transport/portmap.h"
+#include "transport/ss.h"
 #include <stdint.h>
 #include <stdio.h>
 
@@ -20,6 +21,7 @@
 #define MAX_NICK 24
 #define MAX_TEXT 250
 #define MAX_SESSION_NAME 64
+// A peer that has sent nothing for this long gets a hi, in case it has lost the session.
 #define KEEPALIVE 10.0
 #define PEER_TIMEOUT 40.0
 #define PENDING_TTL 45.0
@@ -40,28 +42,39 @@
 #define ROAM_RATE 50.0
 #define ROAM_BURST 100.0
 
-#define RK_RESEND 2.0
+#define RK_RESEND 6.0
 #define HELLO_MAX_BACKOFF 5
 #define RETRY_BASE 2.0
 #define RETRY_CAP 32.0
+// A connected peer that hasn't re-handshaken with our new keys gets our hi again this often.
+#define REHELLO_EVERY 20.0
 
 #define HANDSHAKE_BUF_LEN 2700
 
-// A room frame over UDP goes in pieces: magic, id (4), index, count, then up to CHUNK_PAYLOAD of
-// the frame. Like everything chat sends over UDP they're masked (udp_mask), so the magic only
-// shows once unmasked with the room's key. Relays and Tor carry frames whole.
+// Every datagram chat sends over UDP is one cell of this size, a session frame's: a session frame
+// fills one, and a room frame goes in pieces, each padded to a whole cell. A piece is the magic,
+// an id (4), its index, the count, the whole frame's length (2), then up to CHUNK_PAYLOAD of the
+// frame. Like everything chat sends over UDP they're masked (udp_mask), so the magic only shows
+// once unmasked with the room's key. Relays and Tor carry frames whole.
+#define UDP_CELL (SESSION_HEADER_LEN + SESSION_PAD_TARGET + AEAD_TAG_LEN)
 #define CHUNK_MAGIC0 0xC5
-#define CHUNK_MAGIC1 0x7A
-#define CHUNK_HDR 8
-#define CHUNK_PAYLOAD 1000
+#define CHUNK_MAGIC1 0x7B
+#define CHUNK_HDR 10
+#define CHUNK_PAYLOAD (UDP_CELL - CHUNK_HDR)
 #define CHUNK_MAX 4
+#define ROOM_FRAME_MAX (CHUNK_MAX * CHUNK_PAYLOAD)
+
+// The most one session frame carries: a record (one line of the protocol), or several joined by
+// newlines for a peer whose "k" says it reads them ("b").
+#define RECORD_MAX (SESSION_PAD_TARGET - 2)
 
 // Ratchet skip allowed when a frame arrives from an address that isn't the peer's. Trial decryption
 // runs against every peer, so the full RATCHET_MAX_SKIP here would let junk packets burn CPU.
 #define ROAM_MAX_SKIP 16
 
 #define REASM_SLOTS 32
-#define REASM_TTL 5.0
+// A room frame's pieces go one to a slot, so they take a few seconds to come together.
+#define REASM_TTL 30.0
 
 #ifndef REKEY_INTERVAL
 #define REKEY_INTERVAL 300.0
@@ -69,33 +82,50 @@
 
 #define REKEY_DRAIN_GRACE 20.0
 
-#define REKEY_OVERLAP 20.0
+// A re-handshake runs through slots, a piece at a time: the old chains stay this long for it.
+#define REKEY_OVERLAP 90.0
 #define JOIN_WAIT 5.0
+#define K_SENDS 3
+#define K_EVERY 2.0
 
+// Each peer has a slot this often (and up to a quarter more, at random), and every slot sends
+// exactly one datagram, whether or not there's anything to say: queued lines, a piece of a room
+// frame, or a "nop". Nothing goes to a connected peer outside its slots, so when and how much
+// goes says nothing about what was said.
 #define COVER_INTERVAL 1.5
 #define COVER_MAX_RATE 8.0
 
-// Relays rate-limit, and every member receives every event: cover traffic to a peer reached
-// through them is sparser, still well inside PEER_TIMEOUT.
-#define NOSTR_COVER_INTERVAL 10.0
+// Relays rate-limit, and every member receives every event: slots to a peer reached through them
+// are sparser, and sparser again with more of them.
+#define NOSTR_COVER_INTERVAL 5.0
+#define NOSTR_MAX_RATE 0.33
 // A peer's UDP path counts as broken after this long without a frame; its traffic moves to the relays.
 #define UDP_STALE 25.0
+// Direct routing goes to the relays only while something needs them: nobody reached yet, or a
+// peer only they reach, or one whose UDP has gone quiet. They're let go this long after.
+#define RELAY_LINGER 60.0
 #define NOSTR_BEACON_ALONE 20.0
 #define NOSTR_BEACON_CONNECTED 90.0
 // A joiner in Tor mode that hasn't reached anyone by then publishes the room's onion itself.
 #define TOR_HOST_AFTER 120.0
 
-typedef enum { ROUTE_DIRECT = 0, ROUTE_TOR = 1 } route_mode_t;
+typedef enum { ROUTE_DIRECT = 0, ROUTE_TOR = 1, ROUTE_SS = 2 } route_mode_t;
+
+// The relays: off, only while something needs them (direct routing and Shadowsocks), or always.
+enum { NOSTR_OFF = 0, NOSTR_FALLBACK = 1, NOSTR_ALWAYS = 2 };
 
 // How a session reaches peers. Direct: UDP, found through the DHT (IPv4, IPv6), LAN broadcast
 // and relays, with a router port mapping to let more of them in, and Nostr relays carrying
 // traffic when UDP can't. Tor: onion services only; nothing else touches the network.
+// Shadowsocks: as direct, but everything goes through a Shadowsocks server, and nothing on the
+// LAN or the router.
 typedef struct {
     route_mode_t mode;
     int dht4, dht6, lan, portmap, nostr;
     char relays[NOSTR_MAX_RELAYS][NOSTR_URL_MAX];
     int n_relays;
     tor_opts_t tor;
+    char ss[SS_URL_MAX];   // an ss:// link, key and all
 } routing_t;
 
 void routing_defaults(routing_t *r);
@@ -120,7 +150,7 @@ typedef struct {
     uint8_t id[4];
     int count;
     unsigned got;
-    size_t last_len;
+    size_t total;   // the whole frame's length, as each piece says it
     double born;
     uint8_t buf[CHUNK_MAX * CHUNK_PAYLOAD];
 } reasm_t;
@@ -180,6 +210,12 @@ typedef struct {
     // after the first frame opened (ok_since) if it never does, so nobody joins unannounced.
     double ok_since;
     int k_seen, announced;
+    // Our own k goes to a new peer K_SENDS times, a little apart: nothing acks it, and the first
+    // can be lost.
+    int k_sent;
+    double next_k;
+    // Slots in a row that records took while a room frame of its waited.
+    int room_waited;
     uint8_t pub[PUB_LEN];
     ratchet_t send_chain;
     ratchet_t recv_chain;
@@ -219,10 +255,42 @@ typedef struct {
     int next_pub_set;
     double rk_refused_since, next_rk_warn;
     double next_rk;   // when to re-send our own rk until the peer re-handshakes with our new key
+    double next_rehello;   // when a hi may go to it again (keepalive, or a re-handshake stuck)
+    // Its k says it reads several records in one frame, joined by newlines ("b").
+    int batches;
+
+    // The verify code as the user compared it with this peer, over another channel: 0 not yet,
+    // 1 the same, -1 different. Where comparing is required, only 1 gets what's sent.
+    int code_ok;
 
     ratchet_t old_send, old_recv;
     double old_until;
 } peer_t;
+
+// A record waiting for its peer's next slot. old_chain: sealed on the chain the peer still reads
+// from before our rekey (an "rk" re-sent during the overlap).
+#define SENDQ_MAX 128
+typedef struct {
+    int used;
+    int peer_slot;
+    uint32_t seq;
+    int old_chain;
+    char text[RECORD_MAX + 1];
+} sendq_t;
+
+// A room frame for a connected peer (a re-handshake's hi, ck, hi2 or kx), going out in its slots:
+// over UDP a piece a slot, over the relays or Tor whole.
+#define ROOMQ_MAX 24
+typedef struct {
+    int used;
+    int peer_slot;
+    uint32_t seq;
+    addr_t to;
+    uint8_t id[4];
+    int next_piece, pieces;
+    size_t len;
+    uint8_t frame[ROOM_FRAME_MAX];
+} roomq_t;
 
 typedef struct {
     int used;
@@ -289,15 +357,28 @@ typedef struct {
 
     int net_verbose;
 
+    // Nothing that's sent goes to a peer until the user has compared its verify code (code_ok).
+    int verify_required;
+    // Signing identities whose peers' codes the user compared in this session: that peer, back
+    // with a new handshake the same key signed, needs no second comparison.
+    uint8_t pinned[16][ID_SIGN_PUB_LEN];
+    int n_pinned;
+
     sock_t sock, lan_sock;
     uint16_t port, lan_port;
 
     routing_t route;
     int started;
     const char *start_error;   // why it didn't start, when it didn't
+    char start_why[160];
     nostr_t *nostr;
+    double relays_until;   // the relays stay on until then (direct and Shadowsocks routing)
     tor_t *tor;
     portmap_t *pm;
+    // Shadowsocks routing: every UDP datagram goes to this server, sealed for its relay.
+    ss_udp_t *ss_udp;
+    addr_t ss_server;
+    char ss_host[SS_HOST_MAX];
     double next_beacon;
     int tor_hosting;
     double tor_republish_at;
@@ -309,6 +390,9 @@ typedef struct {
     addr_t static_peers[16];
     int n_static;
     pending_msg_t pending[MAX_PENDING_MSGS];
+    sendq_t sendq[SENDQ_MAX];
+    roomq_t roomq[ROOMQ_MAX];
+    uint32_t queue_seq;
     addr_t self_addrs[8];
     int n_self_addrs;
 
@@ -358,6 +442,8 @@ typedef struct {
     int once;
     notify_mode_t notify_mode;
     notify_preview_t notify_preview;
+    // Send to peers whose verify code wasn't compared (the default is not to).
+    int verify_optional;
     int persist;
     char log_path[512];
 
@@ -421,6 +507,9 @@ int chat_candidate_count(const chat_t *c);
 
 int chat_ready(const chat_t *c);
 const char *chat_verify_label(verify_state_t s);
+// A peer's verify code as the sidebar shows it: 0 nothing to do, 1 to be compared, 2 compared,
+// 3 different.
+int chat_code_state(const chat_t *c, const peer_t *p);
 // What p runs, for :peers: "says official v0.1.9", "modified client (says v0.1.9)" and so on.
 void chat_build_label(const peer_t *p, char *out, size_t cap);
 

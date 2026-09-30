@@ -313,7 +313,7 @@ int session_seal(const uint8_t message_key[32], uint32_t index, const void *data
 
 int session_unseal(const uint8_t message_key[32], uint32_t index, const uint8_t *frame, size_t frame_len,
                     uint8_t *data, size_t data_cap, size_t *data_len) {
-    if (!sealed_len_ok(frame_len, SESSION_HEADER_LEN, SESSION_PAD_TARGET)) return -1;
+    if (!sealed_len_ok(frame_len, SESSION_HEADER_LEN, SESSION_MIN_BODY)) return -1;
     uint8_t idx_be[4] = { (uint8_t)(index >> 24), (uint8_t)(index >> 16), (uint8_t)(index >> 8), (uint8_t)index };
     const uint8_t *nonce = frame + 4, *ct = frame + SESSION_HEADER_LEN;
     return unseal_common(message_key, idx_be, 4, nonce, ct, frame_len - SESSION_HEADER_LEN,

@@ -25,7 +25,10 @@
 #define PAD_BLOCK 64
 #define RATCHET_MAX_SKIP 200
 
-#define SESSION_PAD_TARGET 384
+// Every session frame is sealed this big (a whole UDP cell), and read if it's at least
+// SESSION_MIN_BODY, what 0.1.10 and earlier seal.
+#define SESSION_PAD_TARGET 960
+#define SESSION_MIN_BODY 384
 
 #define ROOM_PAD_TARGET 2560
 

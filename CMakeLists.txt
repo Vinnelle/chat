@@ -153,6 +153,33 @@ ExternalProject_Add(secp256k1_ext
 set(SECP256K1_INCLUDE_DIRS ${SECP256K1_PREFIX}/install/include)
 set(SECP256K1_STATIC_LIB ${SECP256K1_PREFIX}/install/lib/libsecp256k1.a)
 
+# BLAKE3, whose key derivation makes Shadowsocks 2022's session keys. Only its portable C: the
+# same code on every target, with no assembly for zig to assemble.
+set(BLAKE3_VERSION 1.8.2)
+set(BLAKE3_PREFIX ${CMAKE_BINARY_DIR}/blake3-ext)
+set(BLAKE3_SRC ${BLAKE3_PREFIX}/src/blake3_ext/c)
+set(BLAKE3_SOURCES ${BLAKE3_SRC}/blake3.c ${BLAKE3_SRC}/blake3_dispatch.c ${BLAKE3_SRC}/blake3_portable.c)
+ExternalProject_Add(blake3_ext
+    URL https://github.com/BLAKE3-team/BLAKE3/archive/refs/tags/${BLAKE3_VERSION}.tar.gz
+    URL_HASH SHA256=6b51aefe515969785da02e87befafc7fdc7a065cd3458cf1141f29267749e81f
+    DOWNLOAD_EXTRACT_TIMESTAMP true
+    PREFIX ${BLAKE3_PREFIX}
+    CONFIGURE_COMMAND ""
+    BUILD_COMMAND ""
+    INSTALL_COMMAND ""
+    BUILD_BYPRODUCTS ${BLAKE3_SOURCES}
+)
+set_source_files_properties(${BLAKE3_SOURCES} PROPERTIES GENERATED TRUE)
+add_library(chat_blake3 STATIC ${BLAKE3_SOURCES})
+add_dependencies(chat_blake3 blake3_ext)
+target_include_directories(chat_blake3 PUBLIC ${BLAKE3_SRC})
+target_compile_definitions(chat_blake3 PRIVATE BLAKE3_NO_SSE2 BLAKE3_NO_SSE41 BLAKE3_NO_AVX2 BLAKE3_NO_AVX512
+                           BLAKE3_USE_NEON=0)
+set_property(TARGET chat_blake3 PROPERTY POSITION_INDEPENDENT_CODE ON)
+if(NOT MSVC)
+    target_compile_options(chat_blake3 PRIVATE -ffunction-sections -fdata-sections)
+endif()
+
 add_executable(chat
     src/app/main.c
     src/app/tui.c
@@ -168,6 +195,7 @@ add_executable(chat
     src/transport/tor.c
     src/transport/torproc.c
     src/transport/portmap.c
+    src/transport/ss.c
     src/common/util.c
     src/common/bencode.c
     src/common/json.c
@@ -202,7 +230,8 @@ else()
 endif()
 target_include_directories(chat PRIVATE src src/platform/${CHAT_OS} ${CMAKE_BINARY_DIR} ${SODIUM_INCLUDE_DIRS} ${OQS_INCLUDE_DIRS}
                            ${MBEDTLS_INCLUDE_DIRS} ${SECP256K1_INCLUDE_DIRS})
-target_link_libraries(chat PRIVATE ${SODIUM_STATIC_LIB} ${OQS_STATIC_LIB} ${MBEDTLS_STATIC_LIBS} ${SECP256K1_STATIC_LIB})
+target_link_libraries(chat PRIVATE ${SODIUM_STATIC_LIB} ${OQS_STATIC_LIB} ${MBEDTLS_STATIC_LIBS} ${SECP256K1_STATIC_LIB}
+                      chat_blake3)
 
 if(WIN32)
 

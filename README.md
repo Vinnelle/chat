@@ -3,8 +3,8 @@
 A serverless, end-to-end encrypted group chat for the terminal. No accounts, no servers —
 peers find each other over the BitTorrent DHT (IPv4 and IPv6) and UDP broadcast (LAN), then
 talk directly. When a NAT is in the way, chat asks the router to forward a port, and public
-Nostr relays can carry the traffic. Or everything can go through Tor instead. Nothing
-touches disk unless you ask.
+Nostr relays can carry the traffic. Or everything can go through Tor instead, or through a
+Shadowsocks server of your own. Nothing touches disk unless you ask.
 
 > This README was written by AI.
 
@@ -22,6 +22,17 @@ Messages are encrypted with a hybrid, post-quantum construction:
 
 A session's **id + password** together key both the encryption and the DHT lookup, so only
 people who hold both can find and read each other. A blank password still encrypts.
+
+**Compare verify codes.** The id and password only prove someone is a member of the room, so
+any member could sit between two others and read what they say. When a peer joins, chat shows
+a verify code to compare with them over another channel (in person, a call); it's the same on
+both ends only if nobody is in between. Nothing you send reaches a peer until you've said it
+matched with `:verify NICK ok` (`:verify NICK no` if it didn't: that peer then gets nothing).
+Messages from a peer whose code you haven't compared show `(code not compared)`, and the
+sidebar says `compare code`. If the peer signs with an identity (below), its code needs
+comparing once per session: back with a fresh handshake signed by the same key, it's trusted
+again. **Compare verify codes** on the settings page (`:set verify optional`,
+`--verify-optional`) sends to everyone, compared or not.
 
 Optional **identity signing** lets peers verify who they're talking to. Choose it under
 **Signing identity** on the settings page (or `:set sign`), or with `--identity`:
@@ -51,9 +62,9 @@ what protects the key. Anyone who has your machine id can guess passwords agains
 public key you show peers, so use a long one. A blank password makes a new random key that
 lasts until chat exits instead.
 
-Use `:verify NICK` to compare a peer's identity out-of-band. Identity fingerprints and the
-verify codes `:peers` shows are 128 bits, in groups of four hex digits; 0.1.9 and earlier show
-the first 16 digits of the same codes.
+`:verify NICK` shows a peer's verify code and identity fingerprint to compare out-of-band.
+Identity fingerprints and the verify codes `:peers` shows are 128 bits, in groups of four hex
+digits; 0.1.9 and earlier show the first 16 digits of the same codes.
 
 Each peer rekeys every few minutes. Before it does, it announces its new key over the current
 encrypted session, so a room member sitting between two peers can't swap in its own key at a
@@ -96,28 +107,49 @@ chat opens on its settings page, and **Routing** heads it. `--routing` presets i
    neither can members who use Tor.
 3. **Tor.** Onion services, plus the Nostr relays reached through Tor, so members who use
    direct routing can still meet you. Nothing else touches the network.
+4. **Shadowsocks.** As direct, but every packet goes through a Shadowsocks 2022 server of your
+   own (below). No LAN beacon and no port mapping.
 
 Direct routing uses these, and each one can be turned off:
 
 | Part | What it does | Who sees what |
 | --- | --- | --- |
-| BitTorrent DHT (IPv4) | finds peers on the internet | DHT nodes see your IP next to a lookup key only room members can compute, and which changes every hour |
-| IPv6 DHT ([BEP 32](https://www.bittorrent.org/beps/bep_0032.html)) | the same on the IPv6 DHT, where there's usually no NAT to punch through | as above |
-| Router port mapping | asks the router (PCP, NAT-PMP or UPnP-IGD) to forward the session's UDP port, so peers behind NATs that can't be hole-punched still get in; removed when the session ends | your router, which may log it |
-| LAN discovery | an encrypted broadcast beacon on the local network, to a UDP port of the room's own (made from its id and password, 49152-65535) | the local network sees that something broadcasts |
+| BitTorrent DHT (IPv4) | finds peers on the internet | DHT nodes see your IP and port next to a lookup key only room members can compute but anyone who sees it can look up for the rest of the hour: see below |
+| IPv6 DHT ([BEP 32](https://www.bittorrent.org/beps/bep_0032.html)) | the same on the IPv6 DHT, where there's usually no NAT to punch through | as above, with your IPv6 address, which often stays the same longer than an IPv4 one |
+| Router port mapping | asks the router (PCP, NAT-PMP or UPnP-IGD) to forward the session's UDP port, so peers behind NATs that can't be hole-punched still get in; removed when the session ends | your router, which may log it, and any device on the LAN that asks it |
+| LAN discovery | an encrypted broadcast beacon on the local network, to a UDP port of the room's own (made from its id and password, 49152-65535) | the local network sees that something broadcasts, and the same port for every member of the room |
 | Nostr relay fallback | public relays carry the traffic when UDP can't get through | the relays: see below |
 
 Chat prefers direct UDP. A peer moves to the relays only while UDP to it stays quiet, and
-moves back as soon as UDP works again.
+moves back as soon as UDP works again. With direct routing chat goes to the relays only while
+it needs them: until someone is reached, while a peer is reached only through them, or while
+one's UDP has gone quiet, and it leaves them a minute after. Tor members meet direct members
+only on the relays, so a room whose direct members all reach each other can't be found by one;
+**Nostr relays** set to `always` (`:set nostr always`, `--nostr-always`) keeps them connected.
 
 **What the network sees of UDP.** Everything chat sends over UDP is masked with a key made from
 the session id and password, so to anyone else every datagram is random bytes: no ratchet
 counter that could follow a peer from one address to the next, no header on the pieces of a
-handshake, nothing the same from one packet to the next. What still shows is the addresses and
-ports, the sizes (the same for most packets, since everything is padded) and the timing. The
-BitTorrent DHT's own messages are ordinary DHT traffic. 0.1.9 and earlier sent UDP unmasked and
-beaconed on port 47474, so they and this version can't reach each other over UDP or find each
-other on the LAN; they still meet through the Nostr relays, or over Tor.
+handshake, nothing the same from one packet to the next. Every datagram is the same size, 1004
+bytes: a session frame fills one, and a handshake goes in pieces padded to it. And every
+datagram to a connected peer goes in a slot of that peer's, one every 1.5 to 1.9 seconds,
+whether or not there's anything to say: a message, its ack, a message passed on to others and
+a re-handshake all wait for one, so when datagrams go and how many says nothing about when
+anyone typed. What still shows is the addresses and ports, that two addresses exchange a
+steady stream of equal datagrams (which a determined observer can recognise as chat), when a
+session starts and ends, a few seconds of handshake pieces when someone joins, and a
+re-handshake every five minutes or so. The BitTorrent DHT's own messages are ordinary DHT
+traffic, from the same port. 0.1.10 and earlier sent other sizes, so they and this version
+can't reach each other over UDP; they still meet through the Nostr relays, or over Tor.
+
+**What the DHT sees.** Each lookup asks nodes for peers under the hour's lookup key, and
+announces this session's address under it. Only room members can compute the key, but a node
+that sees it can ask for it too, for the rest of the hour, and get the addresses announced
+under it. The key changes every hour, and so does the node id chat asks under, so nothing in
+the DHT's messages ties one hour's lookups to the next; the address they come from still does.
+Queries say they're from a read-only node (BEP 43). A lookup starts from nodes that answered
+before, and asks the four bootstrap servers (router.bittorrent.com, dht.transmissionbt.com,
+router.utorrent.com, dht.libtorrent.org) only while it knows fewer than eight.
 
 **What a Nostr relay sees.** Each datagram is one ephemeral event, so relays pass it on
 without storing it. Every event is signed with a key made for that event alone, has a random
@@ -126,13 +158,32 @@ ten minutes, and only room members can compute it. The content is always the sam
 sender, the recipient, the datagram and random padding, sealed together with XChaCha20-Poly1305
 under a key derived from the session id and password, with a fresh nonce each time. So a relay
 can't tell which events come from the same person, who they're for, or what kind of message
-they hold. It can't link a room's traffic from one ten minutes to the next. Each connection
-subscribes under an id of its own, so relays comparing notes can't tie one member's
-connections together by it. A relay still sees your IP address, when you send and receive, and
-which tags your connection asks for. The defaults are `wss://relay.primal.net`, `wss://nostr.mom` and `wss://relay.nostr.net`.
+they hold. Each ten minutes' tag has connections of its own: a new one to each relay, under a
+new subscription id and, through Tor, a new circuit, asking for that tag alone. It opens a minute
+or two before the ten minutes start and closes a minute or two after they end, so clocks can
+differ that much. A relay still sees the address each connection comes from (the same one each
+ten minutes, unless it's a Tor exit or a Shadowsocks server), when events come and go, and the
+tag, which every member of the room asks for. Events have a size and shape of their own, so
+anyone who can subscribe to a relay can tell chat's events from others, and count them per tag.
+The defaults are `wss://relay.primal.net`, `wss://nostr.mom` and `wss://relay.nostr.net`.
 `--relay` or the settings page picks others. A relay that rate-limits gets fewer events. A
 relay whose policy refuses throwaway keys (web of trust, payment, proof of work) is only read
 from.
+
+**Shadowsocks** routes everything through a [Shadowsocks 2022](https://github.com/Shadowsocks-NET/shadowsocks-specs/blob/main/2022-1-shadowsocks-2022-edition.md)
+server you run (shadowsocks-rust, sing-box, Xray), with method `2022-blake3-aes-128-gcm`,
+`2022-blake3-aes-256-gcm` or `2022-blake3-chacha20-poly1305`. Give it the server's `ss://`
+link in `CHAT_SS` (chat takes it out of the environment) or on the settings page, never on the
+command line, where others on the machine can read it: it holds the server's key. UDP to peers
+and the DHT goes through the server's UDP relay, every packet padded to about the same size,
+and each relay connection through a TCP tunnel of its own. Your network sees one stream of
+random bytes to the server; peers, DHT nodes and relays see the server's address, not yours.
+Names (the DHT's bootstrap servers, the relays) go to the server to look up, so the only name
+chat looks up itself is the server's. The server sees everything your network would have, so
+run it somewhere you trust. Its UDP relay has to pass on replies from any address (full cone),
+as shadowsocks-rust and sing-box do, or peers can't reach you through it; both clocks have to be
+right to within 30 seconds. `--peer` takes addresses only in this mode, and `:update` refuses to
+go around the server.
 
 **Tor** needs tor installed (Arch: `sudo pacman -S tor`, Debian/Ubuntu: `sudo apt install
 tor`, Windows: the Tor Expert Bundle) or Tor Browser. Nothing else needs setting up. chat picks
@@ -232,8 +283,9 @@ Both would stay off unless you turn them on.
 ## Build
 
 Requires CMake ≥ 3.15 and a C compiler. libsodium (1.0.20), liboqs (0.16.0, ML-KEM-768
-only), Mbed TLS (3.6.7, for the relays' `wss://` connections) and libsecp256k1 (0.7.1, for
-Nostr's Schnorr signatures) are fetched and built statically by CMake. TLS certificates are
+only), Mbed TLS (3.6.7, for the relays' `wss://` connections and Shadowsocks' AES-GCM),
+libsecp256k1 (0.7.1, for Nostr's Schnorr signatures) and BLAKE3 (1.8.2, its portable C only,
+for Shadowsocks 2022's keys) are fetched and built statically by CMake. TLS certificates are
 checked against the system's root store. Mbed TLS is configured as a TLS client with
 forward-secret key exchanges only ([`cmake/mbedtls-config.h`](cmake/mbedtls-config.h)), and
 libsecp256k1 keeps only what signing needs, since chat never verifies Nostr signatures.
@@ -275,10 +327,14 @@ a copy taken to another machine still says which build it is.
 
 ### Tests
 
-`tests/` runs real sessions against each other over an in-memory network: handshake, message
-delivery with a lost packet, rekey (and a message lost just as the peer rekeys), replayed
-hellos and junk from outside the room, a third peer joining, and that nothing goes over UDP
-unmasked. It also checks the parsers for what relays, routers and Tor send, the hourly DHT
+`tests/` runs real sessions against each other over an in-memory network: handshake, the
+verify-code gate, message delivery with a lost packet, rekey (and a message lost just as the
+peer rekeys), replayed hellos and junk from outside the room, a third peer joining, that nothing
+goes over UDP unmasked, that every datagram is one cell sent in a slot however many messages
+are sent, and two sessions talking through a Shadowsocks server on the in-memory network, which
+they send nothing around. It also checks Shadowsocks links, its UDP relay and TCP tunnel in all
+three methods, and that the DHT asks as a read-only node and stops starting from the bootstrap
+servers once it knows enough nodes. It also checks the parsers for what relays, routers and Tor send, the hourly DHT
 keys, and that key files are only read from regular files. The fuzz targets (libFuzzer, so
 clang) cover bencode and DHT replies (IPv4 and IPv6), relay JSON and UPnP gateway replies,
 PGP and AGE key import, text cleaning and the input line, and everything a session receives,
@@ -317,8 +373,9 @@ key: commit `minisign.pub`, and keep the secret key backed up and off GitHub.
 
 ```
 chat [--nick NAME] [--colour NAME|#HEX] [--identity age|pgp[:KEYFILE]] [--simple]
-     [--routing direct+nostr|direct|tor] [--nodht] [--noipv6] [--nolan] [--noportmap]
-     [--nonostr] [--relay wss://HOST ...] [--tor-socks HOST:PORT] [--tor-control HOST:PORT]
+     [--routing direct+nostr|direct|tor|shadowsocks] [--nodht] [--noipv6] [--nolan]
+     [--noportmap] [--nonostr] [--nostr-always] [--relay wss://HOST ...]
+     [--tor-socks HOST:PORT] [--tor-control HOST:PORT] [--verify-optional]
      [--session ID --port UDP_PORT --peer HOST:PORT ...]
 ```
 
@@ -380,7 +437,7 @@ command; `Enter` on a command there puts it on the command line.
 | `:quit` (`:q`) | leave this session; quits when none is open |
 | `:quitall` (`:qa`) | leave every session and quit |
 | `:set [NAME [VALUE]]` | change a setting (see below); alone, opens the settings page (`Ctrl+S`) |
-| `:verify NICK` | show a peer's identity fingerprint |
+| `:verify NICK [ok\|no]` | show a peer's verify code and identity fingerprint; `ok` once the code matches theirs, `no` if it doesn't |
 | `:peers` | who is online, with verify codes and builds |
 | `:net` | network report and diagnosis |
 | `:port [N]` | show or move this session's UDP port (`0` picks a free one) |
@@ -396,14 +453,17 @@ values after a name. Under each row's help, the page shows the `:set` that does 
 
 | Name | Values |
 | --- | --- |
-| `routing` | `direct`, `tor` |
-| `dht`, `dht6`, `portmap`, `lan`, `nostr` | `on`, `off` |
+| `routing` | `direct`, `tor`, `shadowsocks` |
+| `ss` | the Shadowsocks server's `ss://` link: only on the page, where it's hidden |
+| `dht`, `dht6`, `portmap`, `lan` | `on`, `off` |
+| `nostr` | `on` (only while needed), `always`, `off` |
 | `relays` | up to 6 `wss://` URLs |
 | `torlaunch` | `auto`, `always`, `never` |
 | `torpath`, `torsocks`, `torcontrol` | a path, `HOST:PORT`, `HOST:PORT` |
 | `torpassword` | only on the page, where it's hidden |
 | `nick`, `colour` | a name; a colour name or `#RRGGBB` |
 | `sign` | `off`, or an `age` or `pgp` key made from a password typed on the page; a key file or pasted key is chosen there too |
+| `verify` | `required` (nothing reaches a peer until you've compared its code), `optional` |
 | `notify` | `all`, `mentions`, `none` |
 | `preview` | what a notification shows: `off` (only that a message came), `nick` (who from), `message` (who, and what); never the session |
 | `net` | `normal`, `verbose` (every handshake packet, relay and Tor event) |
@@ -434,12 +494,14 @@ write access to the folder that holds the executable.
 | --- | --- |
 | `--nick NAME` | Display name (random `swift-otter42`-style if omitted) |
 | `--colour NAME\|#HEX` | Display colour (random by default; `--color` too) |
-| `--routing` | `direct+nostr`, `direct` or `tor`, preset on the settings page (see [Routing](#routing)) |
+| `--routing` | `direct+nostr`, `direct`, `tor` or `shadowsocks`, preset on the settings page (see [Routing](#routing)); Shadowsocks takes its server's link from `CHAT_SS` |
 | `--nodht` | Skip the BitTorrent DHT (IPv4 and IPv6) |
 | `--noipv6` | Skip the IPv6 DHT only |
 | `--nolan` | Skip LAN broadcast discovery |
 | `--noportmap` | Don't ask the router to forward a port |
 | `--nonostr` | No Nostr relay fallback |
+| `--nostr-always` | Stay on the relays all the time, not only while they're needed |
+| `--verify-optional` | Send to peers whose verify code you haven't compared |
 | `--relay URL` | A Nostr relay (`wss://...`) to use instead of the defaults; up to 6 |
 | `--tor-launch auto\|always\|never` | Which tor Tor mode uses: a running one if possible, else chat's own (`auto`); always chat's own; or only a running one |
 | `--tor-path PATH` | The tor program chat starts (default: `tor` on `PATH` or in the usual folders) |
