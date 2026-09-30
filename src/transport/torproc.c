@@ -13,7 +13,7 @@
 struct torproc {
     platform_proc_t *proc;
     char dir[1024];
-    char torrc[1100], defaults[1100], data[1100], port_file[1100], cookie[1100], log[1100];
+    char torrc[1100], data[1100], port_file[1100], cookie[1100], log[1100];
     char socks[32], control[32];
     char version[80];
     char problem[200], last_line[200];
@@ -38,7 +38,7 @@ static int path_in(char *out, size_t cap, const char *dir, const char *name) {
     return n > 0 && (size_t)n < cap ? 0 : -1;
 }
 
-torproc_t *torproc_start(const char *program, const char *config, char *err, size_t cap) {
+torproc_t *torproc_start(const char *program, char *err, size_t cap) {
     torproc_t *p = calloc(1, sizeof *p);
     if (!p) { copy_str(err, "out of memory", cap); return NULL; }
     p->boot = -1;
@@ -49,8 +49,7 @@ torproc_t *torproc_start(const char *program, const char *config, char *err, siz
         free(p);
         return NULL;
     }
-    if (path_in(p->torrc, sizeof p->torrc, p->dir, "torrc") || path_in(p->defaults, sizeof p->defaults, p->dir, "torrc-defaults")
-        || path_in(p->data, sizeof p->data, p->dir, "data")
+    if (path_in(p->torrc, sizeof p->torrc, p->dir, "torrc") || path_in(p->data, sizeof p->data, p->dir, "data")
         || path_in(p->port_file, sizeof p->port_file, p->dir, "control-port")
         || path_in(p->cookie, sizeof p->cookie, p->dir, "control_auth_cookie")
         || path_in(p->log, sizeof p->log, p->dir, "tor.log")) {
@@ -58,14 +57,11 @@ torproc_t *torproc_start(const char *program, const char *config, char *err, siz
         torproc_stop(p);
         return NULL;
     }
-    // A configuration of our own (empty, or the bridges) and empty defaults, so the system's
+    // An empty configuration of our own for both the torrc and the defaults, so the system's
     // /etc/tor/torrc (hidden services, other ports, whatever it holds) plays no part.
     FILE *f = platform_fopen_private(p->torrc, "w");
-    int wrote = f && (!config || fputs(config, f) >= 0);
-    if (f && fclose(f) != 0) wrote = 0;
-    FILE *d = platform_fopen_private(p->defaults, "w");
-    if (d && fclose(d) != 0) d = NULL;
-    if (!wrote || !d) { copy_str(err, "can't write tor's configuration", cap); torproc_stop(p); return NULL; }
+    if (!f) { copy_str(err, "can't write tor's configuration", cap); torproc_stop(p); return NULL; }
+    fclose(f);
     uint16_t socks_port, control_port;
     if (free_ports(&socks_port, &control_port) != 0) {
         copy_str(err, "no free local ports for tor", cap);
@@ -79,7 +75,7 @@ torproc_t *torproc_start(const char *program, const char *config, char *err, siz
     const char *argv[] = {
         program,
         "-f", p->torrc,
-        "--defaults-torrc", p->defaults,
+        "--defaults-torrc", p->torrc,
         "--DataDirectory", p->data,
         "--SocksPort", p->socks,
         "--ControlPort", p->control,

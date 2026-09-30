@@ -6,7 +6,6 @@
 #include "fake_net.h"
 #include "common/json.h"
 #include "transport/portmap.h"
-#include "transport/bridges.h"
 #include "common/util.h"
 #include "crypto/age.h"
 #include "crypto/pgp.h"
@@ -774,83 +773,6 @@ static void test_identity_keys(double *t) {
     CHECK(crypto_sign_verify_detached(got, msg, sizeof msg, derived.pub) == 0, "the key from a password can't sign");
 }
 
-// Transport programs as a test machine has them: lyrebird and snowflake-client, nothing else.
-static int fake_find(void *ctx, const char *transport, const char *program, char *out, size_t cap) {
-    (void)transport;
-    const char *dir = ctx;
-    if (strcmp(program, "lyrebird") != 0 && strcmp(program, "snowflake-client") != 0) return -1;
-    snprintf(out, cap, "%s/%s", dir, program);
-    return 0;
-}
-
-static void test_bridges(double *t) {
-    (void)t;
-    static const char OBFS4[] = "obfs4 146.57.248.225:22 10A6CD36A537FCE513A322361547444B393989F0 "
-                                "cert=K1gDtDAIcUfeLqbstggjIw2rtgIKqdIhUlHp82XRqNSq/mtAjp1BIC9vHKJ2FAEpGssTPw iat-mode=0";
-    static const char WEBTUNNEL[] = "webtunnel [2001:db8::1]:443 0123456789ABCDEF0123456789ABCDEF01234567 "
-                                    "url=https://example.com/a1b2c3 ver=0.0.1";
-    bridges_t b;
-    char why[240], text[1400], out[8192];
-
-    CHECK(bridges_parse("snowflake", &b, why, sizeof why) == 0 && b.n == 2 && b.builtin, "snowflake didn't give the built-in bridges");
-    bridges_describe(&b, text, sizeof text);
-    CHECK(strcmp(text, "built-in Snowflake") == 0, "the built-in bridges described as %s", text);
-    CHECK(bridges_torrc(&b, fake_find, "/usr/bin", out, sizeof out, why, sizeof why) == 0
-          && strstr(out, "UseBridges 1\nClientTransportPlugin snowflake exec /usr/bin/snowflake-client\nBridge snowflake 192.0.2.3:80 ")
-          && strstr(out, "\nBridge snowflake 192.0.2.4:80 "), "the built-in bridges' torrc: %s", out);
-
-    // Lines as bridges.torproject.org or a torrc give them, one with "Bridge " in front.
-    snprintf(text, sizeof text, " Bridge  %s ;\n%s\n", OBFS4, WEBTUNNEL);
-    CHECK(bridges_parse(text, &b, why, sizeof why) == 0 && b.n == 2 && !b.builtin && strcmp(b.line[0], OBFS4) == 0
-          && strcmp(b.line[1], WEBTUNNEL) == 0, "two bridge lines didn't parse: %s", why);
-    bridges_describe(&b, text, sizeof text);
-    CHECK(strcmp(text, "2 bridges (obfs4, webtunnel)") == 0, "two bridges described as %s", text);
-    CHECK(bridges_torrc(&b, fake_find, "/opt/tb", out, sizeof out, why, sizeof why) == 0
-          && strstr(out, "ClientTransportPlugin obfs4,webtunnel exec /opt/tb/lyrebird\n") && strstr(out, "Bridge webtunnel [2001:db8::1]:443 ")
-          && !strstr(out, "snowflake"), "obfs4 and webtunnel's torrc: %s", out);
-    CHECK(bridges_add("snowflake", &b, why, sizeof why) == 0 && b.n == 4
-          && bridges_torrc(&b, fake_find, "/usr/bin", out, sizeof out, why, sizeof why) == 0
-          && strstr(out, "ClientTransportPlugin obfs4,webtunnel exec /usr/bin/lyrebird\n")
-          && strstr(out, "ClientTransportPlugin snowflake exec /usr/bin/snowflake-client\n"), "mixed bridges' torrc: %s", out);
-    CHECK(bridges_add(OBFS4, &b, why, sizeof why) == 0 && b.n == 4, "the same bridge went in twice");
-
-    CHECK(bridges_parse("1.2.3.4:443 0123456789ABCDEF0123456789ABCDEF01234567", &b, why, sizeof why) == 0 && b.n == 1
-          && bridges_torrc(&b, fake_find, "/usr/bin", out, sizeof out, why, sizeof why) == 0
-          && strcmp(out, "UseBridges 1\nBridge 1.2.3.4:443 0123456789ABCDEF0123456789ABCDEF01234567\n") == 0,
-          "a plain bridge's torrc: %s", out);
-    CHECK(bridges_parse("off", &b, why, sizeof why) == 0 && b.n == 0 && bridges_parse("", &b, why, sizeof why) == 0 && b.n == 0,
-          "off didn't clear the bridges");
-
-    static const char *const BAD[] = {
-        "obfs4 bridge.example:443 10A6CD36A537FCE513A322361547444B393989F0",   // a name, not an address
-        "obfs4",
-        "obfs4 1.2.3.4:443 cert=abc #comment",
-        "obfs4 1.2.3.4:443 cert=\"abc\"",
-        "obfs4 1.2.3.4:443 cert=a\\b",
-        "obfs4 1.2.3.4:443 notakeyvalue",
-        "obfs4 1.2.3.4:443 cert=abc\nControlPort 0.0.0.0:9051",   // a torrc option slipped in
-        "obfs4 1.2.3.4:443 cert=\x01",
-        "Obfs4 1.2.3.4:443",
-    };
-    for (size_t i = 0; i < sizeof BAD / sizeof BAD[0]; i++)
-        CHECK(bridges_parse(BAD[i], &b, why, sizeof why) != 0, "a bad bridge line parsed: %s", BAD[i]);
-    text[0] = '\0';
-    for (int i = 0; i < BRIDGE_MAX + 1; i++)
-        snprintf(text + strlen(text), sizeof text - strlen(text), "obfs4 10.0.0.%d:443 cert=x;", i + 1);
-    CHECK(bridges_parse(text, &b, why, sizeof why) != 0, "more than %d bridges parsed", BRIDGE_MAX);
-
-    // No program for the transport, or one tor can't be told to run: said, not written out.
-    CHECK(bridges_parse("conjure 143.110.214.222:80 url=https://example.com", &b, why, sizeof why) == 0
-          && bridges_torrc(&b, fake_find, "/usr/bin", out, sizeof out, why, sizeof why) != 0 && strstr(why, "conjure-client"),
-          "a transport with no program: %s", why);
-    CHECK(bridges_parse("foo 1.2.3.4:443 x=y", &b, why, sizeof why) == 0
-          && bridges_torrc(&b, fake_find, "/usr/bin", out, sizeof out, why, sizeof why) != 0 && strstr(why, "foo"),
-          "a transport chat doesn't know: %s", why);
-    CHECK(bridges_parse(OBFS4, &b, why, sizeof why) == 0
-          && bridges_torrc(&b, fake_find, "/home/me/Tor Browser", out, sizeof out, why, sizeof why) != 0 && strstr(why, "space"),
-          "a program path with a space: %s", why);
-}
-
 static void test_parsers(double *t) {
     (void)t;
     // An address Tor itself handed out, and the same with one character changed.
@@ -923,7 +845,7 @@ int main(int argc, char **argv) {
         { "junk", test_junk }, { "lookalike nick", test_lookalike_nick },
         { "third peer", test_third_peer }, { "candidates settle", test_candidates_settle }, { "builds", test_builds },
         { "parsers", test_parsers }, { "dht keys", test_dht_keys }, { "dht", test_dht }, { "read file", test_read_file },
-        { "identity keys", test_identity_keys }, { "bridges", test_bridges },
+        { "identity keys", test_identity_keys },
     };
     size_t n_tests = sizeof tests / sizeof tests[0];
     int failed[sizeof tests / sizeof tests[0]], n_failed = 0;

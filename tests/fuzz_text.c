@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
-// Text that reaches the terminal (message and nick cleaning, column widths), the input line
-// editor fed with arbitrary key bytes, and pasted bridge lines on their way into tor's torrc.
+// Text that reaches the terminal (message and nick cleaning, column widths) and the input line
+// editor fed with arbitrary key bytes.
 #define _POSIX_C_SOURCE 200809L
 #include "core/chat.h"
 #include "app/tui.h"
 #include "common/util.h"
-#include "transport/bridges.h"
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
@@ -72,32 +71,6 @@ static void fuzz_editor(const uint8_t *data, size_t size) {
         check(in.cmd_len >= 0 && in.cmd_len < (int)sizeof in.cmd && in.cmd[in.cmd_len] == '\0');
         check((size_t)in.len == strlen(in.buf));
         check(in.menu_sel >= 0 && in.menu_sel < 3);
-    }
-}
-
-static int fuzz_find(void *ctx, const char *transport, const char *program, char *out, size_t cap) {
-    (void)ctx; (void)transport;
-    snprintf(out, cap, "/usr/bin/%s", program);
-    return 0;
-}
-
-// Whatever is pasted, the torrc gets only UseBridges, ClientTransportPlugin and Bridge lines, each
-// with nothing tor would read as more than its value.
-static void fuzz_bridges(const char *s) {
-    static bridges_t b;
-    static char torrc[BRIDGE_MAX * (BRIDGE_LINE_MAX + 8) + 1024];
-    char why[240], desc[200];
-    if (bridges_parse(s, &b, why, sizeof why) != 0) { check(why[0] != '\0'); return; }
-    check(b.n >= 0 && b.n <= BRIDGE_MAX);
-    bridges_describe(&b, desc, sizeof desc);
-    if (bridges_torrc(&b, fuzz_find, NULL, torrc, sizeof torrc, why, sizeof why) != 0) return;
-    for (const char *line = torrc; *line; ) {
-        const char *eol = strchr(line, '\n');
-        check(eol != NULL);
-        check(strncmp(line, "UseBridges 1\n", 13) == 0 || strncmp(line, "ClientTransportPlugin ", 22) == 0
-              || strncmp(line, "Bridge ", 7) == 0);
-        for (const char *c = line; c < eol; c++) check(*c >= ' ' && *c < 0x7f && *c != '#' && *c != '"' && *c != '\\');
-        line = eol + 1;
     }
 }
 
@@ -193,7 +166,6 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     hex_decode(s, 32, bin);
     has_control_chars(s);
 
-    fuzz_bridges(s);
     fuzz_editor(data, size);
     fuzz_render(s, data, size);
     free(s);

@@ -16,9 +16,8 @@ typedef struct torproc torproc_t;
 
 typedef enum { TORPROC_STARTING, TORPROC_READY, TORPROC_EXITED } torproc_state_t;
 
-// Starts tor from program (a full path), with config (torrc lines: the bridges) or NULL. Returns
-// NULL with the reason in err.
-torproc_t *torproc_start(const char *program, const char *config, char *err, size_t cap);
+// Starts tor from program (a full path). Returns NULL with the reason in err.
+torproc_t *torproc_start(const char *program, char *err, size_t cap);
 torproc_state_t torproc_poll(torproc_t *p);
 const char *torproc_socks(const torproc_t *p);
 const char *torproc_control(const torproc_t *p);
