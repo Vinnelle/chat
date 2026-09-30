@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Security
+- Desktop notifications on Linux are transient: the desktop shows them but keeps them out of
+  its notification history, which recorded when messages came (and, with previews on, what
+  they said) after chat had exited.
 - Every datagram chat sends a connected peer goes in a slot of that peer's, one every 1.5 to
   1.9 seconds whether or not there's anything to say. A message, its ack, a message passed on
   to other members, a nick change and a re-handshake's pieces all wait for a slot, so when and
