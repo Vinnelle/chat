@@ -121,10 +121,10 @@ static const char *USAGE =
     "  --tor-bridges\n"
     "              reach the Tor network through bridges, so your network doesn't see a\n"
     "              connection to Tor: snowflake (built in; needs snowflake-client), or bridge\n"
-    "              lines from bridges.torproject.org (obfs4, webtunnel: need lyrebird or\n"
-    "              obfs4proxy), ';'-separated or repeated. Chat then starts its own tor\n"
-    "  --tor-pt    TRANSPORT=PATH: a transport's program, when it isn't on PATH under its\n"
-    "              usual name (NixOS: snowflake=/run/current-system/sw/bin/client); repeatable\n"
+    "              lines from bridges.torproject.org (obfs4: lyrebird or obfs4proxy;\n"
+    "              webtunnel: lyrebird), ';'-separated or repeated. Chat then starts its own tor\n"
+    "  --tor-pt    TRANSPORT=PATH: a transport's program, when chat doesn't find it under\n"
+    "              its usual name (snowflake=/opt/snowflake/client); repeatable\n"
     "  --identity  age: an Ed25519 identity, used to sign every session you join, with an\n"
     "              AGE recipient string (age1...) others can `age -r` encrypt files to.\n"
     "              pgp: the same as a PGP key, whose public key others can import.\n"
@@ -473,15 +473,41 @@ static void tor_link_fail(double now, double retry_in) {
     g_tor.retry_at = now + retry_in;
 }
 
+typedef struct {
+    const char *tor;       // the tor program chat starts
+    char skipped[1024];    // a script found under a transport's name, left out
+} transport_search_t;
+
+// Tor's transports are compiled programs, so a script found under one of their names is something
+// else: the AUR's lyrebird, for one, is a voice changer.
+static int found_transport(transport_search_t *s, const char *program, const char *path, char *out, size_t cap) {
+    if (platform_find_program(program, path, out, cap) != 0) return -1;
+    FILE *f = platform_fopen(out, "rb");
+    char head[2] = { 0, 0 };
+    size_t n = f ? fread(head, 1, sizeof head, f) : 0;
+    if (f) fclose(f);
+    if (n == 2 && head[0] == '#' && head[1] == '!') { copy_str(s->skipped, out, sizeof s->skipped); return -1; }
+    return 0;
+}
+
 // A bridge transport's program: where :set torpt says, else by name on PATH and in the usual
-// folders, else next to tor, where Tor Browser and the Tor Expert Bundle keep theirs.
+// folders, next to tor (where Tor Browser and the Tor Expert Bundle keep theirs), or in the Tor
+// Browser torbrowser-launcher installs.
 static int find_transport(void *ctx, const char *transport, const char *program, char *out, size_t cap) {
-    const char *tor = ctx;
+    transport_search_t *s = ctx;
     for (int i = 0; i < g_app.n_tor_pt; i++)
         if (strcmp(g_app.tor_pt[i].transport, transport) == 0) return platform_find_program(program, g_app.tor_pt[i].path, out, cap);
-    if (platform_find_program(program, NULL, out, cap) == 0) return 0;
+    if (found_transport(s, program, NULL, out, cap) == 0) return 0;
     char dir[1024], cand[1200];
-    copy_str(dir, tor, sizeof dir);
+#ifndef _WIN32
+    const char *home = getenv("HOME");
+    if (home && home[0] == '/') {
+        snprintf(cand, sizeof cand, "%s/.local/share/torbrowser/tbb/x86_64/tor-browser/Browser/TorBrowser/Tor/PluggableTransports/%s",
+                 home, program);
+        if (found_transport(s, program, cand, out, cap) == 0) return 0;
+    }
+#endif
+    copy_str(dir, s->tor, sizeof dir);
     char *cut = strrchr(dir, '/');
 #ifdef _WIN32
     char *bs = strrchr(dir, '\\');
@@ -495,7 +521,7 @@ static int find_transport(void *ctx, const char *transport, const char *program,
     static const char *const SUB[] = { "PluggableTransports", "pluggable_transports" };
     for (size_t i = 0; i < sizeof SUB / sizeof SUB[0]; i++) {
         snprintf(cand, sizeof cand, "%s/%s/%s%s", dir, SUB[i], program, EXE);
-        if (platform_find_program(program, cand, out, cap) == 0) return 0;
+        if (found_transport(s, program, cand, out, cap) == 0) return 0;
     }
     return -1;
 }
@@ -548,8 +574,12 @@ static void tor_link_start_own(double now) {
     static char config[BRIDGE_MAX * (BRIDGE_LINE_MAX + 8) + TOR_PT_MAX * 1200 + 64];
     char why[240], desc[160] = "";
     if (g_app.tor_bridges.n > 0) {
-        if (bridges_torrc(&g_app.tor_bridges, find_transport, program, config, sizeof config, why, sizeof why) != 0) {
+        transport_search_t search = { program, "" };
+        if (bridges_torrc(&g_app.tor_bridges, find_transport, &search, config, sizeof config, why, sizeof why) != 0) {
             push_log("* tor: can't use the bridges: %s", why);
+            if (search.skipped[0])
+                push_log("* tor: %s was left out: it's a script, not Tor's program of that name (the AUR's lyrebird is a "
+                         "voice changer)", search.skipped);
             tor_link_fail(now, 30.0);
             return;
         }
@@ -1025,12 +1055,13 @@ static const setting_def_t SETTINGS[] = {
       "Hides from your network that you use Tor: chat's own tor reaches the Tor network through bridges and a "
       "pluggable transport, never a Tor relay's known address. snowflake: Tor Browser's built-in Snowflake "
       "bridges (needs snowflake-client). Or bridge lines from bridges.torproject.org, ';' between them: obfs4 "
-      "or webtunnel (needs lyrebird or obfs4proxy). With bridges, chat always starts its own tor, restarting "
+      "(needs lyrebird or obfs4proxy) or webtunnel (needs lyrebird or webtunnel-client). With bridges, chat always starts its own tor, restarting "
       "the one in use. off: none." },
     { SET_TOR_PT, NULL, "torpt", "Transport programs", K_TEXT, "TRANSPORT=PATH ...",
-      "Where a bridge transport's program is, when it isn't on PATH under its usual name: e.g. "
-      "snowflake=/run/current-system/sw/bin/client (NixOS's snowflake package calls it client). Empty: look on "
-      "PATH, in the usual folders, and next to tor (Tor Browser, the Tor Expert Bundle)." },
+      "Where a bridge transport's program is, when chat doesn't find it under its usual name: e.g. "
+      "snowflake=/opt/snowflake/client. Empty: look on PATH and in the usual folders (Arch's AUR "
+      "snowflake-pt-client too), next to tor (Tor Browser, the Tor Expert Bundle), and in the Tor Browser "
+      "torbrowser-launcher installs." },
     { SET_TOR_SOCKS, NULL, "torsocks", "Tor SOCKS port", K_TEXT, "HOST:PORT",
       "Where to look for a running tor's SOCKS port (host:port). With the defaults, Tor Browser's "
       "127.0.0.1:9150 is tried too. Applies to sessions you open from now on." },
