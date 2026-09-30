@@ -17,7 +17,6 @@ set(CHAT_CORE_SOURCES
     ${PROJECT_SOURCE_DIR}/src/transport/nostr.c
     ${PROJECT_SOURCE_DIR}/src/transport/tls.c
     ${PROJECT_SOURCE_DIR}/src/transport/tor.c
-    ${PROJECT_SOURCE_DIR}/src/transport/bridges.c
     ${PROJECT_SOURCE_DIR}/src/transport/portmap.c
     ${PROJECT_SOURCE_DIR}/src/common/util.c
     ${PROJECT_SOURCE_DIR}/src/common/bencode.c

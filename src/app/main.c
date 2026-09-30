@@ -10,7 +10,6 @@
 #include "common/util.h"
 #include "app/update.h"
 #include "transport/torproc.h"
-#include "transport/bridges.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,8 +25,7 @@ static const char *USAGE =
     "            [--routing dht+nostr|dht|tor] [--nodht] [--noipv6] [--nolan]\n"
     "            [--noportmap] [--nonostr] [--nostr-always] [--relay wss://HOST ...]\n"
     "            [--tor-launch auto|always|never] [--tor-path PATH] [--tor-socks HOST:PORT]\n"
-    "            [--tor-control HOST:PORT] [--tor-bridges snowflake|LINE ...]\n"
-    "            [--tor-pt TRANSPORT=PATH ...] [--verify-optional]\n"
+    "            [--tor-control HOST:PORT] [--verify-optional]\n"
     "            [--session ID --port UDP_PORT --peer HOST:PORT ...]\n"
     "       chat --update | --version\n"
     "\n"
@@ -118,13 +116,6 @@ static const char *USAGE =
     "  --tor-socks, --tor-control\n"
     "              where to look for a running tor (default 127.0.0.1:9050 and :9051; Tor\n"
     "              Browser's 9150 and 9151 are tried too)\n"
-    "  --tor-bridges\n"
-    "              reach the Tor network through bridges, so your network doesn't see a\n"
-    "              connection to Tor: snowflake (built in; needs snowflake-client), or bridge\n"
-    "              lines from bridges.torproject.org (obfs4: lyrebird or obfs4proxy;\n"
-    "              webtunnel: lyrebird), ';'-separated or repeated. Chat then starts its own tor\n"
-    "  --tor-pt    TRANSPORT=PATH: a transport's program, when chat doesn't find it under\n"
-    "              its usual name (snowflake=/opt/snowflake/client); repeatable\n"
     "  --identity  age: an Ed25519 identity, used to sign every session you join, with an\n"
     "              AGE recipient string (age1...) others can `age -r` encrypt files to.\n"
     "              pgp: the same as a PGP key, whose public key others can import.\n"
@@ -189,13 +180,6 @@ typedef enum { KEY_MADE, KEY_DERIVED, KEY_FILE, KEY_PASTED } key_origin_t;
 
 #define MAX_DIR_ITEMS 512
 
-// Where a bridge transport's program is, when it isn't found by its usual name.
-#define TOR_PT_MAX 4
-typedef struct {
-    char transport[32];
-    char path[512];
-} tor_pt_t;
-
 typedef struct {
     char name[200];   // a folder's ends in '/'
     int is_dir;
@@ -231,9 +215,6 @@ typedef struct {
     identity_source_t load_kind;   // AGE or PGP: what the key file browser or the paste page takes
     int tor_launch;
     char tor_path[512];
-    bridges_t tor_bridges;
-    tor_pt_t tor_pt[TOR_PT_MAX];   // transports' programs, where they aren't found by name
-    int n_tor_pt;
     uint8_t color[3];
     identity_source_t identity_source;
     identity_keypair_t identity;
@@ -473,93 +454,6 @@ static void tor_link_fail(double now, double retry_in) {
     g_tor.retry_at = now + retry_in;
 }
 
-typedef struct {
-    const char *tor;       // the tor program chat starts
-    char skipped[1024];    // a script found under a transport's name, left out
-} transport_search_t;
-
-// Tor's transports are compiled programs, so a script found under one of their names is something
-// else: the AUR's lyrebird, for one, is a voice changer.
-static int found_transport(transport_search_t *s, const char *program, const char *path, char *out, size_t cap) {
-    if (platform_find_program(program, path, out, cap) != 0) return -1;
-    FILE *f = platform_fopen(out, "rb");
-    char head[2] = { 0, 0 };
-    size_t n = f ? fread(head, 1, sizeof head, f) : 0;
-    if (f) fclose(f);
-    if (n == 2 && head[0] == '#' && head[1] == '!') { copy_str(s->skipped, out, sizeof s->skipped); return -1; }
-    return 0;
-}
-
-// A bridge transport's program: where :set torpt says, else by name on PATH and in the usual
-// folders, next to tor (where Tor Browser and the Tor Expert Bundle keep theirs), or in the Tor
-// Browser torbrowser-launcher installs.
-static int find_transport(void *ctx, const char *transport, const char *program, char *out, size_t cap) {
-    transport_search_t *s = ctx;
-    for (int i = 0; i < g_app.n_tor_pt; i++)
-        if (strcmp(g_app.tor_pt[i].transport, transport) == 0) return platform_find_program(program, g_app.tor_pt[i].path, out, cap);
-    if (found_transport(s, program, NULL, out, cap) == 0) return 0;
-    char dir[1024], cand[1200];
-#ifndef _WIN32
-    const char *home = getenv("HOME");
-    if (home && home[0] == '/') {
-        snprintf(cand, sizeof cand, "%s/.local/share/torbrowser/tbb/x86_64/tor-browser/Browser/TorBrowser/Tor/PluggableTransports/%s",
-                 home, program);
-        if (found_transport(s, program, cand, out, cap) == 0) return 0;
-    }
-#endif
-    copy_str(dir, s->tor, sizeof dir);
-    char *cut = strrchr(dir, '/');
-#ifdef _WIN32
-    char *bs = strrchr(dir, '\\');
-    if (!cut || (bs && bs > cut)) cut = bs;
-    static const char EXE[] = ".exe";
-#else
-    static const char EXE[] = "";
-#endif
-    if (!cut) return -1;
-    *cut = '\0';
-    static const char *const SUB[] = { "PluggableTransports", "pluggable_transports" };
-    for (size_t i = 0; i < sizeof SUB / sizeof SUB[0]; i++) {
-        snprintf(cand, sizeof cand, "%s/%s/%s%s", dir, SUB[i], program, EXE);
-        if (found_transport(s, program, cand, out, cap) == 0) return 0;
-    }
-    return -1;
-}
-
-// TRANSPORT=PATH pairs, space-separated, for :set torpt (replace) and --tor-pt (add).
-static int tor_pt_parse(const char *text, int add, char *why, size_t cap) {
-    tor_pt_t list[TOR_PT_MAX];
-    int n = add ? g_app.n_tor_pt : 0;
-    memcpy(list, g_app.tor_pt, sizeof list);
-    char buf[1200];
-    copy_str(buf, text, sizeof buf);
-    for (char *save = NULL, *tok = strtok_r(buf, " \t", &save); tok; tok = strtok_r(NULL, " \t", &save)) {
-        char *eq = strchr(tok, '=');
-        size_t tl = eq ? (size_t)(eq - tok) : 0;
-        if (!eq || tl == 0 || tl >= sizeof list[0].transport) { snprintf(why, cap, "want TRANSPORT=PATH, like snowflake=/usr/bin/snowflake-client"); return -1; }
-        for (size_t i = 0; i < tl; i++)
-            if (!((tok[i] >= 'a' && tok[i] <= 'z') || (tok[i] >= '0' && tok[i] <= '9') || tok[i] == '_')) {
-                snprintf(why, cap, "want TRANSPORT=PATH, like snowflake=/usr/bin/snowflake-client");
-                return -1;
-            }
-        char found[1024];
-        if (platform_find_program(eq + 1, eq + 1, found, sizeof found) != 0) {
-            snprintf(why, cap, "can't use %.100s - it has to be a full path to a program only root or you can change", eq + 1);
-            return -1;
-        }
-        *eq = '\0';
-        int slot = 0;
-        while (slot < n && strcmp(list[slot].transport, tok) != 0) slot++;
-        if (slot == n && n >= TOR_PT_MAX) { snprintf(why, cap, "at most %d transport programs", TOR_PT_MAX); return -1; }
-        if (slot == n) n++;
-        copy_str(list[slot].transport, tok, sizeof list[slot].transport);
-        copy_str(list[slot].path, found, sizeof list[slot].path);
-    }
-    memcpy(g_app.tor_pt, list, sizeof list);
-    g_app.n_tor_pt = n;
-    return 0;
-}
-
 static void tor_link_start_own(double now) {
     char program[1024], err[160];
     if (platform_find_program("tor", g_app.tor_path, program, sizeof program) != 0) {
@@ -571,23 +465,7 @@ static void tor_link_start_own(double now) {
         tor_link_fail(now, 30.0);
         return;
     }
-    static char config[BRIDGE_MAX * (BRIDGE_LINE_MAX + 8) + TOR_PT_MAX * 1200 + 64];
-    char why[240], desc[160] = "";
-    if (g_app.tor_bridges.n > 0) {
-        transport_search_t search = { program, "" };
-        if (bridges_torrc(&g_app.tor_bridges, find_transport, &search, config, sizeof config, why, sizeof why) != 0) {
-            push_log("* tor: can't use the bridges: %s", why);
-            if (search.skipped[0])
-                push_log("* tor: %s was left out: it's a script, not Tor's program of that name (the AUR's lyrebird is a "
-                         "voice changer)", search.skipped);
-            tor_link_fail(now, 30.0);
-            return;
-        }
-        char d[120];
-        bridges_describe(&g_app.tor_bridges, d, sizeof d);
-        snprintf(desc, sizeof desc, " through %s", d);
-    }
-    g_tor.proc = torproc_start(program, g_app.tor_bridges.n > 0 ? config : NULL, err, sizeof err);
+    g_tor.proc = torproc_start(program, err, sizeof err);
     if (!g_tor.proc) {
         push_log("* tor: couldn't start %s: %s", program, err);
         tor_link_fail(now, 30.0);
@@ -595,27 +473,19 @@ static void tor_link_start_own(double now) {
     }
     g_tor.state = TL_STARTING;
     g_tor.boot_told = -1;
-    push_log("* tor: starting chat's own tor (%s)%s - its data lives in a private temporary folder, deleted when chat exits",
-             program, desc);
-}
-
-// Gets a tor if there's none yet. With bridges, only chat's own will do (unless it may start
-// none): a running tor would connect without them.
-static void tor_link_begin(double now) {
-    if (g_tor.state == TL_FAILED && now >= g_tor.retry_at) g_tor.state = TL_OFF;
-    if (g_tor.state != TL_OFF) return;
-    if (g_app.tor_launch == TOR_LAUNCH_ALWAYS || (g_app.tor_bridges.n > 0 && g_app.tor_launch != TOR_LAUNCH_NEVER)) {
-        tor_link_start_own(now);
-        return;
-    }
-    g_tor.probe = tor_probe_new(&g_app.route.tor);
-    if (!g_tor.probe) { tor_link_fail(now, 30.0); return; }
-    g_tor.state = TL_PROBING;
+    push_log("* tor: starting chat's own tor (%s) - its data lives in a private temporary folder, deleted when chat exits",
+             program);
 }
 
 // Makes sure Tor mode has a tor, or is getting one.
 static void tor_link_ensure(double now) {
-    if (g_app.route.mode == ROUTE_TOR) tor_link_begin(now);
+    if (g_app.route.mode != ROUTE_TOR) return;
+    if (g_tor.state == TL_FAILED && now >= g_tor.retry_at) g_tor.state = TL_OFF;
+    if (g_tor.state != TL_OFF) return;
+    if (g_app.tor_launch == TOR_LAUNCH_ALWAYS) { tor_link_start_own(now); return; }
+    g_tor.probe = tor_probe_new(&g_app.route.tor);
+    if (!g_tor.probe) { tor_link_fail(now, 30.0); return; }
+    g_tor.state = TL_PROBING;
 }
 
 static void tor_link_step(double now) {
@@ -631,9 +501,6 @@ static void tor_link_step(double now) {
                 g_tor.state = TL_READY;
                 push_log("* tor: using the tor that's already running (control port %s) - it keeps its entry guards "
                          "and any bridges it's set up with", g_tor.control);
-                if (g_app.tor_bridges.n > 0)
-                    push_log("* tor: chat's bridges are only for a tor it starts itself (:set torlaunch auto), so this "
-                             "one connects the way its own torrc says");
                 tor_link_apply();
             } else if (g_app.tor_launch == TOR_LAUNCH_NEVER) {
                 if (r == -2) push_log("* tor: the running tor won't let chat in: %s", why);
@@ -690,15 +557,6 @@ static void tor_link_stop(void) {
     g_tor.state = TL_OFF;
 }
 
-// New bridges need a new tor: the one in use stops, and chat's own starts with them. The sessions
-// move to it once it's up, as they do when chat's tor restarts.
-static void tor_link_rebridge(void) {
-    if (g_tor.state == TL_OFF) return;
-    tor_link_stop();
-    g_tor.starts = 0;
-    tor_link_begin(now_seconds());
-}
-
 static void tor_link_line(char *out, size_t cap) {
     switch (g_tor.state) {
         case TL_PROBING:  snprintf(out, cap, "tor: looking"); break;
@@ -706,10 +564,8 @@ static void tor_link_line(char *out, size_t cap) {
         case TL_FAILED:   snprintf(out, cap, "tor: none"); break;
         case TL_READY:
             if (!g_tor.proc) snprintf(out, cap, "tor: running one");
-            else if (g_tor.boot_told < 100)
-                snprintf(out, cap, "tor: own %d%%%s", torproc_bootstrap(g_tor.proc) < 0 ? 0 : torproc_bootstrap(g_tor.proc),
-                         g_app.tor_bridges.n > 0 ? " (bridges)" : "");
-            else snprintf(out, cap, "tor: own%s", g_app.tor_bridges.n > 0 ? " (bridges)" : "");
+            else if (g_tor.boot_told < 100) snprintf(out, cap, "tor: own %d%%", torproc_bootstrap(g_tor.proc) < 0 ? 0 : torproc_bootstrap(g_tor.proc));
+            else snprintf(out, cap, "tor: own");
             break;
         default: snprintf(out, cap, "tor: off"); break;
     }
@@ -1010,7 +866,7 @@ enum { K_TOGGLE, K_CHOICE, K_TEXT, K_SECRET, K_ACTION };
 
 typedef enum {
     SET_ROUTING, SET_DHT4, SET_DHT6, SET_PORTMAP, SET_LAN,
-    SET_TOR_LAUNCH, SET_TOR_PATH, SET_TOR_BRIDGES, SET_TOR_PT, SET_TOR_SOCKS, SET_TOR_CONTROL, SET_TOR_PASSWORD,
+    SET_TOR_LAUNCH, SET_TOR_PATH, SET_TOR_SOCKS, SET_TOR_CONTROL, SET_TOR_PASSWORD,
     SET_NOSTR, SET_RELAYS,
     SET_NICK, SET_COLOUR, SET_SIGN, SET_AGE_RECIPIENT, SET_PGP_PUBKEY,
     SET_VERIFY, SET_NOTIFY, SET_PREVIEW, SET_NET, SET_PORT,
@@ -1051,17 +907,6 @@ static const setting_def_t SETTINGS[] = {
     { SET_TOR_PATH, NULL, "torpath", "Tor program", K_TEXT, "PATH",
       "The tor chat starts: a full path, or empty for tor on PATH or in the usual folders. It has to be a "
       "program only root or you can change." },
-    { SET_TOR_BRIDGES, NULL, "bridges", "Tor bridges", K_TEXT, "snowflake|LINE; LINE...|off",
-      "Hides from your network that you use Tor: chat's own tor reaches the Tor network through bridges and a "
-      "pluggable transport, never a Tor relay's known address. snowflake: Tor Browser's built-in Snowflake "
-      "bridges (needs snowflake-client). Or bridge lines from bridges.torproject.org, ';' between them: obfs4 "
-      "(needs lyrebird or obfs4proxy) or webtunnel (needs lyrebird or webtunnel-client). With bridges, chat always starts its own tor, restarting "
-      "the one in use. off: none." },
-    { SET_TOR_PT, NULL, "torpt", "Transport programs", K_TEXT, "TRANSPORT=PATH ...",
-      "Where a bridge transport's program is, when chat doesn't find it under its usual name: e.g. "
-      "snowflake=/opt/snowflake/client. Empty: look on PATH and in the usual folders (Arch's AUR "
-      "snowflake-pt-client too), next to tor (Tor Browser, the Tor Expert Bundle), and in the Tor Browser "
-      "torbrowser-launcher installs." },
     { SET_TOR_SOCKS, NULL, "torsocks", "Tor SOCKS port", K_TEXT, "HOST:PORT",
       "Where to look for a running tor's SOCKS port (host:port). With the defaults, Tor Browser's "
       "127.0.0.1:9150 is tried too. Applies to sessions you open from now on." },
@@ -1140,8 +985,8 @@ static const setting_def_t *setting_by_key(const char *key) {
 static int dht_setting(setting_id_t id) { return id == SET_DHT4 || id == SET_DHT6; }
 static int dht_routing_only_setting(setting_id_t id) { return id == SET_PORTMAP || id == SET_LAN; }
 static int tor_only_setting(setting_id_t id) {
-    return id == SET_TOR_LAUNCH || id == SET_TOR_PATH || id == SET_TOR_BRIDGES || id == SET_TOR_PT || id == SET_TOR_SOCKS
-        || id == SET_TOR_CONTROL || id == SET_TOR_PASSWORD;
+    return id == SET_TOR_LAUNCH || id == SET_TOR_PATH || id == SET_TOR_SOCKS || id == SET_TOR_CONTROL
+        || id == SET_TOR_PASSWORD;
 }
 
 // Settings that don't apply right now aren't listed: the DHT ones in Tor mode, the Tor ones in
@@ -1234,15 +1079,6 @@ static void setting_value(setting_id_t id, char *out, size_t cap) {
             if (g_app.tor_path[0]) snprintf(out, cap, "%s", g_app.tor_path);
             else if (platform_find_program("tor", NULL, found, sizeof found) == 0) snprintf(out, cap, "found %s", found);
             else snprintf(out, cap, "not installed");
-            break;
-        }
-        case SET_TOR_BRIDGES:  bridges_describe(&g_app.tor_bridges, out, cap); break;
-        case SET_TOR_PT: {
-            size_t p = 0;
-            out[0] = '\0';
-            for (int i = 0; i < g_app.n_tor_pt && p < cap; i++)
-                p += (size_t)snprintf(out + p, cap - p, "%s%s=%s", i ? " " : "", g_app.tor_pt[i].transport, g_app.tor_pt[i].path);
-            if (g_app.n_tor_pt == 0) snprintf(out, cap, "look on PATH and next to tor");
             break;
         }
         case SET_TOR_SOCKS:    snprintf(out, cap, "%s", r->tor.socks); break;
@@ -1395,24 +1231,6 @@ static void begin_setting_edit(setting_id_t id) {
             snprintf(v, sizeof v, "%u", (unsigned)g_app.default_port);
         } else if (id == SET_TOR_PATH) {
             copy_str(v, g_app.tor_path, sizeof v);
-        } else if (id == SET_TOR_BRIDGES) {
-            // The lines as they'd be typed, if they fit; "snowflake" for the built-in ones.
-            const bridges_t *b = &g_app.tor_bridges;
-            size_t p = 0;
-            v[0] = '\0';
-            char d[40];
-            bridges_describe(b, d, sizeof d);
-            if (strcmp(d, "built-in Snowflake") == 0) copy_str(v, "snowflake", sizeof v);
-            else
-                for (int i = 0; i < b->n && p < sizeof v; i++)
-                    p += (size_t)snprintf(v + p, sizeof v - p, "%s%s", i ? "; " : "", b->line[i]);
-            if (p >= sizeof v) v[0] = '\0';
-        } else if (id == SET_TOR_PT) {
-            size_t p = 0;
-            v[0] = '\0';
-            for (int i = 0; i < g_app.n_tor_pt && p < sizeof v; i++)
-                p += (size_t)snprintf(v + p, sizeof v - p, "%s%s=%s", i ? " " : "", g_app.tor_pt[i].transport, g_app.tor_pt[i].path);
-            if (p >= sizeof v) v[0] = '\0';
         } else {
             setting_value(id, v, sizeof v);
         }
@@ -1466,28 +1284,6 @@ static void setting_apply_text(setting_id_t id, const char *typed) {
             copy_str(id == SET_TOR_SOCKS ? r->tor.socks : r->tor.control, text, TOR_HOST_MAX);
             routing_changed(id);
             return;
-        case SET_TOR_BRIDGES: {
-            char why[240], d[160];
-            bridges_t b;
-            if (bridges_parse(text, &b, why, sizeof why) != 0) { note("can't use those bridges: %s", why); return; }
-            bridges_describe(&b, d, sizeof d);
-            if (memcmp(&b, &g_app.tor_bridges, sizeof b) == 0) { note("Tor bridges: %s, as before", d); return; }
-            g_app.tor_bridges = b;
-            // With torlaunch never they don't apply, so the tor in use stays.
-            int restart = g_tor.state != TL_OFF && g_app.tor_launch != TOR_LAUNCH_NEVER;
-            note("Tor bridges: %s%s", d, restart ? " - restarting tor with them"
-                 : g_app.tor_launch == TOR_LAUNCH_NEVER ? " - only for a tor chat starts (torlaunch is never)"
-                 : " - for the next tor chat starts");
-            if (restart) tor_link_rebridge();
-            return;
-        }
-        case SET_TOR_PT: {
-            char why[240], d[400];
-            if (tor_pt_parse(text, 0, why, sizeof why) != 0) { note("%s", why); return; }
-            setting_value(id, d, sizeof d);
-            note("Transport programs: %s - for the next tor chat starts", d);
-            return;
-        }
         case SET_TOR_PATH: {
             char found[1024];
             if (text[0] && platform_find_program("tor", text, found, sizeof found) != 0) {
@@ -3275,12 +3071,6 @@ int main(int argc, char **argv) {
                 return 1;
             }
             copy_str(g_app.tor_path, found, sizeof g_app.tor_path);
-        } else if (strcmp(key, "tor-bridges") == 0 && i + 1 < argc) {
-            char why[240];
-            if (bridges_add(argv[++i], &g_app.tor_bridges, why, sizeof why) != 0) { fprintf(stderr, "chat: --tor-bridges: %s\n", why); return 1; }
-        } else if (strcmp(key, "tor-pt") == 0 && i + 1 < argc) {
-            char why[240];
-            if (tor_pt_parse(argv[++i], 1, why, sizeof why) != 0) { fprintf(stderr, "chat: --tor-pt: %s\n", why); return 1; }
         } else if ((strcmp(key, "tor-socks") == 0 || strcmp(key, "tor-control") == 0) && i + 1 < argc) {
             const char *v = argv[++i];
             if (!valid_host_port(v)) { fprintf(stderr, "chat: bad --%s %s (want host:port)\n", key, v); return 1; }
