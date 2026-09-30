@@ -119,7 +119,10 @@ static void markup_escape(const char *in, char *out, size_t outlen) {
 
 static void notify_run(void *arg) {
     notify_job_t *j = (notify_job_t *)arg;
-    char *argv[] = { (char *)"notify-send", (char *)"--app-name=chat", (char *)"--", j->title, j->body, NULL };
+    // Transient: shown, but kept out of the desktop's notification history, which would otherwise
+    // record when messages came (and, with previews on, what they said) after chat has exited.
+    char *argv[] = { (char *)"notify-send", (char *)"--app-name=chat", (char *)"--hint=int:transient:1", (char *)"--",
+                     j->title, j->body, NULL };
     pid_t pid;
     if (spawn_quiet(&pid, g_notify_prog, argv) == 0)
         while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
