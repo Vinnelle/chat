@@ -22,7 +22,7 @@
 
 static const char *USAGE =
     "usage: chat [--nick NAME] [--colour NAME|#HEX] [--identity age|pgp[:KEYFILE]] [--simple]\n"
-    "            [--routing direct+nostr|direct|tor] [--nodht] [--noipv6] [--nolan]\n"
+    "            [--routing dht+nostr|dht|tor] [--nodht] [--noipv6] [--nolan]\n"
     "            [--noportmap] [--nonostr] [--nostr-always] [--relay wss://HOST ...]\n"
     "            [--tor-launch auto|always|never] [--tor-path PATH] [--tor-socks HOST:PORT]\n"
     "            [--tor-control HOST:PORT] [--verify-optional]\n"
@@ -88,19 +88,19 @@ static const char *USAGE =
     "              omitted - :set nick renames it anytime, shared by every session\n"
     "  --colour    your display colour in every session; random by default (--color too)\n"
     "  --routing   how sessions reach peers, preset on the settings page chat opens on:\n"
-    "              direct+nostr: UDP between peers, found through the BitTorrent DHT (IPv4\n"
+    "              dht+nostr: UDP between peers, found through the BitTorrent DHT (IPv4\n"
     "              and IPv6), the LAN and a router port mapping, with Nostr relays carrying\n"
-    "              encrypted traffic when UDP can't get through. direct: the same without\n"
+    "              encrypted traffic when UDP can't get through. dht: the same without\n"
     "              relays. tor: Tor onion services, plus the relays through Tor. Tor and\n"
-    "              direct members only reach each other on the relays: both need them.\n"
+    "              DHT members only reach each other on the relays: both need them.\n"
     "  --nodht     skip the BitTorrent DHT (IPv4 and IPv6)\n"
     "  --noipv6    skip the IPv6 DHT only\n"
     "  --nolan     skip LAN broadcast discovery\n"
     "  --noportmap don't ask the router to forward a port (UPnP-IGD, NAT-PMP, PCP)\n"
-    "  --nonostr   no Nostr relays. Tor and direct members only reach each other\n"
+    "  --nonostr   no Nostr relays. Tor and DHT members only reach each other\n"
     "              through them, so with this off they can't\n"
     "  --nostr-always\n"
-    "              stay on the relays all the time. By default direct routing goes there\n"
+    "              stay on the relays all the time. By default DHT routing goes there\n"
     "              only while nobody is reached yet or a peer's UDP fails, so Tor members\n"
     "              can't find a room whose members all reach each other directly\n"
     "  --verify-optional\n"
@@ -435,7 +435,7 @@ static struct {
 // Downloads (:update) go through Tor whenever Tor mode is on: to the tor in use once there is
 // one, and to a port nothing listens on until then, so they fail instead of going direct.
 static void sync_update_proxy(void) {
-    if (g_app.route.mode == ROUTE_DIRECT) update_set_proxy(NULL);
+    if (g_app.route.mode == ROUTE_DHT) update_set_proxy(NULL);
     else update_set_proxy(g_tor.state == TL_READY ? g_tor.socks : "127.0.0.1:1");
 }
 
@@ -832,12 +832,12 @@ static cmd_result_t app_help(void *ctx, const char *arg);
 
 static const char *const ROUTE_CHOICE_LINES[] = {
     "* how should chat reach people?",
-    ("*   [1] direct + Nostr fallback (recommended): UDP straight to peers, found through the BitTorrent DHT "
+    ("*   [1] DHT + Nostr fallback (recommended): UDP straight to peers, found through the BitTorrent DHT "
      "(IPv4 and IPv6), your LAN and a router port mapping. Public Nostr relays carry the traffic, encrypted "
      "and padded, when UDP can't get through"),
-    "*   [2] direct only: the same without relays. Some peers behind strict NATs won't connect, and neither can "
+    "*   [2] DHT only: the same without relays. Some peers behind strict NATs won't connect, and neither can "
         "members using Tor",
-    ("*   [3] Tor: onion services, and the Nostr relays reached through Tor to meet direct peers. Hides "
+    ("*   [3] Tor: onion services, and the Nostr relays reached through Tor to meet DHT peers. Hides "
      "your IP address from peers and everyone else. Uses tor or Tor Browser if one is running, else starts "
      "its own; connecting takes longer"),
 };
@@ -846,7 +846,7 @@ static void apply_route_choice(int choice) {
     if (choice == 3) {
         g_app.route.mode = ROUTE_TOR;
     } else {
-        g_app.route.mode = ROUTE_DIRECT;
+        g_app.route.mode = ROUTE_DHT;
         g_app.route.nostr = choice == 1 ? NOSTR_FALLBACK : NOSTR_OFF;
     }
     g_app.route_chosen = 1;
@@ -854,7 +854,7 @@ static void apply_route_choice(int choice) {
 
 static const char *route_label(void) {
     if (g_app.route.mode == ROUTE_TOR) return "Tor onion services only";
-    return g_app.route.nostr ? "direct, with Nostr relay fallback" : "direct only";
+    return g_app.route.nostr ? "DHT, with Nostr relay fallback" : "DHT only";
 }
 
 // ---- the settings page ----
@@ -884,9 +884,9 @@ typedef struct {
 } setting_def_t;
 
 static const setting_def_t SETTINGS[] = {
-    { SET_ROUTING, "Network", "routing", "Routing", K_CHOICE, "direct|tor",
-      "direct: UDP straight between peers, found with the options below. tor: onion services, plus the Nostr "
-      "relays through Tor to meet direct members - hides your IP address from everyone. Uses a running tor or "
+    { SET_ROUTING, "Network", "routing", "Routing", K_CHOICE, "dht|tor",
+      "dht: UDP straight between peers, found with the options below. tor: onion services, plus the Nostr "
+      "relays through Tor to meet DHT members - hides your IP address from everyone. Uses a running tor or "
       "starts chat's own; connecting takes longer. Applies to sessions you open from now on." },
     { SET_DHT4, NULL, "dht", "BitTorrent DHT (IPv4)", K_TOGGLE, "on|off",
       "Finds peers on the internet through the public BitTorrent DHT. Its nodes see your IP address next to a "
@@ -917,7 +917,7 @@ static const setting_def_t SETTINGS[] = {
       "Only for a tor set up with HashedControlPassword. Kept in memory only. Applies to sessions you open from now on." },
     // Last in the section: the relays apply in both modes, so they stay put when the mode changes.
     { SET_NOSTR, NULL, "nostr", "Nostr relays", K_CHOICE, "off|on|always",
-      "on: direct routing goes to the relays only while it needs them - nobody reached yet, or a peer UDP doesn't "
+      "on: DHT routing goes to the relays only while it needs them - nobody reached yet, or a peer UDP doesn't "
       "reach - and leaves a minute after. always: stays there, so Tor members can find a room whose members all "
       "reach each other directly (they only meet on the relays). Tor routing reaches them only through Tor, and "
       "always stays. Each event has a one-off key, a random kind, one size and fresh encryption, under a tag "
@@ -962,7 +962,7 @@ static const setting_def_t SETTINGS[] = {
 static const char *const NOTIFY_NAMES[] = { "none", "mentions", "all" };
 static const char *const PREVIEW_NAMES[] = { "off", "nick", "message" };
 static const char *const ON_OFF[] = { "off", "on" };
-static const char *const ROUTE_NAMES[] = { "direct", "tor" };
+static const char *const ROUTE_NAMES[] = { "dht", "tor" };
 static const char *const NOSTR_NAMES[] = { "off", "on", "always" };
 static const char *const VERIFY_NAMES[] = { "required", "optional" };
 static const char *const NET_LOG_NAMES[] = { "normal", "verbose" };
@@ -983,18 +983,18 @@ static const setting_def_t *setting_by_key(const char *key) {
 }
 
 static int dht_setting(setting_id_t id) { return id == SET_DHT4 || id == SET_DHT6; }
-static int direct_only_setting(setting_id_t id) { return id == SET_PORTMAP || id == SET_LAN; }
+static int dht_routing_only_setting(setting_id_t id) { return id == SET_PORTMAP || id == SET_LAN; }
 static int tor_only_setting(setting_id_t id) {
     return id == SET_TOR_LAUNCH || id == SET_TOR_PATH || id == SET_TOR_SOCKS || id == SET_TOR_CONTROL
         || id == SET_TOR_PASSWORD;
 }
 
-// Settings that don't apply right now aren't listed: the direct ones in Tor mode, the Tor ones in
-// direct mode, the relay list with relays off, the AGE
+// Settings that don't apply right now aren't listed: the DHT ones in Tor mode, the Tor ones in
+// DHT mode, the relay list with relays off, the AGE
 // recipient without an AGE identity, and the PGP public key without a PGP key made here.
 static int setting_shown(setting_id_t id) {
     route_mode_t m = g_app.route.mode;
-    if (m != ROUTE_DIRECT && direct_only_setting(id)) return 0;
+    if (m != ROUTE_DHT && dht_routing_only_setting(id)) return 0;
     if (m == ROUTE_TOR && dht_setting(id)) return 0;
     if (m != ROUTE_TOR && tor_only_setting(id)) return 0;
     if (id == SET_RELAYS && !g_app.route.nostr) return 0;
@@ -1004,7 +1004,7 @@ static int setting_shown(setting_id_t id) {
 }
 
 static const char *setting_hidden_why(setting_id_t id) {
-    if (direct_only_setting(id)) return "it only applies with direct routing";
+    if (dht_routing_only_setting(id)) return "it only applies with dht routing";
     if (dht_setting(id)) return "it doesn't apply with tor routing";
     if (tor_only_setting(id)) return "it only applies with tor routing";
     if (id == SET_RELAYS) return "it only applies with the Nostr relays on";
@@ -1142,7 +1142,7 @@ static void routing_changed(setting_id_t id) {
     }
     char v[160]; setting_value(id, v, sizeof v);
     const char *label = setting_def(id)->label;
-    if (id == SET_ROUTING || tor_only_setting(id) || (later && !direct_only_setting(id)))
+    if (id == SET_ROUTING || tor_only_setting(id) || (later && !dht_routing_only_setting(id)))
         note("%s: %s - for sessions you open from now on%s", label, v, any ? "; open ones keep their routing" : "");
     else
         note("%s: %s%s", label, v, any ? " - applied to open sessions too" : "");
@@ -2656,7 +2656,7 @@ static int build_net(tui_kv_t kv[MAX_NET], char vals[MAX_NET][32]) {
         KV("tor", "%s", strncmp(t, "tor: ", 5) == 0 ? t + 5 : t);
         KV("onion", "%s", e->tor && tor_my_onion(e->tor)[0] ? "published" : "waiting");
     } else {
-        KV("route", "direct");
+        KV("route", "dht");
         KV("port", "udp/%u", (unsigned)e->port);
         KV("portmap", "%s", !e->pm ? "off" : portmap_mapped(e->pm, NULL) ? "mapped" : "not yet");
     }
@@ -3047,10 +3047,11 @@ int main(int argc, char **argv) {
             g_app.verify_optional = 1;
         } else if (strcmp(key, "routing") == 0 && i + 1 < argc) {
             const char *v = argv[++i];
-            if (strcmp(v, "direct+nostr") == 0 || strcmp(v, "nostr") == 0) apply_route_choice(1);
-            else if (strcmp(v, "direct") == 0) apply_route_choice(2);
+            // direct+nostr and direct: the modes' old names, still taken.
+            if (strcmp(v, "dht+nostr") == 0 || strcmp(v, "nostr") == 0 || strcmp(v, "direct+nostr") == 0) apply_route_choice(1);
+            else if (strcmp(v, "dht") == 0 || strcmp(v, "direct") == 0) apply_route_choice(2);
             else if (strcmp(v, "tor") == 0) apply_route_choice(3);
-            else { fprintf(stderr, "chat: --routing takes direct+nostr, direct or tor\n"); return 1; }
+            else { fprintf(stderr, "chat: --routing takes dht+nostr, dht or tor\n"); return 1; }
         } else if (strcmp(key, "relay") == 0 && i + 1 < argc) {
             const char *v = argv[++i];
             if (nostr_url_ok(v) != 0) { fprintf(stderr, "chat: bad --relay %s (want wss://host[:port][/path])\n", v); return 1; }

@@ -102,13 +102,13 @@ it takes to join one with a blank password.
 chat opens on its settings page, and **Routing** heads it. `--routing` presets it, and
 `Ctrl+S` or `:set` brings the page back later.
 
-1. **Direct + Nostr fallback** (recommended). Peers talk over UDP, straight to each other.
-2. **Direct only.** The same without relays. Some peers behind strict NATs won't connect, and
+1. **DHT + Nostr fallback** (recommended). Peers talk over UDP, straight to each other.
+2. **DHT only.** The same without relays. Some peers behind strict NATs won't connect, and
    neither can members who use Tor.
 3. **Tor.** Onion services, plus the Nostr relays reached through Tor, so members who use
-   direct routing can still meet you. Nothing else touches the network.
+   DHT routing can still meet you. Nothing else touches the network.
 
-Direct routing uses these, and each one can be turned off:
+DHT routing uses these, and each one can be turned off:
 
 | Part | What it does | Who sees what |
 | --- | --- | --- |
@@ -119,10 +119,10 @@ Direct routing uses these, and each one can be turned off:
 | Nostr relay fallback | public relays carry the traffic when UDP can't get through | the relays: see below |
 
 Chat prefers direct UDP. A peer moves to the relays only while UDP to it stays quiet, and
-moves back as soon as UDP works again. With direct routing chat goes to the relays only while
+moves back as soon as UDP works again. With DHT routing chat goes to the relays only while
 it needs them: until someone is reached, while a peer is reached only through them, or while
-one's UDP has gone quiet, and it leaves them a minute after. Tor members meet direct members
-only on the relays, so a room whose direct members all reach each other can't be found by one;
+one's UDP has gone quiet, and it leaves them a minute after. Tor members meet DHT members
+only on the relays, so a room whose DHT members all reach each other can't be found by one;
 **Nostr relays** set to `always` (`:set nostr always`, `--nostr-always`) keeps them connected.
 
 **What the network sees of UDP.** Everything chat sends over UDP is masked with a key made from
@@ -194,13 +194,13 @@ tor. If chat crashes, tor notices and quits within seconds. On Windows a job obj
 once. The next chat deletes the folder the crash left. A fresh private tor downloads the Tor
 network's directory each time, so it can take a minute or more before it connects.
 
-> **Note:** Tor and direct members of a room can only reach each other through the Nostr
-> relays, so both need them on: a direct member with option 1 (direct + Nostr fallback), and a
-> Tor member with the relays left on, as they are by default. With option 2 (direct only) or
+> **Note:** Tor and DHT members of a room can only reach each other through the Nostr
+> relays, so both need them on: a DHT member with option 1 (DHT + Nostr fallback), and a
+> Tor member with the relays left on, as they are by default. With option 2 (DHT only) or
 > `--nonostr` on either side, the room splits in two, and neither half sees the other.
 
-**Tor and direct members in one room** can't reach each other over onion services or UDP. They
-meet on the Nostr relays: a Tor session connects to the same relays as direct ones, but only
+**Tor and DHT members in one room** can't reach each other over onion services or UDP. They
+meet on the Nostr relays: a Tor session connects to the same relays as DHT ones, but only
 through Tor's SOCKS port. Each relay gets a circuit of its own, and Tor looks the relay's name
 up at the exit, so nothing asks local DNS. Until chat has a tor, it connects to no relay at all.
 The relays see a Tor exit, never your address, and the events look the same whoever sends them.
@@ -353,7 +353,7 @@ key: commit `minisign.pub`, and keep the secret key backed up and off GitHub.
 
 ```
 chat [--nick NAME] [--colour NAME|#HEX] [--identity age|pgp[:KEYFILE]] [--simple]
-     [--routing direct+nostr|direct|tor] [--nodht] [--noipv6] [--nolan]
+     [--routing dht+nostr|dht|tor] [--nodht] [--noipv6] [--nolan]
      [--noportmap] [--nonostr] [--nostr-always] [--relay wss://HOST ...]
      [--tor-socks HOST:PORT] [--tor-control HOST:PORT] [--verify-optional]
      [--session ID --port UDP_PORT --peer HOST:PORT ...]
@@ -433,7 +433,7 @@ values after a name. Under each row's help, the page shows the `:set` that does 
 
 | Name | Values |
 | --- | --- |
-| `routing` | `direct`, `tor` |
+| `routing` | `dht`, `tor` |
 | `dht`, `dht6`, `portmap`, `lan` | `on`, `off` |
 | `nostr` | `on` (only while needed), `always`, `off` |
 | `relays` | up to 6 `wss://` URLs |
@@ -473,7 +473,7 @@ write access to the folder that holds the executable.
 | --- | --- |
 | `--nick NAME` | Display name (random `swift-otter42`-style if omitted) |
 | `--colour NAME\|#HEX` | Display colour (random by default; `--color` too) |
-| `--routing` | `direct+nostr`, `direct` or `tor`, preset on the settings page (see [Routing](#routing)) |
+| `--routing` | `dht+nostr`, `dht` or `tor` (`direct+nostr` and `direct` still work), preset on the settings page (see [Routing](#routing)) |
 | `--nodht` | Skip the BitTorrent DHT (IPv4 and IPv6) |
 | `--noipv6` | Skip the IPv6 DHT only |
 | `--nolan` | Skip LAN broadcast discovery |

@@ -100,7 +100,7 @@
 #define NOSTR_MAX_RATE 0.33
 // A peer's UDP path counts as broken after this long without a frame; its traffic moves to the relays.
 #define UDP_STALE 25.0
-// Direct routing goes to the relays only while something needs them: nobody reached yet, or a
+// DHT routing goes to the relays only while something needs them: nobody reached yet, or a
 // peer only they reach, or one whose UDP has gone quiet. They're let go this long after.
 #define RELAY_LINGER 60.0
 #define NOSTR_BEACON_ALONE 20.0
@@ -108,12 +108,12 @@
 // A joiner in Tor mode that hasn't reached anyone by then publishes the room's onion itself.
 #define TOR_HOST_AFTER 120.0
 
-typedef enum { ROUTE_DIRECT = 0, ROUTE_TOR = 1 } route_mode_t;
+typedef enum { ROUTE_DHT = 0, ROUTE_TOR = 1 } route_mode_t;
 
-// The relays: off, only while something needs them (direct routing), or always.
+// The relays: off, only while something needs them (DHT routing), or always.
 enum { NOSTR_OFF = 0, NOSTR_FALLBACK = 1, NOSTR_ALWAYS = 2 };
 
-// How a session reaches peers. Direct: UDP, found through the DHT (IPv4, IPv6), LAN broadcast
+// How a session reaches peers. DHT: UDP, found through the DHT (IPv4, IPv6), LAN broadcast
 // and relays, with a router port mapping to let more of them in, and Nostr relays carrying
 // traffic when UDP can't. Tor: onion services only; nothing else touches the network.
 typedef struct {
@@ -367,7 +367,7 @@ typedef struct {
     int started;
     const char *start_error;   // why it didn't start, when it didn't
     nostr_t *nostr;
-    double relays_until;   // the relays stay on until then (direct routing)
+    double relays_until;   // the relays stay on until then (DHT routing)
     tor_t *tor;
     portmap_t *pm;
     double next_beacon;
@@ -481,7 +481,7 @@ void chat_set_identity(chat_t *c, identity_source_t source, const identity_keypa
 
 #define CHAT_MAX_SOCKS 12
 int chat_sockets(chat_t *c, sock_t out[CHAT_MAX_SOCKS]);
-// Whether the session is up: its keys could be made, and its UDP socket (direct) or its Tor link
+// Whether the session is up: its keys could be made, and its UDP socket (DHT) or its Tor link
 // (Tor). If not, chat_start_error says why.
 int chat_started(const chat_t *c);
 const char *chat_start_error(const chat_t *c);

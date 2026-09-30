@@ -26,14 +26,14 @@ static const char *const DEFAULT_RELAYS[] = {
 
 void routing_defaults(routing_t *r) {
     memset(r, 0, sizeof *r);
-    r->mode = ROUTE_DIRECT;
+    r->mode = ROUTE_DHT;
     r->dht4 = r->dht6 = r->lan = r->portmap = r->nostr = 1;
     for (size_t i = 0; i < sizeof DEFAULT_RELAYS / sizeof DEFAULT_RELAYS[0]; i++)
         copy_str(r->relays[r->n_relays++], DEFAULT_RELAYS[i], NOSTR_URL_MAX);
     r->tor = TOR_DEFAULTS;
 }
 
-const char *routing_mode_name(route_mode_t m) { return m == ROUTE_TOR ? "tor" : "direct"; }
+const char *routing_mode_name(route_mode_t m) { return m == ROUTE_TOR ? "tor" : "dht"; }
 static void ui_print_colored(chat_t *c, const uint8_t rgb[3], const char *fmt, ...);
 static void ui_chat(chat_t *c, const uint8_t rgb[3], int mention, const char *name, const char *text);
 
@@ -1050,7 +1050,7 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
                 // Only Tor mode follows onion addresses; nothing else may ever look them up.
                 item[TOR_ADDR_LEN] = '\0';
                 if (c->tor && tor_target(c->tor, item, &a) == 0) add_candidate(c, a);
-            } else if (c->route.mode == ROUTE_DIRECT && addr_parse_ip_port(item, &a) == 0) {
+            } else if (c->route.mode == ROUTE_DHT && addr_parse_ip_port(item, &a) == 0) {
                 // Numeric only: a hostname here would have us resolve whatever a peer names.
                 add_candidate(c, a);
             }
@@ -1568,7 +1568,7 @@ static void tor_tick(chat_t *c, double now) {
     }
 }
 
-// Whether the relays have work: always in Tor mode (they're where direct members are met) or when
+// Whether the relays have work: always in Tor mode (they're where DHT members are met) or when
 // set so; otherwise while nobody is reached yet, while a peer is reached (or being reached) only
 // through them, or while a peer's UDP has gone quiet and they may be needed next.
 static int relays_needed(chat_t *c, double now) {
@@ -1748,11 +1748,11 @@ void chat_tick(chat_t *c, double now) {
         c->warned_lonely = 1;
         ui_print(c, "* nobody has answered for this session yet - check the id and password with "
                      "whoever shared them, or they may not have started their app yet");
-        // Direct and Tor sessions only meet on the relays: without them the room splits in two
+        // DHT and Tor sessions only meet on the relays: without them the room splits in two
         // without a word.
         if (!c->nostr)
             ui_print(c, "* Nostr relays are off here, so members using %s routing can't reach you - :set nostr on turns them on%s",
-                     c->route.mode == ROUTE_TOR ? "direct" : "Tor", c->route.mode == ROUTE_TOR ? " (through Tor)" : "");
+                     c->route.mode == ROUTE_TOR ? "DHT" : "Tor", c->route.mode == ROUTE_TOR ? " (through Tor)" : "");
         net_report(c);
     }
 }
@@ -1766,7 +1766,7 @@ static void net_report(chat_t *c) {
         if (c->tor) tor_status(c->tor, ts, sizeof ts);
         ui_print(c, "* net: tor | %s | candidates to try: %d | handshakes in progress: %d | connected: %d",
                  ts, cands, pending_peer_count(c), live_count(c));
-        char ns[300] = "off - direct peers can't reach this session";
+        char ns[300] = "off - DHT peers can't reach this session";
         if (c->nostr) nostr_status(c->nostr, ns, sizeof ns);
         int relayed = 0;
         for (int i = 0; i < c->peer_hi; i++) if (c->peers[i].used && c->peers[i].ok && c->peers[i].addr.kind == ADDR_NOSTR) relayed++;
@@ -2037,7 +2037,7 @@ static cmd_result_t cmd_net(void *ctx, const char *arg) {
 
 static cmd_result_t cmd_port(void *ctx, const char *arg) {
     chat_t *c = ctx;
-    if (c->route.mode != ROUTE_DIRECT) {
+    if (c->route.mode != ROUTE_DHT) {
         ui_print(c, "* this session runs over Tor and has no udp port of its own");
         return CMD_OK;
     }
@@ -2196,7 +2196,7 @@ static void start_nostr(chat_t *c) {
     if (c->nostr || !c->route.nostr || c->route.n_relays == 0) return;
     uint8_t tag_key[NOSTR_KEY_LEN], wrap_key[NOSTR_KEY_LEN];
     derive_nostr_keys(c->master, tag_key, wrap_key);
-    // In Tor mode the relays are where direct peers can be met, and they're only ever reached
+    // In Tor mode the relays are where DHT peers can be met, and they're only ever reached
     // through Tor: its SOCKS port, or nothing at all until chat has one.
     const char *proxy = c->route.mode == ROUTE_TOR ? c->route.tor.socks : NULL;
     c->nostr = nostr_new(tag_key, wrap_key, c->my_id, (const char (*)[NOSTR_URL_MAX])c->route.relays, c->route.n_relays,
@@ -2207,7 +2207,7 @@ static void start_nostr(chat_t *c) {
     c->relays_until = 0;
 }
 
-static void start_direct(chat_t *c) {
+static void start_dht_routing(chat_t *c) {
     if (c->route.lan) c->lan_sock = net_udp_open(c->lan_port, NET_REUSE, NULL);
     start_dht(c);
     if (c->route.portmap) c->pm = portmap_new(c->port, module_log, c);
@@ -2274,7 +2274,7 @@ void chat_route_summary(const chat_t *c, char *out, size_t cap) {
         if (c->nostr && p < cap) snprintf(out + p, cap - p, "+nostr %d/%d", nostr_relays_up(c->nostr), nostr_relay_total(c->nostr));
         return;
     }
-    size_t p = (size_t)snprintf(out, cap, "direct");
+    size_t p = (size_t)snprintf(out, cap, "dht");
     if (c->pm && portmap_mapped(c->pm, NULL) && p < cap) p += (size_t)snprintf(out + p, cap - p, "+map");
     if (c->nostr && p < cap) snprintf(out + p, cap - p, "+nostr %d/%d", nostr_relays_up(c->nostr), nostr_relay_total(c->nostr));
 }
@@ -2349,7 +2349,7 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
         c->sock = net_udp_open(o->port, NET_DUAL, &c->port);
         c->started = c->sock != SOCK_INVALID;
         if (!c->started) c->start_error = "could not open a UDP socket (is the port in use?)";
-        if (c->started) start_direct(c);
+        if (c->started) start_dht_routing(c);
     }
 
     int n_static = c->route.mode == ROUTE_TOR ? 0 : o->n_peers;

@@ -44,6 +44,8 @@
   the same four bootstrap servers with the room's lookup key.
 
 ### Changed
+- Direct routing is now called DHT routing: `--routing dht+nostr` and `--routing dht`, and
+  `dht` on the settings page. `--routing direct+nostr` and `--routing direct` still work.
 - This version and 0.1.10 can't reach each other over UDP: the datagrams are a new size and
   room frames' pieces have a new header. They meet through the Nostr relays, or over Tor, and
   read each other's session frames there.
