@@ -43,6 +43,14 @@
   only while it knows fewer than eight. Every lookup, every 30 seconds while alone, went to
   the same four bootstrap servers with the room's lookup key.
 
+### Added
+- **Tor bridges** (`:set bridges`, `--tor-bridges`): chat's own tor reaches the Tor network
+  through bridges and a pluggable transport, so your network doesn't see a connection to Tor.
+  `snowflake` uses Tor Browser's built-in Snowflake bridges (needs `snowflake-client`); bridge
+  lines from bridges.torproject.org take `obfs4` or `webtunnel` (needs `lyrebird` or
+  `obfs4proxy`). With bridges set, chat always starts its own tor. `:set torpt` and `--tor-pt`
+  say where a transport's program is when it isn't found by name.
+
 ### Changed
 - Direct routing is now called DHT routing: `--routing dht+nostr` and `--routing dht`, and
   `dht` on the settings page. `--routing direct+nostr` and `--routing direct` still work.

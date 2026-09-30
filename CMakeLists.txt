@@ -167,6 +167,7 @@ add_executable(chat
     src/transport/tls.c
     src/transport/tor.c
     src/transport/torproc.c
+    src/transport/bridges.c
     src/transport/portmap.c
     src/common/util.c
     src/common/bencode.c
