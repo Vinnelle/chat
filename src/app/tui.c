@@ -1229,9 +1229,13 @@ static void session_line(pen_t *p, const tui_session_row_t *s, int sel) {
 static void peer_line(pen_t *p, const tui_peer_row_t *pr) {
     const char *word, *glyph;
     style_t st;
+    // What most needs doing first: codes that differ, a bad signature, a code still to compare.
     if (pr->you) { word = glyph = "you"; st = S_FAINT; }
-    else if (pr->verify == 1) { word = G_CHECK " verified"; glyph = G_CHECK; st = S_GREEN; }
+    else if (pr->code == 3) { word = G_CROSS " codes differ"; glyph = G_CROSS; st = S_RED_BOLD; }
     else if (pr->verify == 2) { word = G_CROSS " invalid"; glyph = G_CROSS; st = S_RED_BOLD; }
+    else if (pr->code == 1) { word = "? compare code"; glyph = "?"; st = S_YELLOW_BOLD; }
+    else if (pr->code == 2) { word = G_CHECK " compared"; glyph = G_CHECK; st = S_GREEN; }
+    else if (pr->verify == 1) { word = G_CHECK " verified"; glyph = G_CHECK; st = S_GREEN; }
     else { word = "unverified"; glyph = "?"; st = S_FAINT; }
     const char *mod_word = pr->modified ? "modified " : "", *mod_glyph = pr->modified ? "! " : "";
     int tag_w = utf8_str_cols(pr->tag);

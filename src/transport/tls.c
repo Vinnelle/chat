@@ -16,6 +16,7 @@
 
 struct tls_conn {
     mbedtls_ssl_context ssl;
+    tls_io_t io;
     sock_t s;
     char err[160];
 };
@@ -74,22 +75,35 @@ int tls_setup(char *err, size_t cap) {
 }
 
 static int bio_send(void *ctx, const unsigned char *buf, size_t len) {
-    int n = net_tcp_send(((tls_conn_t *)ctx)->s, buf, len);
+    tls_conn_t *t = ctx;
+    int n = t->io.send(t->io.ctx, buf, len);
     if (n > 0) return n;
     return n == 0 ? MBEDTLS_ERR_SSL_WANT_WRITE : MBEDTLS_ERR_NET_SEND_FAILED;
 }
 
 static int bio_recv(void *ctx, unsigned char *buf, size_t len) {
-    int n = net_tcp_recv(((tls_conn_t *)ctx)->s, buf, len);
+    tls_conn_t *t = ctx;
+    int n = t->io.recv(t->io.ctx, buf, len);
     if (n > 0) return n;
     return n == 0 ? MBEDTLS_ERR_SSL_WANT_READ : MBEDTLS_ERR_NET_CONN_RESET;
 }
 
+static int sock_send(void *ctx, const void *data, size_t len) { return net_tcp_send(((tls_conn_t *)ctx)->s, data, len); }
+static int sock_recv(void *ctx, void *buf, size_t cap) { return net_tcp_recv(((tls_conn_t *)ctx)->s, buf, cap); }
+
 tls_conn_t *tls_new(sock_t s, const char *host) {
+    tls_io_t io = { sock_send, sock_recv, NULL };
+    tls_conn_t *t = tls_new_io(&io, host);
+    if (t) { t->s = s; t->io.ctx = t; }
+    return t;
+}
+
+tls_conn_t *tls_new_io(const tls_io_t *io, const char *host) {
     if (tls_setup(NULL, 0) != 0) return NULL;
     tls_conn_t *t = calloc(1, sizeof *t);
     if (!t) return NULL;
-    t->s = s;
+    t->io = *io;
+    t->s = SOCK_INVALID;
     mbedtls_ssl_init(&t->ssl);
     if (mbedtls_ssl_setup(&t->ssl, &g_conf) != 0 || mbedtls_ssl_set_hostname(&t->ssl, host) != 0) {
         mbedtls_ssl_free(&t->ssl);

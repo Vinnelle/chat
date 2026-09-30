@@ -41,7 +41,55 @@ void dht_init(dht_state_t *d, const uint8_t key[DHT_KEY_LEN], uint16_t my_port, 
     d->my_port = my_port;
     d->want[DHT_V4] = want_v4;
     d->want[DHT_V6] = want_v6;
-    gen_random(d->node_id, 20);
+}
+
+void dht_set_output(dht_state_t *d, dht_send_fn send, void *ctx, int names_remote) {
+    d->send = send;
+    d->send_ctx = ctx;
+    d->names_remote = names_remote;
+}
+
+static void dht_send(dht_state_t *d, const dht_cand_t *c, const uint8_t *buf, size_t len) {
+    if (!d->send) return;
+    if (c->named) d->send(d->send_ctx, buf, len, NULL, BOOTSTRAP[c->named - 1].host, BOOTSTRAP[c->named - 1].port);
+    else d->send(d->send_ctx, buf, len, &c->addr, NULL, 0);
+}
+
+static int known_count(const dht_state_t *d, int fam) {
+    int n = 0;
+    for (int i = 0; i < DHT_KNOWN_MAX; i++) n += d->known[fam][i].used;
+    return n;
+}
+
+// A node that answered: kept, in place of the one that answered longest ago when the list is full.
+static void known_add(dht_state_t *d, addr_t a, const uint8_t id[20], double now) {
+    dht_known_t *list = d->known[a.is_v6 ? DHT_V6 : DHT_V4], *slot = NULL;
+    for (int i = 0; i < DHT_KNOWN_MAX && !slot; i++) if (list[i].used && addr_equal(list[i].addr, a)) slot = &list[i];
+    for (int i = 0; i < DHT_KNOWN_MAX && !slot; i++) if (!list[i].used) slot = &list[i];
+    if (!slot) {
+        slot = &list[0];
+        for (int i = 1; i < DHT_KNOWN_MAX; i++) if (list[i].ok_at < slot->ok_at) slot = &list[i];
+    }
+    slot->used = 1;
+    slot->addr = a;
+    memcpy(slot->node_id, id, 20);
+    slot->ok_at = now;
+}
+
+static void known_drop(dht_state_t *d, addr_t a) {
+    dht_known_t *list = d->known[a.is_v6 ? DHT_V6 : DHT_V4];
+    for (int i = 0; i < DHT_KNOWN_MAX; i++) if (list[i].used && addr_equal(list[i].addr, a)) list[i].used = 0;
+}
+
+// This hour's node id: made the first time the hour's key is looked up.
+static void use_node_id(dht_state_t *d, long long epoch) {
+    for (int i = 0; i < 2; i++)
+        if (d->ids[i].set && d->ids[i].epoch == epoch) { memcpy(d->node_id, d->ids[i].id, 20); return; }
+    int slot = !d->ids[0].set ? 0 : !d->ids[1].set ? 1 : d->ids[0].epoch < d->ids[1].epoch ? 0 : 1;
+    d->ids[slot].set = 1;
+    d->ids[slot].epoch = epoch;
+    gen_random(d->ids[slot].id, 20);
+    memcpy(d->node_id, d->ids[slot].id, 20);
 }
 
 static void resolve_thread(void *arg) {
@@ -136,6 +184,7 @@ static void pick_infohash(dht_state_t *d) {
         d->alt_pending = 1;
     }
     dht_epoch_infohash(d->key, use, d->infohash);
+    use_node_id(d, use);
 }
 
 static void xor_distance(const uint8_t a[20], const uint8_t b[20], uint8_t out[20]) {
@@ -177,13 +226,24 @@ static int ranked_top(dht_lookup_t *lk, const uint8_t infohash[20], const int **
 
 static dht_cand_t *find_or_add_cand(dht_lookup_t *lk, addr_t a) {
     for (int i = 0; i < lk->n_cands; i++)
-        if (addr_equal(lk->cands[i].addr, a)) return &lk->cands[i];
+        if (!lk->cands[i].named && addr_equal(lk->cands[i].addr, a)) return &lk->cands[i];
     if (lk->n_cands >= DHT_MAX_CANDS) return NULL;
     dht_cand_t *c = &lk->cands[lk->n_cands++];
     memset(c, 0, sizeof *c);
     c->addr = a;
     lk->dirty = 1;
     return c;
+}
+
+// A bootstrap server by name, for the proxy to look up.
+static void add_named_cand(dht_lookup_t *lk, int index) {
+    for (int i = 0; i < lk->n_cands; i++) if (lk->cands[i].named == index + 1) return;
+    if (lk->n_cands >= DHT_MAX_CANDS) return;
+    dht_cand_t *c = &lk->cands[lk->n_cands++];
+    memset(c, 0, sizeof *c);
+    c->named = index + 1;
+    c->addr.port = BOOTSTRAP[index].port;
+    lk->dirty = 1;
 }
 
 static size_t append_raw(uint8_t *buf, size_t pos, const void *data, size_t len) {
@@ -211,7 +271,9 @@ static size_t append_want(dht_state_t *d, uint8_t *buf, size_t p) {
     return p;
 }
 
-static void send_get_peers(dht_state_t *d, sock_t sock, addr_t to, const uint8_t tid[2]) {
+// Every query says "ro" (BEP 43): chat is a read-only node, which answers no queries, so other
+// nodes don't put it in their routing tables or ping it, and its silence is what they expect.
+static void send_get_peers(dht_state_t *d, const dht_cand_t *to, const uint8_t tid[2]) {
     uint8_t buf[160];
     size_t p = 0;
     p = append_str(buf, p, "d1:ad2:id");
@@ -219,13 +281,13 @@ static void send_get_peers(dht_state_t *d, sock_t sock, addr_t to, const uint8_t
     p = append_str(buf, p, "9:info_hash");
     p = append_bstr(buf, p, d->infohash, 20);
     p = append_want(d, buf, p);
-    p = append_str(buf, p, "e1:q9:get_peers1:t");
+    p = append_str(buf, p, "e1:q9:get_peers2:roi1e1:t");
     p = append_bstr(buf, p, tid, 2);
     p = append_str(buf, p, "1:y1:qe");
-    net_send(sock, buf, p, to);
+    dht_send(d, to, buf, p);
 }
 
-static void send_announce(dht_state_t *d, sock_t sock, addr_t to, const uint8_t tid[2],
+static void send_announce(dht_state_t *d, const dht_cand_t *to, const uint8_t tid[2],
                            const uint8_t *token, size_t token_len) {
     uint8_t buf[256];
     size_t p = 0;
@@ -237,24 +299,47 @@ static void send_announce(dht_state_t *d, sock_t sock, addr_t to, const uint8_t 
     p = append_int(buf, p, (long)d->my_port);
     p = append_str(buf, p, "5:token");
     p = append_bstr(buf, p, token, token_len);
-    p = append_str(buf, p, "1:q13:announce_peer1:t");
+    p = append_str(buf, p, "1:q13:announce_peer2:roi1e1:t");
     p = append_bstr(buf, p, tid, 2);
     p = append_str(buf, p, "1:y1:qe");
-    net_send(sock, buf, p, to);
+    dht_send(d, to, buf, p);
 }
 
+// Starts from the nodes that answered lately, which the bootstrap servers join only while there
+// are too few: those four see every lookup that starts with them.
 static void start_lookup(dht_state_t *d, dht_lookup_t *lk, int fam, double now) {
     memset(lk, 0, sizeof *lk);
     lk->t0 = now;
     lk->active = 1;
     lk->dirty = 1;
+    for (int i = 0; i < DHT_KNOWN_MAX; i++) {
+        const dht_known_t *k = &d->known[fam][i];
+        if (!k->used) continue;
+        dht_cand_t *c = find_or_add_cand(lk, k->addr);
+        if (c) { memcpy(c->node_id, k->node_id, 20); c->have_id = 1; }
+    }
+    if (known_count(d, fam) >= DHT_KNOWN_ENOUGH) return;
+    if (d->names_remote) {
+        // The proxy looks the names up, in whatever family it has; IPv6 fills from the replies.
+        if (fam == DHT_V4 || !d->want[DHT_V4])
+            for (int i = 0; i < 4; i++) add_named_cand(lk, i);
+        return;
+    }
     for (int i = 0; i < d->n_boot; i++)
         if (d->boot[i].is_v6 == (fam == DHT_V6)) find_or_add_cand(lk, d->boot[i]);
     // A family no bootstrap server answers for starts empty and fills from the other's replies.
 }
 
+// Enough to start a round from: the bootstrap servers' addresses, nodes known already, or (by
+// name) nothing at all.
+static int can_start(const dht_state_t *d) {
+    if (d->names_remote || d->n_boot > 0) return 1;
+    for (int fam = 0; fam < 2; fam++) if (d->want[fam] && known_count(d, fam) >= DHT_KNOWN_ENOUGH) return 1;
+    return 0;
+}
+
 static void maybe_reresolve(dht_state_t *d, double now) {
-    if (d->job || d->n_boot > 0) return;
+    if (d->names_remote || d->job || d->n_boot > 0) return;
     if (now < d->next_resolve) return;
     int shift = d->resolve_tries < 6 ? d->resolve_tries : 6;
     double delay = 5.0 * (double)(1u << shift);
@@ -265,9 +350,14 @@ static void maybe_reresolve(dht_state_t *d, double now) {
 }
 
 // Sends the next queries of one lookup. Returns 1 once it has finished (and announced).
-static int lookup_step(dht_state_t *d, dht_lookup_t *lk, sock_t sock, double now) {
-    for (int i = 0; i < DHT_MAX_INFLIGHT; i++)
-        if (lk->inflight[i].used && now - lk->inflight[i].sent_at > 3.0) lk->inflight[i].used = 0;
+static int lookup_step(dht_state_t *d, dht_lookup_t *lk, double now) {
+    for (int i = 0; i < DHT_MAX_INFLIGHT; i++) {
+        dht_inflight_t *f = &lk->inflight[i];
+        if (!f->used || now - f->sent_at <= 3.0) continue;
+        // No answer: a node known from before isn't started from again.
+        if (!f->named) known_drop(d, f->addr);
+        f->used = 0;
+    }
 
     const int *top;
     int n_top = ranked_top(lk, d->infohash, &top);
@@ -287,9 +377,10 @@ static int lookup_step(dht_state_t *d, dht_lookup_t *lk, sock_t sock, double now
                     if (!lk->inflight[s].used) {
                         gen_random(lk->inflight[s].tid, 2);
                         lk->inflight[s].addr = c->addr;
+                        lk->inflight[s].named = c->named;
                         lk->inflight[s].sent_at = now;
                         lk->inflight[s].used = 1;
-                        send_get_peers(d, sock, c->addr, lk->inflight[s].tid);
+                        send_get_peers(d, c, lk->inflight[s].tid);
                         inflight_count++;
                         break;
                     }
@@ -306,7 +397,7 @@ static int lookup_step(dht_state_t *d, dht_lookup_t *lk, sock_t sock, double now
         for (int i = 0; i < n_ann; i++) {
             dht_cand_t *c = &lk->cands[ann_idx[i]];
             uint8_t tid[2]; gen_random(tid, 2);
-            send_announce(d, sock, c->addr, tid, c->token, c->token_len);
+            send_announce(d, c, tid, c->token, c->token_len);
         }
         lk->active = 0;
         return 1;
@@ -314,14 +405,12 @@ static int lookup_step(dht_state_t *d, dht_lookup_t *lk, sock_t sock, double now
     return 0;
 }
 
-int dht_step(dht_state_t *d, sock_t sock, double now,
-             void (*on_candidate)(void *ctx, addr_t a), void *ctx) {
-    (void)on_candidate; (void)ctx;
+int dht_step(dht_state_t *d, double now) {
     collect_job(d);
     int any_active = d->lk[DHT_V4].active || d->lk[DHT_V6].active;
     if (!any_active) {
         maybe_reresolve(d, now);
-        if (now >= d->next_lookup && !d->job && d->n_boot > 0) {
+        if (now >= d->next_lookup && !d->job && can_start(d)) {
             pick_infohash(d);
             for (int fam = 0; fam < 2; fam++)
                 if (d->want[fam]) start_lookup(d, &d->lk[fam], fam, now);
@@ -330,7 +419,7 @@ int dht_step(dht_state_t *d, sock_t sock, double now,
     }
     int finished = 0;
     for (int fam = 0; fam < 2; fam++)
-        if (d->lk[fam].active) finished |= lookup_step(d, &d->lk[fam], sock, now);
+        if (d->lk[fam].active) finished |= lookup_step(d, &d->lk[fam], now);
     if (finished && !d->lk[DHT_V4].active && !d->lk[DHT_V6].active) {
         d->next_lookup = d->alt_pending ? now : now + (d->peers_now ? DHT_RELOOKUP_CONNECTED : DHT_RELOOKUP_IDLE);
         if (!d->told_dht) d->told_dht = 1;
@@ -392,7 +481,7 @@ void dht_on_packet(dht_state_t *d, const uint8_t *data, size_t len, addr_t from,
         if (!l->active) continue;
         for (int i = 0; i < DHT_MAX_INFLIGHT; i++) {
             if (l->inflight[i].used && memcmp(l->inflight[i].tid, t->s, 2) == 0 &&
-                addr_equal(l->inflight[i].addr, from)) { slot = i; lk = l; break; }
+                (l->inflight[i].named || addr_equal(l->inflight[i].addr, from))) { slot = i; lk = l; break; }
         }
     }
     if (slot < 0) return;
@@ -402,11 +491,16 @@ void dht_on_packet(dht_state_t *d, const uint8_t *data, size_t len, addr_t from,
     if (!r || r->type != BE_DICT) return;
     dht_cand_t *c = find_or_add_cand(lk, from);
     if (!c) return;
+    // A server asked by name answers from an address: that one has been asked already.
+    c->queried = 1;
     const be_value *id = be_dict_get(r, "id");
-    if (id && id->type == BE_STR && id->slen == 20 && !c->have_id) {
-        memcpy(c->node_id, id->s, 20);
-        c->have_id = 1;
-        lk->dirty = 1;
+    if (id && id->type == BE_STR && id->slen == 20) {
+        if (!c->have_id) {
+            memcpy(c->node_id, id->s, 20);
+            c->have_id = 1;
+            lk->dirty = 1;
+        }
+        known_add(d, from, (const uint8_t *)id->s, now_seconds());
     }
     const be_value *token = be_dict_get(r, "token");
     if (token && token->type == BE_STR && token->slen <= sizeof(c->token)) {

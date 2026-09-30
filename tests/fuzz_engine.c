@@ -45,7 +45,9 @@ int LLVMFuzzerInitialize(int *argc, char ***argv) {
     start(&A, "alice", 41001, 41002, 1);
     start(&B, "bob", 41002, 41001, 0);
     t0 = now_seconds();
-    for (int i = 0; i < 200 && !(chat_online_count(&A) && chat_online_count(&B)); i++) {
+    // Frames go out in slots, a second and a half apart: the clock has to move for the handshake.
+    for (int i = 0; i < 600 && !(chat_online_count(&A) && chat_online_count(&B)); i++) {
+        t0 += 0.1;
         chat_on_socket_readable(&A, A.sock, t0);
         chat_on_socket_readable(&B, B.sock, t0);
         chat_tick(&A, t0);

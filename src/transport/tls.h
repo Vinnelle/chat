@@ -6,14 +6,24 @@
 #include <stddef.h>
 #include "platform/net.h"
 
-// A TLS client over a non-blocking TCP socket, checked against the system's root certificates.
+// A TLS client over a non-blocking TCP socket, or anything that moves bytes like one (a
+// Shadowsocks tunnel), checked against the system's root certificates.
 
 typedef struct tls_conn tls_conn_t;
+
+// Byte I/O as net_tcp_send and net_tcp_recv do it: bytes moved, 0 when it would block, -1 on an
+// error or (recv) a closed connection.
+typedef struct {
+    int (*send)(void *ctx, const void *data, size_t len);
+    int (*recv)(void *ctx, void *buf, size_t cap);
+    void *ctx;
+} tls_io_t;
 
 // Loads the root certificates once. Returns 0, or -1 with the reason in err.
 int tls_setup(char *err, size_t cap);
 
 tls_conn_t *tls_new(sock_t s, const char *host);
+tls_conn_t *tls_new_io(const tls_io_t *io, const char *host);
 // 1 once the handshake is done, 0 while it needs more I/O, -1 if it failed (see tls_error).
 int tls_handshake(tls_conn_t *t);
 // Bytes moved, 0 when the socket would block, -1 on an error or a closed connection.

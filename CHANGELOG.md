@@ -49,6 +49,45 @@
   peer's keys at a limited rate, so junk of the right size can't use up the CPU.
 - LAN beacons are only taken from real broadcasts, not from room members over the relays or
   Tor.
+- Every datagram chat sends a connected peer goes in a slot of that peer's, one every 1.5 to
+  1.9 seconds whether or not there's anything to say. A message, its ack, a message passed on
+  to other members, a nick change and a re-handshake's pieces all wait for a slot, so when and
+  how much goes no longer shows when anyone typed, or who first sent what in a group. Sending
+  a message to several members no longer goes out to all of them at the same instant. A
+  message takes up to two slots to arrive, and its ack as long to come back.
+- Every UDP datagram is one 1004-byte cell: a session frame fills one, and a room frame goes in
+  pieces padded to whole cells. Session frames were 428 bytes and pieces 1008, 1008 and 608,
+  a pattern that picked chat out of other traffic.
+- The `hi` every 10 seconds to every connected peer is gone: it was three pieces that marked
+  chat's traffic as clearly as any header. A peer gets a `hi` only when it has gone quiet, or
+  hasn't re-handshaken with new keys.
+- Nothing you send reaches a peer until you've compared its verify code with them over another
+  channel and said so with `:verify NICK ok`. Anyone with a session's id and password could sit
+  between two members and read what they said; the code is the same on both ends only if
+  nobody does. When a peer joins, chat shows the code to compare. `:verify NICK no` marks one
+  that differs, which then gets nothing. Messages from a peer not compared show
+  `(code not compared)`, and the sidebar says `compare code` until it is. A peer whose signing
+  identity was confirmed this way and comes back with a fresh handshake signed by the same key
+  needs no second comparison. **Compare verify codes** on the settings page (`:set verify
+  optional`, `--verify-optional`) sends to everyone, compared or not.
+- Direct routing goes to the Nostr relays only while it needs them: while nobody is reached
+  yet, while a peer is reached only through them, or while one's UDP has gone quiet. It leaves
+  them a minute after. Before, every direct-routed member's address stayed connected to the
+  relays for the whole session. `:set nostr always` (or `--nostr-always`) keeps the old way, for
+  rooms with Tor members, who meet direct members only on the relays.
+- Each ten minutes' relay tag has connections of its own, asking for that tag alone: a new one
+  to each relay a minute or two before the ten minutes start, and the last one closed a minute
+  or two after they end. Each connection asked for the previous, current and next tags and
+  moved on under the same subscription, which chained every ten minutes to the next for the
+  relay. A relay still sees the address a connection comes from.
+- The DHT node id changes with the lookup key, each hour: the same id for a whole session tied
+  one hour's key to the next for every node that saw both. Around the hour's change, each
+  hour's key is looked up under its own id.
+- DHT queries say `ro` (BEP 43): chat is a read-only node, which never answered queries, and
+  now other nodes don't expect it to.
+- A DHT lookup starts from the nodes that answered earlier ones, and asks the bootstrap servers
+  only while it knows fewer than eight. Every lookup, every 30 seconds while alone, went to
+  the same four bootstrap servers with the room's lookup key.
 
 ### Fixed
 - A message sent just before a peer rekeyed or rejoined could be lost: the re-handshake threw
@@ -87,6 +126,16 @@
 - `Tab` / `Shift+Tab` jump between sections on the settings and help pages.
 - `Ctrl+U` in INSERT deletes everything before the cursor.
 - `NO_COLOR` keeps the UI to bold, faint and reverse.
+- **Shadowsocks** routing (`--routing shadowsocks`, or on the settings page): everything goes
+  through your own Shadowsocks 2022 server (2022-blake3-aes-128-gcm, -aes-256-gcm or
+  -chacha20-poly1305), from an `ss://` link in `CHAT_SS` or on the settings page. UDP to peers
+  and the DHT goes through its UDP relay, each relay connection through a TCP tunnel of its
+  own. Your network sees one encrypted connection to the server; peers, DHT nodes and relays
+  see the server's address. Names (the DHT's bootstrap servers, the relays) go to the server
+  to look up. No LAN beacon and no router port mapping. The server's UDP relay has to pass on
+  replies from anywhere, as shadowsocks-rust and sing-box do, and both clocks have to be right
+  to 30 seconds. `:update` doesn't go around it.
+- BLAKE3 (1.8.2, its portable C only) is built in for Shadowsocks 2022's key derivation.
 
 ### Changed
 - `just test-build` names each binary after its build id, as `chat-<build id>-<system>-<arch>`:
@@ -113,6 +162,8 @@
   linked.
 - The full-screen UI sends nothing to the terminal while the screen stays the same. It redrew
   the whole screen every second, which over SSH was a steady stream.
+- A handshake takes a few seconds, and a re-handshake up to half a minute, going a slot at a
+  time.
 
 ## 0.3.1
 

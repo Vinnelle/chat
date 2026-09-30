@@ -22,9 +22,10 @@
 
 static const char *USAGE =
     "usage: chat [--nick NAME] [--colour NAME|#HEX] [--identity age|pgp[:KEYFILE]] [--simple]\n"
-    "            [--routing direct+nostr|direct|tor] [--nodht] [--noipv6] [--nolan] [--noportmap]\n"
-    "            [--nonostr] [--relay wss://HOST ...] [--tor-launch auto|always|never] [--tor-path PATH]\n"
-    "            [--tor-socks HOST:PORT] [--tor-control HOST:PORT]\n"
+    "            [--routing direct+nostr|direct|tor|shadowsocks] [--nodht] [--noipv6] [--nolan]\n"
+    "            [--noportmap] [--nonostr] [--nostr-always] [--relay wss://HOST ...]\n"
+    "            [--tor-launch auto|always|never] [--tor-path PATH] [--tor-socks HOST:PORT]\n"
+    "            [--tor-control HOST:PORT] [--verify-optional]\n"
     "            [--session ID --port UDP_PORT --peer HOST:PORT ...]\n"
     "       chat --update | --version\n"
     "\n"
@@ -69,8 +70,13 @@ static const char *USAGE =
     "\n"
     "Commands run from the command line (/ on an empty line, or : in NORMAL); anything else\n"
     "typed is sent:\n"
-    "  :new :join :quit (:q) :quitall (:qa) :copyid :update :peers :verify NICK :net\n"
+    "  :new :join :quit (:q) :quitall (:qa) :copyid :update :peers :verify NICK [ok|no] :net\n"
     "  :port [N] :set [NAME [VALUE]] :help   - :help opens a page of keys and commands\n"
+    "\n"
+    "Anyone with a session's id and password can sit between two other members, so nothing\n"
+    "you send reaches a peer until you've compared its verify code with them over another\n"
+    "channel (a call, in person): chat shows the code when they join, and :verify NICK ok\n"
+    "says it matched. --verify-optional (:set verify optional) sends to everyone anyway.\n"
     "\n"
     "Each setting is a row on the settings page, and :set NAME VALUE sets it without opening\n"
     "the page (:set nick bob, :set net verbose, :set routing tor). :set alone opens the page,\n"
@@ -86,13 +92,21 @@ static const char *USAGE =
     "              and IPv6), the LAN and a router port mapping, with Nostr relays carrying\n"
     "              encrypted traffic when UDP can't get through. direct: the same without\n"
     "              relays. tor: Tor onion services, plus the relays through Tor. Tor and\n"
-    "              direct members only reach each other on the relays: both need them\n"
+    "              direct members only reach each other on the relays: both need them.\n"
+    "              shadowsocks: as direct, but everything through your Shadowsocks 2022\n"
+    "              server, whose ss:// link comes from CHAT_SS or the settings page\n"
     "  --nodht     skip the BitTorrent DHT (IPv4 and IPv6)\n"
     "  --noipv6    skip the IPv6 DHT only\n"
     "  --nolan     skip LAN broadcast discovery\n"
     "  --noportmap don't ask the router to forward a port (UPnP-IGD, NAT-PMP, PCP)\n"
     "  --nonostr   no Nostr relays. Tor and direct members only reach each other\n"
     "              through them, so with this off they can't\n"
+    "  --nostr-always\n"
+    "              stay on the relays all the time. By default direct routing goes there\n"
+    "              only while nobody is reached yet or a peer's UDP fails, so Tor members\n"
+    "              can't find a room whose members all reach each other directly\n"
+    "  --verify-optional\n"
+    "              send to peers whose verify code you haven't compared\n"
     "  --relay     a Nostr relay (wss://...) to use instead of the defaults; repeatable\n"
     "  --tor-launch\n"
     "              which tor Tor mode uses. auto (default): a tor that's already running if\n"
@@ -190,6 +204,7 @@ typedef struct {
     int route_chosen;
     notify_mode_t notify_mode;
     notify_preview_t notify_preview;
+    int verify_optional;
     int net_verbose;
     uint16_t default_port;
     int settings_sel;
@@ -420,9 +435,11 @@ static struct {
 } g_tor;
 
 // Downloads (:update) go through Tor whenever Tor mode is on: to the tor in use once there is
-// one, and to a port nothing listens on until then, so they fail instead of going direct.
+// one, and to a port nothing listens on until then, so they fail instead of going direct. curl
+// can't speak Shadowsocks, so in that mode they fail the same way.
 static void sync_update_proxy(void) {
-    if (g_app.route.mode != ROUTE_TOR) update_set_proxy(NULL);
+    if (g_app.route.mode == ROUTE_DIRECT) update_set_proxy(NULL);
+    else if (g_app.route.mode == ROUTE_SS) update_set_proxy("127.0.0.1:1");
     else update_set_proxy(g_tor.state == TL_READY ? g_tor.socks : "127.0.0.1:1");
 }
 
@@ -603,6 +620,7 @@ static session_slot_t *start_session(const char *session_name, const char *passw
     o.created = created;
     o.notify_mode = g_app.notify_mode;
     o.notify_preview = g_app.notify_preview;
+    o.verify_optional = g_app.verify_optional;
     o.has_color = 1;
     memcpy(o.color, g_app.color, 3);
     o.identity_source = g_app.identity_source;
@@ -635,6 +653,8 @@ static session_slot_t *start_session(const char *session_name, const char *passw
     }
     if (g_app.route.mode == ROUTE_TOR)
         console_note(s, "* routing: Tor onion services only - connecting takes a little longer");
+    else if (g_app.route.mode == ROUTE_SS)
+        console_note(s, "* routing: everything through the Shadowsocks server %s", s->engine.ss_host);
     return s;
 }
 
@@ -672,6 +692,12 @@ static void show_identity_result(void) {
     }
 }
 
+// A --peer as an address. Through Shadowsocks only a numeric one: a name would go to local DNS.
+static int peer_arg_address(const char *arg, addr_t *out) {
+    if (g_app.route.mode != ROUTE_SS) return addr_parse_hostport(arg, out);
+    return addr_parse_ip_port(arg, out);
+}
+
 static void finish_onboarding(void) {
     g_app.mode = MODE_CHAT;
 
@@ -683,8 +709,10 @@ static void finish_onboarding(void) {
             push_log("* --peer left out: Tor mode never reaches peers over UDP, so their addresses aren't looked up");
         } else {
             for (int i = 0; i < g_app.pending_auto_n_peers; i++) {
-                if (addr_parse_hostport(g_app.pending_auto_peer_args[i], &peers[n_peers]) == 0) n_peers++;
-                else push_log("* --peer %s left out: can't find that address", g_app.pending_auto_peer_args[i]);
+                if (peer_arg_address(g_app.pending_auto_peer_args[i], &peers[n_peers]) == 0) n_peers++;
+                else push_log("* --peer %s left out: %s", g_app.pending_auto_peer_args[i],
+                              g_app.route.mode == ROUTE_SS ? "Shadowsocks routing takes addresses, not names (they'd be looked up "
+                                                             "around the server)" : "can't find that address");
             }
         }
         start_session(g_app.pending_auto_session, g_app.pending_auto_password, 0,
@@ -807,6 +835,13 @@ static cmd_result_t app_update(void *ctx, const char *arg) {
         push_log("* update: Tor mode downloads through Tor, and there's no tor yet - try again once it's connected");
         return CMD_OK;
     }
+    if (g_app.route.mode == ROUTE_SS) {
+        // curl can't go through Shadowsocks, and going around it would show GitHub (and the
+        // network) who runs chat.
+        push_log("* update: Shadowsocks routing can't download through the server - update with :set routing tor, "
+                 "or from a network you don't mind seeing it");
+        return CMD_OK;
+    }
     if (update_start() == 0) push_log("* update: checking GitHub for a newer release (v" CHAT_VERSION " here)...");
     else push_log("* update: already running");
     return CMD_OK;
@@ -826,20 +861,26 @@ static const char *const ROUTE_CHOICE_LINES[] = {
     ("*   [3] Tor: onion services, and the Nostr relays reached through Tor to meet direct peers. Hides "
      "your IP address from peers and everyone else. Uses tor or Tor Browser if one is running, else starts "
      "its own; connecting takes longer"),
+    ("*   [4] Shadowsocks: as [1], but every packet goes through your own Shadowsocks 2022 server (an ss:// "
+     "link). Your network sees one encrypted connection to it; peers, the DHT and the relays see the "
+     "server's address, not yours"),
 };
 
 static void apply_route_choice(int choice) {
     if (choice == 3) {
         g_app.route.mode = ROUTE_TOR;
+    } else if (choice == 4) {
+        g_app.route.mode = ROUTE_SS;
     } else {
         g_app.route.mode = ROUTE_DIRECT;
-        g_app.route.nostr = choice == 1;
+        g_app.route.nostr = choice == 1 ? NOSTR_FALLBACK : NOSTR_OFF;
     }
     g_app.route_chosen = 1;
 }
 
 static const char *route_label(void) {
     if (g_app.route.mode == ROUTE_TOR) return "Tor onion services only";
+    if (g_app.route.mode == ROUTE_SS) return "through a Shadowsocks server";
     return g_app.route.nostr ? "direct, with Nostr relay fallback" : "direct only";
 }
 
@@ -851,11 +892,11 @@ static const char *route_label(void) {
 enum { K_TOGGLE, K_CHOICE, K_TEXT, K_SECRET, K_ACTION };
 
 typedef enum {
-    SET_ROUTING, SET_DHT4, SET_DHT6, SET_PORTMAP, SET_LAN,
+    SET_ROUTING, SET_SS, SET_DHT4, SET_DHT6, SET_PORTMAP, SET_LAN,
     SET_TOR_LAUNCH, SET_TOR_PATH, SET_TOR_SOCKS, SET_TOR_CONTROL, SET_TOR_PASSWORD,
     SET_NOSTR, SET_RELAYS,
     SET_NICK, SET_COLOUR, SET_SIGN, SET_AGE_RECIPIENT, SET_PGP_PUBKEY,
-    SET_NOTIFY, SET_PREVIEW, SET_NET, SET_PORT,
+    SET_VERIFY, SET_NOTIFY, SET_PREVIEW, SET_NET, SET_PORT,
     SET_SIDEBAR, SET_CONSOLE, SET_CHAT
 } setting_id_t;
 
@@ -870,13 +911,20 @@ typedef struct {
 } setting_def_t;
 
 static const setting_def_t SETTINGS[] = {
-    { SET_ROUTING, "Network", "routing", "Routing", K_CHOICE, "direct|tor",
+    { SET_ROUTING, "Network", "routing", "Routing", K_CHOICE, "direct|tor|shadowsocks",
       "direct: UDP straight between peers, found with the options below. tor: onion services, plus the Nostr "
       "relays through Tor to meet direct members - hides your IP address from everyone. Uses a running tor or "
-      "starts chat's own; connecting takes longer. Applies to sessions you open from now on." },
+      "starts chat's own; connecting takes longer. shadowsocks: as direct, but all of it through your own "
+      "Shadowsocks server, so your network sees one encrypted connection and everyone else the server's "
+      "address. Applies to sessions you open from now on." },
+    { SET_SS, NULL, "ss", "Shadowsocks server", K_SECRET, NULL,
+      "The server's ss:// link, as shadowsocks-rust, sing-box or Xray give it: a Shadowsocks 2022 method "
+      "(2022-blake3-aes-128-gcm, -aes-256-gcm or -chacha20-poly1305) and its key. Its UDP relay has to pass on "
+      "replies from anywhere (full cone), as shadowsocks-rust and sing-box do, and both clocks have to be right to "
+      "30 seconds. Kept in memory only. Applies to sessions you open from now on." },
     { SET_DHT4, NULL, "dht", "BitTorrent DHT (IPv4)", K_TOGGLE, "on|off",
       "Finds peers on the internet through the public BitTorrent DHT. Its nodes see your IP address next to a "
-      "lookup key only room members can compute." },
+      "lookup key only room members can compute, and a node id that changes with it every hour." },
     { SET_DHT6, NULL, "dht6", "IPv6 DHT", K_TOGGLE, "on|off",
       "Also looks peers up on the IPv6 DHT (BEP 32). IPv6 usually has no NAT to punch through, so peers there "
       "connect more reliably." },
@@ -902,11 +950,12 @@ static const setting_def_t SETTINGS[] = {
     { SET_TOR_PASSWORD, NULL, "torpassword", "Tor control password", K_SECRET, NULL,
       "Only for a tor set up with HashedControlPassword. Kept in memory only. Applies to sessions you open from now on." },
     // Last in the section: the relays apply in both modes, so they stay put when the mode changes.
-    { SET_NOSTR, NULL, "nostr", "Nostr relays", K_TOGGLE, "on|off",
-      "Tor and direct members can only reach each other through these relays, so both need this on. Direct: "
-      "they carry traffic when UDP can't get through. Tor: they're reached only through Tor and never see your "
-      "IP. Each event has a one-off key, a random kind, one size and fresh encryption, under a tag that changes "
-      "every 10 minutes." },
+    { SET_NOSTR, NULL, "nostr", "Nostr relays", K_CHOICE, "off|on|always",
+      "on: direct routing goes to the relays only while it needs them - nobody reached yet, or a peer UDP doesn't "
+      "reach - and leaves a minute after. always: stays there, so Tor members can find a room whose members all "
+      "reach each other directly (they only meet on the relays). Tor routing reaches them only through Tor, and "
+      "always stays. Each event has a one-off key, a random kind, one size and fresh encryption, under a tag "
+      "that changes every 10 minutes, with a new connection for each." },
     { SET_RELAYS, NULL, "relays", "Relay list", K_TEXT, "wss://URL ... (up to 6)",
       "The relays the fallback uses: up to 6 wss:// URLs, separated by spaces or commas." },
     { SET_NICK, "Profile", "nick", "Nickname", K_TEXT, "NAME", "Your name in every session." },
@@ -921,7 +970,12 @@ static const setting_def_t SETTINGS[] = {
     { SET_PGP_PUBKEY, NULL, "pgpkey", "PGP public key", K_ACTION, NULL,
       "The public half of the PGP key made here, by its fingerprint, for others to gpg --import. Enter copies "
       "it to the clipboard; it's in the console too." },
-    { SET_NOTIFY, "Chat", "notify", "Notifications", K_CHOICE, "all|mentions|none",
+    { SET_VERIFY, "Chat", "verify", "Compare verify codes", K_CHOICE, "required|optional",
+      "Anyone with a session's id and password could sit between two members and read what they say. When a peer "
+      "joins, chat shows a code to compare with them over another channel; it's the same on both ends only if "
+      "nobody is in between. required: nothing you send reaches a peer until you say it matched (:verify NICK ok). "
+      "optional: it goes to everyone, compared or not." },
+    { SET_NOTIFY, NULL, "notify", "Notifications", K_CHOICE, "all|mentions|none",
       "Desktop notifications, for open sessions and new ones: every message, mentions of your nick, or none." },
     { SET_PREVIEW, NULL, "preview", "Notification preview", K_CHOICE, "off|nick|message",
       "What a notification shows. off: only that a message came. nick: who it's from. message: who, and what "
@@ -942,7 +996,9 @@ static const setting_def_t SETTINGS[] = {
 static const char *const NOTIFY_NAMES[] = { "none", "mentions", "all" };
 static const char *const PREVIEW_NAMES[] = { "off", "nick", "message" };
 static const char *const ON_OFF[] = { "off", "on" };
-static const char *const ROUTE_NAMES[] = { "direct", "tor" };
+static const char *const ROUTE_NAMES[] = { "direct", "tor", "shadowsocks" };
+static const char *const NOSTR_NAMES[] = { "off", "on", "always" };
+static const char *const VERIFY_NAMES[] = { "required", "optional" };
 static const char *const NET_LOG_NAMES[] = { "normal", "verbose" };
 
 static setting_id_t g_edit_id;
@@ -960,20 +1016,23 @@ static const setting_def_t *setting_by_key(const char *key) {
     return NULL;
 }
 
-static int direct_only_setting(setting_id_t id) {
-    return id == SET_DHT4 || id == SET_DHT6 || id == SET_PORTMAP || id == SET_LAN;
-}
+// The DHT works through Shadowsocks too; the LAN and the router would show this machine.
+static int dht_setting(setting_id_t id) { return id == SET_DHT4 || id == SET_DHT6; }
+static int direct_only_setting(setting_id_t id) { return id == SET_PORTMAP || id == SET_LAN; }
 static int tor_only_setting(setting_id_t id) {
     return id == SET_TOR_LAUNCH || id == SET_TOR_PATH || id == SET_TOR_SOCKS || id == SET_TOR_CONTROL
         || id == SET_TOR_PASSWORD;
 }
 
 // Settings that don't apply right now aren't listed: the direct ones in Tor mode, the Tor ones in
-// direct mode, the relay list with relays off, the AGE recipient without an AGE identity, and the
-// PGP public key without a PGP key made here.
+// direct mode, the Shadowsocks server in the others, the relay list with relays off, the AGE
+// recipient without an AGE identity, and the PGP public key without a PGP key made here.
 static int setting_shown(setting_id_t id) {
-    if (g_app.route.mode == ROUTE_TOR && direct_only_setting(id)) return 0;
-    if (g_app.route.mode == ROUTE_DIRECT && tor_only_setting(id)) return 0;
+    route_mode_t m = g_app.route.mode;
+    if (m != ROUTE_DIRECT && direct_only_setting(id)) return 0;
+    if (m == ROUTE_TOR && dht_setting(id)) return 0;
+    if (m != ROUTE_TOR && tor_only_setting(id)) return 0;
+    if (m != ROUTE_SS && id == SET_SS) return 0;
     if (id == SET_RELAYS && !g_app.route.nostr) return 0;
     if (id == SET_AGE_RECIPIENT && g_app.identity_source != IDENT_AGE) return 0;
     if (id == SET_PGP_PUBKEY && !pgp_key_made_here()) return 0;
@@ -982,6 +1041,8 @@ static int setting_shown(setting_id_t id) {
 
 static const char *setting_hidden_why(setting_id_t id) {
     if (direct_only_setting(id)) return "it only applies with direct routing";
+    if (dht_setting(id)) return "it doesn't apply with tor routing";
+    if (id == SET_SS) return "it only applies with shadowsocks routing";
     if (tor_only_setting(id)) return "it only applies with tor routing";
     if (id == SET_RELAYS) return "it only applies with the Nostr relays on";
     if (id == SET_PGP_PUBKEY) return "it needs a PGP signing key made here";
@@ -995,12 +1056,13 @@ static int setting_options(setting_id_t id, const char *const **names, int *n) {
     *names = ON_OFF;
     *n = 2;
     switch (id) {
-        case SET_ROUTING:    *names = ROUTE_NAMES; return r->mode == ROUTE_TOR;
+        case SET_ROUTING:    *names = ROUTE_NAMES; *n = 3; return (int)r->mode;
         case SET_DHT4:       return r->dht4 != 0;
         case SET_DHT6:       return r->dht6 != 0;
         case SET_PORTMAP:    return r->portmap != 0;
         case SET_LAN:        return r->lan != 0;
-        case SET_NOSTR:      return r->nostr != 0;
+        case SET_NOSTR:      *names = NOSTR_NAMES; *n = 3; return r->nostr;
+        case SET_VERIFY:     *names = VERIFY_NAMES; return g_app.verify_optional != 0;
         case SET_TOR_LAUNCH: *names = TOR_LAUNCH_NAMES; *n = 3; return g_app.tor_launch;
         case SET_NOTIFY:     *names = NOTIFY_NAMES; *n = 3; return (int)g_app.notify_mode;
         case SET_PREVIEW:    *names = PREVIEW_NAMES; *n = 3; return (int)g_app.notify_preview;
@@ -1059,6 +1121,15 @@ static void setting_value(setting_id_t id, char *out, size_t cap) {
         case SET_TOR_SOCKS:    snprintf(out, cap, "%s", r->tor.socks); break;
         case SET_TOR_CONTROL:  snprintf(out, cap, "%s", r->tor.control); break;
         case SET_TOR_PASSWORD: snprintf(out, cap, "%s", r->tor.password[0] ? "set" : "not set (cookie or no login)"); break;
+        case SET_SS: {
+            // The link holds the key: only the server shows.
+            ss_config_t cfg;
+            if (!r->ss[0]) snprintf(out, cap, "not set");
+            else if (ss_parse_url(r->ss, &cfg, NULL, 0) == 0) snprintf(out, cap, "%s:%u", cfg.host, (unsigned)cfg.port);
+            else snprintf(out, cap, "set, but not a link chat can use");
+            crypto_wipe(&cfg, sizeof cfg);
+            break;
+        }
         case SET_NICK:         snprintf(out, cap, "%s", g_app.nick); break;
         case SET_COLOUR: {
             const char *name = NULL;
@@ -1117,7 +1188,7 @@ static void routing_changed(setting_id_t id) {
     }
     char v[160]; setting_value(id, v, sizeof v);
     const char *label = setting_def(id)->label;
-    if (id == SET_ROUTING || tor_only_setting(id) || (later && !direct_only_setting(id)))
+    if (id == SET_ROUTING || id == SET_SS || tor_only_setting(id) || (later && !direct_only_setting(id)))
         note("%s: %s - for sessions you open from now on%s", label, v, any ? "; open ones keep their routing" : "");
     else
         note("%s: %s%s", label, v, any ? " - applied to open sessions too" : "");
@@ -1132,12 +1203,17 @@ static void set_colour_all(void) {
 static void setting_choose(setting_id_t id, int i) {
     routing_t *r = &g_app.route;
     switch (id) {
-        case SET_ROUTING: r->mode = i ? ROUTE_TOR : ROUTE_DIRECT; routing_changed(id); return;
+        case SET_ROUTING: r->mode = (route_mode_t)i; routing_changed(id); return;
         case SET_DHT4:    r->dht4 = i; routing_changed(id); return;
         case SET_DHT6:    r->dht6 = i; routing_changed(id); return;
         case SET_PORTMAP: r->portmap = i; routing_changed(id); return;
         case SET_LAN:     r->lan = i; routing_changed(id); return;
         case SET_NOSTR:   r->nostr = i; routing_changed(id); return;
+        case SET_VERIFY:
+            g_app.verify_optional = i;
+            for (int s = 0; s < MAX_SESSIONS; s++)
+                if (g_app.used[s] && !g_app.sessions[s].initialising) g_app.sessions[s].engine.verify_required = !i;
+            break;
         case SET_TOR_LAUNCH:
             g_app.tor_launch = i;
             note("Start chat's own tor: %s - for the next tor chat looks for; a tor already in use stays",
@@ -1189,7 +1265,8 @@ static void begin_setting_edit(setting_id_t id) {
     tui_input_clear(&g_app.input);
     g_app.input.modal = 0;
     g_edit_id = id;
-    if (id != SET_TOR_PASSWORD) {
+    // A secret starts empty: what's typed replaces it.
+    if (id != SET_TOR_PASSWORD && id != SET_SS) {
         char v[600];
         if (id == SET_RELAYS) {
             size_t p = 0;
@@ -1268,6 +1345,17 @@ static void setting_apply_text(setting_id_t id, const char *typed) {
             crypto_wipe(text, sizeof text);
             routing_changed(id);
             return;
+        case SET_SS: {
+            ss_config_t cfg;
+            char why[160];
+            int ok = !text[0] || ss_parse_url(text, &cfg, why, sizeof why) == 0;
+            if (ok) copy_str(r->ss, text, sizeof r->ss);
+            crypto_wipe(text, sizeof text);
+            crypto_wipe(&cfg, sizeof cfg);
+            if (!ok) { note("can't use that link: %s", why); return; }
+            routing_changed(id);
+            return;
+        }
         case SET_NICK:
             if (!text[0]) return;
             chat_clean_nick(text, g_app.nick);
@@ -2501,8 +2589,7 @@ static tui_view_t current_view(char *sub, size_t cap) {
     v.scroll = s->scroll;
     v.empty = session_empty_text(s);
     if (s->initialising) snprintf(sub, cap, "starting");
-    else snprintf(sub, cap, "%d online \xc2\xb7 %s", chat_online_count(&s->engine) + 1,
-                  s->engine.route.mode == ROUTE_TOR ? "tor" : "direct");
+    else snprintf(sub, cap, "%d online \xc2\xb7 %s", chat_online_count(&s->engine) + 1, routing_mode_name(s->engine.route.mode));
     v.subtitle = sub;
     return v;
 }
@@ -2625,12 +2712,16 @@ static int build_net(tui_kv_t kv[MAX_NET], char vals[MAX_NET][32]) {
         KV("route", "tor");
         KV("tor", "%s", strncmp(t, "tor: ", 5) == 0 ? t + 5 : t);
         KV("onion", "%s", e->tor && tor_my_onion(e->tor)[0] ? "published" : "waiting");
+    } else if (e->route.mode == ROUTE_SS) {
+        KV("route", "shadowsocks");
+        KV("server", "%.28s", e->ss_host);
     } else {
         KV("route", "direct");
         KV("port", "udp/%u", (unsigned)e->port);
         KV("portmap", "%s", !e->pm ? "off" : portmap_mapped(e->pm, NULL) ? "mapped" : "not yet");
     }
-    if (e->nostr) KV("relays", "%d/%d up", nostr_relays_up(e->nostr), nostr_relay_total(e->nostr));
+    if (e->nostr && !nostr_active(e->nostr)) KV("relays", "not needed");
+    else if (e->nostr) KV("relays", "%d/%d up", nostr_relays_up(e->nostr), nostr_relay_total(e->nostr));
     else KV("relays", "off");
     if (e->route.mode != ROUTE_TOR) {
         if (e->dht_on) {
@@ -2699,6 +2790,7 @@ static void render(void) {
             copy_str(r->nick, name, sizeof r->nick);
             memcpy(r->color, p->color, 3);
             r->verify = (int)p->identity_state;
+            r->code = chat_code_state(e, p);
             r->modified = p->build_state == BUILD_MODIFIED;
         }
     }
@@ -2886,10 +2978,25 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
             for (size_t i = 0; i < sizeof ROUTE_CHOICE_LINES / sizeof ROUTE_CHOICE_LINES[0]; i++)
                 printf("%s\n", ROUTE_CHOICE_LINES[i] + 2);
             char line[16];
-            if (term_read_line("routing [1/2/3, Enter = 1]: ", line, sizeof line) != 0) return 1;
-            if (line[0] >= '1' && line[0] <= '3') choice = line[0] - '0';
+            if (term_read_line("routing [1/2/3/4, Enter = 1]: ", line, sizeof line) != 0) return 1;
+            if (line[0] >= '1' && line[0] <= '4') choice = line[0] - '0';
         }
         apply_route_choice(choice);
+    }
+    if (g_app.route.mode == ROUTE_SS && !g_app.route.ss[0]) {
+        // Hidden as it's typed: the link holds the server's key.
+        char link[SS_URL_MAX] = "", why[160];
+        if (tty) term_read_password("Shadowsocks server (ss:// link): ", link, sizeof link);
+        ss_config_t cfg;
+        int ok = ss_parse_url(link, &cfg, why, sizeof why) == 0, typed = link[0] != '\0';
+        if (ok) copy_str(g_app.route.ss, link, sizeof g_app.route.ss);
+        crypto_wipe(link, sizeof link);
+        crypto_wipe(&cfg, sizeof cfg);
+        if (!ok) {
+            fprintf(stderr, "chat: %s\n", typed ? why : "Shadowsocks routing needs a server: set CHAT_SS to its ss:// link");
+            crypto_wipe(&o, sizeof o);
+            return 1;
+        }
     }
     // --peer names are looked up only once the routing is settled, and never for Tor, where the
     // lookup would go around it.
@@ -2899,8 +3006,9 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
         return 1;
     }
     for (int i = 0; i < n_peer_args && o.n_peers < (int)(sizeof o.peers / sizeof o.peers[0]); i++) {
-        if (addr_parse_hostport(peer_args[i], &o.peers[o.n_peers]) != 0) {
-            fprintf(stderr, "chat: can't find --peer %s\n", peer_args[i]);
+        if (peer_arg_address(peer_args[i], &o.peers[o.n_peers]) != 0) {
+            fprintf(stderr, "chat: can't use --peer %s%s\n", peer_args[i],
+                    g_app.route.mode == ROUTE_SS ? " (Shadowsocks routing takes IP:PORT, never a name)" : "");
             crypto_wipe(&o, sizeof o);
             return 1;
         }
@@ -2914,6 +3022,7 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
     }
     o.notify_mode = g_app.notify_mode;
     o.notify_preview = g_app.notify_preview;
+    o.verify_optional = g_app.verify_optional;
     o.has_color = 1;
     memcpy(o.color, g_app.color, 3);
     o.identity_source = g_app.identity_source;
@@ -2936,6 +3045,9 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
     if (c.route.mode == ROUTE_TOR)
         printf("session '%s', you are %s (peer %s). encrypted, over Tor only. :quit or EOF to stop.\n",
                c.session_name, c.nick, idhex);
+    else if (c.route.mode == ROUTE_SS)
+        printf("session '%s', you are %s (peer %s). encrypted, through the Shadowsocks server %s. :quit or EOF to stop.\n",
+               c.session_name, c.nick, idhex, c.ss_host);
     else
         printf("session '%s', you are %s (peer %s). encrypted, udp/%u, routing: %s. :quit or EOF to stop.\n",
                c.session_name, c.nick, idhex, (unsigned)c.port, route_label());
@@ -3007,13 +3119,18 @@ int main(int argc, char **argv) {
         } else if (strcmp(key, "noportmap") == 0) {
             g_app.route.portmap = 0;
         } else if (strcmp(key, "nonostr") == 0) {
-            g_app.route.nostr = 0;
+            g_app.route.nostr = NOSTR_OFF;
+        } else if (strcmp(key, "nostr-always") == 0) {
+            g_app.route.nostr = NOSTR_ALWAYS;
+        } else if (strcmp(key, "verify-optional") == 0) {
+            g_app.verify_optional = 1;
         } else if (strcmp(key, "routing") == 0 && i + 1 < argc) {
             const char *v = argv[++i];
             if (strcmp(v, "direct+nostr") == 0 || strcmp(v, "nostr") == 0) apply_route_choice(1);
             else if (strcmp(v, "direct") == 0) apply_route_choice(2);
             else if (strcmp(v, "tor") == 0) apply_route_choice(3);
-            else { fprintf(stderr, "chat: --routing takes direct+nostr, direct or tor\n"); return 1; }
+            else if (strcmp(v, "shadowsocks") == 0 || strcmp(v, "ss") == 0) apply_route_choice(4);
+            else { fprintf(stderr, "chat: --routing takes direct+nostr, direct, tor or shadowsocks\n"); return 1; }
         } else if (strcmp(key, "relay") == 0 && i + 1 < argc) {
             const char *v = argv[++i];
             if (nostr_url_ok(v) != 0) { fprintf(stderr, "chat: bad --relay %s (want wss://host[:port][/path])\n", v); return 1; }
@@ -3067,6 +3184,20 @@ int main(int argc, char **argv) {
     platform_harden_process();
     update_cleanup_stale();
 
+    // The Shadowsocks link holds its server's key: from the environment (taken out of it), never
+    // the command line, where anyone on this machine could read it.
+    {
+        char link[SS_URL_MAX];
+        if (platform_env_take("CHAT_SS", link, sizeof link) == 0 && link[0]) {
+            ss_config_t cfg;
+            char why[160];
+            if (ss_parse_url(link, &cfg, why, sizeof why) != 0) { fprintf(stderr, "chat: CHAT_SS: %s\n", why); return 1; }
+            copy_str(g_app.route.ss, link, sizeof g_app.route.ss);
+            crypto_wipe(&cfg, sizeof cfg);
+        }
+        crypto_wipe(link, sizeof link);
+    }
+
     crypto_setup();
     update_self_build(&g_self_build);
     // The signing key, a pasted key block and typed passwords pass through these for the whole
@@ -3078,6 +3209,10 @@ int main(int argc, char **argv) {
     crypto_lock(g_app.pending_auto_password, sizeof g_app.pending_auto_password);
 
     if (do_update) {
+        if (g_app.route_chosen && g_app.route.mode == ROUTE_SS) {
+            fprintf(stderr, "chat: can't download through a Shadowsocks server - not updating (--routing tor goes through Tor)\n");
+            return 1;
+        }
         // With --routing tor the download goes through Tor, never direct: find or start a tor first.
         int over_tor = g_app.route_chosen && g_app.route.mode == ROUTE_TOR;
         if (over_tor) {

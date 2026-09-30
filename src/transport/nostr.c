@@ -31,14 +31,18 @@
 #define PING_EVERY 30.0
 #define BACKOFF_MAX 300.0
 #define RESUB_DELAY 30.0
-// Events older or newer than this are someone's replay, or a clock far off.
-#define EVENT_MAX_SKEW 600
 // Relays rate-limit writes, some hard (a ban for a while after a few refusals). A handshake is a
 // short burst; steady traffic is one event per peer every few seconds.
 #define SEND_RATE 0.5
 #define SEND_BURST 8.0
 #define PAUSE_MIN 30.0
 #define PAUSE_MAX 900.0
+// The next ten minutes' connection opens this long before they start (at random between the
+// half and the whole of it), and the last ten minutes' closes as long after (likewise): members'
+// clocks can differ by the half. Through Tor a connection takes longer to come up.
+#define LEAD 120.0
+#define LEAD_PROXY 240.0
+#define TAIL 120.0
 
 enum { R_IDLE, R_RESOLVING, R_CONNECTING, R_SOCKS, R_TLS, R_UPGRADE, R_OPEN };
 // Tor has to build a circuit and reach the relay before the SOCKS reply comes.
@@ -64,16 +68,20 @@ typedef struct {
     int n;
 } resolve_job_t;
 
+typedef struct relay relay_t;
+
+// One connection to a relay, asking for one ten minutes' tag.
 typedef struct {
-    char url[NOSTR_URL_MAX];
-    char host[100];
-    char path[128];
-    uint16_t port;
+    int used;
+    relay_t *relay;
+    long long epoch;
+    char tag[65];
     int state;
     resolve_job_t *job;
     addr_t addrs[4];
     int n_addrs, addr_i;
     sock_t s;
+    ss_stream_t *ss;
     tls_conn_t *tls;
     char ws_key[32];
     uint8_t *in;
@@ -83,45 +91,59 @@ typedef struct {
     uint8_t *msg;
     size_t msg_len;
     int msg_op, in_msg;
-    double deadline, next_try, opened_at, last_rx, next_ping, resub_at;
-    int fails;
+    double deadline, opened_at, last_rx, next_ping, resub_at;
     int subscribed;
     // A new one for each connection: the same id at several relays, or on one relay from one
     // connection to the next, would tie those connections to one member (and, through Tor, the
     // circuits it gives each relay).
     char subid[17];
     char challenge[160];
+    // Through Tor: the SOCKS exchange so far, and this connection's own SOCKS login, so each gets
+    // a circuit (and exit) of its own.
+    int via_proxy, socks_stage;
+    char socks_user[17];
+} conn_t;
+
+struct relay {
+    char url[NOSTR_URL_MAX];
+    char host[100];
+    char path[128];
+    uint16_t port;
+    conn_t conns[2];
+    double next_try;
+    int fails;
     int warned, refusals;
     double tokens, tokens_at;
     // Writes held back after the relay refused one for rate or policy; reading goes on.
     double paused_until, pause;
     int read_only, odd_refusals;
-    // Through Tor: the SOCKS exchange so far, and this relay's own SOCKS login, so each relay
-    // gets a circuit (and exit) of its own.
-    int via_proxy, socks_stage;
-    char socks_user[17];
-} relay_t;
+    // When the next ten minutes' connection opens, and the last one's closes, this time round.
+    long long plan_epoch;
+    double open_next_at, close_last_at;
+};
 
 struct nostr {
     relay_t relays[NOSTR_MAX_RELAYS];
     int n_relays;
+    int active;
     // Tor mode: every relay connection goes through this SOCKS proxy, and none goes anywhere
     // until it's known.
     int must_proxy;
     char proxy[64];
+    // Shadowsocks mode: every connection through this server's TCP tunnel.
+    int use_ss;
+    ss_config_t ss;
+    addr_t ss_server;
     uint8_t tag_key[NOSTR_KEY_LEN];
     uint8_t wrap_key[NOSTR_KEY_LEN];
     uint8_t my_id[ID_LEN];
-    // Tags of the previous, current and next ten minutes: clocks differ a little.
-    long long epoch;
-    char tags[3][65];
     uint8_t seen_ids[SEEN_IDS][8];
     int seen_head;
     nostr_deliver_fn deliver;
     nostr_log_fn log;
     void *ctx;
-    // The relay whose message is being handled: a send mustn't flush (and maybe drop) it then.
-    relay_t *busy;
+    // The connection whose message is being handled: a send mustn't flush (and maybe drop) it then.
+    conn_t *busy;
     js_arena arena;
     char ev[EVENT_CAP];
     char ser[EVENT_CAP];
@@ -178,18 +200,11 @@ static void parse_url(relay_t *r) {
     copy_str(r->path, *p ? p : "/", sizeof r->path);
 }
 
-static long long current_epoch(void) { return (long long)time(NULL) / NOSTR_EPOCH; }
-
 static void epoch_tag(const nostr_t *n, long long epoch, char out[65]) {
     uint8_t e[8], mac[32];
     for (int i = 0; i < 8; i++) e[i] = (uint8_t)((unsigned long long)epoch >> (56 - 8 * i));
     hmac_sha256(n->tag_key, sizeof n->tag_key, e, sizeof e, mac);
     hex_encode(mac, sizeof mac, out);
-}
-
-static void set_epoch(nostr_t *n, long long epoch) {
-    n->epoch = epoch;
-    for (int i = 0; i < 3; i++) epoch_tag(n, epoch - 1 + i, n->tags[i]);
 }
 
 nostr_t *nostr_new(const uint8_t tag_key[NOSTR_KEY_LEN], const uint8_t wrap_key[NOSTR_KEY_LEN],
@@ -206,18 +221,22 @@ nostr_t *nostr_new(const uint8_t tag_key[NOSTR_KEY_LEN], const uint8_t wrap_key[
     memcpy(n->tag_key, tag_key, NOSTR_KEY_LEN);
     memcpy(n->wrap_key, wrap_key, NOSTR_KEY_LEN);
     memcpy(n->my_id, my_id, ID_LEN);
-    set_epoch(n, current_epoch());
     for (int i = 0; i < n_relays && n->n_relays < NOSTR_MAX_RELAYS; i++) {
         if (nostr_url_ok(relays[i]) != 0) continue;
         relay_t *r = &n->relays[n->n_relays++];
         copy_str(r->url, relays[i], sizeof r->url);
         parse_url(r);
-        r->s = SOCK_INVALID;
-        r->state = R_IDLE;
-        // Spread the first connections a little.
-        r->next_try = 0;
+        for (int k = 0; k < 2; k++) { r->conns[k].s = SOCK_INVALID; r->conns[k].relay = r; }
+        r->plan_epoch = -1;
     }
     return n;
+}
+
+void nostr_set_ss(nostr_t *n, const ss_config_t *c, addr_t server) {
+    n->use_ss = 1;
+    n->ss = *c;
+    n->ss_server = server;
+    crypto_lock(&n->ss, sizeof n->ss);
 }
 
 static void resolve_main(void *arg) {
@@ -234,62 +253,80 @@ static void resolve_main(void *arg) {
 #endif
 }
 
-static void drop_job(relay_t *r) {
-    if (!r->job) return;
+static void drop_job(conn_t *c) {
+    if (!c->job) return;
 #if JOB_ATOMIC
-    if (atomic_exchange(&r->job->state, JOB_ABANDONED) == JOB_DONE) free(r->job);
+    if (atomic_exchange(&c->job->state, JOB_ABANDONED) == JOB_DONE) free(c->job);
 #else
-    if (r->job->state == JOB_DONE) free(r->job);
-    else r->job->state = JOB_ABANDONED;   // left for good: without atomics, never freed
+    if (c->job->state == JOB_DONE) free(c->job);
+    else c->job->state = JOB_ABANDONED;   // left for good: without atomics, never freed
 #endif
-    r->job = NULL;
+    c->job = NULL;
 }
 
-static void close_relay(relay_t *r) {
-    drop_job(r);
-    if (r->tls) { tls_free(r->tls); r->tls = NULL; }
-    if (r->s != SOCK_INVALID) { net_close(r->s); r->s = SOCK_INVALID; }
-    free(r->in); free(r->out); free(r->msg);
-    r->in = r->out = r->msg = NULL;
-    r->in_len = r->out_len = r->msg_len = 0;
-    r->in_msg = 0;
-    r->subscribed = 0;
-    r->challenge[0] = '\0';
-    r->read_only = 0;
-    r->via_proxy = 0;
-    r->socks_stage = 0;
+static void close_conn(conn_t *c) {
+    drop_job(c);
+    if (c->tls) { tls_free(c->tls); c->tls = NULL; }
+    if (c->ss) { ss_stream_free(c->ss); c->ss = NULL; }
+    if (c->s != SOCK_INVALID) { net_close(c->s); c->s = SOCK_INVALID; }
+    free(c->in); free(c->out); free(c->msg);
+    relay_t *r = c->relay;
+    memset(c, 0, sizeof *c);
+    c->relay = r;
+    c->s = SOCK_INVALID;
+    c->state = R_IDLE;
 }
 
-static void relay_fail(nostr_t *n, relay_t *r, double now, const char *why) {
-    int was_open = r->state == R_OPEN;
-    close_relay(r);
+static void conn_fail(nostr_t *n, conn_t *c, double now, const char *why) {
+    relay_t *r = c->relay;
+    int was_open = c->state == R_OPEN;
+    double opened_at = c->opened_at;
+    char reason[160];
+    // Under TLS, a broken tunnel shows as a bare I/O error: its own reason says more.
+    copy_str(reason, c->ss && ss_stream_dead(c->ss) ? ss_stream_error(c->ss) : why, sizeof reason);
+    close_conn(c);
     // A connection that held for a minute was fine: start the backoff over.
-    if (was_open && now - r->opened_at > 60.0) r->fails = 0;
+    if (was_open && now - opened_at > 60.0) r->fails = 0;
     int shift = r->fails < 6 ? r->fails : 6;
     double delay = 5.0 * (double)(1u << shift);
     if (delay > BACKOFF_MAX) delay = BACKOFF_MAX;
     r->fails++;
     r->next_try = now + delay;
-    r->state = R_IDLE;
     if (!r->warned) {
         r->warned = 1;
-        logf_(n, 0, "* nostr: %s %s: %s - retrying in the background", r->host,
-              was_open ? "dropped" : "unreachable", why);
+        logf_(n, 0, "* nostr: %s %s: %s - retrying in the background", r->host, was_open ? "dropped" : "unreachable", reason);
     } else {
-        logf_(n, 1, "* nostr: %s %s: %s - next try in %.0fs", r->host, was_open ? "dropped" : "unreachable", why, delay);
+        logf_(n, 1, "* nostr: %s %s: %s - next try in %.0fs", r->host, was_open ? "dropped" : "unreachable", reason, delay);
     }
 }
 
 void nostr_free(nostr_t *n) {
     if (!n) return;
-    for (int i = 0; i < n->n_relays; i++) close_relay(&n->relays[i]);
+    for (int i = 0; i < n->n_relays; i++)
+        for (int k = 0; k < 2; k++) close_conn(&n->relays[i].conns[k]);
     crypto_unlock(n->wrap_key, sizeof n->wrap_key);
+    if (n->use_ss) crypto_unlock(&n->ss, sizeof n->ss);
     crypto_wipe(n, sizeof *n);
     free(n);
 }
 
-// Appends one masked client frame to the relay's queue. Returns -1 if it won't fit.
-static int ws_queue(relay_t *r, int op, const void *data, size_t len) {
+void nostr_set_active(nostr_t *n, int on) {
+    if (n->active == !!on) return;
+    n->active = !!on;
+    if (on) {
+        for (int i = 0; i < n->n_relays; i++) { n->relays[i].next_try = 0; n->relays[i].plan_epoch = -1; }
+        logf_(n, 1, "* nostr: connecting to the relays");
+        return;
+    }
+    for (int i = 0; i < n->n_relays; i++)
+        for (int k = 0; k < 2; k++) close_conn(&n->relays[i].conns[k]);
+    logf_(n, 1, "* nostr: off the relays - nothing needs them now");
+}
+
+int nostr_active(const nostr_t *n) { return n->active; }
+
+// Appends one masked client frame to the connection's queue. Returns -1 if it won't fit.
+static int ws_queue(conn_t *c, int op, const void *data, size_t len) {
     uint8_t hdr[14];
     size_t h = 0;
     hdr[h++] = (uint8_t)(0x80 | op);
@@ -300,22 +337,22 @@ static int ws_queue(relay_t *r, int op, const void *data, size_t len) {
     gen_random(mask, 4);
     memcpy(hdr + h, mask, 4);
     h += 4;
-    if (!r->out || r->out_len + h + len > OUT_CAP) return -1;
-    memcpy(r->out + r->out_len, hdr, h);
-    uint8_t *dst = r->out + r->out_len + h;
+    if (!c->out || c->out_len + h + len > OUT_CAP) return -1;
+    memcpy(c->out + c->out_len, hdr, h);
+    uint8_t *dst = c->out + c->out_len + h;
     const uint8_t *src = data;
     for (size_t i = 0; i < len; i++) dst[i] = src[i] ^ mask[i & 3];
-    r->out_len += h + len;
+    c->out_len += h + len;
     return 0;
 }
 
-static int flush(nostr_t *n, relay_t *r, double now) {
-    while (r->out_len > 0) {
-        int w = tls_write(r->tls, r->out, r->out_len);
+static int flush(nostr_t *n, conn_t *c, double now) {
+    while (c->out_len > 0) {
+        int w = tls_write(c->tls, c->out, c->out_len);
         if (w == 0) return 0;
-        if (w < 0) { relay_fail(n, r, now, tls_error(r->tls)); return -1; }
-        memmove(r->out, r->out + w, r->out_len - (size_t)w);
-        r->out_len -= (size_t)w;
+        if (w < 0) { conn_fail(n, c, now, tls_error(c->tls)); return -1; }
+        memmove(c->out, c->out + w, c->out_len - (size_t)w);
+        c->out_len -= (size_t)w;
     }
     return 0;
 }
@@ -365,24 +402,22 @@ static size_t build_event(nostr_t *n, int kind, const char *tags, const char *co
     return e + tail;
 }
 
-// Asks for the room's tags of the three epochs around now. A new REQ under the same id replaces
-// the old one, which is how the tags move on.
-static void send_req(nostr_t *n, relay_t *r) {
-    char req[400];
+// Asks for this connection's one tag.
+static void send_req(conn_t *c) {
+    char req[200];
     long since = (long)time(NULL) - 120;
-    int len = snprintf(req, sizeof req, "[\"REQ\",\"%s\",{\"#e\":[\"%s\",\"%s\",\"%s\"],\"since\":%ld}]",
-                       r->subid, n->tags[0], n->tags[1], n->tags[2], since);
-    if (ws_queue(r, 1, req, (size_t)len) == 0) r->subscribed = 1;
+    int len = snprintf(req, sizeof req, "[\"REQ\",\"%s\",{\"#e\":[\"%s\"],\"since\":%ld}]", c->subid, c->tag, since);
+    if (ws_queue(c, 1, req, (size_t)len) == 0) c->subscribed = 1;
 }
 
 // NIP-42: prove to the relay that we hold the key it sees our events signed with.
-static void send_auth(nostr_t *n, relay_t *r) {
+static void send_auth(nostr_t *n, conn_t *c) {
     char tags[400];
     size_t p = (size_t)snprintf(tags, sizeof tags, "[[\"relay\",");
-    p = js_put_str(tags, p, sizeof tags, r->url, strlen(r->url));
+    p = js_put_str(tags, p, sizeof tags, c->relay->url, strlen(c->relay->url));
     if (p >= sizeof tags) return;
     p += (size_t)snprintf(tags + p, sizeof tags - p, "],[\"challenge\",");
-    p = js_put_str(tags, p, sizeof tags, r->challenge, strlen(r->challenge));
+    p = js_put_str(tags, p, sizeof tags, c->challenge, strlen(c->challenge));
     if (p + 3 >= sizeof tags) return;
     memcpy(tags + p, "]]", 3);
     size_t ev = build_event(n, 22242, tags, "", 0);
@@ -394,7 +429,7 @@ static void send_auth(nostr_t *n, relay_t *r) {
     memcpy(msg, head, sizeof head - 1);
     memcpy(msg + sizeof head - 1, n->ev, ev);
     msg[total - 1] = ']';
-    ws_queue(r, 1, msg, total);
+    ws_queue(c, 1, msg, total);
     free(msg);
 }
 
@@ -418,7 +453,7 @@ static int random_kind(void) {
     }
 }
 
-static void on_event(nostr_t *n, const js_value *ev, double now) {
+static void on_event(nostr_t *n, conn_t *c, const js_value *ev, double now) {
     const js_value *content = js_obj_get(ev, "content");
     const js_value *kind = js_obj_get(ev, "kind");
     const js_value *tags = js_obj_get(ev, "tags");
@@ -430,8 +465,7 @@ static void on_event(nostr_t *n, const js_value *ev, double now) {
         const js_value *t = &tags->items[i];
         if (t->type != JS_ARR || t->n < 2) continue;
         const char *name = js_str(&t->items[0]), *val = js_str(&t->items[1]);
-        if (!name || !val || strcmp(name, "e") != 0) continue;
-        for (int k = 0; k < 3; k++) if (strcmp(val, n->tags[k]) == 0) ours = 1;
+        if (name && val && strcmp(name, "e") == 0 && strcmp(val, c->tag) == 0) ours = 1;
     }
     if (!ours) return;
 
@@ -455,14 +489,15 @@ static void on_event(nostr_t *n, const js_value *ev, double now) {
     crypto_wipe(plain, sizeof plain);
 }
 
-static void on_message(nostr_t *n, relay_t *r, const char *msg, size_t len, double now) {
+static void on_message(nostr_t *n, conn_t *c, const char *msg, size_t len, double now) {
+    relay_t *r = c->relay;
     const js_value *v = js_parse(msg, len, &n->arena);
     if (!v || v->type != JS_ARR || v->n < 2) return;
     const char *type = js_str(&v->items[0]);
     if (!type) return;
     if (strcmp(type, "EVENT") == 0 && v->n >= 3) {
         const char *sub = js_str(&v->items[1]);
-        if (sub && strcmp(sub, r->subid) == 0 && v->items[2].type == JS_OBJ) on_event(n, &v->items[2], now);
+        if (sub && strcmp(sub, c->subid) == 0 && v->items[2].type == JS_OBJ) on_event(n, c, &v->items[2], now);
     } else if (strcmp(type, "OK") == 0 && v->n >= 4) {
         if (v->items[2].type == JS_BOOL && !v->items[2].b) {
             const char *why = js_str(&v->items[3]);
@@ -498,22 +533,23 @@ static void on_message(nostr_t *n, relay_t *r, const char *msg, size_t len, doub
         char clean[120];
         clean_text(why ? why : "", clean, sizeof clean - 1);
         logf_(n, 1, "* nostr: %s closed our subscription: %s", r->host, clean);
-        r->subscribed = 0;
-        if (r->challenge[0]) { send_auth(n, r); send_req(n, r); }
-        else r->resub_at = now + RESUB_DELAY;
+        c->subscribed = 0;
+        if (c->challenge[0]) { send_auth(n, c); send_req(c); }
+        else c->resub_at = now + RESUB_DELAY;
     } else if (strcmp(type, "AUTH") == 0) {
         const char *ch = js_str(&v->items[1]);
-        if (!ch || strlen(ch) >= sizeof r->challenge) return;
-        copy_str(r->challenge, ch, sizeof r->challenge);
-        send_auth(n, r);
-        if (!r->subscribed) send_req(n, r);
+        if (!ch || strlen(ch) >= sizeof c->challenge) return;
+        copy_str(c->challenge, ch, sizeof c->challenge);
+        send_auth(n, c);
+        if (!c->subscribed) send_req(c);
     }
 }
 
-static void start_upgrade(nostr_t *n, relay_t *r, double now) {
+static void start_upgrade(nostr_t *n, conn_t *c, double now) {
+    relay_t *r = c->relay;
     uint8_t key[16];
     gen_random(key, sizeof key);
-    base64_encode(key, sizeof key, r->ws_key);
+    base64_encode(key, sizeof key, c->ws_key);
     char req[512];
     char hostport[112];
     if (r->port == 443) copy_str(hostport, r->host, sizeof hostport);
@@ -521,13 +557,13 @@ static void start_upgrade(nostr_t *n, relay_t *r, double now) {
     int len = snprintf(req, sizeof req,
                        "GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                        "Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n",
-                       r->path, hostport, r->ws_key);
-    if (len <= 0 || (size_t)len >= sizeof req || r->out_len + (size_t)len > OUT_CAP) { relay_fail(n, r, now, "request too long"); return; }
-    memcpy(r->out + r->out_len, req, (size_t)len);
-    r->out_len += (size_t)len;
-    r->state = R_UPGRADE;
-    r->deadline = now + STEP_TIMEOUT;
-    flush(n, r, now);
+                       r->path, hostport, c->ws_key);
+    if (len <= 0 || (size_t)len >= sizeof req || c->out_len + (size_t)len > OUT_CAP) { conn_fail(n, c, now, "request too long"); return; }
+    memcpy(c->out + c->out_len, req, (size_t)len);
+    c->out_len += (size_t)len;
+    c->state = R_UPGRADE;
+    c->deadline = now + STEP_TIMEOUT;
+    flush(n, c, now);
 }
 
 static int header_value(const char *head, const char *name, char *out, size_t cap) {
@@ -551,19 +587,19 @@ static int header_value(const char *head, const char *name, char *out, size_t ca
 }
 
 // Once the whole response head is in: 1 upgraded, 0 not yet, -1 refused.
-static int check_upgrade(relay_t *r, char *why, size_t cap) {
+static int check_upgrade(conn_t *c, char *why, size_t cap) {
     uint8_t *end = NULL;
-    for (size_t i = 0; i + 3 < r->in_len; i++)
-        if (memcmp(r->in + i, "\r\n\r\n", 4) == 0) { end = r->in + i; break; }
+    for (size_t i = 0; i + 3 < c->in_len; i++)
+        if (memcmp(c->in + i, "\r\n\r\n", 4) == 0) { end = c->in + i; break; }
     if (!end) {
-        if (r->in_len > 8192) { copy_str(why, "oversized handshake reply", cap); return -1; }
+        if (c->in_len > 8192) { copy_str(why, "oversized handshake reply", cap); return -1; }
         return 0;
     }
-    size_t head_len = (size_t)(end - r->in) + 4;
+    size_t head_len = (size_t)(end - c->in) + 4;
     char head[8200];
     // One read can bring a long head all at once, past the check above.
     if (head_len > sizeof head) { copy_str(why, "oversized handshake reply", cap); return -1; }
-    memcpy(head, r->in, head_len - 2);
+    memcpy(head, c->in, head_len - 2);
     head[head_len - 2] = '\0';
     if (strncmp(head, "HTTP/1.1 101", 12) != 0 && strncmp(head, "HTTP/1.0 101", 12) != 0) {
         char status[48];
@@ -580,106 +616,120 @@ static int check_upgrade(relay_t *r, char *why, size_t cap) {
         return -1;
     }
     char concat[80];
-    snprintf(concat, sizeof concat, "%s258EAFA5-E914-47DA-95CA-C5AB0DC85B11", r->ws_key);
+    snprintf(concat, sizeof concat, "%s258EAFA5-E914-47DA-95CA-C5AB0DC85B11", c->ws_key);
     uint8_t digest[20];
     char expect[32];
     mbedtls_sha1((const unsigned char *)concat, strlen(concat), digest);
     base64_encode(digest, sizeof digest, expect);
     if (strcmp(accept, expect) != 0) { copy_str(why, "bad websocket accept header", cap); return -1; }
-    memmove(r->in, r->in + head_len, r->in_len - head_len);
-    r->in_len -= head_len;
+    memmove(c->in, c->in + head_len, c->in_len - head_len);
+    c->in_len -= head_len;
     return 1;
 }
 
-// Handles whole frames in the input buffer. Returns -1 if the relay has to go.
-static int read_frames(nostr_t *n, relay_t *r, double now) {
+// Handles whole frames in the input buffer. Returns -1 if the connection has to go.
+static int read_frames(nostr_t *n, conn_t *c, double now) {
     for (;;) {
-        if (r->in_len < 2) return 0;
-        uint8_t b0 = r->in[0], b1 = r->in[1];
+        if (c->in_len < 2) return 0;
+        uint8_t b0 = c->in[0], b1 = c->in[1];
         int fin = (b0 & 0x80) != 0, op = b0 & 0x0f, masked = (b1 & 0x80) != 0;
         uint64_t plen = b1 & 0x7f;
         size_t h = 2;
         if (plen == 126) {
-            if (r->in_len < 4) return 0;
-            plen = ((uint64_t)r->in[2] << 8) | r->in[3];
+            if (c->in_len < 4) return 0;
+            plen = ((uint64_t)c->in[2] << 8) | c->in[3];
             h = 4;
         } else if (plen == 127) {
-            if (r->in_len < 10) return 0;
+            if (c->in_len < 10) return 0;
             plen = 0;
-            for (int i = 0; i < 8; i++) plen = (plen << 8) | r->in[2 + i];
+            for (int i = 0; i < 8; i++) plen = (plen << 8) | c->in[2 + i];
             h = 10;
         }
-        if (plen > MSG_MAX) { relay_fail(n, r, now, "oversized message"); return -1; }
+        if (plen > MSG_MAX) { conn_fail(n, c, now, "oversized message"); return -1; }
         uint8_t mask[4] = { 0, 0, 0, 0 };
         if (masked) {
-            if (r->in_len < h + 4) return 0;
-            memcpy(mask, r->in + h, 4);
+            if (c->in_len < h + 4) return 0;
+            memcpy(mask, c->in + h, 4);
             h += 4;
         }
-        if (r->in_len < h + plen) return 0;
-        uint8_t *payload = r->in + h;
+        if (c->in_len < h + plen) return 0;
+        uint8_t *payload = c->in + h;
         if (masked) for (size_t i = 0; i < plen; i++) payload[i] ^= mask[i & 3];
 
-        if (op == 8) { relay_fail(n, r, now, "closed by the relay"); return -1; }
+        if (op == 8) { conn_fail(n, c, now, "closed by the relay"); return -1; }
         if (op == 9) {
-            if (plen <= 125) ws_queue(r, 10, payload, (size_t)plen);
+            if (plen <= 125) ws_queue(c, 10, payload, (size_t)plen);
         } else if (op == 1 || op == 2 || op == 0) {
-            if (op != 0) { r->in_msg = 1; r->msg_op = op; r->msg_len = 0; }
-            if (!r->in_msg) { relay_fail(n, r, now, "stray continuation frame"); return -1; }
-            if (r->msg_len + plen > MSG_MAX) { relay_fail(n, r, now, "oversized message"); return -1; }
-            memcpy(r->msg + r->msg_len, payload, (size_t)plen);
-            r->msg_len += (size_t)plen;
+            if (op != 0) { c->in_msg = 1; c->msg_op = op; c->msg_len = 0; }
+            if (!c->in_msg) { conn_fail(n, c, now, "stray continuation frame"); return -1; }
+            if (c->msg_len + plen > MSG_MAX) { conn_fail(n, c, now, "oversized message"); return -1; }
+            memcpy(c->msg + c->msg_len, payload, (size_t)plen);
+            c->msg_len += (size_t)plen;
             if (fin) {
-                r->in_msg = 0;
-                if (r->msg_op == 1) {
-                    n->busy = r;
-                    on_message(n, r, (const char *)r->msg, r->msg_len, now);
+                c->in_msg = 0;
+                if (c->msg_op == 1) {
+                    n->busy = c;
+                    on_message(n, c, (const char *)c->msg, c->msg_len, now);
                     n->busy = NULL;
                 }
-                if (r->state != R_OPEN) return -1;
+                if (c->state != R_OPEN) return -1;
             }
         }
         size_t used = h + (size_t)plen;
-        memmove(r->in, r->in + used, r->in_len - used);
-        r->in_len -= used;
+        memmove(c->in, c->in + used, c->in_len - used);
+        c->in_len -= used;
     }
 }
 
-static int alloc_buffers(relay_t *r) {
-    if (!r->in) r->in = malloc(IN_CAP);
-    if (!r->out) r->out = malloc(OUT_CAP);
-    if (!r->msg) r->msg = malloc(MSG_MAX);
-    return r->in && r->out && r->msg ? 0 : -1;
+static int alloc_buffers(conn_t *c) {
+    if (!c->in) c->in = malloc(IN_CAP);
+    if (!c->out) c->out = malloc(OUT_CAP);
+    if (!c->msg) c->msg = malloc(MSG_MAX);
+    return c->in && c->out && c->msg ? 0 : -1;
 }
 
-static void start_tls(nostr_t *n, relay_t *r, double now) {
-    r->tls = tls_new(r->s, r->host);
-    if (!r->tls) {
+static int ss_io_send(void *ctx, const void *data, size_t len) { return net_tcp_send(((conn_t *)ctx)->s, data, len); }
+static int ss_io_recv(void *ctx, void *buf, size_t cap) { return net_tcp_recv(((conn_t *)ctx)->s, buf, cap); }
+static int tls_io_send(void *ctx, const void *data, size_t len) { return ss_stream_send(((conn_t *)ctx)->ss, data, len); }
+static int tls_io_recv(void *ctx, void *buf, size_t cap) { return ss_stream_recv(((conn_t *)ctx)->ss, buf, cap); }
+
+static void start_tls(nostr_t *n, conn_t *c, double now) {
+    relay_t *r = c->relay;
+    if (n->use_ss) {
+        // TLS runs inside the tunnel, to the relay, which the server reaches by name.
+        ss_io_t sio = { ss_io_send, ss_io_recv, c };
+        c->ss = ss_stream_new(&n->ss, &sio, r->host, r->port, 0);
+        tls_io_t tio = { tls_io_send, tls_io_recv, c };
+        if (c->ss) c->tls = tls_new_io(&tio, r->host);
+    } else {
+        c->tls = tls_new(c->s, r->host);
+    }
+    if (!c->tls) {
         char err[160] = "TLS unavailable";
         tls_setup(err, sizeof err);
-        relay_fail(n, r, now, err);
+        conn_fail(n, c, now, err);
         return;
     }
-    r->state = R_TLS;
-    r->deadline = now + STEP_TIMEOUT;
+    c->state = R_TLS;
+    c->deadline = now + STEP_TIMEOUT;
 }
 
 // Through Tor: connect to its SOCKS port. The relay's name goes to Tor as it is, so Tor looks it
 // up at the exit; nothing here ever asks local DNS.
-static void begin_proxy_connect(nostr_t *n, relay_t *r, double now) {
+static void begin_proxy_connect(nostr_t *n, conn_t *c, double now) {
     addr_t pa;
-    if (addr_parse_hostport(n->proxy, &pa) != 0) { relay_fail(n, r, now, "Tor's SOCKS address isn't host:port"); return; }
-    if (alloc_buffers(r) != 0) { relay_fail(n, r, now, "out of memory"); return; }
-    r->s = net_tcp_connect(pa);
-    if (r->s == SOCK_INVALID) { relay_fail(n, r, now, "can't reach Tor's SOCKS port"); return; }
+    if (addr_parse_hostport(n->proxy, &pa) != 0) { conn_fail(n, c, now, "Tor's SOCKS address isn't host:port"); return; }
+    if (alloc_buffers(c) != 0) { conn_fail(n, c, now, "out of memory"); return; }
+    c->s = net_tcp_connect(pa);
+    if (c->s == SOCK_INVALID) { conn_fail(n, c, now, "can't reach Tor's SOCKS port"); return; }
     uint8_t user[8];
     gen_random(user, sizeof user);
-    hex_encode(user, sizeof user, r->socks_user);
-    r->via_proxy = 1;
-    r->socks_stage = 0;
-    r->in_len = 0;
-    r->state = R_CONNECTING;
-    r->deadline = now + STEP_TIMEOUT;
+    hex_encode(user, sizeof user, c->socks_user);
+    c->via_proxy = 1;
+    c->socks_stage = 0;
+    c->in_len = 0;
+    c->state = R_CONNECTING;
+    c->deadline = now + STEP_TIMEOUT;
 }
 
 static int send_all(sock_t s, const uint8_t *data, size_t len) {
@@ -699,179 +749,196 @@ static const char *socks_reply(int rep) {
 }
 
 // Moves the SOCKS exchange on with what has arrived. 1 once connected through Tor, 0 waiting,
-// -1 failed (the relay has been dropped).
-static int socks_advance(nostr_t *n, relay_t *r, double now) {
+// -1 failed (the connection has been dropped).
+static int socks_advance(nostr_t *n, conn_t *c, double now) {
+    relay_t *r = c->relay;
     for (;;) {
-        if (r->socks_stage == 0) {
-            if (r->in_len < 2) return 0;
-            if (r->in[0] != 5 || r->in[1] != 2) { relay_fail(n, r, now, "that SOCKS port won't take Tor's login (is it Tor's?)"); return -1; }
+        if (c->socks_stage == 0) {
+            if (c->in_len < 2) return 0;
+            if (c->in[0] != 5 || c->in[1] != 2) { conn_fail(n, c, now, "that SOCKS port won't take Tor's login (is it Tor's?)"); return -1; }
             uint8_t auth[20];
             auth[0] = 1; auth[1] = 16;
-            memcpy(auth + 2, r->socks_user, 16);
+            memcpy(auth + 2, c->socks_user, 16);
             auth[18] = 1; auth[19] = 'x';
-            memmove(r->in, r->in + 2, r->in_len - 2); r->in_len -= 2;
-            if (send_all(r->s, auth, sizeof auth) != 0) { relay_fail(n, r, now, "SOCKS write failed"); return -1; }
-            r->socks_stage = 1;
-        } else if (r->socks_stage == 1) {
-            if (r->in_len < 2) return 0;
-            if (r->in[1] != 0) { relay_fail(n, r, now, "Tor refused the SOCKS login"); return -1; }
-            memmove(r->in, r->in + 2, r->in_len - 2); r->in_len -= 2;
+            memmove(c->in, c->in + 2, c->in_len - 2); c->in_len -= 2;
+            if (send_all(c->s, auth, sizeof auth) != 0) { conn_fail(n, c, now, "SOCKS write failed"); return -1; }
+            c->socks_stage = 1;
+        } else if (c->socks_stage == 1) {
+            if (c->in_len < 2) return 0;
+            if (c->in[1] != 0) { conn_fail(n, c, now, "Tor refused the SOCKS login"); return -1; }
+            memmove(c->in, c->in + 2, c->in_len - 2); c->in_len -= 2;
             size_t hl = strlen(r->host);
             uint8_t req[7 + 100];
             req[0] = 5; req[1] = 1; req[2] = 0; req[3] = 3; req[4] = (uint8_t)hl;
             memcpy(req + 5, r->host, hl);
             req[5 + hl] = (uint8_t)(r->port >> 8);
             req[6 + hl] = (uint8_t)r->port;
-            if (send_all(r->s, req, 7 + hl) != 0) { relay_fail(n, r, now, "SOCKS write failed"); return -1; }
-            r->socks_stage = 2;
-            r->deadline = now + SOCKS_TIMEOUT;
+            if (send_all(c->s, req, 7 + hl) != 0) { conn_fail(n, c, now, "SOCKS write failed"); return -1; }
+            c->socks_stage = 2;
+            c->deadline = now + SOCKS_TIMEOUT;
         } else {
-            if (r->in_len < 5) return 0;
-            if (r->in[0] != 5 || r->in[1] != 0) { relay_fail(n, r, now, socks_reply(r->in[1])); return -1; }
-            size_t need = r->in[3] == 1 ? 10 : r->in[3] == 4 ? 22 : r->in[3] == 3 ? (size_t)7 + r->in[4] : 0;
-            if (need == 0) { relay_fail(n, r, now, "bad SOCKS reply"); return -1; }
-            if (r->in_len < need) return 0;
-            memmove(r->in, r->in + need, r->in_len - need); r->in_len -= need;
+            if (c->in_len < 5) return 0;
+            if (c->in[0] != 5 || c->in[1] != 0) { conn_fail(n, c, now, socks_reply(c->in[1])); return -1; }
+            size_t need = c->in[3] == 1 ? 10 : c->in[3] == 4 ? 22 : c->in[3] == 3 ? (size_t)7 + c->in[4] : 0;
+            if (need == 0) { conn_fail(n, c, now, "bad SOCKS reply"); return -1; }
+            if (c->in_len < need) return 0;
+            memmove(c->in, c->in + need, c->in_len - need); c->in_len -= need;
             return 1;
         }
     }
 }
 
-static void begin_connect(nostr_t *n, relay_t *r, double now) {
-    while (r->addr_i < r->n_addrs) {
-        r->s = net_tcp_connect(r->addrs[r->addr_i]);
-        if (r->s != SOCK_INVALID) {
-            r->state = R_CONNECTING;
-            r->deadline = now + STEP_TIMEOUT;
+static void begin_connect(nostr_t *n, conn_t *c, double now) {
+    while (c->addr_i < c->n_addrs) {
+        c->s = net_tcp_connect(c->addrs[c->addr_i]);
+        if (c->s != SOCK_INVALID) {
+            c->state = R_CONNECTING;
+            c->deadline = now + STEP_TIMEOUT;
             return;
         }
-        r->addr_i++;
+        c->addr_i++;
     }
-    relay_fail(n, r, now, "no address could be reached");
+    conn_fail(n, c, now, n->use_ss ? "the Shadowsocks server can't be reached" : "no address could be reached");
 }
 
-static void relay_step(nostr_t *n, relay_t *r, double now) {
-    switch (r->state) {
-        case R_IDLE: {
-            if (now < r->next_try) return;
-            if (n->must_proxy) {
-                // No tor yet: wait for one rather than ever connect directly.
-                if (n->proxy[0]) begin_proxy_connect(n, r, now);
-                return;
-            }
-            resolve_job_t *job = calloc(1, sizeof *job);
-            if (!job) return;
-            copy_str(job->host, r->host, sizeof job->host);
-            job->port = r->port;
-            job->state = JOB_RUNNING;
-            r->job = job;
-            if (platform_spawn_thread(resolve_main, job) != 0) { free(job); r->job = NULL; r->next_try = now + 30; return; }
-            r->state = R_RESOLVING;
-            r->deadline = now + 30.0;
+// Opens a connection for epoch's tag.
+static void conn_open(nostr_t *n, relay_t *r, conn_t *c, long long epoch, double now) {
+    close_conn(c);
+    c->used = 1;
+    c->epoch = epoch;
+    epoch_tag(n, epoch, c->tag);
+    if (n->must_proxy) {
+        // No tor yet: wait for one rather than ever connect directly.
+        if (n->proxy[0]) begin_proxy_connect(n, c, now);
+        return;
+    }
+    if (n->use_ss) {
+        // Only the server's address, known already: the relay's name goes through the tunnel.
+        if (alloc_buffers(c) != 0) { conn_fail(n, c, now, "out of memory"); return; }
+        c->addrs[0] = n->ss_server;
+        c->n_addrs = 1;
+        c->addr_i = 0;
+        begin_connect(n, c, now);
+        return;
+    }
+    resolve_job_t *job = calloc(1, sizeof *job);
+    if (!job) return;
+    copy_str(job->host, r->host, sizeof job->host);
+    job->port = r->port;
+    job->state = JOB_RUNNING;
+    c->job = job;
+    if (platform_spawn_thread(resolve_main, job) != 0) { free(job); c->job = NULL; conn_fail(n, c, now, "can't look the name up"); return; }
+    c->state = R_RESOLVING;
+    c->deadline = now + 30.0;
+}
+
+static void conn_step(nostr_t *n, conn_t *c, double now) {
+    relay_t *r = c->relay;
+    switch (c->state) {
+        case R_IDLE:
+            // A Tor-mode connection that had no tor to go through: now it has.
+            if (n->must_proxy && n->proxy[0] && c->s == SOCK_INVALID) begin_proxy_connect(n, c, now);
             return;
-        }
         case R_RESOLVING: {
 #if JOB_ATOMIC
-            int done = atomic_load(&r->job->state) == JOB_DONE;
+            int done = atomic_load(&c->job->state) == JOB_DONE;
 #else
-            int done = r->job->state == JOB_DONE;
+            int done = c->job->state == JOB_DONE;
 #endif
             if (!done) {
-                if (now > r->deadline) relay_fail(n, r, now, "name lookup timed out");
+                if (now > c->deadline) conn_fail(n, c, now, "name lookup timed out");
                 return;
             }
-            r->n_addrs = r->job->n;
-            memcpy(r->addrs, r->job->out, sizeof(addr_t) * (size_t)r->n_addrs);
-            free(r->job);
-            r->job = NULL;
-            if (r->n_addrs == 0) { relay_fail(n, r, now, "name lookup failed"); return; }
-            r->addr_i = 0;
-            if (alloc_buffers(r) != 0) { relay_fail(n, r, now, "out of memory"); return; }
-            begin_connect(n, r, now);
+            c->n_addrs = c->job->n;
+            memcpy(c->addrs, c->job->out, sizeof(addr_t) * (size_t)c->n_addrs);
+            free(c->job);
+            c->job = NULL;
+            if (c->n_addrs == 0) { conn_fail(n, c, now, "name lookup failed"); return; }
+            c->addr_i = 0;
+            if (alloc_buffers(c) != 0) { conn_fail(n, c, now, "out of memory"); return; }
+            begin_connect(n, c, now);
             return;
         }
         case R_CONNECTING: {
-            int rc = net_tcp_connect_done(r->s);
-            if (rc == 0 && now < r->deadline) return;
-            if (rc != 1 && r->via_proxy) { relay_fail(n, r, now, "can't reach Tor's SOCKS port"); return; }
+            int rc = net_tcp_connect_done(c->s);
+            if (rc == 0 && now < c->deadline) return;
+            if (rc != 1 && c->via_proxy) { conn_fail(n, c, now, "can't reach Tor's SOCKS port"); return; }
             if (rc != 1) {
-                net_close(r->s);
-                r->s = SOCK_INVALID;
-                r->addr_i++;
-                begin_connect(n, r, now);
+                net_close(c->s);
+                c->s = SOCK_INVALID;
+                c->addr_i++;
+                begin_connect(n, c, now);
                 return;
             }
-            if (r->via_proxy) {
+            if (c->via_proxy) {
                 static const uint8_t hello[3] = { 5, 1, 2 };
-                if (send_all(r->s, hello, sizeof hello) != 0) { relay_fail(n, r, now, "SOCKS write failed"); return; }
-                r->state = R_SOCKS;
-                r->deadline = now + STEP_TIMEOUT;
+                if (send_all(c->s, hello, sizeof hello) != 0) { conn_fail(n, c, now, "SOCKS write failed"); return; }
+                c->state = R_SOCKS;
+                c->deadline = now + STEP_TIMEOUT;
                 return;
             }
-            start_tls(n, r, now);
+            start_tls(n, c, now);
             return;
         }
         case R_SOCKS: {
             for (;;) {
-                if (r->in_len >= IN_CAP) { relay_fail(n, r, now, "SOCKS overflow"); return; }
-                int got = net_tcp_recv(r->s, r->in + r->in_len, IN_CAP - r->in_len);
-                if (got < 0) { relay_fail(n, r, now, "Tor closed the connection"); return; }
+                if (c->in_len >= IN_CAP) { conn_fail(n, c, now, "SOCKS overflow"); return; }
+                int got = net_tcp_recv(c->s, c->in + c->in_len, IN_CAP - c->in_len);
+                if (got < 0) { conn_fail(n, c, now, "Tor closed the connection"); return; }
                 if (got == 0) break;
-                r->in_len += (size_t)got;
+                c->in_len += (size_t)got;
             }
-            int rc = socks_advance(n, r, now);
+            int rc = socks_advance(n, c, now);
             if (rc < 0) return;
-            if (rc == 0) { if (now > r->deadline) relay_fail(n, r, now, "Tor didn't reach the relay in time"); return; }
+            if (rc == 0) { if (now > c->deadline) conn_fail(n, c, now, "Tor didn't reach the relay in time"); return; }
             // Anything past the SOCKS reply would be the relay's TLS, which only starts once we speak.
-            r->in_len = 0;
-            start_tls(n, r, now);
+            c->in_len = 0;
+            start_tls(n, c, now);
             return;
         }
         case R_TLS: {
-            int rc = tls_handshake(r->tls);
-            if (rc < 0) { relay_fail(n, r, now, tls_error(r->tls)); return; }
-            if (rc == 0) { if (now > r->deadline) relay_fail(n, r, now, "TLS handshake timed out"); return; }
-            start_upgrade(n, r, now);
+            int rc = tls_handshake(c->tls);
+            if (rc < 0) { conn_fail(n, c, now, tls_error(c->tls)); return; }
+            if (rc == 0) { if (now > c->deadline) conn_fail(n, c, now, "TLS handshake timed out"); return; }
+            start_upgrade(n, c, now);
             return;
         }
         case R_UPGRADE:
         case R_OPEN: {
-            if (flush(n, r, now) < 0) return;
+            if (flush(n, c, now) < 0) return;
             for (;;) {
-                if (r->in_len >= IN_CAP) { relay_fail(n, r, now, "input overflow"); return; }
-                int got = tls_read(r->tls, r->in + r->in_len, IN_CAP - r->in_len);
-                if (got < 0) { relay_fail(n, r, now, tls_error(r->tls)); return; }
+                if (c->in_len >= IN_CAP) { conn_fail(n, c, now, "input overflow"); return; }
+                int got = tls_read(c->tls, c->in + c->in_len, IN_CAP - c->in_len);
+                if (got < 0) { conn_fail(n, c, now, tls_error(c->tls)); return; }
                 if (got == 0) break;
-                r->in_len += (size_t)got;
-                r->last_rx = now;
-                if (r->state == R_UPGRADE) {
+                c->in_len += (size_t)got;
+                c->last_rx = now;
+                if (c->state == R_UPGRADE) {
                     char why[80];
-                    int up = check_upgrade(r, why, sizeof why);
-                    if (up < 0) { relay_fail(n, r, now, why); return; }
+                    int up = check_upgrade(c, why, sizeof why);
+                    if (up < 0) { conn_fail(n, c, now, why); return; }
                     if (up == 0) continue;
-                    r->state = R_OPEN;
-                    r->opened_at = now;
-                    r->next_ping = now + PING_EVERY;
-                    r->tokens = SEND_BURST;
-                    r->tokens_at = now;
+                    c->state = R_OPEN;
+                    c->opened_at = now;
+                    c->next_ping = now + PING_EVERY;
                     uint8_t sid[8];
                     gen_random(sid, sizeof sid);
-                    hex_encode(sid, sizeof sid, r->subid);
+                    hex_encode(sid, sizeof sid, c->subid);
                     if (r->warned) logf_(n, 0, "* nostr: %s is back", r->host);
                     else logf_(n, 1, "* nostr: connected to %s", r->host);
                     r->warned = 0;
-                    send_req(n, r);
+                    send_req(c);
                 }
-                if (read_frames(n, r, now) < 0) return;
+                if (read_frames(n, c, now) < 0) return;
             }
-            if (r->state == R_UPGRADE) {
-                if (now > r->deadline) relay_fail(n, r, now, "websocket handshake timed out");
+            if (c->state == R_UPGRADE) {
+                if (now > c->deadline) conn_fail(n, c, now, "websocket handshake timed out");
                 return;
             }
-            if (now - r->last_rx > IDLE_TIMEOUT) { relay_fail(n, r, now, "went quiet"); return; }
-            if (now >= r->next_ping) { r->next_ping = now + PING_EVERY; ws_queue(r, 9, "p", 1); }
-            if (!r->subscribed && r->resub_at > 0 && now >= r->resub_at) { r->resub_at = 0; send_req(n, r); }
-            flush(n, r, now);
+            if (now - c->last_rx > IDLE_TIMEOUT) { conn_fail(n, c, now, "went quiet"); return; }
+            if (now >= c->next_ping) { c->next_ping = now + PING_EVERY; ws_queue(c, 9, "p", 1); }
+            if (!c->subscribed && c->resub_at > 0 && now >= c->resub_at) { c->resub_at = 0; send_req(c); }
+            flush(n, c, now);
             return;
         }
         default:
@@ -879,24 +946,79 @@ static void relay_step(nostr_t *n, relay_t *r, double now) {
     }
 }
 
-void nostr_step(nostr_t *n, double now) {
-    long long epoch = current_epoch();
-    if (epoch != n->epoch) {
-        set_epoch(n, epoch);
-        for (int i = 0; i < n->n_relays; i++)
-            if (n->relays[i].state == R_OPEN) send_req(n, &n->relays[i]);
+static conn_t *conn_for(relay_t *r, long long epoch) {
+    for (int k = 0; k < 2; k++) if (r->conns[k].used && r->conns[k].epoch == epoch) return &r->conns[k];
+    return NULL;
+}
+
+// Which connections a relay should have now: this ten minutes', the next one's from a little
+// before it starts, and the last one's until a little after it ended. Nothing else.
+static void relay_plan(nostr_t *n, relay_t *r, double now) {
+    double wall = (double)time(NULL);
+    long long e = (long long)wall / NOSTR_EPOCH;
+    if (r->plan_epoch != e) {
+        double lead = n->must_proxy ? LEAD_PROXY : LEAD;
+        double start = (double)(e * NOSTR_EPOCH), next = (double)((e + 1) * NOSTR_EPOCH);
+        r->open_next_at = next - lead / 2 - (double)rand_below((uint32_t)(lead / 2 * 1000)) / 1000.0;
+        r->close_last_at = start + TAIL / 2 + (double)rand_below((uint32_t)(TAIL / 2 * 1000)) / 1000.0;
+        r->plan_epoch = e;
     }
-    for (int i = 0; i < n->n_relays; i++) relay_step(n, &n->relays[i], now);
+    for (int k = 0; k < 2; k++) {
+        conn_t *c = &r->conns[k];
+        if (!c->used) continue;
+        int keep = c->epoch == e || (c->epoch == e + 1) || (c->epoch == e - 1 && wall < r->close_last_at);
+        if (!keep) {
+            logf_(n, 1, "* nostr: %s: closing the last ten minutes' connection", r->host);
+            close_conn(c);
+        }
+    }
+    if (now < r->next_try) return;
+    long long want[2] = { e, wall >= r->open_next_at ? e + 1 : -1 };
+    for (int i = 0; i < 2; i++) {
+        if (want[i] < 0 || conn_for(r, want[i])) continue;
+        conn_t *slot = !r->conns[0].used ? &r->conns[0] : !r->conns[1].used ? &r->conns[1] : NULL;
+        if (!slot) {
+            // Both taken: the oldest makes way for the one needed now.
+            slot = r->conns[0].epoch < r->conns[1].epoch ? &r->conns[0] : &r->conns[1];
+            if (slot->epoch >= want[i]) continue;
+        }
+        conn_open(n, r, slot, want[i], now);
+        if (!slot->used) return;   // it failed at once, and the backoff holds the rest
+    }
+}
+
+void nostr_step(nostr_t *n, double now) {
+    if (!n->active) return;
+    for (int i = 0; i < n->n_relays; i++) {
+        relay_t *r = &n->relays[i];
+        relay_plan(n, r, now);
+        for (int k = 0; k < 2; k++) if (r->conns[k].used) conn_step(n, &r->conns[k], now);
+    }
 }
 
 int nostr_sockets(const nostr_t *n, sock_t *out, int max) {
     int k = 0;
-    for (int i = 0; i < n->n_relays && k < max; i++)
-        if (n->relays[i].s != SOCK_INVALID && n->relays[i].state >= R_SOCKS) out[k++] = n->relays[i].s;
+    for (int i = 0; i < n->n_relays; i++)
+        for (int j = 0; j < 2 && k < max; j++) {
+            const conn_t *c = &n->relays[i].conns[j];
+            if (c->used && c->s != SOCK_INVALID && c->state >= R_SOCKS) out[k++] = c->s;
+        }
     return k;
 }
 
-static int writable(const relay_t *r, double now) { return r->state == R_OPEN && !r->read_only && now >= r->paused_until; }
+// The connection to publish on: this ten minutes', else the last one's while it lasts, else the
+// next one's. An event carries the tag its connection asks for, never another.
+static conn_t *publish_conn(relay_t *r) {
+    long long e = (long long)time(NULL) / NOSTR_EPOCH;
+    const long long order[3] = { e, e - 1, e + 1 };
+    for (int i = 0; i < 3; i++) {
+        conn_t *c = conn_for(r, order[i]);
+        if (c && c->state == R_OPEN) return c;
+    }
+    return NULL;
+}
+
+static int writable(relay_t *r, double now) { return !r->read_only && now >= r->paused_until && publish_conn(r); }
 
 addr_t nostr_everyone(void) {
     static const uint8_t zero[ID_LEN];
@@ -904,7 +1026,7 @@ addr_t nostr_everyone(void) {
 }
 
 int nostr_send(nostr_t *n, addr_t to, const uint8_t *data, size_t len, double now) {
-    if (to.kind != ADDR_NOSTR || len == 0 || len > DGRAM_MAX) return -1;
+    if (!n->active || to.kind != ADDR_NOSTR || len == 0 || len > DGRAM_MAX) return -1;
     int any = 0;
     for (int i = 0; i < n->n_relays; i++) any |= writable(&n->relays[i], now);
     if (!any) return -1;
@@ -921,29 +1043,35 @@ int nostr_send(nostr_t *n, addr_t to, const uint8_t *data, size_t len, double no
     seen_before(n, wrapped);
     char content[CONTENT_LEN + 1];
     size_t clen = base64_encode(wrapped, sizeof wrapped, content);
-    char tags[80];
-    snprintf(tags, sizeof tags, "[[\"e\",\"%s\"]]", n->tags[1]);
-    size_t ev = build_event(n, random_kind(), tags, content, clen);
-    if (!ev) return -1;
+    int kind = random_kind(), sent = 0;
+    // One event per tag: every relay publishing on its connection for the same ten minutes gets
+    // the same event, as before.
+    char built_tag[65] = "";
+    size_t total = 0;
     static const char head[] = "[\"EVENT\",";
-    size_t total = sizeof head - 1 + ev + 1;
-    if (total > EVENT_CAP) return -1;
-    char *msg = n->ser;
-    memcpy(msg, head, sizeof head - 1);
-    memcpy(msg + sizeof head - 1, n->ev, ev);
-    msg[total - 1] = ']';
-    int sent = 0;
     for (int i = 0; i < n->n_relays; i++) {
         relay_t *r = &n->relays[i];
-        if (r->state != R_OPEN || r->read_only || now < r->paused_until) continue;
+        conn_t *c = publish_conn(r);
+        if (!c || r->read_only || now < r->paused_until) continue;
         r->tokens += (now - r->tokens_at) * SEND_RATE;
         if (r->tokens > SEND_BURST) r->tokens = SEND_BURST;
         r->tokens_at = now;
         if (r->tokens < 1.0) continue;
-        if (ws_queue(r, 1, msg, total) != 0) continue;
+        if (strcmp(built_tag, c->tag) != 0) {
+            char tags[80];
+            snprintf(tags, sizeof tags, "[[\"e\",\"%s\"]]", c->tag);
+            size_t ev = build_event(n, kind, tags, content, clen);
+            total = sizeof head - 1 + ev + 1;
+            if (!ev || total > EVENT_CAP) { built_tag[0] = '\0'; continue; }
+            memcpy(n->ser, head, sizeof head - 1);
+            memcpy(n->ser + sizeof head - 1, n->ev, ev);
+            n->ser[total - 1] = ']';
+            copy_str(built_tag, c->tag, sizeof built_tag);
+        }
+        if (ws_queue(c, 1, n->ser, total) != 0) continue;
         r->tokens -= 1.0;
         sent++;
-        if (r != n->busy) flush(n, r, now);
+        if (c != n->busy) flush(n, c, now);
     }
     return sent > 0 ? 0 : -1;
 }
@@ -954,8 +1082,7 @@ void nostr_set_proxy(nostr_t *n, const char *socks) {
     // Whatever went through the old tor is gone with it: start over through the new one.
     for (int i = 0; i < n->n_relays; i++) {
         relay_t *r = &n->relays[i];
-        close_relay(r);
-        r->state = R_IDLE;
+        for (int k = 0; k < 2; k++) close_conn(&r->conns[k]);
         r->next_try = 0;
         r->fails = 0;
     }
@@ -963,19 +1090,27 @@ void nostr_set_proxy(nostr_t *n, const char *socks) {
 
 int nostr_relays_up(const nostr_t *n) {
     int k = 0;
-    for (int i = 0; i < n->n_relays; i++) if (n->relays[i].state == R_OPEN) k++;
+    for (int i = 0; i < n->n_relays; i++) {
+        const relay_t *r = &n->relays[i];
+        k += (r->conns[0].used && r->conns[0].state == R_OPEN) || (r->conns[1].used && r->conns[1].state == R_OPEN);
+    }
     return k;
 }
-
 
 int nostr_relay_total(const nostr_t *n) { return n->n_relays; }
 
 void nostr_status(const nostr_t *n, char *out, size_t cap) {
     double now = now_seconds();
+    if (!n->active) {
+        snprintf(out, cap, "0/%d relays up (not connected: nothing needs them now)", n->n_relays);
+        return;
+    }
     size_t p = (size_t)snprintf(out, cap, "%d/%d relays up", nostr_relays_up(n), n->n_relays);
     for (int i = 0; i < n->n_relays && p < cap; i++) {
         const relay_t *r = &n->relays[i];
-        const char *st = r->state != R_OPEN ? (r->state == R_IDLE ? "waiting" : "connecting")
+        int open = (r->conns[0].used && r->conns[0].state == R_OPEN) || (r->conns[1].used && r->conns[1].state == R_OPEN);
+        int trying = r->conns[0].used || r->conns[1].used;
+        const char *st = !open ? (trying ? "connecting" : "waiting")
                        : r->read_only ? "read-only" : now < r->paused_until ? "paused" : "up";
         p += (size_t)snprintf(out + p, cap - p, "%s%s %s", i ? ", " : " (", r->host, st);
     }

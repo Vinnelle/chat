@@ -44,11 +44,16 @@ static fake_sock_t *sock_of(sock_t s) {
     return s >= 1 && s <= FAKE_SOCKS && g_socks[s - 1].used ? &g_socks[s - 1] : NULL;
 }
 
+static int port_taken(uint16_t port) {
+    for (int i = 0; i < FAKE_SOCKS; i++) if (g_socks[i].used && g_socks[i].port == port) return 1;
+    return 0;
+}
+
 sock_t net_udp_open(uint16_t port, unsigned flags, uint16_t *bound_port) {
     if (flags & NET_REUSE) return SOCK_INVALID;
-    if (port == 0) port = g_next_port++;
-    for (int i = 0; i < FAKE_SOCKS; i++)
-        if (g_socks[i].used && g_socks[i].port == port) return SOCK_INVALID;
+    // A free one, as the system would pick: past the ports tests ask for by number.
+    if (port == 0) do port = g_next_port++; while (port_taken(port) || (port >= 40000 && port < 40010));
+    if (port_taken(port)) return SOCK_INVALID;
     for (int i = 0; i < FAKE_SOCKS; i++) {
         if (g_socks[i].used) continue;
         g_socks[i].used = 1;
