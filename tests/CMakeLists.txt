@@ -18,7 +18,6 @@ set(CHAT_CORE_SOURCES
     ${PROJECT_SOURCE_DIR}/src/transport/tls.c
     ${PROJECT_SOURCE_DIR}/src/transport/tor.c
     ${PROJECT_SOURCE_DIR}/src/transport/portmap.c
-    ${PROJECT_SOURCE_DIR}/src/transport/ss.c
     ${PROJECT_SOURCE_DIR}/src/common/util.c
     ${PROJECT_SOURCE_DIR}/src/common/bencode.c
     ${PROJECT_SOURCE_DIR}/src/common/json.c
@@ -34,7 +33,7 @@ function(chat_test_executable name)
                                ${PROJECT_SOURCE_DIR}/src/platform/${CHAT_OS} ${SODIUM_INCLUDE_DIRS} ${OQS_INCLUDE_DIRS}
                                ${MBEDTLS_INCLUDE_DIRS} ${SECP256K1_INCLUDE_DIRS})
     target_link_libraries(${name} PRIVATE ${SODIUM_STATIC_LIB} ${OQS_STATIC_LIB} ${MBEDTLS_STATIC_LIBS}
-                          ${SECP256K1_STATIC_LIB} chat_blake3 Threads::Threads)
+                          ${SECP256K1_STATIC_LIB} Threads::Threads)
     target_compile_options(${name} PRIVATE -Wall -Wextra)
 endfunction()
 

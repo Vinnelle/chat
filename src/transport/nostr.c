@@ -81,7 +81,6 @@ typedef struct {
     addr_t addrs[4];
     int n_addrs, addr_i;
     sock_t s;
-    ss_stream_t *ss;
     tls_conn_t *tls;
     char ws_key[32];
     uint8_t *in;
@@ -130,10 +129,6 @@ struct nostr {
     // until it's known.
     int must_proxy;
     char proxy[64];
-    // Shadowsocks mode: every connection through this server's TCP tunnel.
-    int use_ss;
-    ss_config_t ss;
-    addr_t ss_server;
     uint8_t tag_key[NOSTR_KEY_LEN];
     uint8_t wrap_key[NOSTR_KEY_LEN];
     uint8_t my_id[ID_LEN];
@@ -232,13 +227,6 @@ nostr_t *nostr_new(const uint8_t tag_key[NOSTR_KEY_LEN], const uint8_t wrap_key[
     return n;
 }
 
-void nostr_set_ss(nostr_t *n, const ss_config_t *c, addr_t server) {
-    n->use_ss = 1;
-    n->ss = *c;
-    n->ss_server = server;
-    crypto_lock(&n->ss, sizeof n->ss);
-}
-
 static void resolve_main(void *arg) {
     resolve_job_t *job = arg;
     addr_t found[ADDR_RESOLVE_MAX];
@@ -267,7 +255,6 @@ static void drop_job(conn_t *c) {
 static void close_conn(conn_t *c) {
     drop_job(c);
     if (c->tls) { tls_free(c->tls); c->tls = NULL; }
-    if (c->ss) { ss_stream_free(c->ss); c->ss = NULL; }
     if (c->s != SOCK_INVALID) { net_close(c->s); c->s = SOCK_INVALID; }
     free(c->in); free(c->out); free(c->msg);
     relay_t *r = c->relay;
@@ -282,8 +269,7 @@ static void conn_fail(nostr_t *n, conn_t *c, double now, const char *why) {
     int was_open = c->state == R_OPEN;
     double opened_at = c->opened_at;
     char reason[160];
-    // Under TLS, a broken tunnel shows as a bare I/O error: its own reason says more.
-    copy_str(reason, c->ss && ss_stream_dead(c->ss) ? ss_stream_error(c->ss) : why, sizeof reason);
+    copy_str(reason, why, sizeof reason);
     close_conn(c);
     // A connection that held for a minute was fine: start the backoff over.
     if (was_open && now - opened_at > 60.0) r->fails = 0;
@@ -305,7 +291,6 @@ void nostr_free(nostr_t *n) {
     for (int i = 0; i < n->n_relays; i++)
         for (int k = 0; k < 2; k++) close_conn(&n->relays[i].conns[k]);
     crypto_unlock(n->wrap_key, sizeof n->wrap_key);
-    if (n->use_ss) crypto_unlock(&n->ss, sizeof n->ss);
     crypto_wipe(n, sizeof *n);
     free(n);
 }
@@ -688,22 +673,9 @@ static int alloc_buffers(conn_t *c) {
     return c->in && c->out && c->msg ? 0 : -1;
 }
 
-static int ss_io_send(void *ctx, const void *data, size_t len) { return net_tcp_send(((conn_t *)ctx)->s, data, len); }
-static int ss_io_recv(void *ctx, void *buf, size_t cap) { return net_tcp_recv(((conn_t *)ctx)->s, buf, cap); }
-static int tls_io_send(void *ctx, const void *data, size_t len) { return ss_stream_send(((conn_t *)ctx)->ss, data, len); }
-static int tls_io_recv(void *ctx, void *buf, size_t cap) { return ss_stream_recv(((conn_t *)ctx)->ss, buf, cap); }
-
 static void start_tls(nostr_t *n, conn_t *c, double now) {
     relay_t *r = c->relay;
-    if (n->use_ss) {
-        // TLS runs inside the tunnel, to the relay, which the server reaches by name.
-        ss_io_t sio = { ss_io_send, ss_io_recv, c };
-        c->ss = ss_stream_new(&n->ss, &sio, r->host, r->port, 0);
-        tls_io_t tio = { tls_io_send, tls_io_recv, c };
-        if (c->ss) c->tls = tls_new_io(&tio, r->host);
-    } else {
-        c->tls = tls_new(c->s, r->host);
-    }
+    c->tls = tls_new(c->s, r->host);
     if (!c->tls) {
         char err[160] = "TLS unavailable";
         tls_setup(err, sizeof err);
@@ -798,7 +770,7 @@ static void begin_connect(nostr_t *n, conn_t *c, double now) {
         }
         c->addr_i++;
     }
-    conn_fail(n, c, now, n->use_ss ? "the Shadowsocks server can't be reached" : "no address could be reached");
+    conn_fail(n, c, now, "no address could be reached");
 }
 
 // Opens a connection for epoch's tag.
@@ -810,15 +782,6 @@ static void conn_open(nostr_t *n, relay_t *r, conn_t *c, long long epoch, double
     if (n->must_proxy) {
         // No tor yet: wait for one rather than ever connect directly.
         if (n->proxy[0]) begin_proxy_connect(n, c, now);
-        return;
-    }
-    if (n->use_ss) {
-        // Only the server's address, known already: the relay's name goes through the tunnel.
-        if (alloc_buffers(c) != 0) { conn_fail(n, c, now, "out of memory"); return; }
-        c->addrs[0] = n->ss_server;
-        c->n_addrs = 1;
-        c->addr_i = 0;
-        begin_connect(n, c, now);
         return;
     }
     resolve_job_t *job = calloc(1, sizeof *job);

@@ -126,16 +126,6 @@
 - `Tab` / `Shift+Tab` jump between sections on the settings and help pages.
 - `Ctrl+U` in INSERT deletes everything before the cursor.
 - `NO_COLOR` keeps the UI to bold, faint and reverse.
-- **Shadowsocks** routing (`--routing shadowsocks`, or on the settings page): everything goes
-  through your own Shadowsocks 2022 server (2022-blake3-aes-128-gcm, -aes-256-gcm or
-  -chacha20-poly1305), from an `ss://` link in `CHAT_SS` or on the settings page. UDP to peers
-  and the DHT goes through its UDP relay, each relay connection through a TCP tunnel of its
-  own. Your network sees one encrypted connection to the server; peers, DHT nodes and relays
-  see the server's address. Names (the DHT's bootstrap servers, the relays) go to the server
-  to look up. No LAN beacon and no router port mapping. The server's UDP relay has to pass on
-  replies from anywhere, as shadowsocks-rust and sing-box do, and both clocks have to be right
-  to 30 seconds. `:update` doesn't go around it.
-- BLAKE3 (1.8.2, its portable C only) is built in for Shadowsocks 2022's key derivation.
 
 ### Changed
 - `just test-build` names each binary after its build id, as `chat-<build id>-<system>-<arch>`:

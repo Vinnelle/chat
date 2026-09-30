@@ -7,7 +7,6 @@
 #include <stdint.h>
 #include "platform/net.h"
 #include "crypto/crypto.h"
-#include "transport/ss.h"
 
 // Datagrams over Nostr relays, for peers that can't reach each other directly.
 //
@@ -23,7 +22,7 @@
 // subscription id (and through Tor, a new circuit), asking for that tag alone. Around the change
 // the next one opens a minute or two early and the last one closes a minute or two late, so
 // clocks can differ that much. What a relay still sees: the address each connection comes from
-// (the same one from one ten minutes to the next, unless it's Tor's or a Shadowsocks server's),
+// (the same one from one ten minutes to the next, unless it's Tor's),
 // when events come and go, and which tag a connection asks for, which every member of the room
 // asks for too.
 //
@@ -48,8 +47,6 @@ nostr_t *nostr_new(const uint8_t tag_key[NOSTR_KEY_LEN], const uint8_t wrap_key[
                    const char *proxy, nostr_deliver_fn deliver, nostr_log_fn log, void *ctx);
 void nostr_free(nostr_t *n);
 void nostr_set_proxy(nostr_t *n, const char *socks);
-// Every connection through this Shadowsocks server instead, the relays' names looked up there.
-void nostr_set_ss(nostr_t *n, const ss_config_t *c, addr_t server);
 // On: connect and stay connected. Off: every connection closes, and none opens until it's on.
 void nostr_set_active(nostr_t *n, int on);
 int nostr_active(const nostr_t *n);

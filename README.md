@@ -3,8 +3,8 @@
 A serverless, end-to-end encrypted group chat for the terminal. No accounts, no servers —
 peers find each other over the BitTorrent DHT (IPv4 and IPv6) and UDP broadcast (LAN), then
 talk directly. When a NAT is in the way, chat asks the router to forward a port, and public
-Nostr relays can carry the traffic. Or everything can go through Tor instead, or through a
-Shadowsocks server of your own. Nothing touches disk unless you ask.
+Nostr relays can carry the traffic. Or everything can go through Tor instead. Nothing
+touches disk unless you ask.
 
 > This README was written by AI.
 
@@ -107,8 +107,6 @@ chat opens on its settings page, and **Routing** heads it. `--routing` presets i
    neither can members who use Tor.
 3. **Tor.** Onion services, plus the Nostr relays reached through Tor, so members who use
    direct routing can still meet you. Nothing else touches the network.
-4. **Shadowsocks.** As direct, but every packet goes through a Shadowsocks 2022 server of your
-   own (below). No LAN beacon and no port mapping.
 
 Direct routing uses these, and each one can be turned off:
 
@@ -162,28 +160,13 @@ they hold. Each ten minutes' tag has connections of its own: a new one to each r
 new subscription id and, through Tor, a new circuit, asking for that tag alone. It opens a minute
 or two before the ten minutes start and closes a minute or two after they end, so clocks can
 differ that much. A relay still sees the address each connection comes from (the same one each
-ten minutes, unless it's a Tor exit or a Shadowsocks server), when events come and go, and the
+ten minutes, unless it's a Tor exit), when events come and go, and the
 tag, which every member of the room asks for. Events have a size and shape of their own, so
 anyone who can subscribe to a relay can tell chat's events from others, and count them per tag.
 The defaults are `wss://relay.primal.net`, `wss://nostr.mom` and `wss://relay.nostr.net`.
 `--relay` or the settings page picks others. A relay that rate-limits gets fewer events. A
 relay whose policy refuses throwaway keys (web of trust, payment, proof of work) is only read
 from.
-
-**Shadowsocks** routes everything through a [Shadowsocks 2022](https://github.com/Shadowsocks-NET/shadowsocks-specs/blob/main/2022-1-shadowsocks-2022-edition.md)
-server you run (shadowsocks-rust, sing-box, Xray), with method `2022-blake3-aes-128-gcm`,
-`2022-blake3-aes-256-gcm` or `2022-blake3-chacha20-poly1305`. Give it the server's `ss://`
-link in `CHAT_SS` (chat takes it out of the environment) or on the settings page, never on the
-command line, where others on the machine can read it: it holds the server's key. UDP to peers
-and the DHT goes through the server's UDP relay, every packet padded to about the same size,
-and each relay connection through a TCP tunnel of its own. Your network sees one stream of
-random bytes to the server; peers, DHT nodes and relays see the server's address, not yours.
-Names (the DHT's bootstrap servers, the relays) go to the server to look up, so the only name
-chat looks up itself is the server's. The server sees everything your network would have, so
-run it somewhere you trust. Its UDP relay has to pass on replies from any address (full cone),
-as shadowsocks-rust and sing-box do, or peers can't reach you through it; both clocks have to be
-right to within 30 seconds. `--peer` takes addresses only in this mode, and `:update` refuses to
-go around the server.
 
 **Tor** needs tor installed (Arch: `sudo pacman -S tor`, Debian/Ubuntu: `sudo apt install
 tor`, Windows: the Tor Expert Bundle) or Tor Browser. Nothing else needs setting up. chat picks
@@ -283,9 +266,8 @@ Both would stay off unless you turn them on.
 ## Build
 
 Requires CMake ≥ 3.15 and a C compiler. libsodium (1.0.20), liboqs (0.16.0, ML-KEM-768
-only), Mbed TLS (3.6.7, for the relays' `wss://` connections and Shadowsocks' AES-GCM),
-libsecp256k1 (0.7.1, for Nostr's Schnorr signatures) and BLAKE3 (1.8.2, its portable C only,
-for Shadowsocks 2022's keys) are fetched and built statically by CMake. TLS certificates are
+only), Mbed TLS (3.6.7, for the relays' `wss://` connections) and libsecp256k1 (0.7.1, for
+Nostr's Schnorr signatures) are fetched and built statically by CMake. TLS certificates are
 checked against the system's root store. Mbed TLS is configured as a TLS client with
 forward-secret key exchanges only ([`cmake/mbedtls-config.h`](cmake/mbedtls-config.h)), and
 libsecp256k1 keeps only what signing needs, since chat never verifies Nostr signatures.
@@ -331,9 +313,7 @@ a copy taken to another machine still says which build it is.
 verify-code gate, message delivery with a lost packet, rekey (and a message lost just as the
 peer rekeys), replayed hellos and junk from outside the room, a third peer joining, that nothing
 goes over UDP unmasked, that every datagram is one cell sent in a slot however many messages
-are sent, and two sessions talking through a Shadowsocks server on the in-memory network, which
-they send nothing around. It also checks Shadowsocks links, its UDP relay and TCP tunnel in all
-three methods, and that the DHT asks as a read-only node and stops starting from the bootstrap
+are sent, and that the DHT asks as a read-only node and stops starting from the bootstrap
 servers once it knows enough nodes. It also checks the parsers for what relays, routers and Tor send, the hourly DHT
 keys, and that key files are only read from regular files. The fuzz targets (libFuzzer, so
 clang) cover bencode and DHT replies (IPv4 and IPv6), relay JSON and UPnP gateway replies,
@@ -373,7 +353,7 @@ key: commit `minisign.pub`, and keep the secret key backed up and off GitHub.
 
 ```
 chat [--nick NAME] [--colour NAME|#HEX] [--identity age|pgp[:KEYFILE]] [--simple]
-     [--routing direct+nostr|direct|tor|shadowsocks] [--nodht] [--noipv6] [--nolan]
+     [--routing direct+nostr|direct|tor] [--nodht] [--noipv6] [--nolan]
      [--noportmap] [--nonostr] [--nostr-always] [--relay wss://HOST ...]
      [--tor-socks HOST:PORT] [--tor-control HOST:PORT] [--verify-optional]
      [--session ID --port UDP_PORT --peer HOST:PORT ...]
@@ -453,8 +433,7 @@ values after a name. Under each row's help, the page shows the `:set` that does 
 
 | Name | Values |
 | --- | --- |
-| `routing` | `direct`, `tor`, `shadowsocks` |
-| `ss` | the Shadowsocks server's `ss://` link: only on the page, where it's hidden |
+| `routing` | `direct`, `tor` |
 | `dht`, `dht6`, `portmap`, `lan` | `on`, `off` |
 | `nostr` | `on` (only while needed), `always`, `off` |
 | `relays` | up to 6 `wss://` URLs |
@@ -494,7 +473,7 @@ write access to the folder that holds the executable.
 | --- | --- |
 | `--nick NAME` | Display name (random `swift-otter42`-style if omitted) |
 | `--colour NAME\|#HEX` | Display colour (random by default; `--color` too) |
-| `--routing` | `direct+nostr`, `direct`, `tor` or `shadowsocks`, preset on the settings page (see [Routing](#routing)); Shadowsocks takes its server's link from `CHAT_SS` |
+| `--routing` | `direct+nostr`, `direct` or `tor`, preset on the settings page (see [Routing](#routing)) |
 | `--nodht` | Skip the BitTorrent DHT (IPv4 and IPv6) |
 | `--noipv6` | Skip the IPv6 DHT only |
 | `--nolan` | Skip LAN broadcast discovery |
