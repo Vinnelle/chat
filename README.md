@@ -351,6 +351,13 @@ Only you can open the folder and the files (`0700`, `0600`), and each file is wr
 then renamed into place, so a crash never leaves half of one. Sessions, their ids and
 passwords, messages, peers and files are never saved.
 
+`settings` and `key` are the only files chat writes there, and both are always sealed: chat
+never writes your settings in the clear, not as `settings.toml` or under any other name. The
+TOML above exists only inside the sealed file. A plain-text file in that folder, such as a
+`settings.toml`, didn't come from chat. chat doesn't read it, doesn't keep it up to date and
+doesn't delete it, and `:uninstall` leaves it and the folder alone. Delete it yourself if you
+don't want it on disk.
+
 At the start chat asks for the passphrase in a box (on the terminal with `--simple` or
 `--update`), or takes it from `CHAT_INSTALL_PASSWORD`. One Argon2id run opens both files, and a
 wrong passphrase says so, where a native key's mistyped password quietly makes a different key.
