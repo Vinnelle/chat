@@ -130,6 +130,5 @@ int dht_queried_count(const dht_state_t *d);
 int dht_found_count(const dht_state_t *d);
 int dht_queried_count_fam(const dht_state_t *d, int fam);
 int dht_found_count_fam(const dht_state_t *d, int fam);
-int dht_bootstrap_ready(const dht_state_t *d);
 
 #endif

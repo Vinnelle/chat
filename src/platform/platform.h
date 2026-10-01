@@ -79,6 +79,11 @@ int platform_downloads_dir(char *out, size_t cap);
 FILE *platform_create_new(const char *utf8_path);
 // Moves a finished download to its name, only if nothing has that name: never replaces a file.
 int platform_move_new(const char *from, const char *to);
+// $XDG_CONFIG_HOME/chat, else ~/.config/chat, or %LOCALAPPDATA%\chat on Windows. With create, it's
+// made if there's none yet, and only this user can open it.
+int platform_config_dir(char *out, size_t cap, int create);
+// Written to a private file beside path, flushed, then renamed over it: a crash leaves one or the other.
+int platform_write_private(const char *utf8_path, const void *data, size_t len);
 
 int platform_exe_path(char *out, size_t cap);
 

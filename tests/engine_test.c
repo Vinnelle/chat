@@ -5,6 +5,7 @@
 #include "core/chat.h"
 #include "fake_net.h"
 #include "common/json.h"
+#include "common/toml.h"
 #include "transport/portmap.h"
 #include "common/image.h"
 #include "common/util.h"
@@ -187,6 +188,17 @@ static int drop_one(void *ctx, addr_t from, addr_t to, const void *data, size_t 
     if (!is_session_frame(data, len)) return 0;
     d->armed = 0;
     d->dropped++;
+    return 1;
+}
+
+// Drops every fifth session frame from one port to another.
+typedef struct { uint16_t from, to; int seen, dropped; } lossy_t;
+
+static int drop_fifth(void *ctx, addr_t from, addr_t to, const void *data, size_t len) {
+    lossy_t *l = ctx;
+    if (from.port != l->from || to.port != l->to || !is_session_frame(data, len)) return 0;
+    if (++l->seen % 5) return 0;
+    l->dropped++;
     return 1;
 }
 
@@ -706,6 +718,58 @@ static void test_builds(double *t) {
 }
 
 // What comes from relays, routers and Tor, taken apart without a network.
+static void test_passphrase_seal(double *t) {
+    (void)t;
+    static const uint8_t secret[104] = "a signing key, as :install packs it";
+    static const char settings[] = "[profile]\nnick = \"alice\"\n";
+    uint8_t sealed[sizeof secret + PASS_SEAL_OVERHEAD], opened[sizeof secret];
+    uint8_t sealed2[sizeof settings + PASS_SEAL_OVERHEAD], opened2[sizeof settings];
+    size_t n = 0, n2 = 0, got = 0;
+    pass_lock_t lk, again, wrong;
+    CHECK(pass_lock_new("correct horse", &lk) == 0, "making a lock failed");
+    CHECK(pass_seal(&lk, secret, sizeof secret, sealed, sizeof sealed - 1, &n) == PASS_FORMAT,
+          "sealing into too small a buffer didn't refuse");
+    CHECK(pass_seal(&lk, secret, sizeof secret, sealed, sizeof sealed, &n) == 0 && n == sizeof sealed,
+          "sealing failed, or made %zu bytes, want %zu", n, sizeof sealed);
+    CHECK(pass_seal(&lk, settings, sizeof settings, sealed2, sizeof sealed2, &n2) == 0
+          && memcmp(sealed, sealed2, PASS_HEADER_LEN) == 0 && memcmp(sealed + PASS_HEADER_LEN, sealed2 + PASS_HEADER_LEN,
+                                                                     AEAD_NONCE_LEN) != 0,
+          "two secrets under one lock didn't share its header, or shared a nonce");
+    // One Argon2id run, from either file, opens both.
+    int rc = pass_lock_of("correct horse", sealed2, n2, &again);
+    CHECK(rc == 0, "the right passphrase didn't make a lock (%d)", rc);
+    rc = pass_unseal(&again, sealed, n, opened, sizeof opened, &got);
+    CHECK(rc == 0 && got == sizeof secret && memcmp(opened, secret, sizeof secret) == 0,
+          "the right passphrase didn't open the key (%d)", rc);
+    rc = pass_unseal(&again, sealed2, n2, opened2, sizeof opened2, &got);
+    CHECK(rc == 0 && got == sizeof settings && memcmp(opened2, settings, sizeof settings) == 0,
+          "the right passphrase didn't open the settings (%d)", rc);
+    CHECK(pass_lock_of("correct horsf", sealed, n, &wrong) == 0
+          && pass_unseal(&wrong, sealed, n, opened, sizeof opened, &got) == PASS_WRONG,
+          "a wrong passphrase didn't fail as one");
+    pass_lock_t other;
+    CHECK(pass_lock_new("correct horse", &other) == 0
+          && pass_unseal(&other, sealed, n, opened, sizeof opened, &got) == PASS_WRONG,
+          "the same passphrase with another salt opened it");
+    sealed[16] ^= 1;   // the salt
+    CHECK(pass_unseal(&lk, sealed, n, opened, sizeof opened, &got) == PASS_WRONG
+          && pass_lock_of("correct horse", sealed, n, &wrong) == 0
+          && pass_unseal(&wrong, sealed, n, opened, sizeof opened, &got) == PASS_WRONG,
+          "a changed header still opened");
+    sealed[16] ^= 1;
+    sealed[PASS_SEAL_OVERHEAD] ^= 1;   // the sealed secret
+    CHECK(pass_unseal(&lk, sealed, n, opened, sizeof opened, &got) == PASS_WRONG, "a changed secret still opened");
+    sealed[PASS_SEAL_OVERHEAD] ^= 1;
+    sealed[12] = 0xff;   // an Argon2id memory limit no one would ask for
+    CHECK(pass_lock_of("correct horse", sealed, n, &wrong) == PASS_FORMAT,
+          "a tampered memory limit wasn't refused before Argon2id ran");
+    uint8_t junk[PASS_SEAL_OVERHEAD + 8];
+    memset(junk, 'x', sizeof junk);
+    CHECK(pass_lock_of("correct horse", junk, sizeof junk, &wrong) == PASS_FORMAT
+          && pass_unseal(&lk, junk, sizeof junk, opened, sizeof opened, &got) == PASS_FORMAT,
+          "bytes that were never sealed weren't refused");
+}
+
 static void test_identity_keys(double *t) {
     (void)t;
     // An identity file age-keygen wrote, and the recipient it gave for it.
@@ -884,6 +948,13 @@ static int same_file(const char *path, const uint8_t *data, size_t len) {
     return n == (long)len && memcmp(buf, data, len) == 0;
 }
 
+// How file n's fetch stands, or -1 if there's no file n: an offer that never came fails a check
+// rather than the whole test.
+static int dl_state(chat_t *c, int n) {
+    const file_entry_t *e = n > 0 ? chat_file(c, n) : NULL;
+    return e ? (int)e->dl : -1;
+}
+
 static int dl_over(chat_t *c, int n) {
     const file_entry_t *e = chat_file(c, n);
     return !e || e->dl == DL_DONE || e->dl == DL_FAILED;
@@ -921,7 +992,7 @@ static void test_files(double *t) {
     CHECK(chat_file_fetch(&B, n, 0, 0) == 0, "bob couldn't fetch notes.txt");
     RUN_UNTIL(t, 120, dl_over(&B, n));
     snprintf(want, sizeof want, "%s/notes.txt", dl);
-    CHECK(chat_file(&B, n)->dl == DL_DONE && same_file(want, data, 5000), "notes.txt didn't arrive whole");
+    CHECK(dl_state(&B, n) == DL_DONE && same_file(want, data, 5000), "notes.txt didn't arrive whole");
     CHECK(chat_file_fetch(&B, n, 0, 0) == 0, "bob couldn't fetch notes.txt again");
     RUN_UNTIL(t, 120, dl_over(&B, n));
     snprintf(want, sizeof want, "%s/notes (2).txt", dl);
@@ -965,8 +1036,30 @@ static void test_files(double *t) {
     CHECK(chat_file_fetch(&B, n, 0, 0) == 0, "bob couldn't fetch changing.bin");
     RUN_UNTIL(t, 120, dl_over(&B, n));
     snprintf(want, sizeof want, "%s/changing.bin", dl);
-    CHECK(chat_file(&B, n)->dl == DL_FAILED && log_b.mismatched == 1
+    CHECK(dl_state(&B, n) == DL_FAILED && log_b.mismatched == 1
           && platform_read_file(want, data + 199000, 10) < 0 && !part_files_left(dl), "a changed file was kept");
+
+    // Every fifth of alice's frames to bob lost while 20 KB comes: a run of chunks that didn't come
+    // is asked for again as soon as the rest of its run has, so it comes whole, not long after.
+    snprintf(path, sizeof path, "%s/lossy.bin", home);
+    write_file(path, data, 20000);
+    snprintf(cmd, sizeof cmd, "send %s", path);
+    chat_run_command(&A, cmd);
+    RUN_UNTIL(t, 20, offer_named(&B, "lossy.bin") > 0);
+    n = offer_named(&B, "lossy.bin");
+    lossy_t lossy = { A.port, B.port, 0, 0 };
+    fake_net_filter = drop_fifth;
+    fake_net_filter_ctx = &lossy;
+    // No rekeys meanwhile: this is about chunks, and re-handshakes are the rekey tests'. After it,
+    // they come at their usual spacing again, not all at once.
+    for (int k = 0; k < 3; k++) ALL[k]->next_rekey = *t + 1000.0;
+    CHECK(chat_file_fetch(&B, n, 0, 0) == 0, "bob couldn't fetch lossy.bin");
+    RUN_UNTIL(t, 300, dl_over(&B, n));
+    for (int k = 0; k < 3; k++) ALL[k]->next_rekey = *t + REKEY_INTERVAL * (0.5 + 0.2 * k);
+    fake_net_filter = NULL;
+    fake_net_filter_ctx = NULL;
+    snprintf(want, sizeof want, "%s/lossy.bin", dl);
+    CHECK(lossy.dropped > 0 && same_file(want, data, 20000), "20 KB with some of its chunks lost didn't come whole");
 
     // Fast transfers: the same file in a fraction of the time.
     snprintf(path, sizeof path, "%s/big.bin", home);
@@ -990,7 +1083,7 @@ static void test_files(double *t) {
     RUN_FOR(t, 4);
     snprintf(cmd, sizeof cmd, "cancel %d", n);
     chat_run_command(&B, cmd);
-    CHECK(chat_file(&B, n)->dl == DL_NONE && !part_files_left(dl), "a cancelled download left something");
+    CHECK(dl_state(&B, n) == DL_NONE && !part_files_left(dl), "a cancelled download left something");
 
     // No longer offered: a fetch is told so.
     int mine = 0;
@@ -999,7 +1092,7 @@ static void test_files(double *t) {
     chat_run_command(&A, cmd);
     CHECK(chat_file_fetch(&B, n, 0, 0) == 0, "bob couldn't ask for big.bin");
     RUN_UNTIL(t, 60, dl_over(&B, n));
-    CHECK(chat_file(&B, n)->dl == DL_FAILED && log_b.withdrawn == 1, "a withdrawn file wasn't refused");
+    CHECK(dl_state(&B, n) == DL_FAILED && log_b.withdrawn == 1, "a withdrawn file wasn't refused");
 
     snprintf(cmd, sizeof cmd, "rm -rf '%s'", home);
     if (system(cmd) != 0) printf("couldn't remove %s\n", home);
@@ -1038,6 +1131,61 @@ static void test_file_names(double *t) {
     CHECK(file_parse_size("8M", &v) == 0 && v == 8u * 1024 * 1024 && file_parse_size("512 KB", &v) == 0 && v == 512 * 1024
           && file_parse_size("1.5G", &v) == 0 && v == 1610612736ull && file_parse_size("100", &v) == 0 && v == 100
           && file_parse_size("x", &v) != 0 && file_parse_size("5Q", &v) != 0 && file_parse_size("-1", &v) != 0, "sizes parse wrong");
+}
+
+typedef struct { int n; char seen[10][160]; } toml_log_t;
+
+static void toml_got(void *ctx, const char *table, const char *key, const toml_value *v) {
+    toml_log_t *l = ctx;
+    if (l->n >= 10) return;
+    char *o = l->seen[l->n++];
+    int p = snprintf(o, 160, "%s.%s=", table, key);
+    switch (v->type) {
+        case TOML_STRING: snprintf(o + p, 160 - (size_t)p, "s:%s", v->s); break;
+        case TOML_BOOL:   snprintf(o + p, 160 - (size_t)p, "b:%d", v->b); break;
+        case TOML_INT:    snprintf(o + p, 160 - (size_t)p, "i:%lld", v->i); break;
+        case TOML_ARRAY:
+            p += snprintf(o + p, 160 - (size_t)p, "a:");
+            for (int k = 0; k < v->n; k++) p += snprintf(o + p, 160 - (size_t)p, "%s%s", k ? "|" : "", v->items[k]);
+            break;
+    }
+}
+
+static void test_toml(double *t) {
+    (void)t;
+    static const char text[] =
+        "# a comment\n"
+        "top = 1\n"
+        "[network]  # after a header\n"
+        "routing = \"tor\"\n"
+        "lan = false\n"
+        "relays = [\n  \"wss://a\", # first\n  'wss://b',\n]\n"
+        "port = 4_000\n"
+        "ratio = 1.5\n"
+        "a.b = true\n"
+        "\n[ profile ]\r\n"
+        "nick = \"al\\\"i\\u00e9\\\\\"\r\n"
+        "\"colour\" = 'pur\\ple'\n"
+        "open = \"no end\n"
+        "[[x]]\n"
+        "lost = 1\n";
+    static const char *const want[] = {
+        ".top=i:1", "network.routing=s:tor", "network.lan=b:0", "network.relays=a:wss://a|wss://b",
+        "network.port=i:4000", "profile.nick=s:al\"i\xc3\xa9\\", "profile.colour=s:pur\\ple",
+    };
+    toml_log_t l = { 0 };
+    int bad_line = 0, bad = toml_parse(text, toml_got, &l, &bad_line);
+    CHECK(l.n == 7, "read %d keys, want 7", l.n);
+    for (int i = 0; i < l.n && i < 7; i++) CHECK(strcmp(l.seen[i], want[i]) == 0, "read %s, want %s", l.seen[i], want[i]);
+    // A float, a dotted key, an unended string, an array of tables, and a key under it.
+    CHECK(bad == 5 && bad_line == 11, "%d lines left out from line %d, want 5 from line 11", bad, bad_line);
+
+    char line[256] = "k = ";
+    size_t n = toml_put_str(line, 4, sizeof line, "a\"b\\c\n\x01\xc3\xa9");
+    toml_log_t back = { 0 };
+    CHECK(n < sizeof line && toml_parse(line, toml_got, &back, NULL) == 0 && back.n == 1
+          && strcmp(back.seen[0], ".k=s:a\"b\\c\n\x01\xc3\xa9") == 0, "a string didn't come back the same: %s", line);
+    CHECK(toml_put_str(line, 0, 4, "abcdef") == 4, "a string that didn't fit wasn't refused");
 }
 
 static void test_parsers(double *t) {
@@ -1111,8 +1259,8 @@ int main(int argc, char **argv) {
         { "udp masked", test_udp_masked },
         { "junk", test_junk }, { "lookalike nick", test_lookalike_nick },
         { "third peer", test_third_peer }, { "candidates settle", test_candidates_settle }, { "builds", test_builds },
-        { "parsers", test_parsers }, { "dht keys", test_dht_keys }, { "dht", test_dht }, { "read file", test_read_file },
-        { "identity keys", test_identity_keys }, { "images", test_images }, { "file names", test_file_names }, { "files", test_files },
+        { "parsers", test_parsers }, { "toml", test_toml }, { "dht keys", test_dht_keys }, { "dht", test_dht }, { "read file", test_read_file },
+        { "identity keys", test_identity_keys }, { "passphrase seal", test_passphrase_seal }, { "images", test_images }, { "file names", test_file_names }, { "files", test_files },
     };
     size_t n_tests = sizeof tests / sizeof tests[0];
     int failed[sizeof tests / sizeof tests[0]], n_failed = 0;

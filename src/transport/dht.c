@@ -166,8 +166,6 @@ void dht_rebootstrap(dht_state_t *d) {
     d->next_lookup = 0;
 }
 
-int dht_bootstrap_ready(const dht_state_t *d) { return d->n_boot > 0; }
-
 // This round's lookup key: this hour's, or the other hour's in a round straight after while the
 // hour's change is near.
 static void pick_infohash(dht_state_t *d) {

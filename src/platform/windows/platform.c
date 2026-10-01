@@ -570,6 +570,43 @@ int platform_move_new(const char *from, const char *to) {
     return MoveFileExW(wf, wt, 0) ? 0 : -1;
 }
 
+int platform_config_dir(char *out, size_t cap, int create) {
+    // Local, not Roaming: a roaming profile would copy it to other machines and a server.
+    wchar_t *w = _wgetenv(L"LOCALAPPDATA");
+    char base[900];
+    if (!w || !w[0] || WideCharToMultiByte(CP_UTF8, 0, w, -1, base, sizeof base, NULL, NULL) <= 0) return -1;
+    for (char *p = base; *p; p++) if (*p == '\\') *p = '/';
+    int n = snprintf(out, cap, "%s/chat", base);
+    if (n <= 0 || (size_t)n >= cap) return -1;
+    if (!create) return 0;
+    wchar_t wp[1400];
+    if (!to_wide(out, wp, 1400)) return -1;
+    CreateDirectoryW(wp, NULL);
+    DWORD a = GetFileAttributesW(wp);
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) && !(a & FILE_ATTRIBUTE_REPARSE_POINT) ? 0 : -1;
+}
+
+int platform_write_private(const char *utf8_path, const void *data, size_t len) {
+    char tmp[1100];
+    int n = snprintf(tmp, sizeof tmp, "%s.new", utf8_path);
+    wchar_t wt[1400], wp[1400];
+    if (n <= 0 || (size_t)n >= sizeof tmp || !to_wide(tmp, wt, 1400) || !to_wide(utf8_path, wp, 1400)) return -1;
+    HANDLE h = CreateFileW(wt, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return -1;
+    const char *p = data;
+    BOOL ok = TRUE;
+    for (size_t left = len; ok && left > 0; ) {
+        DWORD chunk = left > 65536 ? 65536 : (DWORD)left, wrote = 0;
+        ok = WriteFile(h, p, chunk, &wrote, NULL) && wrote > 0;
+        p += wrote;
+        left -= wrote;
+    }
+    ok = ok && FlushFileBuffers(h);
+    CloseHandle(h);
+    if (!ok || !MoveFileExW(wt, wp, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) { DeleteFileW(wt); return -1; }
+    return 0;
+}
+
 double now_seconds(void) {
     static LARGE_INTEGER freq;
     LARGE_INTEGER now;

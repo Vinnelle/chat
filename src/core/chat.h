@@ -68,6 +68,12 @@
 // newlines for a peer whose "k" says it reads them ("b").
 #define RECORD_MAX (SESSION_PAD_TARGET - 2)
 
+// Through the relays a frame can be bigger: they carry every event sealed the same size, whatever
+// is in it. A peer that reads several records to a frame gets frames there as big as it can read,
+// every one that size, which holds two file chunks.
+#define RELAY_FRAME (SESSION_HEADER_LEN + SEAL_MAX_BODY + AEAD_TAG_LEN)
+#define RELAY_RECORD_MAX (SEAL_MAX_BODY - 2)
+
 // Ratchet skip allowed when a frame arrives from an address that isn't the peer's. Trial decryption
 // runs against every peer, so the full RATCHET_MAX_SKIP here would let junk packets burn CPU.
 #define ROAM_MAX_SKIP 16
@@ -81,6 +87,11 @@
 #endif
 
 #define REKEY_DRAIN_GRACE 20.0
+// A rekey also waits while a re-handshake with someone is still going, ours or theirs, this long at
+// most: one that crossed it would start over with keys the other side hasn't seen, and through the
+// relays, where a re-handshake takes the best part of a minute, they kept crossing until the
+// session timed out.
+#define REKEY_DEFER_MAX 120.0
 
 // A re-handshake runs through slots, a piece at a time: the old chains stay this long for it.
 #define REKEY_OVERLAP 90.0
@@ -99,6 +110,11 @@
 // are sparser, and sparser again with more of them.
 #define NOSTR_COVER_INTERVAL 5.0
 #define NOSTR_MAX_RATE 0.33
+// Fast transfers can't burst through the relays: the slots of one we're sending come as often as
+// they allow instead, all relayed peers' together at most NOSTR_FAST_RATE a second (a relay takes
+// 0.5 events a second from a connection), and never closer than NOSTR_FAST_INTERVAL.
+#define NOSTR_FAST_RATE 0.4
+#define NOSTR_FAST_INTERVAL 2.5
 // A peer's UDP path counts as broken after this long without a frame; its traffic moves to the relays.
 #define UDP_STALE 25.0
 // DHT routing goes to the relays only while something needs them: nobody reached yet, or a
@@ -114,10 +130,11 @@
 // A file is offered to the connected peers ("fo"); nothing more moves until someone chooses to
 // fetch it. Then they ask for a window of chunks at a time ("fg") and the sender sends them in
 // the slots that would otherwise carry a nop ("fd"), so a transfer looks like any other moment on
-// the wire. With fast transfers on, a peer's slots come much closer together while a transfer
-// runs (never through the relays): quicker, but visible as a burst. Each chunk lands in its place
-// in the window; a whole window is written in order and hashed, and the file is kept only if the
-// hash is the one offered.
+// the wire; through the relays, two to a slot. With fast transfers on, a peer's slots come much
+// closer together while a transfer runs: quicker, but visible as a burst (through the relays, only
+// as close as they allow). Each chunk lands in its place in the window, and a run of them that
+// didn't come is asked for again; a whole window is written in order and hashed, and the file is
+// kept only if the hash is the one offered.
 #define FILE_HARD_MAX (1024ull * 1024 * 1024)
 #define FILE_CAP_DEFAULT (8ull * 1024 * 1024)
 #define FILE_OFFERS_MAX 64
@@ -129,6 +146,9 @@
 // A file fetched to be shown rather than saved is held in memory: at most this big.
 #define FILE_VIEW_MAX (64u * 1024 * 1024)
 #define FILE_RETRIES 8
+// A fetch waits up to this long for its sender to come back (a Tor circuit or a relay can stall a
+// peer out), and goes on from where it got to if they do.
+#define FILE_OWNER_GRACE 120.0
 
 typedef enum { ROUTE_DHT = 0, ROUTE_TOR = 1 } route_mode_t;
 
@@ -328,9 +348,12 @@ typedef struct {
     uint64_t win_off;            // the window asked for: win_n chunks from win_off
     int win_n;
     uint64_t win_got;            // which of them have come
+    int req_end;                 // the chunk after the run of the window last asked for
     uint8_t *win;
     double retry_at;
     int retries;
+    double since;                // when the fetch started
+    double gone_since;           // when its sender went, while it's away
 } file_entry_t;
 
 typedef struct {
@@ -541,6 +564,12 @@ void chat_set_nick(chat_t *c, const char *nick);
 // whole) or to save in Downloads. anyway: past the size limit. 0, or -1 having said why.
 int chat_file_fetch(chat_t *c, int num, int view, int anyway);
 const file_entry_t *chat_file(const chat_t *c, int num);
+// A file being fetched: the bytes that have come, those of the window still to be written included,
+// and about how many seconds the rest takes, at the pace so far or, before there's one, at the pace
+// its path allows. -1 while its sender isn't here, -2 while their verify code waits to be compared
+// again (back after a moment away, with a new one).
+uint64_t chat_file_got(const file_entry_t *e);
+double chat_file_eta(const chat_t *c, const file_entry_t *e, double now);
 void chat_set_file_options(chat_t *c, uint64_t cap, int fast);
 void chat_set_colour(chat_t *c, const uint8_t rgb[3]);
 
@@ -567,8 +596,8 @@ const char *chat_start_error(const chat_t *c);
 int chat_apply_routing(chat_t *c, const routing_t *r);
 // Moves a Tor session to the tor at these ports (the one chat started, or found running).
 void chat_tor_set_ports(chat_t *c, const char *socks, const char *control);
-// One line on how this session reaches peers, for the sidebar.
-void chat_route_summary(const chat_t *c, char *out, size_t cap);
+// That tor has reached the Tor network: relays that failed while it was still connecting go again.
+void chat_tor_connected(chat_t *c);
 int chat_online_count(const chat_t *c);
 int chat_pending_count(const chat_t *c);
 int chat_candidate_count(const chat_t *c);

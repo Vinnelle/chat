@@ -7,6 +7,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+// A fuzzer's mutations would almost never get past the zlib and PNG checksums, so a fuzzing build
+// doesn't check them.
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+#define CHECK_SUMS 0
+#else
+#define CHECK_SUMS 1
+#endif
+
 static int fail(char *why, size_t cap, const char *msg) {
     if (why && cap) copy_str(why, msg, cap);
     return -1;
@@ -277,12 +285,7 @@ static int zlib_inflate(const uint8_t *in, size_t inlen, uint8_t *out, size_t ou
     if (s.outpos != outlen || s.inlen - s.inpos < 4) return -1;
     const uint8_t *a = in + s.inpos;
     uint32_t want = ((uint32_t)a[0] << 24) | ((uint32_t)a[1] << 16) | ((uint32_t)a[2] << 8) | a[3];
-#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
-    (void)want;
-    return 0;
-#else
-    return adler32(out, outlen) == want ? 0 : -1;
-#endif
+    return !CHECK_SUMS || adler32(out, outlen) == want ? 0 : -1;
 }
 
 // ---- PNG ----
@@ -393,10 +396,7 @@ static int png_thumb(const uint8_t *p, size_t len, int max_w, int max_h, const u
         uint32_t clen = be32(p + pos);
         if (clen > 0x7FFFFFFFu || clen > len - pos - 12) return fail(why, cap, "the PNG is cut short");
         const uint8_t *type = p + pos + 4, *d = p + pos + 8;
-#ifndef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
-        // (A fuzzer's mutations would almost never get past these, so a fuzzing build skips them.)
-        if (crc32_of(type, (size_t)clen + 4) != be32(d + clen)) return fail(why, cap, "the PNG is damaged (a checksum is wrong)");
-#endif
+        if (CHECK_SUMS && crc32_of(type, (size_t)clen + 4) != be32(d + clen)) return fail(why, cap, "the PNG is damaged (a checksum is wrong)");
         if (!have_ihdr && memcmp(type, "IHDR", 4) != 0) return fail(why, cap, "the PNG doesn't start with its header");
         if (memcmp(type, "IHDR", 4) == 0) {
             if (have_ihdr || clen != 13) return fail(why, cap, "the PNG's header is wrong");
@@ -533,7 +533,7 @@ typedef struct {
     int td, ta;             // this scan's tables
     int dc_pred;
     int bw, bh;             // its blocks across and down, padded to whole MCUs
-    uint8_t *plane;         // bw * scale_px by bh * scale_px samples
+    uint8_t *plane;         // bw * 8 by bh * 8 samples, or one per block with dc_only
     int stride;
 } jcomp_t;
 

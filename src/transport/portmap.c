@@ -36,7 +36,6 @@ typedef struct {
 struct portmap {
     int state, via;
     uint16_t internal_port, external_port, want_external;
-    uint32_t lifetime;
     uint8_t gw[4];
     int have_gw;
     uint8_t local_ip[4];
@@ -118,7 +117,6 @@ static void mapped(portmap_t *p, double now, int via, uint16_t ext, uint32_t lif
     p->via = via;
     p->external_port = ext;
     p->want_external = ext;
-    p->lifetime = lifetime;
     p->state = P_MAPPED;
     p->renewing = 0;
     // Renew at half the lease; a permanent UPnP mapping (lifetime 0) is only checked hourly.
