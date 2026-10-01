@@ -231,7 +231,7 @@ you ask. `:install` saves them, and after that every change is saved (see
 
 `:send PATH` offers a file to everyone in the session whose verify code you've compared (and
 anyone who joins or gets compared later). `:send` on its own opens a file browser to pick one.
-Nothing moves until someone fetches it. `:download N` saves it, and for a picture (PNG or JPEG)
+Nothing is sent until someone fetches it. `:download N` saves it, and for a picture (PNG or JPEG)
 `:show N` draws it in the chat under the line that offered it. Pictures stay hidden until you
 ask, and `:hide N` hides one again. While a file is coming in, a row under that line shows the
 progress and roughly how long is left. `:files` lists what's been offered and how far each
@@ -245,7 +245,7 @@ fetch has got. `:cancel N` stops a fetch, or stops offering one of your files.
   of the file (not what's in it). It's the sender's setting that makes it faster.
 - **Through the relays.** Tor and DHT members only meet on the Nostr relays, where slots are a
   few seconds apart. Every relay event is sealed to the same size, so each slot fits two chunks
-  for free, about 12 KB a minute. Fast transfers can't burst there, but your slots to that peer
+  at no extra cost, about 12 KB a minute. Fast transfers can't burst there, but your slots to that peer
   come as often as the relays allow, about twice the normal rate, and the relays can see that.
   Transfers carry on through rekeys. A fetch waits up to two minutes if the sender drops, and
   carries on from where it was if they come back (with a new verify code, once that's compared
@@ -265,7 +265,7 @@ fetch has got. `:cancel N` stops a fetch, or stops offering one of your files.
   GIFs and everything else aren't shown, download them instead.
 - **Size.** **File size limit** (8 MB by default) is the biggest file chat fetches without
   asking. An offer over it says so, and `:download N anyway` (or `:show N anyway`) fetches it
-  anyway. The max is 1 GB.
+  regardless. The max is 1 GB.
 
 ## Download
 
@@ -310,9 +310,8 @@ you're saving it. It would be off unless you turn it on.
 ### Installing
 
 `:install`, in the full screen UI, saves your settings and signing key so they're there next
-time chat starts. It asks first, and tells you what it leaves on disk: **a trail**, files that
-tell anyone who can read the disk (an admin, malware, a backup, forensics) that chat is used
-there.
+time chat starts. It asks first, and tells you what it leaves on disk. The files tell anyone who can read the
+disk (an admin, malware, a backup, forensics) that chat is used there.
 
 Both files are sealed with one passphrase you pick, typed twice, even if there's no signing
 key to save. Argon2id (512 MiB, same as for a session) makes a key from it with a salt, and
@@ -355,10 +354,10 @@ only exists inside the sealed file. If there's a plain text file in that folder,
 `settings.toml`, it didn't come from chat. chat doesn't read it, update it or delete it, and
 `:uninstall` leaves it and the folder alone. Delete it yourself if you don't want it on disk.
 
-On startup chat asks for the passphrase in a box (on the terminal with `--simple` or
+On startup chat asks for the passphrase in a box (in the terminal with `--simple` or
 `--update`), or reads it from `CHAT_INSTALL_PASSWORD`. One Argon2id run opens both files, and a
 wrong passphrase tells you, unlike a native key where a typo quietly makes a different key. It
-reads the settings first, so a command line option still wins for that run, and it starts on
+reads the settings first, so a command line option still overrides it for that run, and it starts on
 your sessions instead of the settings page. `--identity` signs with a different key for that
 run and leaves the saved one alone. `Esc` starts without what's saved: chat's defaults, on the
 settings page, and nothing you change that run is saved. Since the saved routing might be Tor,
@@ -477,19 +476,20 @@ Commit `minisign.pub`, and keep the secret key backed up and off GitHub.
 chat [--nick NAME] [--colour NAME|#HEX] [--identity age|pgp[:KEYFILE]] [--simple]
      [--routing dht+nostr|dht|tor] [--nodht] [--noipv6] [--nolan]
      [--noportmap] [--nonostr] [--nostr-always] [--relay wss://HOST ...]
-     [--tor-socks HOST:PORT] [--tor-control HOST:PORT] [--verify-required]
-     [--file-limit SIZE] [--fast-files]
+     [--tor-launch auto|always|never] [--tor-path PATH] [--tor-socks HOST:PORT]
+     [--tor-control HOST:PORT] [--verify-required] [--file-limit SIZE]
+     [--fast-files]
      [--session ID --port UDP_PORT --peer HOST:PORT ...]
+chat --update | --version
 ```
 
-In a real terminal, `chat` opens a full screen UI. The sidebar on the left lists your sessions
-
-> NOTE: This TUI was heavily assisted by UI, as I have mentioned across most my projects, I hate, and suck at, UI / Front-End development. If any front-end devs would like to improve the functionality, performance, and/or aesthetic of this, be my guest!
-
+In a terminal, `chat` opens a full screen UI. The sidebar on the left lists your sessions
 (switch with Tab / Shift+Tab), the peers in the selected one and how each is verified, and how
 that session reaches them: route, port or tor, relays, port mapping, DHT and traffic. The rest
 of the screen is the selected session's chat, with its console above it, and you type in the
 box at the bottom.
+
+> NOTE: This TUI was heavily assisted by UI, as I have mentioned across most my projects, I hate, and suck at, UI / Front-End development. If any front-end devs would like to improve the functionality, performance, and/or aesthetic of this, be my guest!
 
 A session with unread messages shows how many next to its name, in yellow with an `@` if one
 mentions you. With the sidebar hidden, the chat's title shows how many are new in other
@@ -503,7 +503,7 @@ wouldn't be readable on it. `NO_COLOR` limits it to bold, faint and reverse.
 
 It starts on the settings page, so routing, nickname, colour, signing identity and the rest are
 all set up in one place. **Start chatting** at the bottom (or `Esc`) goes to your sessions.
-Nothing touches the network before that: no tor is looked for or started, and no `--peer` name
+Nothing goes on the network before that: no tor is looked for or started, and no `--peer` name
 is looked up (in Tor mode it never is, since that would go around Tor). Once `:install` has
 saved your settings, it starts on your sessions, and `Ctrl+S` opens the page.
 
@@ -587,7 +587,7 @@ after a name. Under each row's help, the page shows the `:set` command that does
 | `sign` | `off`, or an `age` or `pgp` key made from a password typed on the page; a key file or pasted key is picked there too |
 | `verify` | `required` (nothing goes to a peer until you've compared its code), `optional` |
 | `filelimit` | the biggest file fetched without `anyway`: `8M`, `500K`, `1G` |
-| `fastfiles` | `on` (what you send goes in quick bursts; through the relays, as fast as they allow), `off` (chat's steady slots) |
+| `fastfiles` | `on` (what you send goes in quick bursts; through the relays, as fast as they allow), `off` (chat's regular slots) |
 | `notify` | `all`, `mentions`, `none` |
 | `preview` | what a notification shows: `off` (only that a message came), `nick` (who from), `message` (who, and what); never the session |
 | `net` | `normal`, `verbose` (every handshake packet, relay and Tor event) |
@@ -615,7 +615,7 @@ executable is in.
 
 ### Options
 
-Options given here win over what `:install` saved, for that run.
+Options given here override what `:install` saved, for that run.
 
 | Option | Meaning |
 | --- | --- |
@@ -630,7 +630,7 @@ Options given here win over what `:install` saved, for that run.
 | `--nostr-always` | Stay on the relays all the time, not just while they're needed |
 | `--verify-required` | Send nothing to a peer until you've compared its verify code |
 | `--file-limit SIZE` | The biggest file fetched without `anyway` (default `8M`, up to `1G`) |
-| `--fast-files` | Send files in quick bursts instead of chat's steady slots (through the relays, as fast as they allow) |
+| `--fast-files` | Send files in quick bursts instead of chat's regular slots (through the relays, as fast as they allow) |
 | `--relay URL` | A Nostr relay (`wss://...`) to use instead of the defaults; up to 6 |
 | `--tor-launch auto\|always\|never` | Which tor Tor mode uses: a running one if there is one, otherwise chat's own (`auto`); always chat's own; or only a running one |
 | `--tor-path PATH` | The tor program chat starts (default: `tor` on `PATH` or in the usual folders) |
