@@ -225,6 +225,38 @@ while the onion services are published and found.
 
 Settings last until chat exits. Like everything else, they're never written to disk.
 
+## Files and pictures
+
+`:send PATH` offers a file to everyone in the session whose verify code you've compared (and
+to whoever joins or is compared later). Nothing else happens until someone chooses to fetch it:
+`:download N` saves it, and for a picture (PNG or JPEG) `:show N` draws it in the chat, under
+the line that offered it. Pictures stay hidden until you ask; `:hide N` tucks one away again.
+`:files` lists what's been offered and how far each fetch has got; `:cancel N` stops one, or
+stops offering a file of yours.
+
+- **What's on the wire.** A file goes in the same slots as everything else, in the places that
+  would otherwise carry nothing, so with **Fast file transfers** off a transfer looks like any
+  other moment: a photo takes minutes, though, and a big file hours. With it on, your slots to
+  the peer you're transferring with come every few milliseconds while it runs: seconds instead
+  of minutes, but anyone watching your network can see a burst about the size of the file (never
+  what's in it). Each side's setting speeds only its own slots, and never through the relays.
+- **What's kept.** A file comes a window of chunks at a time, written in order and hashed, and
+  it's kept only if its SHA-256 is the one in the offer: a file changed after it was offered,
+  or tampered with, is thrown away. It's written to a new, private, hidden file in
+  `~/Downloads` that can't follow a link, then moved to its name only if nothing has that name
+  (`photo (2).jpg` beside an existing `photo.jpg`): nothing is ever replaced. A picture fetched
+  to show is never written to disk; it's wiped from memory once it's drawn.
+- **Names.** A name from a peer can't be a path, a hidden file, a Windows device (`CON`, `NUL`)
+  or anything the terminal acts on: folders, control and right-to-left characters, and
+  `/ \ : * ? " < > |` are taken out. Nothing chat saves is executable.
+- **Pictures.** Decoded by chat's own PNG and baseline JPEG readers, which check every length,
+  table and dimension, inflate a PNG to exactly what its header says and no further, and never
+  hold the full-size image: each pixel goes straight into the thumbnail. Progressive JPEGs,
+  GIFs and the rest aren't shown; download them instead.
+- **Size.** **File size limit** (8 MB unless you change it) is the most chat fetches without
+  being told: an offer past it says so, and `:download N anyway` (or `:show N anyway`) fetches
+  that one all the same. Files go up to 1 GB.
+
 ## Download
 
 Prebuilt Linux and Windows x86_64 binaries are on the
@@ -321,9 +353,13 @@ peer rekeys), replayed hellos and junk from outside the room, a third peer joini
 goes over UDP unmasked, that every datagram is one cell sent in a slot however many messages
 are sent, and that the DHT asks as a read-only node and stops starting from the bootstrap
 servers once it knows enough nodes. It also checks the parsers for what relays, routers and Tor send, the hourly DHT
-keys, and that key files are only read from regular files. The fuzz targets (libFuzzer, so
+keys, that key files are only read from regular files, the PNG and JPEG readers (and what they
+refuse), file names from peers, and files end to end: offered, saved beside a file of the same
+name, past the size limit, shown from memory, changed after they were offered (thrown away),
+sent fast, cancelled and withdrawn. The fuzz targets (libFuzzer, so
 clang) cover bencode and DHT replies (IPv4 and IPv6), relay JSON and UPnP gateway replies,
-PGP and AGE key import, text cleaning and the input line, and everything a session receives,
+PGP and AGE key import, PNG and JPEG images, text cleaning, file names, the input line and
+pictures drawn in the chat, and everything a session receives,
 including messages from a room member or a connected peer, and datagrams that unmask to
 anything at all. GitHub Actions runs the engine test, and each fuzz target for a minute, on
 every push and pull request.
@@ -331,7 +367,7 @@ every push and pull request.
 ```sh
 just test               # build and run the engine test
 just test -v            # the same, printing every session line and every check before the summary
-just fuzz engine 600    # fuzz one target (bencode, json, pgp, text, engine) for 600 seconds
+just fuzz engine 600    # fuzz one target (bencode, json, pgp, text, engine, image) for 600 seconds
 ```
 
 ### Releases
@@ -363,6 +399,7 @@ chat [--nick NAME] [--colour NAME|#HEX] [--identity age|pgp[:KEYFILE]] [--simple
      [--routing dht+nostr|dht|tor] [--nodht] [--noipv6] [--nolan]
      [--noportmap] [--nonostr] [--nostr-always] [--relay wss://HOST ...]
      [--tor-socks HOST:PORT] [--tor-control HOST:PORT] [--verify-optional]
+     [--file-limit SIZE] [--fast-files]
      [--session ID --port UDP_PORT --peer HOST:PORT ...]
 ```
 
@@ -431,6 +468,11 @@ command; `Enter` on a command there puts it on the command line.
 | `:copyid` | copy the session id to the clipboard |
 | `:update` | install the latest release |
 | `:changelog` | what changed in each version (`:news`); built in, so it reads offline |
+| `:send PATH` | offer a file (see [Files and pictures](#files-and-pictures)) |
+| `:files` | the files offered here, and how each fetch is going |
+| `:download N [anyway]` | save file N in `~/Downloads` (`:dl`); `anyway` past your size limit |
+| `:show N [anyway]`, `:hide N` | draw picture N in the chat where it was offered, or tuck it away |
+| `:cancel N` | stop fetching file N, or stop offering one of yours |
 
 ### Settings
 
@@ -451,6 +493,8 @@ values after a name. Under each row's help, the page shows the `:set` that does 
 | `nick`, `colour` | a name; a colour name or `#RRGGBB` |
 | `sign` | `off`, or an `age` or `pgp` key made from a password typed on the page; a key file or pasted key is chosen there too |
 | `verify` | `required` (nothing reaches a peer until you've compared its code), `optional` |
+| `filelimit` | the biggest file fetched without `anyway`: `8M`, `500K`, `1G` |
+| `fastfiles` | `on` (transfers in quick bursts), `off` (chat's steady slots) |
 | `notify` | `all`, `mentions`, `none` |
 | `preview` | what a notification shows: `off` (only that a message came), `nick` (who from), `message` (who, and what); never the session |
 | `net` | `normal`, `verbose` (every handshake packet, relay and Tor event) |
@@ -489,6 +533,8 @@ write access to the folder that holds the executable.
 | `--nonostr` | No Nostr relay fallback |
 | `--nostr-always` | Stay on the relays all the time, not only while they're needed |
 | `--verify-optional` | Send to peers whose verify code you haven't compared |
+| `--file-limit SIZE` | The biggest file fetched without `anyway` (default `8M`, up to `1G`) |
+| `--fast-files` | Transfer files in quick bursts rather than chat's steady slots |
 | `--relay URL` | A Nostr relay (`wss://...`) to use instead of the defaults; up to 6 |
 | `--tor-launch auto\|always\|never` | Which tor Tor mode uses: a running one if possible, else chat's own (`auto`); always chat's own; or only a running one |
 | `--tor-path PATH` | The tor program chat starts (default: `tor` on `PATH` or in the usual folders) |

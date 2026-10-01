@@ -47,6 +47,16 @@
   the same four bootstrap servers with the room's lookup key.
 
 ### Added
+- **Files and pictures**: `:send PATH` offers a file to the session; nothing moves until someone
+  fetches it with `:download N` (saved in `~/Downloads`), or, for a PNG or JPEG, `:show N`,
+  which draws it in the chat under the line that offered it (`:hide N` tucks it away). `:files`
+  lists them and `:cancel N` stops one. A file is kept only if its SHA-256 matches the offer,
+  is saved under a cleaned-up name without ever replacing anything, and a picture shown is never
+  written to disk. Files move in chat's steady slots, invisible on the wire but slow; **Fast
+  file transfers** (`:set fastfiles on`, `--fast-files`) sends them in quick bursts instead.
+  **File size limit** (`:set filelimit`, `--file-limit`, 8 MB by default) is the most fetched
+  without saying `anyway`; files go up to 1 GB. Pictures are decoded by chat's own PNG and
+  baseline JPEG readers, which never hold the full-size image.
 - `:changelog` (or `:news`) shows this changelog on a page of its own, built into chat so it
   reads offline. In `--simple` it prints it.
 

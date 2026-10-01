@@ -10,6 +10,7 @@
 #include "common/util.h"
 #include "app/update.h"
 #include "transport/torproc.h"
+#include "common/image.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,7 +27,8 @@ static const char *USAGE =
     "            [--routing dht+nostr|dht|tor] [--nodht] [--noipv6] [--nolan]\n"
     "            [--noportmap] [--nonostr] [--nostr-always] [--relay wss://HOST ...]\n"
     "            [--tor-launch auto|always|never] [--tor-path PATH] [--tor-socks HOST:PORT]\n"
-    "            [--tor-control HOST:PORT] [--verify-optional]\n"
+    "            [--tor-control HOST:PORT] [--verify-optional] [--file-limit SIZE]\n"
+    "            [--fast-files]\n"
     "            [--session ID --port UDP_PORT --peer HOST:PORT ...]\n"
     "       chat --update | --version\n"
     "\n"
@@ -106,6 +108,11 @@ static const char *USAGE =
     "              can't find a room whose members all reach each other directly\n"
     "  --verify-optional\n"
     "              send to peers whose verify code you haven't compared\n"
+    "  --file-limit\n"
+    "              the biggest file fetched without saying anyway (default 8M; up to 1G)\n"
+    "  --fast-files\n"
+    "              send files in quick bursts rather than chat's steady slots: seconds, not\n"
+    "              minutes, but the network can see a transfer happen\n"
     "  --relay     a Nostr relay (wss://...) to use instead of the defaults; repeatable\n"
     "  --tor-launch\n"
     "              which tor Tor mode uses. auto (default): a tor that's already running if\n"
@@ -148,10 +155,19 @@ static const char *USAGE =
 #define MAX_PEER_ARGS 16
 #define PEER_ARG_LEN 256
 
+// A picture fetched to show: its thumbnail, drawn under the line that offered it while shown.
+#define MAX_PICS 16
+typedef struct {
+    int used, num, shown;
+    image_thumb_t th;
+    tui_image_t ti;
+} pic_t;
+
 typedef struct {
     chat_t engine;
     tui_scrollback_t sb;
     tui_scrollback_t console;
+    pic_t pics[MAX_PICS];
     int unread;
     int initialising;
     int scroll;   // the newest messages hidden below the chat, scrolled back past
@@ -218,6 +234,8 @@ typedef struct {
     identity_source_t load_kind;   // AGE or PGP: what the key file browser or the paste page takes
     int tor_launch;
     char tor_path[512];
+    uint64_t file_cap;   // 0: the default
+    int fast_files;
     uint8_t color[3];
     identity_source_t identity_source;
     identity_keypair_t identity;
@@ -290,9 +308,9 @@ static void push_log(const char *fmt, ...) {
 static void session_print(void *ui, const char *hhmm, const char *text, const uint8_t *rgb,
                           unsigned flags, int color_len, int file) {
     session_slot_t *s = (session_slot_t *)ui;
-    (void)file;
     if (flags & LINE_CHAT) {
         tui_scrollback_push(&s->sb, hhmm, text, rgb, (flags & LINE_MENTION) != 0, color_len);
+        if (file) tui_scrollback_mark_file(&s->sb, file);
         if (s != g_app.selected) s->unread = 1;
         // Scrolled back, the chat stays on the messages in view.
         if (s->scroll > 0 && s->scroll < s->sb.count - 1) s->scroll++;
@@ -303,6 +321,57 @@ static void session_print(void *ui, const char *hhmm, const char *text, const ui
 }
 
 static int session_ready(const session_slot_t *s) { return !s->initialising && chat_ready(&s->engine); }
+
+static void console_note(session_slot_t *s, const char *fmt, ...);
+
+static pic_t *pic_find(session_slot_t *s, int num) {
+    for (int i = 0; i < MAX_PICS; i++) if (s->pics[i].used && s->pics[i].num == num) return &s->pics[i];
+    return NULL;
+}
+
+static void pic_free(pic_t *p) {
+    if (p->th.rgb) crypto_wipe(p->th.rgb, (size_t)p->th.w * (size_t)p->th.h * 3);
+    image_thumb_free(&p->th);
+    memset(p, 0, sizeof *p);
+}
+
+static void pics_free(session_slot_t *s) {
+    for (int i = 0; i < MAX_PICS; i++) if (s->pics[i].used) pic_free(&s->pics[i]);
+}
+
+static const tui_image_t *pic_for(const void *ctx, int file) {
+    const session_slot_t *s = ctx;
+    for (int i = 0; i < MAX_PICS; i++)
+        if (s->pics[i].used && s->pics[i].num == file && s->pics[i].shown) return &s->pics[i].ti;
+    return NULL;
+}
+
+// A picture fetched to show has come: decoded into a thumbnail here, then the bytes are gone.
+static void session_file_view(void *ui, int num, const char *name, const uint8_t *data, size_t len) {
+    session_slot_t *s = ui;
+    (void)name;
+    static const uint8_t bg[3] = { 0, 0, 0 };
+    image_thumb_t th;
+    char why[160];
+    if (image_thumbnail(data, len, TUI_IMAGE_MAX_W, TUI_IMAGE_MAX_H, bg, &th, why, sizeof why) != 0) {
+        console_note(s, "* can't show file %d: %s - :download %d saves it", num, why, num);
+        return;
+    }
+    pic_t *p = pic_find(s, num);
+    if (!p) for (int i = 0; i < MAX_PICS && !p; i++) if (!s->pics[i].used) p = &s->pics[i];
+    if (!p) {
+        p = &s->pics[0];
+        for (int i = 1; i < MAX_PICS; i++) if (s->pics[i].num < p->num) p = &s->pics[i];
+    }
+    pic_free(p);
+    p->used = 1;
+    p->num = num;
+    p->shown = 1;
+    p->th = th;
+    p->ti = (tui_image_t){ th.w, th.h, th.rgb };
+    console_note(s, "* file %d shown (%dx%d) - :hide %d tucks it away", num, th.src_w, th.src_h, num);
+    g_app.dirty = 1;
+}
 
 // That something came, and who sent it and what it says only if the preview setting let the
 // engine pass them on (nick, text NULL otherwise). Never the session: desktops keep a history of
@@ -353,6 +422,7 @@ static void close_session(session_slot_t *s) {
     if (!s) return;
     int idx = slot_index(s);
     chat_shutdown(&s->engine);
+    pics_free(s);
     release_scrollbacks(s);
     g_app.used[idx] = 0;
     if (g_app.selected == s) {
@@ -621,6 +691,8 @@ static session_slot_t *start_session(const char *session_name, const char *passw
     o.notify_mode = g_app.notify_mode;
     o.notify_preview = g_app.notify_preview;
     o.verify_optional = g_app.verify_optional;
+    o.file_cap = g_app.file_cap;
+    o.fast_files = g_app.fast_files;
     o.has_color = 1;
     memcpy(o.color, g_app.color, 3);
     o.identity_source = g_app.identity_source;
@@ -628,6 +700,7 @@ static session_slot_t *start_session(const char *session_name, const char *passw
     set_build_opts(&o);
 
     chat_init(&s->engine, &o, session_print, session_notify, s);
+    s->engine.file_view = session_file_view;
     crypto_wipe(&o, sizeof o);
     if (!chat_started(&s->engine)) {
         const char *why = chat_start_error(&s->engine);
@@ -832,6 +905,8 @@ static cmd_result_t app_update(void *ctx, const char *arg) {
 
 static cmd_result_t app_help(void *ctx, const char *arg);
 static cmd_result_t app_changelog(void *ctx, const char *arg);
+static cmd_result_t app_show(void *ctx, const char *arg);
+static cmd_result_t app_hide(void *ctx, const char *arg);
 
 // ---- routing: asked at the start of --simple; the full-screen UI opens on the settings page ----
 
@@ -874,7 +949,7 @@ typedef enum {
     SET_TOR_LAUNCH, SET_TOR_PATH, SET_TOR_SOCKS, SET_TOR_CONTROL, SET_TOR_PASSWORD,
     SET_NOSTR, SET_RELAYS,
     SET_NICK, SET_COLOUR, SET_SIGN, SET_AGE_RECIPIENT, SET_PGP_PUBKEY,
-    SET_VERIFY, SET_NOTIFY, SET_PREVIEW, SET_NET, SET_PORT,
+    SET_VERIFY, SET_FILE_LIMIT, SET_FAST_FILES, SET_NOTIFY, SET_PREVIEW, SET_NET, SET_PORT,
     SET_SIDEBAR, SET_CONSOLE, SET_CHAT
 } setting_id_t;
 
@@ -946,6 +1021,14 @@ static const setting_def_t SETTINGS[] = {
       "joins, chat shows a code to compare with them over another channel; it's the same on both ends only if "
       "nobody is in between. required: nothing you send reaches a peer until you say it matched (:verify NICK ok). "
       "optional: it goes to everyone, compared or not." },
+    { SET_FILE_LIMIT, NULL, "filelimit", "File size limit", K_TEXT, "SIZE (8M, 500K, 1G)",
+      "The biggest file chat fetches when you ask: an offer past it says so, and :download N anyway (or :show N "
+      "anyway) fetches that one all the same. Nothing is ever fetched until you ask. Files go up to 1 GB." },
+    { SET_FAST_FILES, NULL, "fastfiles", "Fast file transfers", K_TOGGLE, "on|off",
+      "off: files move in chat's steady slots, a small piece a second and a half, so a transfer looks like nothing "
+      "at all on the wire - but a photo takes minutes. on: while a transfer of yours runs, your slots to that peer "
+      "come every few milliseconds (never through the relays): seconds, not minutes, but anyone watching the "
+      "network sees a burst about the size of the file. Each side's setting speeds its own slots." },
     { SET_NOTIFY, NULL, "notify", "Notifications", K_CHOICE, "all|mentions|none",
       "Desktop notifications, for open sessions and new ones: every message, mentions of your nick, or none." },
     { SET_PREVIEW, NULL, "preview", "Notification preview", K_CHOICE, "off|nick|message",
@@ -1031,6 +1114,7 @@ static int setting_options(setting_id_t id, const char *const **names, int *n) {
         case SET_LAN:        return r->lan != 0;
         case SET_NOSTR:      *names = NOSTR_NAMES; *n = 3; return r->nostr;
         case SET_VERIFY:     *names = VERIFY_NAMES; return g_app.verify_optional != 0;
+        case SET_FAST_FILES: return g_app.fast_files != 0;
         case SET_TOR_LAUNCH: *names = TOR_LAUNCH_NAMES; *n = 3; return g_app.tor_launch;
         case SET_NOTIFY:     *names = NOTIFY_NAMES; *n = 3; return (int)g_app.notify_mode;
         case SET_PREVIEW:    *names = PREVIEW_NAMES; *n = 3; return (int)g_app.notify_preview;
@@ -1086,6 +1170,7 @@ static void setting_value(setting_id_t id, char *out, size_t cap) {
             else snprintf(out, cap, "not installed");
             break;
         }
+        case SET_FILE_LIMIT:   file_format_size(g_app.file_cap ? g_app.file_cap : FILE_CAP_DEFAULT, out, cap); break;
         case SET_TOR_SOCKS:    snprintf(out, cap, "%s", r->tor.socks); break;
         case SET_TOR_CONTROL:  snprintf(out, cap, "%s", r->tor.control); break;
         case SET_TOR_PASSWORD: snprintf(out, cap, "%s", r->tor.password[0] ? "set" : "not set (cookie or no login)"); break;
@@ -1193,6 +1278,11 @@ static void setting_choose(setting_id_t id, int i) {
             for (int s = 0; s < MAX_SESSIONS; s++)
                 if (g_app.used[s] && !g_app.sessions[s].initialising) g_app.sessions[s].engine.net_verbose = i;
             break;
+        case SET_FAST_FILES:
+            g_app.fast_files = i;
+            for (int s = 0; s < MAX_SESSIONS; s++)
+                if (g_app.used[s] && !g_app.sessions[s].initialising) chat_set_file_options(&g_app.sessions[s].engine, g_app.file_cap, i);
+            break;
         case SET_SIDEBAR: g_app.show_sidebar = i; break;
         case SET_CONSOLE: g_app.show_console = i; break;
         case SET_CHAT:    g_app.show_chat = i; break;
@@ -1297,6 +1387,16 @@ static void setting_apply_text(setting_id_t id, const char *typed) {
             }
             copy_str(g_app.tor_path, text[0] ? found : "", sizeof g_app.tor_path);
             note("Tor program: %s", g_app.tor_path[0] ? g_app.tor_path : "search PATH and the usual folders");
+            return;
+        }
+        case SET_FILE_LIMIT: {
+            uint64_t v;
+            if (file_parse_size(text, &v) != 0 || v == 0 || v > FILE_HARD_MAX) { note("that isn't a size from 1 byte to 1 GB (8M, 500K, 1G)"); return; }
+            g_app.file_cap = v;
+            for (int i = 0; i < MAX_SESSIONS; i++)
+                if (g_app.used[i] && !g_app.sessions[i].initialising) chat_set_file_options(&g_app.sessions[i].engine, v, g_app.fast_files);
+            char sz[32]; file_format_size(v, sz, sizeof sz);
+            note("File size limit: %s - for open sessions too", sz);
             return;
         }
         case SET_TOR_PASSWORD:
@@ -2171,6 +2271,8 @@ static const command_t APP_COMMANDS[] = {
     { "copyid",  NULL,                  NULL,     "copy this session's id to the clipboard",         app_copyid },
     { "update",  NULL,                  NULL,     "install the latest release from GitHub",          app_update },
     { "changelog", "news",              NULL,     "what changed in each version",                    app_changelog },
+    { "show",    NULL,                  "N [anyway]", "show picture N in the chat, where it was offered", app_show },
+    { "hide",    NULL,                  "N",      "tuck picture N away again",                       app_hide },
     { NULL, NULL, NULL, NULL, NULL }
 };
 
@@ -2185,6 +2287,39 @@ static cmd_result_t app_help(void *ctx, const char *arg) {
 static cmd_result_t app_changelog(void *ctx, const char *arg) {
     (void)ctx; (void)arg;
     begin_changelog();
+    return CMD_OK;
+}
+
+// "N" or "N anyway": the number, and whether anyway was said. 0 if it's neither.
+static int file_arg(const char *arg, int *anyway) {
+    char *end;
+    long n = strtol(arg, &end, 10);
+    while (*end == ' ') end++;
+    *anyway = strcmp(end, "anyway") == 0;
+    return n > 0 && n < 1000000 && (!*end || *anyway) ? (int)n : 0;
+}
+
+// Pictures are fetched only when asked to show, and drawn where they were offered.
+static cmd_result_t app_show(void *ctx, const char *arg) {
+    (void)ctx;
+    session_slot_t *s = g_app.selected;
+    int anyway, n = file_arg(arg, &anyway);
+    if (!s || s->initialising) { note("open a session first"); return CMD_OK; }
+    if (!n) { note("usage: :show N [anyway] - N is the number in the offer"); return CMD_OK; }
+    pic_t *p = pic_find(s, n);
+    if (p) { p->shown = 1; g_app.dirty = 1; return CMD_OK; }
+    chat_file_fetch(&s->engine, n, 1, anyway);
+    return CMD_OK;
+}
+
+static cmd_result_t app_hide(void *ctx, const char *arg) {
+    (void)ctx;
+    session_slot_t *s = g_app.selected;
+    int anyway, n = file_arg(arg, &anyway);
+    pic_t *p = s && n ? pic_find(s, n) : NULL;
+    if (!p || !p->shown) { note("picture %s isn't shown", arg); return CMD_OK; }
+    p->shown = 0;
+    g_app.dirty = 1;
     return CMD_OK;
 }
 
@@ -2648,13 +2783,15 @@ static const char *session_empty_text(const session_slot_t *s) {
 // The chat pane: the selected session's name, how it's connected, and what to show while it's quiet.
 static tui_view_t current_view(char *sub, size_t cap) {
     tui_view_t v = { g_app.show_sidebar, g_app.show_console, g_app.show_chat, NULL, NULL, TUI_SESSION_LIVE,
-                     NULL, NULL, 0 };
+                     NULL, NULL, 0, NULL, NULL };
     const session_slot_t *s = g_app.selected;
     if (!s) return v;
     v.title = s->name;
     v.state = session_state(s);
     v.scroll = s->scroll;
     v.empty = session_empty_text(s);
+    v.image = pic_for;
+    v.image_ctx = s;
     if (s->initialising) snprintf(sub, cap, "starting");
     else snprintf(sub, cap, "%d online \xc2\xb7 %s", chat_online_count(&s->engine) + 1, routing_mode_name(s->engine.route.mode));
     v.subtitle = sub;
@@ -2998,6 +3135,37 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
     _exit(0);
 }
 
+// --simple: a picture asked for with :show is printed where the conversation has got to, two of
+// its pixel rows to a line of half blocks.
+static void plain_file_view(void *ui, int num, const char *name, const uint8_t *data, size_t len) {
+    (void)ui; (void)name;
+    static const uint8_t bg[3] = { 0, 0, 0 };
+    image_thumb_t th;
+    char why[160];
+    if (!term_ansi_ok()) { printf("* file %d came, but showing a picture needs a terminal with colour - :download %d saves it\n", num, num); return; }
+    if (image_thumbnail(data, len, TUI_IMAGE_MAX_W, TUI_IMAGE_MAX_H, bg, &th, why, sizeof why) != 0) {
+        printf("* can't show file %d: %s - :download %d saves it\n", num, why, num);
+        return;
+    }
+    for (int y = 0; y < th.h; y += 2) {
+        fputs("  ", stdout);
+        for (int x = 0; x < th.w; x++) {
+            const uint8_t *t = th.rgb + ((size_t)y * (size_t)th.w + (size_t)x) * 3;
+            if (y + 1 < th.h) {
+                const uint8_t *b = t + (size_t)th.w * 3;
+                printf("\x1b[38;2;%u;%u;%u;48;2;%u;%u;%um\xe2\x96\x80", t[0], t[1], t[2], b[0], b[1], b[2]);
+            } else {
+                printf("\x1b[0;38;2;%u;%u;%um\xe2\x96\x80", t[0], t[1], t[2]);
+            }
+        }
+        fputs("\x1b[0m\n", stdout);
+    }
+    printf("* file %d (%dx%d)\n", num, th.src_w, th.src_h);
+    fflush(stdout);
+    crypto_wipe(th.rgb, (size_t)th.w * (size_t)th.h * 3);
+    image_thumb_free(&th);
+}
+
 static void plain_print(void *ui, const char *hhmm, const char *text, const uint8_t *rgb,
                         unsigned flags, int color_len, int file) {
     (void)ui;
@@ -3077,6 +3245,8 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
     o.notify_mode = g_app.notify_mode;
     o.notify_preview = g_app.notify_preview;
     o.verify_optional = g_app.verify_optional;
+    o.file_cap = g_app.file_cap;
+    o.fast_files = g_app.fast_files;
     o.has_color = 1;
     memcpy(o.color, g_app.color, 3);
     o.identity_source = g_app.identity_source;
@@ -3085,6 +3255,7 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
 
     static chat_t c;
     chat_init(&c, &o, plain_print, plain_notify, NULL);
+    c.file_view = plain_file_view;
     g_plain_engine = &c;
     crypto_wipe(&o, sizeof o);
     if (!chat_started(&c)) {
@@ -3114,7 +3285,9 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
         for (int i = 0; i < ns; i++) if (ready[i]) chat_on_socket_readable(&c, socks[i], now);
         char line[MAX_TEXT + 1];
         int rc = stdin_reader_poll(reader, line, sizeof line);
+        int show_anyway, show_n = rc == 1 && strncmp(line, ":show ", 6) == 0 ? file_arg(line + 6, &show_anyway) : 0;
         if (rc == 1 && (strcmp(line, ":changelog") == 0 || strcmp(line, ":news") == 0)) { fputs(CHANGELOG_TEXT, stdout); fflush(stdout); }
+        else if (show_n) chat_file_fetch(&c, show_n, 1, show_anyway);
         else if (rc == 1) alive = chat_submit_line(&c, line, now);
         else if (rc == -1) alive = 0;
         tor_link_ensure(now);
@@ -3174,6 +3347,15 @@ int main(int argc, char **argv) {
             g_app.route.nostr = NOSTR_OFF;
         } else if (strcmp(key, "nostr-always") == 0) {
             g_app.route.nostr = NOSTR_ALWAYS;
+        } else if (strcmp(key, "file-limit") == 0 && i + 1 < argc) {
+            uint64_t v;
+            if (file_parse_size(argv[++i], &v) != 0 || v == 0 || v > FILE_HARD_MAX) {
+                fprintf(stderr, "chat: --file-limit takes a size from 1 byte to 1 GB (8M, 500K, 1G)\n");
+                return 1;
+            }
+            g_app.file_cap = v;
+        } else if (strcmp(key, "fast-files") == 0) {
+            g_app.fast_files = 1;
         } else if (strcmp(key, "verify-optional") == 0) {
             g_app.verify_optional = 1;
         } else if (strcmp(key, "routing") == 0 && i + 1 < argc) {

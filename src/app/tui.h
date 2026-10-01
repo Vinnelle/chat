@@ -16,7 +16,7 @@ typedef struct {
     int has_color;
     int color_len;
     int mention;
-
+    int file;          // the file this line offers (a picture can be drawn under it), or 0
 } tui_line_t;
 
 typedef struct {
@@ -29,6 +29,16 @@ void tui_scrollback_push(tui_scrollback_t *sb, const char *hhmm, const char *tex
                          int mention, int color_len);
 
 void tui_scrollback_clear(tui_scrollback_t *sb);
+// Marks the newest line as the one offering file.
+void tui_scrollback_mark_file(tui_scrollback_t *sb, int file);
+
+// A picture shown under the line that offers it: w by h pixels, rgb, drawn two pixels to a row.
+#define TUI_IMAGE_MAX_W 64
+#define TUI_IMAGE_MAX_H 48
+typedef struct {
+    int w, h;
+    const uint8_t *rgb;
+} tui_image_t;
 
 #define TUI_ROW_LABEL_MAX 40
 
@@ -193,6 +203,9 @@ typedef struct {
     const char *clock;
     const char *empty;
     int scroll;
+    // The picture shown under the line offering file, or NULL while it's hidden.
+    const tui_image_t *(*image)(const void *ctx, int file);
+    const void *image_ctx;
 } tui_view_t;
 
 // The bottom row and the input. The chip says where you are, then your identity and nick, then

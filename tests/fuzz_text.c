@@ -75,6 +75,14 @@ static void fuzz_editor(const uint8_t *data, size_t size) {
     }
 }
 
+// A picture of whatever size the input says, drawn under the lines that offer file 1.
+static uint8_t g_pic_rgb[TUI_IMAGE_MAX_W * TUI_IMAGE_MAX_H * 3];
+static tui_image_t g_pic;
+static const tui_image_t *fuzz_image(const void *ctx, int file) {
+    (void)ctx;
+    return file == 1 && g_pic.w > 0 ? &g_pic : NULL;
+}
+
 // The frames go to /dev/null; this is for the sanitizers' benefit.
 static void fuzz_render(const char *s, const uint8_t *data, size_t size) {
     static tui_scrollback_t sb, console;
@@ -83,6 +91,11 @@ static void fuzz_render(const char *s, const uint8_t *data, size_t size) {
     int flags = size > 4 ? data[4] : 0;
     tui_scrollback_push(&sb, "12:34", s, (flags & 1) ? rgb : NULL, (flags & 2) != 0, (int)(strlen(s) / 3));
     tui_scrollback_push(&console, "12:34", s, NULL, 0, 0);
+    g_pic.w = size > 6 ? 1 + data[6] % TUI_IMAGE_MAX_W : 0;
+    g_pic.h = size > 7 ? 1 + data[7] % TUI_IMAGE_MAX_H : 0;
+    for (size_t i = 0; i < sizeof g_pic_rgb; i++) g_pic_rgb[i] = (uint8_t)(i * 31 + (size ? data[i % size] : 0));
+    g_pic.rgb = g_pic_rgb;
+    if (flags & 4) tui_scrollback_mark_file(&sb, 1);
     // A name ending in ':' where the colour ends, as chat lines have it.
     char line[TUI_LINE_MAX];
     snprintf(line, sizeof line, "%.*s: %s", (int)(strlen(s) % 40), s, s);
@@ -107,7 +120,7 @@ static void fuzz_render(const char *s, const uint8_t *data, size_t size) {
     in.suggest = fuzz_suggest;
     if (flags & 128) { in.mode = TUI_IMODE_COMMAND; copy_str(in.cmd, s, sizeof in.cmd); in.cmd_len = (int)strlen(in.cmd); }
     tui_view_t view = { (flags & 4) != 0, (flags & 8) != 0, (flags & 16) != 0, (flags & 2) ? s : NULL, s,
-                        (tui_session_state_t)(flags % 3), s, (flags & 4) ? s : NULL, flags % 5 };
+                        (tui_session_state_t)(flags % 3), s, (flags & 4) ? s : NULL, flags % 5, fuzz_image, NULL };
     const tui_kv_t net[1] = { { s, s } };
     tui_bar_t bar = { .chip = s, .tone = (tui_tone_t)(flags % 5), .prompt = (flags & 32) ? s : NULL, .input = &in,
                       .mask_input = (flags & 128) != 0, .message = (flags & 2) ? s : NULL, .hint = s,
