@@ -173,6 +173,7 @@ add_executable(chat
     src/common/util.c
     src/common/bencode.c
     src/common/json.c
+    src/common/image.c
     src/platform/${CHAT_OS}/net.c
     src/platform/${CHAT_OS}/platform.c
 )
@@ -221,7 +222,7 @@ if(WIN32)
     target_link_options(chat PRIVATE -static)
 else()
     find_package(Threads REQUIRED)
-    target_link_libraries(chat PRIVATE Threads::Threads)
+    target_link_libraries(chat PRIVATE Threads::Threads m)
 endif()
 
 if(MSVC)
