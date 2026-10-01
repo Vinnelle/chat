@@ -70,6 +70,13 @@
 - A handshake takes a few seconds, and a re-handshake up to half a minute, going a slot at a
   time.
 
+### Fixed
+- `--nonostr` and `--nostr-always` were undone by the routing choice: `--simple` without a
+  terminal, or `--routing dht+nostr` given after them, went back to the relay fallback, so
+  `--nonostr` still connected to the Nostr relays. They now hold whatever the routing, and
+  `--simple --nonostr` without a terminal routes DHT only. The routing line says when the
+  relays are always on.
+
 ## 0.1.10
 
 ### Security
