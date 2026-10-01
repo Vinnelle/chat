@@ -63,7 +63,7 @@ set(SODIUM_STATIC_LIB ${SODIUM_PREFIX}/install/lib/libsodium.a)
 set(OQS_VERSION 0.16.0)
 set(OQS_PREFIX ${CMAKE_BINARY_DIR}/liboqs-ext)
 # A native build without OQS_DIST_BUILD takes the build machine's CPU features for granted, and a
-# copy on another machine (just test-build) dies on a CPU without them: it picks AVX2 code at run
+# copy on another machine (just build test) dies on a CPU without them: it picks AVX2 code at run
 # time instead. A cross build (the releases, through zig) has plain C only, since zig's assembler
 # leaves the AVX2 assembly empty; a handshake's ML-KEM takes well under a millisecond either way.
 if(CMAKE_CROSSCOMPILING)

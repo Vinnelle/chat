@@ -181,6 +181,7 @@ typedef enum {
     MODE_SETTINGS_EDIT,
     MODE_SIGN_CHOICE,
     MODE_SIGN_BROWSE,
+    MODE_SEND_BROWSE,
     MODE_SIGN_PASTE,
     MODE_SIGN_PASSWORD,
     MODE_CHAT,
@@ -250,6 +251,7 @@ typedef struct {
     tui_input_t input;
     tui_input_t saved_input;
     browser_t browser;
+    char send_dir[900];   // the folder :send's browser last offered a file from
     char paste_buf[16384];
     size_t paste_len;
     char paste_status[80];
@@ -1867,6 +1869,49 @@ static void browser_key(const tui_key_t *key) {
     g_app.dirty = 1;
 }
 
+// :send without a path: the file is picked here, starting where the last one came from.
+static void begin_send_browse(void) {
+    if (g_app.mode != MODE_CHAT) return;
+    const char *home = platform_home_dir();
+    if ((!g_app.send_dir[0] || browser_load(&g_app.browser, g_app.send_dir) != 0)
+        && (!home || browser_load(&g_app.browser, home) != 0))
+        browser_load(&g_app.browser, "/");
+    g_app.mode = MODE_SEND_BROWSE;
+    g_app.dirty = 1;
+}
+
+static void send_browser_key(const tui_key_t *key) {
+    browser_t *b = &g_app.browser;
+    list_key_t k = list_key(key);
+    switch (k) {
+        case LIST_LEFT: browser_up(); break;
+        case LIST_CHOOSE:
+        case LIST_RIGHT: {
+            if (b->n_items == 0) break;
+            const dir_entry_t *sel = &b->items[b->selected];
+            char full[1200]; browser_entry_path(b, sel, full, sizeof full);
+            if (strcmp(sel->name, "../") == 0) {
+                browser_up();
+            } else if (sel->is_dir) {
+                browser_load(b, full);
+            } else if (k == LIST_CHOOSE) {
+                g_app.mode = MODE_CHAT;
+                if (!g_app.selected || g_app.selected->initialising) {
+                    note("no session to send %.80s to", sel->name);
+                    break;
+                }
+                copy_str(g_app.send_dir, b->path, sizeof g_app.send_dir);
+                chat_send_file(&g_app.selected->engine, full);
+            }
+            break;
+        }
+        case LIST_BACK:
+        case LIST_CLOSE: g_app.mode = MODE_CHAT; break;
+        default: list_move(k, &b->selected, b->n_items); break;
+    }
+    g_app.dirty = 1;
+}
+
 // Everything but Esc is the paste arriving, one key at a time.
 static void paste_key(const tui_key_t *key) {
     if (key->type == TUI_KEY_ESCAPE) {
@@ -2038,6 +2083,22 @@ static void render_browser(int rows_n, int cols_n, const char *clock, const tui_
         .nav = nav, .n_nav = settings_sections(nav, 8), .nav_sel = settings_section_index(SET_SIGN),
         .rows = rows, .n_rows = b->n_items, .selected = b->selected,
         .help = SIGN_PICKS[g_app.load_kind == IDENT_AGE ? PICK_AGE_FILE : PICK_PGP_FILE].help,
+    };
+    tui_render_page(rows_n, cols_n, &page, bar, g_app.color_enabled);
+}
+
+static void render_send_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar) {
+    static tui_row_t rows[MAX_DIR_ITEMS];
+    const browser_t *b = &g_app.browser;
+    for (int i = 0; i < b->n_items; i++)
+        rows[i] = (tui_row_t){ NULL, b->items[i].name, b->items[i].is_dir ? "" : NULL, TUI_V_LINK, NULL };
+    char title[1000];
+    snprintf(title, sizeof title, "Send a file" CRUMB "%s", b->path);
+    tui_page_t page = {
+        .title = title,
+        .clock = clock,
+        .rows = rows, .n_rows = b->n_items, .selected = b->selected,
+        .help = "offered to everyone here; nobody gets it unless they fetch it",
     };
     tui_render_page(rows_n, cols_n, &page, bar, g_app.color_enabled);
 }
@@ -2599,6 +2660,7 @@ static void run_command(const char *line) {
         note(":%s needs a session - Ctrl+N (or :new) creates one, Ctrl+J (or :join) joins one", word);
         return;
     }
+    if (strcmp(word, "send") == 0 && !arg[strspn(arg, " ")]) { begin_send_browse(); return; }
     if (chat_run_command(&g_app.selected->engine, line) == CMD_QUIT) close_session(g_app.selected);
 }
 
@@ -2722,6 +2784,7 @@ static void handle_key(const tui_key_t *key) {
         case MODE_SETTINGS:        settings_key(key); return;
         case MODE_SIGN_CHOICE:     sign_picker_key(key); return;
         case MODE_SIGN_BROWSE: browser_key(key); return;
+        case MODE_SEND_BROWSE: send_browser_key(key); return;
         case MODE_SIGN_PASTE:  paste_key(key); return;
         case MODE_SIGN_PASSWORD:
             if (key->type == TUI_KEY_ESCAPE) end_sign_password();
@@ -2895,6 +2958,10 @@ static tui_bar_t current_bar(void) {
         case MODE_SIGN_BROWSE:
             b.hint = "enter open \xc2\xb7 h up a folder \xc2\xb7 j/k move \xc2\xb7 esc back \xc2\xb7 q close";
             break;
+        case MODE_SEND_BROWSE:
+            b.chip = "SEND";
+            b.hint = "enter send \xc2\xb7 h up a folder \xc2\xb7 j/k move \xc2\xb7 esc close";
+            break;
         case MODE_SIGN_PASTE:      b.hint = "paste the key \xc2\xb7 esc back"; break;
         case MODE_SIGN_PASSWORD:
             b.input = &g_app.input;
@@ -3011,6 +3078,7 @@ static void render(void) {
         case MODE_SIGN_PASTE:
         case MODE_SIGN_PASSWORD:   render_sign_picker(rows_n, cols_n, hhmm, &bar); return;
         case MODE_SIGN_BROWSE:     render_browser(rows_n, cols_n, hhmm, &bar); return;
+        case MODE_SEND_BROWSE:     render_send_browser(rows_n, cols_n, hhmm, &bar); return;
         default: break;
     }
 

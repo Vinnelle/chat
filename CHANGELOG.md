@@ -103,7 +103,7 @@
 - The DHT's bootstrap lookup, which runs on a thread, could write into a session after it
   closed.
 - A key file, or a Tor cookie file, that was a FIFO or a device hung chat.
-- A native build (`just build`, `just test-build`) used the build machine's CPU features in
+- A native build (`just build`, `just build test`) used the build machine's CPU features in
   liboqs unconditionally, so a copy could crash on a CPU without them. It picks AVX2 code at run
   time now.
 - `--simple` writing into a pipe that closes no longer kills chat before its sessions leave,
@@ -134,6 +134,7 @@
 - `Tab` / `Shift+Tab` jump between sections on the settings and help pages.
 - `Ctrl+U` in INSERT deletes everything before the cursor.
 - `NO_COLOR` keeps the UI to bold, faint and reverse.
+- `:send` without a path opens a file browser to pick the file to offer.
 - **Files and pictures**: `:send PATH` offers a file to the session; nothing moves until someone
   fetches it with `:download N` (saved in `~/Downloads`), or, for a PNG or JPEG, `:show N`,
   which draws it in the chat under the line that offered it (`:hide N` tucks it away). `:files`
@@ -149,7 +150,7 @@
   lists, numbered items, quotes, code blocks and rules. In `--simple` it prints it.
 
 ### Changed
-- `just test-build` names each binary after its build id, as `chat-<build id>-<system>-<arch>`:
+- `just build test` names each binary after its build id, as `chat-<build id>-<system>-<arch>`:
   the source it was built from (`git describe`) and when, in UTC, as `chat --version` shows.
 - The full-screen UI is redrawn as one rounded frame split by lines, each part titled in its
   border: a sidebar with the sessions, their peers and how the selected one reaches them, the
@@ -177,6 +178,9 @@
   `dht` on the settings page. `--routing direct+nostr` and `--routing direct` still work.
 - A handshake takes a few seconds, and a re-handshake up to half a minute, going a slot at a
   time.
+- `just build` takes what to build: `just build linux` (was `just build-static`),
+  `just build windows` or `win` (was `build-win`), `just build all` (was `all`) and
+  `just build test [all|linux|windows]` (was `test-build`). Build directories keep their names.
 
 ## 0.3.1
 

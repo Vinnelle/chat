@@ -530,6 +530,8 @@ int chat_submit_line(chat_t *c, const char *line, double now);
 // Runs "name args" (no leading ':') from CHAT_COMMANDS against this session.
 cmd_result_t chat_run_command(chat_t *c, const char *line);
 void chat_send_text(chat_t *c, const char *text, double now);
+// Offers the file at path (as given: no ~ or quotes undone) to everyone here, as :send does.
+void chat_send_file(chat_t *c, const char *path);
 
 extern const command_t CHAT_COMMANDS[];
 
