@@ -35,7 +35,7 @@ test *flags:
     cmake --build build-test -j {{num_cpus()}} --target engine_test
     ./build-test/tests/engine_test "$@"
 
-# Fuzz one target (bencode, json, pgp, text or engine) for a number of seconds (needs clang)
+# Fuzz one target (bencode, json, pgp, text, engine or image) for a number of seconds (needs clang)
 fuzz target="engine" seconds="300":
     cmake -B build-fuzz -DCHAT_FUZZ=ON -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Debug
     cmake --build build-fuzz -j {{num_cpus()}} --target fuzz_{{target}}

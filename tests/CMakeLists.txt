@@ -21,6 +21,7 @@ set(CHAT_CORE_SOURCES
     ${PROJECT_SOURCE_DIR}/src/common/util.c
     ${PROJECT_SOURCE_DIR}/src/common/bencode.c
     ${PROJECT_SOURCE_DIR}/src/common/json.c
+    ${PROJECT_SOURCE_DIR}/src/common/image.c
     ${PROJECT_SOURCE_DIR}/src/platform/${CHAT_OS}/platform.c
     ${CMAKE_CURRENT_SOURCE_DIR}/fake_net.c
 )
@@ -33,7 +34,7 @@ function(chat_test_executable name)
                                ${PROJECT_SOURCE_DIR}/src/platform/${CHAT_OS} ${SODIUM_INCLUDE_DIRS} ${OQS_INCLUDE_DIRS}
                                ${MBEDTLS_INCLUDE_DIRS} ${SECP256K1_INCLUDE_DIRS})
     target_link_libraries(${name} PRIVATE ${SODIUM_STATIC_LIB} ${OQS_STATIC_LIB} ${MBEDTLS_STATIC_LIBS}
-                          ${SECP256K1_STATIC_LIB} Threads::Threads)
+                          ${SECP256K1_STATIC_LIB} Threads::Threads m)
     target_compile_options(${name} PRIVATE -Wall -Wextra)
 endfunction()
 
@@ -41,8 +42,9 @@ chat_test_executable(engine_test engine_test.c)
 add_test(NAME engine COMMAND engine_test)
 
 if(CHAT_FUZZ)
-    foreach(target fuzz_bencode fuzz_pgp fuzz_text fuzz_engine fuzz_json)
+    foreach(target fuzz_bencode fuzz_pgp fuzz_text fuzz_engine fuzz_json fuzz_image)
         chat_test_executable(${target} ${target}.c)
+        target_compile_definitions(${target} PRIVATE FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION)
         target_compile_options(${target} PRIVATE -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -g)
         target_link_options(${target} PRIVATE -fsanitize=fuzzer,address,undefined)
     endforeach()
