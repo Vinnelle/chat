@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0-beta.1
 
 ### Security
 - Verify codes and identity fingerprints are 128 bits, shown in groups of four hex digits. A
