@@ -10,7 +10,7 @@ touches disk unless you ask.
 
 > Eventually, I will rewrite this myself, when I have more time.
 
-> A big goal for this was to minimise the deoendancy requitements as much as possible. with this in mind, the src for this is quite heavy, since I had to write much of the tooling myself.
+> A big goal for this was to minimise the dependency requitements as much as possible. with this in mind, the src for this is quite heavy, since I had to write much of the tooling myself.
 
 > Also, I am not Terry Davis (god rest his soul), and much of this may not be that good, I have optimised, and improved where I can. Pretty much all the code (except for the TUI, because I suck at frontend) is hand written. I have used claude for documentation, review, (some) optimisation, sanity checking, and autocompletions where the suggestions were acceptable. Other than that, this is artisanal, organic, vegan, gluten free, etc. C code.
 
