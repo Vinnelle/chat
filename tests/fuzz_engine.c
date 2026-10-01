@@ -18,8 +18,8 @@
 static chat_t A, B, A0, B0;
 static double t0;
 
-static void quiet(void *ui, const char *hhmm, const char *text, const uint8_t *rgb, unsigned flags, int color_len) {
-    (void)ui; (void)hhmm; (void)text; (void)rgb; (void)flags; (void)color_len;
+static void quiet(void *ui, const char *hhmm, const char *text, const uint8_t *rgb, unsigned flags, int color_len, int file) {
+    (void)ui; (void)hhmm; (void)text; (void)rgb; (void)flags; (void)color_len; (void)file;
 }
 
 static void start(chat_t *c, const char *nick, uint16_t port, uint16_t peer_port, int created) {

@@ -10,6 +10,7 @@
 #include "transport/nostr.h"
 #include "transport/tor.h"
 #include "transport/portmap.h"
+#include "core/files.h"
 #include <stdint.h>
 #include <stdio.h>
 
@@ -107,6 +108,27 @@
 #define NOSTR_BEACON_CONNECTED 90.0
 // A joiner in Tor mode that hasn't reached anyone by then publishes the room's onion itself.
 #define TOR_HOST_AFTER 120.0
+
+// ---- files ----
+//
+// A file is offered to the connected peers ("fo"); nothing more moves until someone chooses to
+// fetch it. Then they ask for a window of chunks at a time ("fg") and the sender sends them in
+// the slots that would otherwise carry a nop ("fd"), so a transfer looks like any other moment on
+// the wire. With fast transfers on, a peer's slots come much closer together while a transfer
+// runs (never through the relays): quicker, but visible as a burst. Each chunk lands in its place
+// in the window; a whole window is written in order and hashed, and the file is kept only if the
+// hash is the one offered.
+#define FILE_HARD_MAX (1024ull * 1024 * 1024)
+#define FILE_CAP_DEFAULT (8ull * 1024 * 1024)
+#define FILE_OFFERS_MAX 64
+#define FILE_ID_LEN 8
+// A chunk's bytes, base64'd into one record: "fd" FID OFFSET DATA.
+#define FILE_CHUNK 690
+#define FILE_WINDOW 64
+#define FILE_FAST_INTERVAL 0.005
+// A file fetched to be shown rather than saved is held in memory: at most this big.
+#define FILE_VIEW_MAX (64u * 1024 * 1024)
+#define FILE_RETRIES 8
 
 typedef enum { ROUTE_DHT = 0, ROUTE_TOR = 1 } route_mode_t;
 
@@ -261,6 +283,11 @@ typedef struct {
 
     ratchet_t old_send, old_recv;
     double old_until;
+
+    // Chunks of one of our files this peer asked for, sent in slots that would carry a nop.
+    int serving;
+    uint8_t serve_fid[FILE_ID_LEN];
+    uint64_t serve_next, serve_end;
 } peer_t;
 
 // A record waiting for its peer's next slot. old_chain: sealed on the chain the peer still reads
@@ -277,6 +304,35 @@ typedef struct {
 // A room frame for a connected peer (a re-handshake's hi, ck, hi2 or kx), going out in its slots:
 // over UDP a piece a slot, over the relays or Tor whole.
 #define ROOMQ_MAX 24
+typedef enum { DL_NONE = 0, DL_ACTIVE, DL_DONE, DL_FAILED } dl_state_t;
+
+typedef struct {
+    int used;
+    int num;                     // what it's called in commands: :download NUM
+    int mine;
+    uint8_t owner[ID_LEN];       // who offered it
+    uint8_t fid[FILE_ID_LEN];
+    uint64_t size;
+    uint8_t sha[32];
+    char name[FILE_NAME_MAX + 1];
+    int image;                   // offered as a PNG or JPEG (only decoding it says it is one)
+    FILE *fp;                    // ours: open for its chunks, so the file offered is the one sent
+
+    dl_state_t dl;
+    int view;                    // fetched to show (into mem), not to save (to out)
+    FILE *out;
+    char part_path[640];
+    uint8_t *mem;
+    uint64_t done;               // bytes in order, written and hashed
+    sha256_ctx_t hash;
+    uint64_t win_off;            // the window asked for: win_n chunks from win_off
+    int win_n;
+    uint64_t win_got;            // which of them have come
+    uint8_t *win;
+    double retry_at;
+    int retries;
+} file_entry_t;
+
 typedef struct {
     int used;
     int peer_slot;
@@ -310,11 +366,15 @@ typedef struct {
     double next_retry;
 } pending_msg_t;
 
+// file: the number of the file a line offers (an image can be shown under it), else 0.
 typedef void (*chat_print_fn)(void *ui, const char *hhmm, const char *text, const uint8_t *rgb,
-                              unsigned flags, int color_len);
+                              unsigned flags, int color_len, int file);
 
 #define LINE_CHAT 1u
 #define LINE_MENTION 2u
+
+// A file fetched to be shown has come, whole and as offered: its bytes, for the moment of the call.
+typedef void (*chat_file_fn)(void *ui, int num, const char *name, const uint8_t *data, size_t len);
 
 // A message worth a notification. nick and text are NULL unless the session's notify_preview
 // lets the notification show them.
@@ -416,6 +476,12 @@ typedef struct {
     reasm_t reasm[REASM_SLOTS];
     net_stats_t st;
 
+    file_entry_t files[FILE_OFFERS_MAX];
+    int file_seq;
+    uint64_t file_cap;      // offers bigger than this need "anyway" to fetch
+    int fast_files;         // our slots speed up while a transfer runs
+    chat_file_fn file_view;
+
     chat_print_fn print;
     chat_notify_fn notify;
     void *ui;
@@ -443,6 +509,9 @@ typedef struct {
     int has_color;
     uint8_t color[3];
 
+    uint64_t file_cap;      // 0: FILE_CAP_DEFAULT
+    int fast_files;
+
     // What peers are told about this build, and the release key (minisign, base64) their builds'
     // lists are checked with; "" leaves them unchecked.
     chat_build_t build;
@@ -465,6 +534,12 @@ void chat_send_text(chat_t *c, const char *text, double now);
 extern const command_t CHAT_COMMANDS[];
 
 void chat_set_nick(chat_t *c, const char *nick);
+
+// Files. chat_file_fetch starts fetching file num: to show (view, handed to c->file_view once it's
+// whole) or to save in Downloads. anyway: past the size limit. 0, or -1 having said why.
+int chat_file_fetch(chat_t *c, int num, int view, int anyway);
+const file_entry_t *chat_file(const chat_t *c, int num);
+void chat_set_file_options(chat_t *c, uint64_t cap, int fast);
 void chat_set_colour(chat_t *c, const uint8_t rgb[3]);
 
 // Cleans a nick and drops the characters the UI puts around nicks ("(verified)", "#id", "name:"),

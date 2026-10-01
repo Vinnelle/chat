@@ -70,6 +70,16 @@ long platform_read_file(const char *utf8_path, void *buf, size_t cap);
 
 int platform_remove(const char *utf8_path);
 
+// For sending a file: opened to read only if it's a regular file (never a FIFO, device or folder,
+// which could hang chat or never end), its size in *size. NULL if not.
+FILE *platform_open_regular(const char *utf8_path, uint64_t *size);
+// The user's Downloads folder, made (only this user can open it) if there's none yet.
+int platform_downloads_dir(char *out, size_t cap);
+// A new file only this user can read, and only if nothing (not even a link) has the name already.
+FILE *platform_create_new(const char *utf8_path);
+// Moves a finished download to its name, only if nothing has that name: never replaces a file.
+int platform_move_new(const char *from, const char *to);
+
 int platform_exe_path(char *out, size_t cap);
 
 int platform_run_quiet(const char *const argv[]);

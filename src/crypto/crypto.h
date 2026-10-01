@@ -100,6 +100,11 @@ void derive_tor_room_key(const uint8_t master[MASTER_LEN], int slot, uint8_t exp
 
 int hmac_sha256(const uint8_t *key, size_t keylen, const uint8_t *data, size_t len, uint8_t out[32]);
 void sha256_hash(const void *data, size_t len, uint8_t out[32]);
+// SHA-256 a piece at a time (libsodium's state, kept opaque here).
+typedef struct { _Alignas(16) uint8_t state[128]; } sha256_ctx_t;
+void sha256_init(sha256_ctx_t *h);
+void sha256_update(sha256_ctx_t *h, const void *data, size_t len);
+void sha256_final(sha256_ctx_t *h, uint8_t out[32]);
 
 int ecdh_shared(const keypair_t *mine, const uint8_t their_pub[PUB_LEN], uint8_t shared[32]);
 

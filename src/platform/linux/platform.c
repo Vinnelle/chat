@@ -3,6 +3,8 @@
 #define _POSIX_C_SOURCE 200809L
 // realpath, mkdtemp: X/Open, which musl only declares when asked for.
 #define _XOPEN_SOURCE 700
+// syscall (renameat2), which glibc and musl declare only beyond POSIX.
+#define _DEFAULT_SOURCE
 
 #include "platform/platform.h"
 #include "common/util.h"
@@ -27,6 +29,7 @@
 #include <sys/file.h>
 #ifdef __linux__
 #include <sys/prctl.h>
+#include <sys/syscall.h>
 #endif
 
 void platform_harden_process(void) {
@@ -395,6 +398,48 @@ long platform_read_file(const char *utf8_path, void *buf, size_t cap) {
     }
     close(fd);
     return got;
+}
+
+FILE *platform_open_regular(const char *utf8_path, uint64_t *size) {
+    int fd = open(utf8_path, O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC);
+    if (fd < 0) return NULL;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0) { close(fd); return NULL; }
+    int fl = fcntl(fd, F_GETFL);
+    if (fl >= 0) fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
+    FILE *f = fdopen(fd, "rb");
+    if (!f) { close(fd); return NULL; }
+    *size = (uint64_t)st.st_size;
+    return f;
+}
+
+int platform_downloads_dir(char *out, size_t cap) {
+    const char *home = getenv("HOME");
+    if (!home || home[0] != '/') return -1;
+    int n = snprintf(out, cap, "%s/Downloads", home);
+    if (n <= 0 || (size_t)n >= cap) return -1;
+    if (mkdir(out, 0700) != 0 && errno != EEXIST) return -1;
+    struct stat st;
+    return stat(out, &st) == 0 && S_ISDIR(st.st_mode) ? 0 : -1;
+}
+
+FILE *platform_create_new(const char *utf8_path) {
+    int fd = open(utf8_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_NOCTTY | O_CLOEXEC, 0600);
+    if (fd < 0) return NULL;
+    FILE *f = fdopen(fd, "wb");
+    if (!f) close(fd);
+    return f;
+}
+
+int platform_move_new(const char *from, const char *to) {
+    // A hard link fails if the name is taken, so nothing is ever replaced.
+    if (link(from, to) == 0) { unlink(from); return 0; }
+    if (errno == EEXIST) return -1;
+#ifdef SYS_renameat2
+    // A filesystem without hard links (FAT, some FUSE ones): a rename that refuses to replace.
+    if (syscall(SYS_renameat2, AT_FDCWD, from, AT_FDCWD, to, 1u /* RENAME_NOREPLACE */) == 0) return 0;
+#endif
+    return -1;
 }
 
 double now_seconds(void) {

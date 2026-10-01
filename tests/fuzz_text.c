@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
-// Text that reaches the terminal (message and nick cleaning, column widths) and the input line
-// editor fed with arbitrary key bytes.
+// Text that reaches the terminal (message and nick cleaning, column widths), the input line
+// editor fed with arbitrary key bytes, and file names from peers on their way to the disk.
 #define _POSIX_C_SOURCE 200809L
 #include "core/chat.h"
 #include "app/tui.h"
 #include "common/util.h"
+#include "core/files.h"
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
@@ -165,6 +166,16 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     base64_decode_strict(s, size, bin, sizeof bin);
     hex_decode(s, 32, bin);
     has_control_chars(s);
+
+    // A peer's file name: never a path, a hidden file, a device, or anything the terminal acts on.
+    char fname[FILE_NAME_MAX + 1];
+    file_clean_name(s, fname);
+    size_t fl = strlen(fname);
+    check(fl >= 1 && fl <= FILE_NAME_MAX && fname[0] != '.' && fname[0] != ' ' && fname[fl - 1] != '.' && fname[fl - 1] != ' ');
+    check(!strpbrk(fname, "/\\:*?\"<>|"));
+    check_clean(fname);
+    uint64_t sz;
+    file_parse_size(s, &sz);
 
     fuzz_editor(data, size);
     fuzz_render(s, data, size);
