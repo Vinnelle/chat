@@ -6,6 +6,7 @@
 #include "common/util.h"
 #include <limits.h>
 #include <string.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <stdarg.h>
 
@@ -1897,44 +1898,172 @@ void tui_render_page(int rows, int cols, const tui_page_t *page, const tui_bar_t
 
 // ---- a page of text ----
 
-// Calls row(ctx, v, style, indent, text, len) for each row the paragraphs wrap to at width w, v
-// counting from 0; returns how many rows there are.
-typedef void (*text_row_fn)(void *ctx, int v, style_t s, int indent, const char *text, size_t len);
+// Inline Markdown, as plain text and a style for each byte of it.
+enum { A_BOLD = 1, A_ITALIC = 2, A_CODE = 4, A_LINK = 8, A_FAINT = 16 };
+
+static int md_flank_open(const char *s, size_t i, size_t n) { return i + 1 < n && s[i + 1] != ' '; }
+
+// The closing mark for the one at s[i] (len bytes of ch), on the same paragraph, or 0.
+static size_t md_close(const char *s, size_t i, size_t n, char ch, size_t len) {
+    for (size_t k = i + len + 1; k + len <= n; k++) {
+        if (s[k] == '\\') { k++; continue; }
+        if (s[k] == '`') { while (++k < n && s[k] != '`') {} continue; }
+        if (s[k] != ch || (len == 2 && s[k + 1] != ch)) continue;
+        if (s[k - 1] == ' ') continue;
+        // _ only closes at the end of a word: snake_case stays as it is.
+        if (ch == '_' && k + len < n && (isalnum((unsigned char)s[k + len]))) continue;
+        return k;
+    }
+    return 0;
+}
+
+static size_t md_inline(const char *s, char *out, uint8_t *attr, size_t cap) {
+    size_t n = strlen(s), o = 0;
+    uint8_t cur = 0;
+#define PUT(c, a) do { if (o + 1 < cap) { out[o] = (c); attr[o] = (a); o++; } } while (0)
+    for (size_t i = 0; i < n; i++) {
+        char ch = s[i];
+        if (ch == '\\' && i + 1 < n && strchr("\\`*_[]()#-.!>", s[i + 1])) { PUT(s[++i], cur); continue; }
+        if (ch == '`') {
+            size_t e = i + 1;
+            while (e < n && s[e] != '`') e++;
+            if (e < n) { for (size_t k = i + 1; k < e; k++) PUT(s[k], (uint8_t)(cur | A_CODE)); i = e; continue; }
+        }
+        if (ch == '*' && i + 1 < n && s[i + 1] == '*' && ((cur & A_BOLD)
+                ? (i > 0 && s[i - 1] != ' ')
+                : (md_flank_open(s, i + 1, n) && md_close(s, i, n, '*', 2)))) {
+            cur ^= A_BOLD;
+            i++;
+            continue;
+        }
+        if ((ch == '*' || ch == '_') && ((cur & A_ITALIC)
+                ? (i > 0 && s[i - 1] != ' ')
+                : (md_flank_open(s, i, n) && (ch == '*' || i == 0 || !isalnum((unsigned char)s[i - 1])) && md_close(s, i, n, ch, 1)))) {
+            cur ^= A_ITALIC;
+            continue;
+        }
+        if (ch == '[') {
+            const char *close = strchr(s + i + 1, ']');
+            if (close && close[1] == '(' && strchr(close + 2, ')')) {
+                const char *url = close + 2, *ue = strchr(url, ')');
+                for (const char *k = s + i + 1; k < close; k++) PUT(*k, (uint8_t)(cur | A_LINK));
+                // The address too, faint: there's nothing to click.
+                PUT(' ', cur); PUT('(', (uint8_t)(cur | A_FAINT));
+                for (const char *k = url; k < ue; k++) PUT(*k, (uint8_t)(cur | A_FAINT));
+                PUT(')', (uint8_t)(cur | A_FAINT));
+                i = (size_t)(ue - s);
+                continue;
+            }
+        }
+        PUT(ch, cur);
+    }
+#undef PUT
+    out[o] = '\0';
+    return o;
+}
+
+// Calls row(ctx, v, para, plain, attr, off, len, first) for each row the paragraphs wrap to at
+// width w, v counting from 0; returns how many rows there are.
+typedef void (*text_row_fn)(void *ctx, int v, const tui_para_t *pa, const char *plain, const uint8_t *attr,
+                            size_t off, size_t len, int first);
+
+// Columns before a paragraph's text: its list depth, and the bullet, number or bar.
+static int para_hang(const tui_para_t *pa) {
+    int lvl = pa->level > 6 ? 6 : pa->level;
+    switch (pa->kind) {
+        case TUI_P_BULLET:   return 2 + 2 * lvl;
+        case TUI_P_NUMBERED: return (int)strlen(pa->marker) + 1 + 2 * lvl;
+        case TUI_P_QUOTE:    return 2;
+        case TUI_P_CODE:     return 2;
+        default:             return 0;
+    }
+}
 
 static int layout_text(const tui_para_t *paras, int n, int w, text_row_fn row, void *ctx) {
+    static char plain[8192];
+    static uint8_t attr[8192];
     int v = 0;
     for (int i = 0; i < n; i++) {
         const tui_para_t *pa = &paras[i];
-        if (pa->kind == TUI_P_BLANK || !pa->text || !pa->text[0]) { if (row) row(ctx, v, S_PLAIN, 0, "", 0); v++; continue; }
-        style_t st = pa->kind == TUI_P_HEADING ? S_ACCENT_BOLD : pa->kind == TUI_P_SUBHEADING ? S_BOLD : S_PLAIN;
-        int hang = pa->kind == TUI_P_BULLET ? 2 : 0;
+        if (pa->kind == TUI_P_BLANK || pa->kind == TUI_P_RULE || !pa->text) {
+            if (row) row(ctx, v, pa, "", attr, 0, 0, 1);
+            v++;
+            continue;
+        }
+        int hang = para_hang(pa);
+        if (pa->kind == TUI_P_CODE) {
+            // Code keeps its spaces and lines: one row, cut at the edge.
+            size_t len = strlen(pa->text) < sizeof plain - 1 ? strlen(pa->text) : sizeof plain - 1;
+            memcpy(plain, pa->text, len);
+            plain[len] = '\0';
+            memset(attr, A_CODE, len);
+            if (row) row(ctx, v, pa, plain, attr, 0, len, 1);
+            v++;
+            continue;
+        }
+        md_inline(pa->text, plain, attr, sizeof plain);
         static size_t off[256], len[256];
-        int k = wrap_rows(pa->text, w - hang, w - hang, off, len, 256);
+        int k = wrap_rows(plain, w - hang, w - hang, off, len, 256);
         for (int j = 0; j < k; j++, v++)
-            if (row) row(ctx, v, st, j == 0 && hang ? -hang : hang, pa->text + off[j], len[j]);
+            if (row) row(ctx, v, pa, plain, attr, off[j], len[j], j == 0);
     }
     return v;
 }
 
 typedef struct {
     wbuf_t *w;
-    int top, left, iw, first, h;
+    int top, left, iw, tw, first, h;
 } text_draw_t;
 
-static void draw_text_row(void *ctx, int v, style_t s, int indent, const char *text, size_t len) {
+// One run of text with the same marks, in the paragraph's own style underneath.
+static void draw_run(pen_t *p, style_t base, uint8_t a, const char *t, size_t n) {
+    char piece[TUI_LINE_MAX * 4];
+    if (n >= sizeof piece) n = sizeof piece - 1;
+    memcpy(piece, t, n);
+    piece[n] = '\0';
+    sty(p->w, (a & A_CODE) || (a & A_LINK) ? S_ACCENT : (a & A_FAINT) ? S_FAINT : base);
+    if (a & A_BOLD) wapp(p->w, "\x1b[1m");
+    if (a & A_ITALIC) wapp(p->w, "\x1b[3m");
+    if (a & A_LINK) wapp(p->w, "\x1b[4m");
+    p->used += wapp_trunc(p->w, piece, p->room - p->used);
+}
+
+static void draw_text_row(void *ctx, int v, const tui_para_t *pa, const char *plain, const uint8_t *attr,
+                          size_t off, size_t len, int first) {
     text_draw_t *d = ctx;
     if (v < d->first || v >= d->first + d->h) return;
     pen_t p;
     inner_begin(d->w, &p, d->top + (v - d->first), d->left, d->iw);
     pspace(&p, 1);
-    // A bullet's first row starts with the bullet; the rows after it hang under its text.
-    if (indent < 0) { ptext(&p, S_ACCENT, "\xe2\x80\xa2 "); }
-    else pspace(&p, 1 + indent);
-    char piece[TUI_LINE_MAX * 4];
-    if (len >= sizeof piece) len = sizeof piece - 1;
-    memcpy(piece, text, len);
-    piece[len] = '\0';
-    ptext(&p, s, piece);
+    if (pa->kind == TUI_P_RULE) {
+        sty(p.w, S_FAINT);
+        for (int x = 0; x < d->tw && p.used < p.room; x++) { wapp(p.w, "\xe2\x94\x80"); p.used++; }
+        inner_end(&p);
+        return;
+    }
+    int lvl = pa->level > 6 ? 6 : pa->level;
+    int hang = para_hang(pa);
+    // A list item's first row starts with its bullet or number; the rows after it hang under its text.
+    if (first && pa->kind == TUI_P_BULLET) {
+        pspace(&p, 1 + 2 * lvl);
+        ptext(&p, S_ACCENT, lvl % 2 ? "\xe2\x97\xa6 " : "\xe2\x80\xa2 ");
+    } else if (first && pa->kind == TUI_P_NUMBERED) {
+        pspace(&p, 1 + 2 * lvl);
+        ptext(&p, S_ACCENT, pa->marker);
+        pspace(&p, 1 + hang);
+    } else if (pa->kind == TUI_P_QUOTE) {
+        ptext(&p, S_FAINT, "\xe2\x94\x82 ");
+    } else {
+        pspace(&p, 1 + hang);
+    }
+    style_t base = pa->kind == TUI_P_HEADING ? S_ACCENT_BOLD : pa->kind == TUI_P_SUBHEADING ? S_BOLD
+                 : pa->kind == TUI_P_QUOTE ? S_FAINT : S_PLAIN;
+    for (size_t i = off; i < off + len; ) {
+        size_t e = i;
+        while (e < off + len && attr[e] == attr[i]) e++;
+        draw_run(&p, base, attr[i], plain + i, e - i);
+        i = e;
+    }
     inner_end(&p);
 }
 
@@ -1967,7 +2096,7 @@ int tui_render_text(int rows, int cols, const char *title, const char *clock, co
         crumb_title(&t, title ? title : "");
         box(&w, r, border_sgr(TUI_TONE_PAGE), &t, &right, NULL);
     }
-    text_draw_t d = { &w, top, left, iw, *scroll, ih };
+    text_draw_t d = { &w, top, left, iw, tw, *scroll, ih };
     layout_text(paras, n, tw, draw_text_row, &d);
     for (int v = total - *scroll; v < ih; v++) blank_row(&w, top + v, left, iw);
     draw_status(&w, rows, cols, bar);

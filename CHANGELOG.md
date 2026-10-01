@@ -58,7 +58,8 @@
   without saying `anyway`; files go up to 1 GB. Pictures are decoded by chat's own PNG and
   baseline JPEG readers, which never hold the full-size image.
 - `:changelog` (or `:news`) shows this changelog on a page of its own, built into chat so it
-  reads offline. In `--simple` it prints it.
+  reads offline, with its Markdown rendered: headings, bold, italic and `code`, links, nested
+  lists, numbered items, quotes, code blocks and rules. In `--simple` it prints it.
 
 ### Changed
 - Direct routing is now called DHT routing: `--routing dht+nostr` and `--routing dht`, and

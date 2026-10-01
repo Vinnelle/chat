@@ -278,13 +278,19 @@ typedef struct {
 
 void tui_render_page(int rows, int cols, const tui_page_t *page, const tui_bar_t *bar, int color_enabled);
 
-// A page of text to read (the changelog): paragraphs wrapped to the page's width, headings bold,
-// bullets hanging. *scroll is how many rows down from the top it starts, clamped to what the page
-// can scroll; returns that most.
-typedef enum { TUI_P_TEXT = 0, TUI_P_HEADING, TUI_P_SUBHEADING, TUI_P_BULLET, TUI_P_BLANK } tui_para_kind_t;
+// A page of Markdown to read (the changelog): paragraphs wrapped to the page's width, with
+// **bold**, *italic*, `code` and [links](url) inside them, headings, bullets and numbered items
+// (level deep, their lines hanging), quotes, code lines (cut, never wrapped) and rules. *scroll is
+// how many rows down from the top it starts, clamped to what the page can scroll; returns that most.
+typedef enum {
+    TUI_P_TEXT = 0, TUI_P_HEADING, TUI_P_SUBHEADING, TUI_P_BULLET, TUI_P_NUMBERED, TUI_P_QUOTE, TUI_P_CODE,
+    TUI_P_RULE, TUI_P_BLANK
+} tui_para_kind_t;
 typedef struct {
     tui_para_kind_t kind;
-    const char *text;
+    const char *text;     // Markdown, inline marks and all
+    int level;            // a list item's depth, from 0
+    char marker[8];       // a numbered item's "3."
 } tui_para_t;
 int tui_render_text(int rows, int cols, const char *title, const char *clock, const tui_para_t *paras, int n,
                     int *scroll, const tui_bar_t *bar, int color_enabled);
