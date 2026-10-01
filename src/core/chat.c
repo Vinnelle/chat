@@ -2149,13 +2149,19 @@ static void file_free(file_entry_t *e) {
     crypto_wipe(e, sizeof *e);
 }
 
-// A free slot, or the oldest that isn't ours and isn't moving.
-static file_entry_t *file_new(chat_t *c) {
+// A free slot, or the oldest that isn't ours and isn't moving. A peer past FILE_OFFERS_PER_PEER
+// replaces its own oldest instead, so nobody can push everyone else's offers out.
+#define FILE_OFFERS_PER_PEER 16
+static file_entry_t *file_new(chat_t *c, const uint8_t *owner) {
     file_entry_t *pick = NULL;
-    for (int i = 0; i < FILE_OFFERS_MAX && !pick; i++) if (!c->files[i].used) pick = &c->files[i];
+    int theirs = 0;
+    for (int i = 0; owner && i < FILE_OFFERS_MAX; i++)
+        theirs += c->files[i].used && !c->files[i].mine && memcmp(c->files[i].owner, owner, ID_LEN) == 0;
+    for (int i = 0; i < FILE_OFFERS_MAX && !pick && theirs < FILE_OFFERS_PER_PEER; i++) if (!c->files[i].used) pick = &c->files[i];
     for (int i = 0; i < FILE_OFFERS_MAX && !pick; i++) {
         file_entry_t *e = &c->files[i];
         if (e->mine || e->dl == DL_ACTIVE) continue;
+        if (theirs >= FILE_OFFERS_PER_PEER && memcmp(e->owner, owner, ID_LEN) != 0) continue;
         if (!pick || e->num < pick->num) pick = e;
     }
     if (!pick) return NULL;
@@ -2246,7 +2252,7 @@ static cmd_result_t cmd_send(void *ctx, const char *arg) {
         if (total > size) break;
     }
     if (ferror(f) || total != size) { fclose(f); ui_print(c, "* can't send %s: it changed while it was read", path); return CMD_OK; }
-    file_entry_t *e = file_new(c);
+    file_entry_t *e = file_new(c, NULL);
     if (!e) { fclose(f); ui_print(c, "* can't offer more files at once - :cancel one you offered first"); return CMD_OK; }
     e->mine = 1;
     memcpy(e->owner, c->my_id, ID_LEN);
@@ -2478,7 +2484,7 @@ static void file_on_record(chat_t *c, peer_t *p, char **f, int n, double now) {
         send_peer(c, p, ack);
         if (size > FILE_HARD_MAX || (strcmp(f[5], "image") != 0 && strcmp(f[5], "file") != 0)) return;
         if (file_by_fid(c, p->id, fid)) return;   // a retry of one we have
-        file_entry_t *e = file_new(c);
+        file_entry_t *e = file_new(c, p->id);
         if (!e) return;
         memcpy(e->owner, p->id, ID_LEN);
         memcpy(e->fid, fid, FILE_ID_LEN);
@@ -2509,8 +2515,11 @@ static void file_on_record(chat_t *c, peer_t *p, char **f, int n, double now) {
         if (strlen(f[1]) != FILE_ID_LEN * 2 || hex_decode(f[1], FILE_ID_LEN * 2, fid) != 0 || parse_u64(f[2], &off) != 0
             || parse_u64(f[3], &count) != 0) return;
         file_entry_t *e = file_by_fid(c, c->my_id, fid);
-        // Only ours, still offered, to someone who'd have been offered it.
-        if (!e || !e->fp || !peer_trusted(c, p)) {
+        // Only ours, still offered, to someone who'd have been offered it. A file of ours that
+        // isn't (any more) gets "fx"; one that never was gets nothing, so made-up ids can't fill
+        // the queue every peer shares.
+        if (!e) return;
+        if (!e->fp || !peer_trusted(c, p)) {
             char rec[40]; snprintf(rec, sizeof rec, "fx\t%s", f[1]);
             send_peer(c, p, rec);
             return;

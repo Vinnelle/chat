@@ -54,12 +54,17 @@ void tui_scrollback_push(tui_scrollback_t *sb, const char *hhmm, const char *tex
     else l->has_color = 0;
     l->mention = mention;
     l->color_len = color_len;
+    l->file = 0;
     sb->head = (sb->head + 1) % TUI_SCROLLBACK;
     if (sb->count < TUI_SCROLLBACK) sb->count++;
 }
 
 void tui_scrollback_clear(tui_scrollback_t *sb) {
     crypto_wipe(sb, sizeof *sb);
+}
+
+void tui_scrollback_mark_file(tui_scrollback_t *sb, int file) {
+    if (sb->count > 0) sb->lines[(sb->head - 1 + TUI_SCROLLBACK) % TUI_SCROLLBACK].file = file;
 }
 
 static int hex_digit(uint8_t c) {
@@ -962,7 +967,42 @@ static void draw_name(pen_t *p, const char *name, const uint8_t *rgb) {
 // Lines from the bottom of nrows grid rows up, newest last, skipping the skip newest. Chat lines
 // line up in columns - time, name, text - and a run from one person in one minute shows the time
 // and name once. The console's lines are faint, its warnings yellow.
-static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *sb, int skip, int console) {
+// A picture's rows at width cols: each is two of its pixel rows, the upper as the colour of a
+// half block and the lower as the colour behind it, scaled to the width by the nearest pixel.
+static int image_rows(const tui_image_t *im, int cols) {
+    if (!im || im->w < 1 || im->h < 1 || cols < 1) return 0;
+    int w = im->w < cols ? im->w : cols;
+    int h = (int)(((int64_t)im->h * w + im->w / 2) / im->w);
+    if (h < 1) h = 1;
+    return (h + 1) / 2;
+}
+
+static void draw_image_row(pen_t *p, const tui_image_t *im, int cols, int r) {
+    int w = im->w < cols ? im->w : cols;
+    int h = (int)(((int64_t)im->h * w + im->w / 2) / im->w);
+    if (h < 1) h = 1;
+    if (!g_color) {
+        // Without colour there's nothing to draw it with.
+        if (r == 0) ptext(p, S_FAINT, "(a picture: it needs a terminal with colour)");
+        return;
+    }
+    for (int x = 0; x < w && p->used < p->room; x++) {
+        int sx = (int)((int64_t)x * im->w / w);
+        int y0 = r * 2, y1 = r * 2 + 1;
+        const uint8_t *top = im->rgb + ((size_t)((int64_t)y0 * im->h / h) * (size_t)im->w + (size_t)sx) * 3;
+        if (y1 < h) {
+            const uint8_t *bot = im->rgb + ((size_t)((int64_t)y1 * im->h / h) * (size_t)im->w + (size_t)sx) * 3;
+            wapp(p->w, "\x1b[38;2;%u;%u;%u;48;2;%u;%u;%um\xe2\x96\x80", top[0], top[1], top[2], bot[0], bot[1], bot[2]);
+        } else {
+            wapp(p->w, "\x1b[0;38;2;%u;%u;%um\xe2\x96\x80", top[0], top[1], top[2]);
+        }
+        p->used++;
+    }
+    wapp(p->w, "\x1b[0m");
+}
+
+static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *sb, int skip, int console,
+                       const tui_view_t *v) {
     if (!sb || nrows <= 0 || sb->count == 0) return;
     int W = g->w;
     if (skip >= sb->count) skip = sb->count - 1;
@@ -998,10 +1038,20 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
 
         size_t off[64], len[64];
         int nch = wrap_rows(body, W - first_pre, W - rest_pre, off, len, 64);
+        // A picture shown under the line that offers it, lined up with the text.
+        const tui_image_t *im = chat && l->file && v && v->image ? v->image(v->image_ctx, l->file) : NULL;
+        int img_cols = W - rest_pre - 1 < TUI_IMAGE_MAX_W ? W - rest_pre - 1 : TUI_IMAGE_MAX_W;
+        // At most half the pane tall, narrower if need be, so the line it's under stays in view.
+        int img_most = nrows / 2 > 4 ? nrows / 2 : 4;
+        if (im && image_rows(im, img_cols) > img_most) {
+            img_cols = (int)((int64_t)im->w * img_most * 2 / im->h);
+            if (img_cols < 1) img_cols = 1;
+        }
+        int nimg = image_rows(im, img_cols);
 
         // Run on from the line above: same person, same minute, and that line in view to say who.
         int grouped = 0;
-        if (chat && k + 1 < sb->count && bottom - nch >= first) {
+        if (chat && k + 1 < sb->count && bottom - nch - nimg >= first) {
             const tui_line_t *older = SB_AT(sb, k + 1);
             char oname[96];
             const char *ob;
@@ -1013,8 +1063,17 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
         style_t body_style = l->mention ? S_BOLD : warn ? S_YELLOW : console ? S_FAINT : S_PLAIN;
         int body_rgb = !chat && l->has_color && !warn;
 
+        for (int r = 0; r < nimg; r++) {
+            int row = bottom - (nimg - 1 - r);
+            if (row < first || row >= first + nrows || row >= g->rows) continue;
+            gpen_t gp;
+            grid_open(g, row, &gp);
+            pspace(&gp.p, rest_pre);
+            draw_image_row(&gp.p, im, img_cols, r);
+            grid_close(g, row, &gp);
+        }
         for (int c = 0; c < nch; c++) {
-            int row = bottom - (nch - 1 - c);
+            int row = bottom - nimg - (nch - 1 - c);
             if (row < first || row >= first + nrows || row >= g->rows) continue;
             gpen_t gp;
             grid_open(g, row, &gp);
@@ -1041,7 +1100,7 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
             }
             grid_close(g, row, &gp);
         }
-        bottom -= nch;
+        bottom -= nch + nimg;
     }
 }
 
@@ -1123,7 +1182,7 @@ static void draw_welcome(grid_t *g, int first, int nrows) {
 static void draw_chat_pane(grid_t *g, int first, int nrows, const tui_scrollback_t *sb, const tui_view_t *v) {
     if (!v->title) draw_welcome(g, first, nrows);
     else if ((!sb || sb->count == 0) && v->empty) draw_center(g, first, nrows, v->empty, v->title);
-    else draw_lines(g, first, nrows, sb, v->scroll, 0);
+    else draw_lines(g, first, nrows, sb, v->scroll, 0, v);
 }
 
 static const char HIDDEN_HINT[] = "Chat and console are hidden\nctrl+t shows the chat " G_MID " ctrl+o the console";
@@ -1149,7 +1208,7 @@ static void draw_main(wbuf_t *w, rect_t m, int boxed, const tui_scrollback_t *sb
     if (!boxed) {
         grid_reset(&g_grid, m.h, m.w);
         if (show_chat) draw_chat_pane(&g_grid, 0, m.h, sb, v);
-        else if (show_con) draw_lines(&g_grid, 0, m.h, console, 0, 1);
+        else if (show_con) draw_lines(&g_grid, 0, m.h, console, 0, 1, NULL);
         else draw_center(&g_grid, 0, m.h, HIDDEN_HINT, NULL);
         grid_emit(w, &g_grid, m.top, m.left, 0);
         return;
@@ -1180,7 +1239,7 @@ static void draw_main(wbuf_t *w, rect_t m, int boxed, const tui_scrollback_t *sb
     int row = m.top + 1;
     if (show_con) {
         grid_reset(&g_grid, show_chat ? con_h : inner, m.w - 4);
-        draw_lines(&g_grid, 0, g_grid.rows, console, 0, 1);
+        draw_lines(&g_grid, 0, g_grid.rows, console, 0, 1, NULL);
         grid_emit(w, &g_grid, row, m.left + 1, 1);
         row += g_grid.rows;
         if (show_chat) edge(w, row++, m.left, m.w, G_LT, G_RT, bs, &ctitle, &clock);
