@@ -37,7 +37,7 @@ static const char *USAGE =
     "            [--routing dht+nostr|dht|tor] [--nodht] [--noipv6] [--nolan]\n"
     "            [--noportmap] [--nonostr] [--nostr-always] [--relay wss://HOST ...]\n"
     "            [--tor-launch auto|always|never] [--tor-path PATH] [--tor-socks HOST:PORT]\n"
-    "            [--tor-control HOST:PORT] [--verify-optional] [--file-limit SIZE]\n"
+    "            [--tor-control HOST:PORT] [--verify-required] [--file-limit SIZE]\n"
     "            [--fast-files]\n"
     "            [--session ID --port UDP_PORT --peer HOST:PORT ...]\n"
     "       chat --update | --version\n"
@@ -89,10 +89,10 @@ static const char *USAGE =
     "  :port [N] :set [NAME [VALUE]] :install :uninstall :help   - :help opens a page of keys\n"
     "  and commands\n"
     "\n"
-    "Anyone with a session's id and password can sit between two other members, so nothing\n"
-    "you send reaches a peer until you've compared its verify code with them over another\n"
-    "channel (a call, in person): chat shows the code when they join, and :verify NICK ok\n"
-    "says it matched. --verify-optional (:set verify optional) sends to everyone anyway.\n"
+    "Anyone with a session's id and password can sit between two other members: chat shows\n"
+    "a verify code when a peer joins, to compare with them over another channel (a call, in\n"
+    "person), and :verify NICK ok says it matched. --verify-required (:set verify required)\n"
+    "sends nothing to a peer until then.\n"
     "\n"
     "Each setting is a row on the settings page, and :set NAME VALUE sets it without opening\n"
     "the page (:set nick bob, :set net verbose, :set routing tor). :set alone opens the page,\n"
@@ -125,8 +125,9 @@ static const char *USAGE =
     "              stay on the relays all the time. By default DHT routing goes there\n"
     "              only while nobody is reached yet or a peer's UDP fails, so Tor members\n"
     "              can't find a room whose members all reach each other directly\n"
-    "  --verify-optional\n"
-    "              send to peers whose verify code you haven't compared\n"
+    "  --verify-required\n"
+    "              send nothing to a peer until you've compared its verify code. By\n"
+    "              default it goes to everyone, compared or not\n"
     "  --file-limit\n"
     "              the biggest file fetched without saying anyway (default 8M; up to 1G)\n"
     "  --fast-files\n"
@@ -4298,6 +4299,8 @@ static int read_options(int argc, char **argv, options_t *o) {
             g_app.fast_files = 1;
         } else if (strcmp(key, "verify-optional") == 0) {
             g_app.verify_optional = 1;
+        } else if (strcmp(key, "verify-required") == 0) {
+            g_app.verify_optional = 0;
         } else if (strcmp(key, "routing") == 0 && i + 1 < argc) {
             const char *v = argv[++i];
             // direct+nostr and direct: the modes' old names, still taken.
@@ -4369,6 +4372,7 @@ int main(int argc, char **argv) {
     routing_defaults(&g_app.route);
     g_app.nostr_flag = -1;
     g_app.notify_mode = NOTIFY_MENTIONS;
+    g_app.verify_optional = 1;
     g_app.show_sidebar = g_app.show_console = g_app.show_chat = 1;
     note_setting_defaults();
     g_argc = argc;

@@ -3,6 +3,10 @@
 ## Unreleased
 
 ### Changed
+- **Compare verify codes** on the settings page is `optional` by default: what you send goes
+  to every peer, compared or not. `:set verify required`, or the new `--verify-required`, holds
+  it back from a peer until you've said its code matched (`:verify NICK ok`).
+  `--verify-optional` is still taken.
 - `:update` opens a box over the chat that shows the update as it goes: a console of each step
   (what it fetched from GitHub, the signature and SHA-256 checks, where it installed), a
   progress bar under it that follows the download, and under that what it's doing, put plainly
