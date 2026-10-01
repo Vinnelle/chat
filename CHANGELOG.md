@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.12
 
 ### Changed
 - **Compare verify codes** on the settings page is `optional` by default: what you send goes
