@@ -218,7 +218,8 @@ typedef enum {
     MODE_INSTALL_PASS2,
     MODE_INSTALL_UNLOCK,
     MODE_UNINSTALL,
-    MODE_UNLOCK
+    MODE_UNLOCK,
+    MODE_UPDATE
 } app_mode_t;
 
 // KEY_MADE is a new random key, KEY_DERIVED one made from a password on this device.
@@ -1008,9 +1009,21 @@ static cmd_result_t app_update(void *ctx, const char *arg) {
         push_log("* update: Tor mode downloads through Tor, and there's no tor yet - try again once it's connected");
         return CMD_OK;
     }
+    // Already under way, it's the same run's box that comes back.
     if (update_start() == 0) push_log("* update: checking GitHub for a newer release (v" CHAT_VERSION " here)...");
-    else push_log("* update: already running");
+    begin_prompt(MODE_UPDATE);
     return CMD_OK;
+}
+
+// The box only shows the update: closing it leaves the update running, and what it came to is in
+// the console either way.
+static void update_key(const tui_key_t *key) {
+    char ch = key->type == TUI_KEY_CHAR && key->ch_len == 1 ? key->ch[0] : 0;
+    if (key->type != TUI_KEY_ESCAPE && key->type != TUI_KEY_ENTER && ch != 'q') return;
+    update_view_t v;
+    update_view(&v);
+    end_prompt();
+    if (v.running) note("the update carries on - :update shows it again");
 }
 
 static cmd_result_t app_help(void *ctx, const char *arg);
@@ -3397,6 +3410,7 @@ static void handle_key(const tui_key_t *key) {
         case MODE_INSTALL_UNLOCK: field_key(key, commit_install_unlock, cancel_install); return;
         case MODE_UNINSTALL:      confirm_key(key, uninstall_confirmed, cancel_uninstall); return;
         case MODE_UNLOCK:         field_key(key, commit_unlock, skip_unlock); return;
+        case MODE_UPDATE:         update_key(key); return;
         default:
             break;
     }
@@ -3449,7 +3463,7 @@ static int on_chat_screen(void) {
     switch (g_app.mode) {
         case MODE_CHAT: case MODE_NEW_PASSWORD: case MODE_JOIN_ID: case MODE_JOIN_PASSWORD:
         case MODE_INSTALL: case MODE_INSTALL_PASS: case MODE_INSTALL_PASS2: case MODE_INSTALL_UNLOCK:
-        case MODE_UNINSTALL: case MODE_UNLOCK:
+        case MODE_UNINSTALL: case MODE_UNLOCK: case MODE_UPDATE:
             return 1;
         default:
             return 0;
@@ -3723,6 +3737,26 @@ static const tui_dialog_t *current_dialog(void) {
             d.input = NULL;
             d.keys = "y delete \xc2\xb7 n cancel";
             break;
+        case MODE_UPDATE: {
+            static update_view_t v;
+            static const char *lines[UPDATE_LOG_MAX];
+            static tui_progress_t pg;
+            update_view(&v);
+            for (int i = 0; i < v.n_log; i++) lines[i] = v.log[i];
+            pg.permille = v.permille;
+            copy_str(pg.text, v.amount, sizeof pg.text);
+            d.title = "UPDATE";
+            d.console = 1;
+            d.log = lines;
+            d.log_kind = v.kind;
+            d.n_log = v.n_log;
+            d.progress = &pg;
+            d.step = v.step;
+            d.step_kind = v.running ? TUI_LOG_INFO : v.ok ? TUI_LOG_GOOD : TUI_LOG_BAD;
+            d.input = NULL;
+            d.keys = v.running ? "esc hide" : "enter close";
+            break;
+        }
         case MODE_UNLOCK:
             d.title = "UNLOCK";
             d.n_text = add_para(paras, 0, TUI_P_TEXT, install_has_key()
@@ -3779,11 +3813,13 @@ static tui_bar_t current_bar(void) {
         case MODE_INSTALL_PASS2:
         case MODE_INSTALL_UNLOCK:
         case MODE_UNINSTALL:
+        case MODE_UPDATE:
             chat_input(&b, &g_app.saved_input);
             b.chip = g_app.mode == MODE_NEW_PASSWORD ? "NEW"
                    : g_app.mode == MODE_JOIN_ID || g_app.mode == MODE_JOIN_PASSWORD ? "JOIN"
                    : g_app.mode == MODE_UNLOCK ? "UNLOCK"
-                   : g_app.mode == MODE_UNINSTALL ? "UNINSTALL" : "INSTALL";
+                   : g_app.mode == MODE_UNINSTALL ? "UNINSTALL"
+                   : g_app.mode == MODE_UPDATE ? "UPDATE" : "INSTALL";
             b.tone = TUI_TONE_PROMPT;
             break;
         default:
@@ -4007,7 +4043,13 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
         }
 
         char update_msg[UPDATE_MSG_MAX];
-        if (update_poll(update_msg, sizeof update_msg)) push_log("%s", update_msg);
+        if (update_poll(update_msg, sizeof update_msg)) { push_log("%s", update_msg); g_app.dirty = 1; }
+        // Its box redraws with each wait while the update runs, so the bar moves as the file comes.
+        if (g_app.mode == MODE_UPDATE) {
+            update_view_t v;
+            update_view(&v);
+            if (v.running) g_app.dirty = 1;
+        }
 
         // The terminal may have redrawn or reflowed the screen: the next frame goes out whole.
         if (term_resized()) { g_app.dirty = 1; tui_invalidate(); }

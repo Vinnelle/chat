@@ -2,6 +2,7 @@
 // Copyright (C) 2026 finlay@tuta.com
 #include "app/update.h"
 #include "core/chat.h"
+#include "core/files.h"
 #include "platform/platform.h"
 #include "common/util.h"
 #include <sodium.h>
@@ -9,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdarg.h>
 
 #ifndef CHAT_VERSION
 #define CHAT_VERSION "0.0.0"
@@ -39,6 +41,91 @@ static int g_ok;
 static char g_proxy[64];
 
 void update_set_proxy(const char *socks) { copy_str(g_proxy, socks ? socks : "", sizeof g_proxy); }
+
+// ---- where it's got, for the box ----
+
+// The update runs on a thread of its own and the screen reads this as it draws: a spinlock is
+// plenty for copies this small.
+static char g_lock;
+static update_view_t g_view;
+static char g_dl_path[1100];   // the download on its way, else ""
+static long g_dl_total;        // its size as GitHub gives it, else 0
+
+#define DL_FROM 200
+#define DL_TO 900
+
+static void view_lock(void) { while (__atomic_test_and_set(&g_lock, __ATOMIC_ACQUIRE)) {} }
+static void view_unlock(void) { __atomic_clear(&g_lock, __ATOMIC_RELEASE); }
+
+static void view_reset(void) {
+    view_lock();
+    memset(&g_view, 0, sizeof g_view);
+    g_view.started = g_view.running = 1;
+    g_dl_path[0] = '\0';
+    g_dl_total = 0;
+    view_unlock();
+}
+
+// A line in the console, the oldest going once it's full.
+static void say(update_line_kind_t kind, const char *fmt, ...) {
+    char line[UPDATE_LINE_MAX];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof line, fmt, ap);
+    va_end(ap);
+    view_lock();
+    if (g_view.n_log == UPDATE_LOG_MAX) {
+        memmove(g_view.log[0], g_view.log[1], sizeof g_view.log[0] * (UPDATE_LOG_MAX - 1));
+        memmove(g_view.kind, g_view.kind + 1, UPDATE_LOG_MAX - 1);
+        g_view.n_log--;
+    }
+    copy_str(g_view.log[g_view.n_log], line, sizeof g_view.log[0]);
+    g_view.kind[g_view.n_log++] = (unsigned char)kind;
+    view_unlock();
+}
+
+// The step it's on, put plainly, and how far that is along.
+static void stage(int permille, const char *fmt, const char *arg) {
+    view_lock();
+    g_view.permille = permille;
+    snprintf(g_view.step, sizeof g_view.step, fmt, arg);
+    view_unlock();
+}
+
+static void downloading(const char *path, long total) {
+    view_lock();
+    copy_str(g_dl_path, path ? path : "", sizeof g_dl_path);
+    g_dl_total = total;
+    view_unlock();
+}
+
+void update_view(update_view_t *v) {
+    char path[sizeof g_dl_path];
+    view_lock();
+    *v = g_view;
+    copy_str(path, g_dl_path, sizeof path);
+    long total = g_dl_total;
+    view_unlock();
+    if (!v->running || !path[0]) return;
+    // curl writes the download straight to the file, so how big that is is how far it's got.
+    long got = 0;
+    FILE *f = platform_fopen(path, "rb");
+    if (f) {
+        if (fseek(f, 0, SEEK_END) == 0) got = ftell(f);
+        fclose(f);
+    }
+    if (got < 0) got = 0;
+    char gs[24], ts[24];
+    file_format_size((uint64_t)got, gs, sizeof gs);
+    if (total > 0) {
+        if (got > total) got = total;
+        v->permille = DL_FROM + (int)((int64_t)(DL_TO - DL_FROM) * got / total);
+        file_format_size((uint64_t)total, ts, sizeof ts);
+        snprintf(v->amount, sizeof v->amount, "%s of %s", gs, ts);
+    } else {
+        snprintf(v->amount, sizeof v->amount, "%s so far", gs);
+    }
+}
 
 static int fetch(const char *url, const char *out_path, int api) {
     // -q must come first: it stops curl reading a .curlrc that could turn off TLS checks or add a proxy.
@@ -138,6 +225,32 @@ static int sums_lookup(const char *sums, const char *name, uint8_t hash[crypto_h
     return -1;
 }
 
+// The size GitHub gives for the release's file called name, or 0 if it isn't there: it only measures
+// the download for the bar. What vouches for the file is the signed SHA-256.
+static long asset_size(const char *json, const char *name) {
+    char want[80];
+    snprintf(want, sizeof want, "\"%s\"", name);
+    size_t wlen = strlen(want);
+    for (const char *p = json; (p = strstr(p, want)) != NULL; p += wlen) {
+        // As the value of a "name": a download URL ends in the name too, and a label may be it.
+        const char *k = p;
+        while (k > json && isspace((unsigned char)k[-1])) k--;
+        if (k == json || k[-1] != ':') continue;
+        k--;
+        while (k > json && isspace((unsigned char)k[-1])) k--;
+        if (k - json < 6 || memcmp(k - 6, "\"name\"", 6) != 0) continue;
+        const char *s = strstr(p, "\"size\"");
+        if (!s) return 0;
+        s += 6;
+        while (isspace((unsigned char)*s)) s++;
+        if (*s++ != ':') return 0;
+        while (isspace((unsigned char)*s)) s++;
+        long v = strtol(s, NULL, 10);
+        return v > 0 && v <= atol(UPDATE_MAX_BYTES) ? v : 0;
+    }
+    return 0;
+}
+
 #ifdef CHAT_RELEASE_PUBKEY
 static const char RELEASE_PUBKEY[] = CHAT_RELEASE_PUBKEY;
 #else
@@ -200,8 +313,19 @@ static int hash_file(const char *path, uint8_t out[crypto_hash_sha256_BYTES], lo
     return 0;
 }
 
+// The message goes to the console log as it always has, and into the box: a failure says so in
+// place of the step it failed at, and leaves the bar where it stopped.
 static void finish(const char *fmt, const char *arg) {
     snprintf(g_msg, sizeof g_msg, fmt, arg);
+    const char *text = strncmp(g_msg, "* update: ", 10) == 0 ? g_msg + 10 : g_msg;
+    say(g_ok ? UPDATE_LINE_GOOD : UPDATE_LINE_BAD, "%s", text);
+    downloading(NULL, 0);
+    view_lock();
+    if (g_ok) g_view.permille = 1000;
+    else copy_str(g_view.step, "Update failed", sizeof g_view.step);
+    g_view.ok = g_ok;
+    g_view.running = 0;
+    view_unlock();
     __atomic_store_n(&g_state, UPD_DONE, __ATOMIC_RELEASE);
 }
 
@@ -212,6 +336,7 @@ static void succeed(const char *fmt, const char *arg) {
 
 static void update_thread(void *unused) {
     (void)unused;
+    stage(0, "Checking GitHub for a newer release%s", "");
 #if !defined(UPDATE_ASSET)
     finish("* update: no release builds exist for this CPU architecture%s", "");
 #else
@@ -226,6 +351,9 @@ static void update_thread(void *unused) {
     snprintf(tmp_sig, sizeof tmp_sig, "%s.sums.minisig", exe);
     snprintf(tmp_bin, sizeof tmp_bin, "%s.download", exe);
 
+    say(UPDATE_LINE_INFO, "this is v" CHAT_VERSION ", " UPDATE_ASSET);
+    if (g_proxy[0]) say(UPDATE_LINE_DETAIL, "downloads go through Tor (%s)", g_proxy);
+    say(UPDATE_LINE_DETAIL, "GET api.github.com/repos/" UPDATE_REPO "/releases/latest");
     if (fetch("https://api.github.com/repos/" UPDATE_REPO "/releases/latest", tmp_json, 1) != 0) {
         platform_remove(tmp_json);
         finish("* update: could not reach GitHub (is curl installed, and is %s's folder writable?)", exe);
@@ -235,11 +363,19 @@ static void update_thread(void *unused) {
     platform_remove(tmp_json);
     char tag[40];
     int ok = json && parse_tag(json, tag, sizeof tag) == 0;
+    long total = ok ? asset_size(json, UPDATE_ASSET) : 0;
     free(json);
     if (!ok) { finish("* update: GitHub's reply had no usable release tag%s", ""); return; }
-    if (!version_newer(tag, CHAT_VERSION)) { succeed("* update: already up to date (v" CHAT_VERSION ", latest is %s)", tag); return; }
+    say(UPDATE_LINE_INFO, "latest release is %s", tag);
+    if (!version_newer(tag, CHAT_VERSION)) {
+        stage(1000, "Already up to date", "");
+        succeed("* update: already up to date (v" CHAT_VERSION ", latest is %s)", tag);
+        return;
+    }
+    stage(100, "Release %s found", tag);
 
     snprintf(url, sizeof url, "https://github.com/" UPDATE_REPO "/releases/download/%s/SHA256SUMS", tag);
+    say(UPDATE_LINE_DETAIL, "GET %s", url + 8);
     if (fetch(url, tmp_sums, 0) != 0) {
         platform_remove(tmp_sums);
         finish("* update: release %s has no SHA256SUMS - refusing to install it", tag);
@@ -251,7 +387,9 @@ static void update_thread(void *unused) {
 
     // SHA256SUMS comes from the same place as the binary, so on its own it only catches corruption.
     // The signature, made offline with the release key, is what vouches for it.
+    stage(130, "Checking %s's signature", tag);
     snprintf(url, sizeof url, "https://github.com/" UPDATE_REPO "/releases/download/%s/SHA256SUMS.minisig", tag);
+    say(UPDATE_LINE_DETAIL, "GET %s", url + 8);
     char *sig = NULL;
     if (fetch(url, tmp_sig, 0) == 0) sig = slurp(tmp_sig, 4096, NULL);
     platform_remove(tmp_sig);
@@ -262,18 +400,34 @@ static void update_thread(void *unused) {
         finish("* update: release %s has no valid release-key signature - refusing to install it", tag);
         return;
     }
+    say(UPDATE_LINE_GOOD, "SHA256SUMS is signed by the release key, for %s", tag);
 
     uint8_t want[crypto_hash_sha256_BYTES];
     ok = sums_lookup(sums, UPDATE_ASSET, want) == 0;
     free(sums);
     if (!ok) { finish("* update: SHA256SUMS lists no " UPDATE_ASSET " for %s - nothing installed", tag); return; }
+    char want_hex[2 * sizeof want + 1];
+    hex_encode(want, sizeof want, want_hex);
+    say(UPDATE_LINE_DETAIL, "expecting SHA-256 %.16s...", want_hex);
 
+    stage(DL_FROM, "Downloading %s", tag);
     snprintf(url, sizeof url, "https://github.com/" UPDATE_REPO "/releases/download/%s/" UPDATE_ASSET, tag);
-    if (fetch(url, tmp_bin, 0) != 0) {
+    if (total > 0) {
+        char ts[24];
+        file_format_size((uint64_t)total, ts, sizeof ts);
+        say(UPDATE_LINE_DETAIL, "GET %s (%s)", url + 8, ts);
+    } else {
+        say(UPDATE_LINE_DETAIL, "GET %s", url + 8);
+    }
+    downloading(tmp_bin, total);
+    int got_ok = fetch(url, tmp_bin, 0) == 0;
+    downloading(NULL, 0);
+    if (!got_ok) {
         platform_remove(tmp_bin);
         finish("* update: downloading " UPDATE_ASSET " from %s failed - nothing installed", tag);
         return;
     }
+    stage(920, "Verifying the download", "");
     uint8_t got[crypto_hash_sha256_BYTES];
     long size = 0;
     if (hash_file(tmp_bin, got, &size) != 0 || size == 0 || memcmp(got, want, sizeof got) != 0) {
@@ -281,11 +435,18 @@ static void update_thread(void *unused) {
         finish("* update: SHA-256 of the %s download does NOT match SHA256SUMS - discarded, nothing installed", tag);
         return;
     }
+    char size_s[24];
+    file_format_size((uint64_t)size, size_s, sizeof size_s);
+    say(UPDATE_LINE_GOOD, "downloaded %s; its SHA-256 matches SHA256SUMS", size_s);
+
+    stage(960, "Installing %s", tag);
+    say(UPDATE_LINE_DETAIL, "replacing %s", exe);
     if (platform_replace_exe(tmp_bin, exe) != 0) {
         platform_remove(tmp_bin);
         finish("* update: verified %s but could not replace the executable (permissions?)", tag);
         return;
     }
+    stage(1000, "Installed %s - restart chat to run it", tag);
     succeed("* update: installed %s (signature and SHA-256 verified) - restart chat to run it", tag);
 #endif
 }
@@ -294,7 +455,12 @@ int update_start(void) {
     int idle = UPD_IDLE;
     if (!__atomic_compare_exchange_n(&g_state, &idle, UPD_RUNNING, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
         return -1;
+    g_ok = 0;
+    view_reset();
     if (platform_spawn_thread(update_thread, NULL) != 0) {
+        view_lock();
+        g_view.running = 0;
+        view_unlock();
         __atomic_store_n(&g_state, UPD_IDLE, __ATOMIC_RELEASE);
         return -1;
     }
@@ -310,6 +476,7 @@ int update_poll(char *msg, size_t cap) {
 
 int update_run(char *msg, size_t cap) {
     g_ok = 0;
+    view_reset();
     update_thread(NULL);
     update_poll(msg, cap);
     return g_ok ? 0 : -1;

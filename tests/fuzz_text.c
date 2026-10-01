@@ -143,7 +143,14 @@ static void fuzz_render(const char *s, const uint8_t *data, size_t size) {
     field.mode = TUI_IMODE_INSERT;
     const tui_para_t paras[3] = { { .kind = (tui_para_kind_t)(flags % 9), .text = s, .level = flags % 4, .marker = "1." },
                                   { .kind = TUI_P_BLANK, .text = "" }, { .kind = TUI_P_BULLET, .text = s } };
-    tui_dialog_t dialog = { .title = s, .text = paras, .n_text = (flags & 2) ? 3 : 0,
+    // Or a console's box, as :update's: the text as every line, a bar and a step.
+    const char *log[3] = { s, s, s };
+    const unsigned char log_kind[3] = { (unsigned char)(flags % 4), 1, 3 };
+    int boxed = size > 12 && (data[12] & 1);
+    tui_dialog_t dialog = { .title = s, .console = boxed, .log = log, .log_kind = log_kind,
+                            .n_log = size > 12 ? data[12] % 4 : 0, .progress = &g_progress, .step = s,
+                            .step_kind = (tui_log_kind_t)(flags % 4),
+                            .text = paras, .n_text = (flags & 2) ? 3 : 0,
                             .input = (flags & 4) ? NULL : &field, .mask = (flags & 8) != 0, .placeholder = s,
                             .status = (flags & 4) ? s : NULL, .note = (flags & 1) ? s : NULL, .keys = s };
     tui_bar_t bar = { .chip = s, .tone = (tui_tone_t)(flags % 5), .input = &in,

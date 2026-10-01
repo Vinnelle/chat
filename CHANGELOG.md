@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- `:update` opens a box over the chat that shows the update as it goes: a console of each step
+  (what it fetched from GitHub, the signature and SHA-256 checks, where it installed), a
+  progress bar under it that follows the download, and under that what it's doing, put plainly
+  ("Checking GitHub for a newer release", "Release v0.1.12 found", "Downloading v0.1.12",
+  "Installing v0.1.12"). Esc hides the box and the update carries on; `:update` brings it back.
+  What it came to still goes to the console.
+
 ## 0.1.11
 
 ### Security

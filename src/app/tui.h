@@ -229,11 +229,23 @@ typedef struct {
     const char *build_label;   // a test build's, right of the console's title
 } tui_view_t;
 
+// A line in a dialog's console, styled by kind: a detail faint, then plain, good green, bad red.
+typedef enum { TUI_LOG_DETAIL = 0, TUI_LOG_INFO, TUI_LOG_GOOD, TUI_LOG_BAD } tui_log_kind_t;
+
 // A question or a field, in a box over the middle of the screen. status stands in for input when
-// what comes isn't typed (a paste).
+// what comes isn't typed (a paste). A dialog with a console (n_log may be 0) is a wider box of what
+// something is doing instead: the console's last lines, a bar under it for progress, and under that
+// step, what it's doing put plainly, in step_kind's style.
 typedef struct tui_para tui_para_t;
 typedef struct {
     const char *title;
+    int console;
+    const char *const *log;
+    const unsigned char *log_kind;
+    int n_log;
+    const tui_progress_t *progress;
+    const char *step;
+    tui_log_kind_t step_kind;
     const tui_para_t *text;
     int n_text;
     const tui_input_t *input;

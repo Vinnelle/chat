@@ -2340,29 +2340,13 @@ static int dialog_rows(int text_n, int field, int note_n) {
     return 1 + (text_n ? text_n + 1 : 0) + (field ? 2 : 0) + (note_n ? note_n + 1 : 0);
 }
 
-// What doesn't fit goes from the end of the text, then of the note; the field always shows.
-static void draw_dialog(wbuf_t *w, int rows, int cols, const tui_dialog_t *d, int *cr, int *cc) {
-    *cr = 0;
+// The box's backdrop (a margin mx by my round it), its frame with the title on the top edge and the
+// keys on the bottom, inner rows high and bw wide: the rect inside its sides.
+static rect_t dialog_frame(wbuf_t *w, int rows, int cols, int bw, int inner, int mx, int my, const tui_dialog_t *d) {
     int avail = rows - 1;
-    int bw = cols - 4 < 76 ? cols - 4 : 76, mx = 2, my = 1;
-    int iw = bw - 2, tw = iw - 4;
-    int text_n = d->n_text > 0 ? layout_text(d->text, d->n_text, tw, NULL, NULL) : 0;
-    static size_t noff[DIALOG_NOTE_ROWS], nlen[DIALOG_NOTE_ROWS];
-    int note_n = d->note && d->note[0] ? wrap_rows(d->note, tw, tw, noff, nlen, DIALOG_NOTE_ROWS) : 0;
-    int field = d->input || d->status;
-    if (dialog_rows(text_n, field, note_n) + 2 + 2 * my > avail) my = 0;
-    while (dialog_rows(text_n, field, note_n) + 2 > avail && (text_n > 0 || note_n > 0)) {
-        if (text_n > 0) text_n--;
-        else note_n--;
-    }
-    int inner = dialog_rows(text_n, field, note_n);
-    if (inner > avail - 2) inner = avail - 2 > 1 ? avail - 2 : 1;
     int bh = inner + 2, outer_h = bh + 2 * my, outer_w = bw + 2 * mx;
     int top = 1 + (avail - outer_h) / 2, left = 1 + (cols - outer_w) / 2;
     if (top < 1) top = 1;
-
-    const char *was = g_row_bg;
-    g_row_bg = g_color && g_have_bg ? g_sel_bg : "";
     for (int r = 0; r < outer_h; r++) {
         at(w, top + r, left);
         sty(w, S_PLAIN);
@@ -2379,8 +2363,120 @@ static void draw_dialog(wbuf_t *w, int rows, int cols, const tui_dialog_t *d, in
     edge(w, bx.top, bx.left, bw, G_TL, G_TR, bs, &title, NULL);
     sides(w, bx.top + 1, inner, bx.left, bw, bs);
     edge(w, bx.top + bh - 1, bx.left, bw, G_BL, G_BR, bs, NULL, &keys);
+    return (rect_t){ bx.top + 1, bx.left + 1, inner, bw - 2 };
+}
 
-    int row = bx.top + 1, end = row + inner, x = bx.left + 1;
+static style_t log_style(tui_log_kind_t k) {
+    switch (k) {
+        case TUI_LOG_INFO: return S_PLAIN;
+        case TUI_LOG_GOOD: return S_GREEN;
+        case TUI_LOG_BAD:  return S_RED;
+        default:           return S_FAINT;
+    }
+}
+
+#define CONSOLE_ROWS 12
+
+// Something under way: its console in a frame of its own, the last lines that fit, then a bar as wide
+// as the console with how far it's got at its right, then the step it's on. The console gives up
+// rows to a short screen; the rest always shows.
+static void draw_console_dialog(wbuf_t *w, int rows, int cols, const tui_dialog_t *d) {
+    int avail = rows - 1;
+    int bw = cols - 4 < 100 ? cols - 4 : 100, my = 1;
+    // A blank, the console's top edge, its rows, its bottom edge, a blank, the bar, a blank, the
+    // step and a blank.
+    const int fixed = 8;
+    int con = CONSOLE_ROWS;
+    if (con + fixed + 2 + 2 * my > avail) my = 0;
+    if (con + fixed + 2 > avail) con = avail - fixed - 2;
+    if (con < 1) con = 1;
+    rect_t in = dialog_frame(w, rows, cols, bw, con + fixed, 2, my, d);
+    int x = in.left, iw = in.w, row = in.top, end = in.top + in.h;
+    int cx = x + 2, cw = iw - 4;
+
+    blank_row(w, row++, x, iw);
+    char cs[48];
+    snprintf(cs, sizeof cs, "%s%s", border_sgr(-1), g_row_bg);
+    for (int r = 0; r < con + 2; r++) blank_row(w, row + r, x, iw);
+    edge(w, row, cx, cw, G_TL, G_TR, cs, NULL, NULL);
+    sides(w, row + 1, con, cx, cw, cs);
+    int first = d->n_log > con ? d->n_log - con : 0;
+    for (int r = 0; r < con; r++) {
+        pen_t p;
+        inner_begin(w, &p, row + 1 + r, cx + 1, cw - 2);
+        int i = first + r;
+        if (i < d->n_log && d->log && d->log[i])
+            pell(&p, log_style(d->log_kind ? (tui_log_kind_t)d->log_kind[i] : TUI_LOG_DETAIL), d->log[i], p.room);
+        inner_end(&p);
+    }
+    edge(w, row + con + 1, cx, cw, G_BL, G_BR, cs, NULL, NULL);
+    row += con + 2;
+    blank_row(w, row++, x, iw);
+
+    if (row < end) {
+        pen_t p;
+        inner_begin(w, &p, row++, x, iw);
+        pspace(&p, 1);
+        int pm = d->progress ? d->progress->permille : 0;
+        if (pm < 0) pm = 0;
+        if (pm > 1000) pm = 1000;
+        char right[TUI_LINE_MAX];
+        if (d->progress && d->progress->text[0]) snprintf(right, sizeof right, "%3d%%  %s", pm / 10, d->progress->text);
+        else snprintf(right, sizeof right, "%3d%%", pm / 10);
+        int rw = (int)strlen(right);
+        int barw = cw - rw - 1;
+        if (barw < 8) { snprintf(right, sizeof right, "%3d%%", pm / 10); rw = (int)strlen(right); barw = cw - rw - 1; }
+        if (barw < 0) barw = 0;
+        int lit = pm * barw / 1000;
+        sty(w, S_ACCENT);
+        for (int i = 0; i < lit; i++) wapp(w, G_HEAVY);
+        sty(w, S_FAINT);
+        for (int i = lit; i < barw; i++) wapp(w, G_H);
+        p.used += barw;
+        ptext(&p, S_PLAIN, " ");
+        ptext(&p, S_BOLD, right);
+        inner_end(&p);
+    }
+    if (row < end) blank_row(w, row++, x, iw);
+    if (row < end) {
+        pen_t p;
+        inner_begin(w, &p, row++, x, iw);
+        pspace(&p, 1);
+        style_t st = d->step_kind == TUI_LOG_GOOD ? S_GREEN : d->step_kind == TUI_LOG_BAD ? S_RED_BOLD : S_ACCENT_BOLD;
+        ptext(&p, st, G_RSAQ " ");
+        if (d->step) pell(&p, st, d->step, p.room - p.used);
+        inner_end(&p);
+    }
+    while (row < end) blank_row(w, row++, x, iw);
+}
+
+// What doesn't fit goes from the end of the text, then of the note; the field always shows.
+static void draw_dialog(wbuf_t *w, int rows, int cols, const tui_dialog_t *d, int *cr, int *cc) {
+    *cr = 0;
+    const char *was = g_row_bg;
+    g_row_bg = g_color && g_have_bg ? g_sel_bg : "";
+    if (d->console) {
+        draw_console_dialog(w, rows, cols, d);
+        g_row_bg = was;
+        return;
+    }
+    int avail = rows - 1;
+    int bw = cols - 4 < 76 ? cols - 4 : 76, mx = 2, my = 1;
+    int iw = bw - 2, tw = iw - 4;
+    int text_n = d->n_text > 0 ? layout_text(d->text, d->n_text, tw, NULL, NULL) : 0;
+    static size_t noff[DIALOG_NOTE_ROWS], nlen[DIALOG_NOTE_ROWS];
+    int note_n = d->note && d->note[0] ? wrap_rows(d->note, tw, tw, noff, nlen, DIALOG_NOTE_ROWS) : 0;
+    int field = d->input || d->status;
+    if (dialog_rows(text_n, field, note_n) + 2 + 2 * my > avail) my = 0;
+    while (dialog_rows(text_n, field, note_n) + 2 > avail && (text_n > 0 || note_n > 0)) {
+        if (text_n > 0) text_n--;
+        else note_n--;
+    }
+    int inner = dialog_rows(text_n, field, note_n);
+    if (inner > avail - 2) inner = avail - 2 > 1 ? avail - 2 : 1;
+    rect_t in = dialog_frame(w, rows, cols, bw, inner, mx, my, d);
+
+    int row = in.top, end = row + inner, x = in.left;
     blank_row(w, row++, x, iw);
     if (text_n > 0) {
         text_draw_t td = { w, row, x, iw, tw, 0, text_n < end - row ? text_n : end - row };
