@@ -19,6 +19,7 @@
 #include <time.h>
 #include "os.h"
 #include "build_stamp.h"
+#include "changelog.h"
 
 static const char *USAGE =
     "usage: chat [--nick NAME] [--colour NAME|#HEX] [--identity age|pgp[:KEYFILE]] [--simple]\n"
@@ -159,6 +160,7 @@ typedef struct {
 
 typedef enum {
     MODE_HELP,
+    MODE_CHANGELOG,
     MODE_SETTINGS,
     MODE_SETTINGS_EDIT,
     MODE_SIGN_CHOICE,
@@ -207,6 +209,7 @@ typedef struct {
     uint16_t default_port;
     int settings_sel;
     int help_sel;
+    int changelog_scroll, changelog_most;
     char message[200];   // the bottom bar's reply to the last thing done, until the next key
     int onboarding;   // the settings page chat opens on: its Done starts chat proper
     int sign_sel;
@@ -827,6 +830,7 @@ static cmd_result_t app_update(void *ctx, const char *arg) {
 }
 
 static cmd_result_t app_help(void *ctx, const char *arg);
+static cmd_result_t app_changelog(void *ctx, const char *arg);
 
 // ---- routing: asked at the start of --simple; the full-screen UI opens on the settings page ----
 
@@ -1974,6 +1978,117 @@ static void begin_help(void) {
     g_app.dirty = 1;
 }
 
+// ---- :changelog ----
+
+// The changelog built into this binary, as paragraphs: headings, bullets (with the lines under
+// them run together), and blank lines between. Markdown's ** and ` are left out.
+static int changelog_paras(const tui_para_t **out) {
+    static tui_para_t paras[1024];
+    static char *text;
+    static int n = -1;
+    if (n >= 0) { *out = paras; return n; }
+    n = 0;
+    size_t len = strlen(CHANGELOG_TEXT);
+    text = malloc(len + 1);
+    if (!text) { *out = paras; return 0; }
+    // Strip the markup in place: what's left stays NUL-terminated per paragraph below.
+    size_t o = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (CHANGELOG_TEXT[i] == '`') continue;
+        if (CHANGELOG_TEXT[i] == '*' && CHANGELOG_TEXT[i + 1] == '*') { i++; continue; }
+        text[o++] = CHANGELOG_TEXT[i];
+    }
+    text[o] = '\0';
+    char *para = NULL;
+    for (char *line = text; line && n < (int)(sizeof paras / sizeof paras[0]) - 1; ) {
+        char *eol = strchr(line, '\n');
+        if (eol) *eol = '\0';
+        char *next = eol ? eol + 1 : NULL;
+        size_t ll = strlen(line);
+        while (ll > 0 && (line[ll - 1] == '\r' || line[ll - 1] == ' ')) line[--ll] = '\0';
+        // A line that carries on the paragraph above (indented, or plain text under plain text)
+        // joins it: the NUL that ended the paragraph becomes a space.
+        int cont = para && ll > 0 && (line[0] == ' ' || (paras[n - 1].kind == TUI_P_TEXT && line[0] != '#' && line[0] != '-'));
+        if (cont) {
+            char *t = line;
+            while (*t == ' ') t++;
+            memmove(para + strlen(para) + 1, t, strlen(t) + 1);
+            para[strlen(para)] = ' ';
+        } else if (ll == 0) {
+            if (n > 0 && paras[n - 1].kind != TUI_P_BLANK) paras[n++] = (tui_para_t){ TUI_P_BLANK, "" };
+            para = NULL;
+        } else if (strncmp(line, "## ", 3) == 0) {
+            para = line + 3;
+            paras[n++] = (tui_para_t){ TUI_P_HEADING, para };
+        } else if (strncmp(line, "### ", 4) == 0) {
+            para = line + 4;
+            paras[n++] = (tui_para_t){ TUI_P_SUBHEADING, para };
+        } else if (strncmp(line, "# ", 2) == 0) {
+            para = NULL;   // the file's own title: the page has one
+        } else if (strncmp(line, "- ", 2) == 0) {
+            para = line + 2;
+            paras[n++] = (tui_para_t){ TUI_P_BULLET, para };
+        } else {
+            para = line;
+            paras[n++] = (tui_para_t){ TUI_P_TEXT, para };
+        }
+        line = next;
+    }
+    while (n > 0 && paras[n - 1].kind == TUI_P_BLANK) n--;
+    if (n > 0 && paras[0].kind == TUI_P_BLANK) { memmove(paras, paras + 1, sizeof paras[0] * (size_t)(n - 1)); n--; }
+    *out = paras;
+    return n;
+}
+
+static void begin_changelog(void) {
+    if (g_app.mode != MODE_CHAT) return;
+    g_app.mode = MODE_CHANGELOG;
+    g_app.changelog_scroll = 0;
+    g_app.dirty = 1;
+}
+
+static void render_changelog(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar) {
+    const tui_para_t *paras;
+    int n = changelog_paras(&paras);
+    char title[48];
+    snprintf(title, sizeof title, "Changelog (v%s here)", CHAT_VERSION);
+    g_app.changelog_most = tui_render_text(rows_n, cols_n, title, clock, paras, n, &g_app.changelog_scroll, bar,
+                                           g_app.color_enabled);
+}
+
+static void changelog_key(const tui_key_t *key) {
+    int rows_n, cols_n; term_get_size(&rows_n, &cols_n);
+    int page = rows_n > 6 ? rows_n - 4 : 1;
+    int *s = &g_app.changelog_scroll;
+    switch (key->type) {
+        case TUI_KEY_UP:        (*s)--; break;
+        case TUI_KEY_DOWN:      (*s)++; break;
+        case TUI_KEY_PAGE_UP:   *s -= page; break;
+        case TUI_KEY_PAGE_DOWN: *s += page; break;
+        case TUI_KEY_HOME:      *s = 0; break;
+        case TUI_KEY_END:       *s = g_app.changelog_most; break;
+        case TUI_KEY_ESCAPE:
+        case TUI_KEY_HELP:      g_app.mode = MODE_CHAT; break;
+        case TUI_KEY_CHAR:
+            if (key->ch_len != 1) break;
+            switch (key->ch[0]) {
+                case 'k': (*s)--; break;
+                case 'j': (*s)++; break;
+                case ' ': *s += page; break;
+                case 'b': *s -= page; break;
+                case 'g': *s = 0; break;
+                case 'G': *s = g_app.changelog_most; break;
+                case 'q': g_app.mode = MODE_CHAT; break;
+                default: break;
+            }
+            break;
+        default: break;
+    }
+    if (*s < 0) *s = 0;
+    if (*s > g_app.changelog_most) *s = g_app.changelog_most;
+    g_app.dirty = 1;
+}
+
 // Tab and Shift+Tab: the first row of the next section, or of this one (then the one before).
 static int page_section_step(const tui_row_t *rows, int n, int sel, int dir) {
     if (dir > 0) {
@@ -2054,6 +2169,7 @@ static const command_t APP_COMMANDS[] = {
     { "set",     NULL,        "[NAME [VALUE]]",   "change a setting; alone, opens them all (Ctrl+S)", app_set },
     { "copyid",  NULL,                  NULL,     "copy this session's id to the clipboard",         app_copyid },
     { "update",  NULL,                  NULL,     "install the latest release from GitHub",          app_update },
+    { "changelog", "news",              NULL,     "what changed in each version",                    app_changelog },
     { NULL, NULL, NULL, NULL, NULL }
 };
 
@@ -2062,6 +2178,12 @@ static const command_t *const ALL_COMMANDS[] = { APP_COMMANDS, CHAT_COMMANDS, NU
 static cmd_result_t app_help(void *ctx, const char *arg) {
     (void)ctx; (void)arg;
     begin_help();
+    return CMD_OK;
+}
+
+static cmd_result_t app_changelog(void *ctx, const char *arg) {
+    (void)ctx; (void)arg;
+    begin_changelog();
     return CMD_OK;
 }
 
@@ -2420,6 +2542,7 @@ static void handle_key(const tui_key_t *key) {
     // The pages draw their fields in their rows, so a key there redraws the page.
     switch (g_app.mode) {
         case MODE_HELP:            help_key(key); return;
+        case MODE_CHANGELOG:       changelog_key(key); return;
         case MODE_SETTINGS:        settings_key(key); return;
         case MODE_SIGN_CHOICE:     sign_picker_key(key); return;
         case MODE_SIGN_BROWSE: browser_key(key); return;
@@ -2581,6 +2704,10 @@ static tui_bar_t current_bar(void) {
         .nick_color = g_app.color,
     };
     switch (g_app.mode) {
+        case MODE_CHANGELOG:
+            b.chip = "CHANGELOG";
+            b.hint = "j/k scroll \xc2\xb7 space/b page \xc2\xb7 g/G top/bottom \xc2\xb7 q close";
+            break;
         case MODE_HELP:
             b.chip = "HELP";
             b.hint = "enter use \xc2\xb7 j/k move \xc2\xb7 tab section \xc2\xb7 esc close";
@@ -2699,6 +2826,7 @@ static void render(void) {
 
     switch (g_app.mode) {
         case MODE_HELP:            render_help(rows_n, cols_n, hhmm, &bar); return;
+        case MODE_CHANGELOG:       render_changelog(rows_n, cols_n, hhmm, &bar); return;
         case MODE_SETTINGS:
         case MODE_SETTINGS_EDIT:   render_settings(rows_n, cols_n, hhmm, &bar); return;
         case MODE_SIGN_CHOICE:
@@ -2984,7 +3112,8 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
         for (int i = 0; i < ns; i++) if (ready[i]) chat_on_socket_readable(&c, socks[i], now);
         char line[MAX_TEXT + 1];
         int rc = stdin_reader_poll(reader, line, sizeof line);
-        if (rc == 1) alive = chat_submit_line(&c, line, now);
+        if (rc == 1 && (strcmp(line, ":changelog") == 0 || strcmp(line, ":news") == 0)) { fputs(CHANGELOG_TEXT, stdout); fflush(stdout); }
+        else if (rc == 1) alive = chat_submit_line(&c, line, now);
         else if (rc == -1) alive = 0;
         tor_link_ensure(now);
         tor_link_step(now);

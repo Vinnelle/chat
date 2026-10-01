@@ -46,6 +46,10 @@
   only while it knows fewer than eight. Every lookup, every 30 seconds while alone, went to
   the same four bootstrap servers with the room's lookup key.
 
+### Added
+- `:changelog` (or `:news`) shows this changelog on a page of its own, built into chat so it
+  reads offline. In `--simple` it prints it.
+
 ### Changed
 - Direct routing is now called DHT routing: `--routing dht+nostr` and `--routing dht`, and
   `dht` on the settings page. `--routing direct+nostr` and `--routing direct` still work.

@@ -178,7 +178,14 @@ add_executable(chat
 add_custom_target(build_stamp ALL
     COMMAND ${CMAKE_COMMAND} -DOUT=${CMAKE_BINARY_DIR}/build_stamp.h -DSRC=${CMAKE_SOURCE_DIR} -P ${CMAKE_SOURCE_DIR}/cmake/stamp.cmake
     BYPRODUCTS ${CMAKE_BINARY_DIR}/build_stamp.h)
-add_dependencies(chat libsodium_ext liboqs_ext mbedtls_ext secp256k1_ext build_stamp)
+# The changelog, built in for :changelog: regenerated whenever CHANGELOG.md changes.
+add_custom_command(
+    OUTPUT ${CMAKE_BINARY_DIR}/changelog.h
+    COMMAND ${CMAKE_COMMAND} -DIN=${CMAKE_SOURCE_DIR}/CHANGELOG.md -DOUT=${CMAKE_BINARY_DIR}/changelog.h
+            -DNAME=CHANGELOG_TEXT -P ${CMAKE_SOURCE_DIR}/cmake/embed.cmake
+    DEPENDS ${CMAKE_SOURCE_DIR}/CHANGELOG.md ${CMAKE_SOURCE_DIR}/cmake/embed.cmake)
+add_custom_target(changelog_h DEPENDS ${CMAKE_BINARY_DIR}/changelog.h)
+add_dependencies(chat libsodium_ext liboqs_ext mbedtls_ext secp256k1_ext build_stamp changelog_h)
 target_compile_definitions(chat PRIVATE CHAT_VERSION="${PROJECT_VERSION}" MBEDTLS_USER_CONFIG_FILE="${CHAT_MBEDTLS_CONFIG}")
 
 # /update installs only releases whose SHA256SUMS the key in minisign.pub signed (`just keygen`
