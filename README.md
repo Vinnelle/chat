@@ -32,14 +32,15 @@ find the room or read it. A blank password still encrypts.
 **Compare verify codes.** The id and password only prove someone is in the room. Any member
 could sit between two others and read what they say. When a peer joins, chat shows a verify
 code. Compare it with them over something else (in person, a call). It only matches on both
-ends if nobody is in the middle. Nothing you send goes to a peer until you mark it with
-`:verify NICK ok`, or `:verify NICK no` if it didn't match, and then that peer gets nothing.
-Until then, their messages show `(code not compared)`, the sidebar says `compare code`, and the
-input box tells you your messages aren't going to them (`:verify NICK` shows the code). If the
-peer signs with an identity (below), you only compare once per session. If they come back with
-a fresh handshake signed by the same key, they're trusted again. **Compare verify codes** on the
-settings page (`:set verify optional`, `--verify-optional`) turns this off and sends to
-everyone.
+ends if nobody is in the middle. Mark it with `:verify NICK ok`, or `:verify NICK no` if it
+didn't match, and then that peer gets nothing. By default, what you send goes to everyone
+else whether you've compared or not. **Compare verify codes** on the settings page
+(`:set verify required`, `--verify-required`) holds it back instead: nothing you send goes to
+a peer until you've marked it `ok`. Until then, their messages show `(code not compared)`, the
+sidebar says `compare code`, and the input box tells you your messages aren't going to them
+(`:verify NICK` shows the code). If the peer signs with an identity (below), you only compare
+once per session. If they come back with a fresh handshake signed by the same key, they're
+trusted again.
 
 **Identity signing** is optional, and lets peers check who they're talking to. Pick it under
 **Signing identity** on the settings page (or `:set sign`), or with `--identity`:
@@ -476,7 +477,7 @@ Commit `minisign.pub`, and keep the secret key backed up and off GitHub.
 chat [--nick NAME] [--colour NAME|#HEX] [--identity age|pgp[:KEYFILE]] [--simple]
      [--routing dht+nostr|dht|tor] [--nodht] [--noipv6] [--nolan]
      [--noportmap] [--nonostr] [--nostr-always] [--relay wss://HOST ...]
-     [--tor-socks HOST:PORT] [--tor-control HOST:PORT] [--verify-optional]
+     [--tor-socks HOST:PORT] [--tor-control HOST:PORT] [--verify-required]
      [--file-limit SIZE] [--fast-files]
      [--session ID --port UDP_PORT --peer HOST:PORT ...]
 ```
@@ -627,7 +628,7 @@ Options given here win over what `:install` saved, for that run.
 | `--noportmap` | Don't ask the router to forward a port |
 | `--nonostr` | No Nostr relay fallback |
 | `--nostr-always` | Stay on the relays all the time, not just while they're needed |
-| `--verify-optional` | Send to peers whose verify code you haven't compared |
+| `--verify-required` | Send nothing to a peer until you've compared its verify code |
 | `--file-limit SIZE` | The biggest file fetched without `anyway` (default `8M`, up to `1G`) |
 | `--fast-files` | Send files in quick bursts instead of chat's steady slots (through the relays, as fast as they allow) |
 | `--relay URL` | A Nostr relay (`wss://...`) to use instead of the defaults; up to 6 |
