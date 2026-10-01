@@ -228,7 +228,7 @@ Settings last until chat exits. Like everything else, they're never written to d
 ## Files and pictures
 
 `:send PATH` offers a file to everyone in the session whose verify code you've compared (and
-to whoever joins or is compared later). Nothing else happens until someone chooses to fetch it:
+to whoever joins or is compared later); `:send` alone picks the file in a file browser. Nothing else happens until someone chooses to fetch it:
 `:download N` saves it, and for a picture (PNG or JPEG) `:show N` draws it in the chat, under
 the line that offered it. Pictures stay hidden until you ask; `:hide N` tucks one away again.
 `:files` lists what's been offered and how far each fetch has got; `:cancel N` stops one, or
@@ -333,10 +333,10 @@ A [`justfile`](justfile) wraps the commands above:
 
 ```sh
 just build              # native binary in build/
-just build-win          # Windows binary in build-win/ (needs zig)
+just build windows      # Windows binary in build-win/ (needs zig)
 just run --nick you     # build, then run
-just test-build         # Linux and Windows binaries in test-builds/<date>-<time>/, offer to run this system's
-just test-build linux   # the same for one system (or: windows); the other system's needs zig
+just build test         # Linux and Windows binaries in test-builds/<date>-<time>/, offer to run this system's
+just build test linux   # the same for one system (or: windows); the other system's needs zig
 just clean              # remove build directories
 ```
 
@@ -468,7 +468,7 @@ command; `Enter` on a command there puts it on the command line.
 | `:copyid` | copy the session id to the clipboard |
 | `:update` | install the latest release |
 | `:changelog` | what changed in each version (`:news`); built in, so it reads offline |
-| `:send PATH` | offer a file (see [Files and pictures](#files-and-pictures)) |
+| `:send [PATH]` | offer a file, picked in a file browser without PATH (see [Files and pictures](#files-and-pictures)) |
 | `:files` | the files offered here, and how each fetch is going |
 | `:download N [anyway]` | save file N in `~/Downloads` (`:dl`); `anyway` past your size limit |
 | `:show N [anyway]`, `:hide N` | draw picture N in the chat where it was offered, or tuck it away |

@@ -1,62 +1,63 @@
+set positional-arguments
+
 version := `sed -n 's/^project(chat VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt`
 
 # List recipes
 default:
-    @just --list
+    @just --list --unsorted
 
-# Configure and build the native binary
-build:
-    cmake -B build
-    cmake --build build -j {{num_cpus()}}
+# ---------------------------------------------------------------------------------------------
+# Build
 
-# Build a static musl Linux binary (needs zig on PATH)
-build-static:
-    cmake -B build-static -DCMAKE_TOOLCHAIN_FILE=cmake/zig-linux-musl.cmake
-    cmake --build build-static -j {{num_cpus()}}
+#   just build                       native binary in build/
+#   just build linux                 static musl Linux binary in build-static/ (needs zig)
+#   just build windows               Windows binary in build-win/ (needs zig; win works too)
+#   just build all                   native and Windows binaries
+#   just build test [system] [args]  test builds, see _build-test
+# Build chat: native (default), linux, windows, all, or test [all|linux|windows]
+[group('build')]
+build what="native" *args:
+    #!/bin/sh
+    set -eu
+    what="$1"
+    shift
+    just={{quote(just_executable())}}
+    if [ "$what" != test ] && [ $# -gt 0 ]; then echo "just build $what takes no further arguments" >&2; exit 1; fi
+    case "$what" in
+        native)
+            cmake -B build
+            cmake --build build -j {{num_cpus()}}
+            ;;
+        linux)
+            cmake -B build-static -DCMAKE_TOOLCHAIN_FILE=cmake/zig-linux-musl.cmake
+            cmake --build build-static -j {{num_cpus()}}
+            ;;
+        windows|win)
+            cmake -B build-win -DCMAKE_TOOLCHAIN_FILE=cmake/zig-windows.cmake
+            cmake --build build-win -j {{num_cpus()}}
+            ;;
+        all)
+            "$just" build
+            "$just" build windows
+            ;;
+        test) exec "$just" _build-test "$@" ;;
+        *) echo "just build takes native, linux, windows, all or test, not $what" >&2; exit 1 ;;
+    esac
 
-# Cross-build the Windows binary (needs zig on PATH)
-build-win:
-    cmake -B build-win -DCMAKE_TOOLCHAIN_FILE=cmake/zig-windows.cmake
-    cmake --build build-win -j {{num_cpus()}}
-
-# Build native and Windows binaries
-all: build build-win
-
-# Build, then run chat with the given arguments
-[positional-arguments]
-run *args: build
-    ./build/chat "$@"
-
-# Sessions handshake and chat over an in-memory network. -v also prints every session line and check.
-# Build and run the engine test (-v for everything, then the summary)
-[positional-arguments]
-test *flags:
-    cmake -B build-test -DCHAT_TESTS=ON
-    cmake --build build-test -j {{num_cpus()}} --target engine_test
-    ./build-test/tests/engine_test "$@"
-
-# Fuzz one target (bencode, json, pgp, text, engine or image) for a number of seconds (needs clang)
-fuzz target="engine" seconds="300":
-    cmake -B build-fuzz -DCHAT_FUZZ=ON -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Debug
-    cmake --build build-fuzz -j {{num_cpus()}} --target fuzz_{{target}}
-    mkdir -p fuzz-corpus/{{target}}
-    ASAN_OPTIONS=detect_leaks=0 ./build-fuzz/tests/fuzz_{{target}} fuzz-corpus/{{target}} \
-        $(test -d tests/seeds/{{target}} && echo tests/seeds/{{target}}) -dict=tests/fuzz.dict -max_total_time={{seconds}}
-
-# linux, windows or all (the default). This system's binary builds natively, the other is
-# cross-built with zig. With all, a failed cross build only leaves that binary out. Only with a
+# just build test [all|linux|windows] [chat args], all by default. This system's binary builds
+# natively, the other is cross-built with zig. With all, a failed cross build only leaves that binary out. Only with a
 # terminal to answer on does it ask; any further arguments go to chat if it runs. Each binary is
 # chat-<build id>-<system>-<arch>, the build id saying which source it's from and when it was built.
-# Build into test-builds/<date>-<time>/ (all, linux or windows), then offer to run this system's
-[positional-arguments]
-test-build target="all" *args:
+# Build into test-builds/<date>-<time>/ (all, linux or windows), then offer to run this system's binary
+_build-test target="all" *args:
     #!/bin/sh
     set -eu
     target="$1"
     shift
     case "$target" in
+        win) target=windows ;;
         all|linux|windows) ;;
-        *) echo "test-build takes all, linux or windows, not $target" >&2; exit 1 ;;
+        *) echo "just build test takes all, linux or windows, not $target" >&2; exit 1 ;;
     esac
     just={{quote(just_executable())}}
     host={{os()}}
@@ -80,7 +81,7 @@ test-build target="all" *args:
             keep build build/chat linux-{{arch()}} || return 1
             native="$out"
         else
-            have_zig Linux && "$just" build-static || return 1
+            have_zig Linux && "$just" build linux || return 1
             keep build-static build-static/chat linux-x86_64 || return 1
         fi
     }
@@ -98,7 +99,7 @@ test-build target="all" *args:
             echo "no chat.exe in build/" >&2
             return 1
         else
-            have_zig Windows && "$just" build-win || return 1
+            have_zig Windows && "$just" build windows || return 1
             keep build-win build-win/chat.exe windows-x86_64.exe || return 1
         fi
     }
@@ -127,8 +128,56 @@ test-build target="all" *args:
         esac
     fi
 
+# Build, then run chat with the given arguments
+[group('build')]
+run *args: build
+    ./build/chat "$@"
+
+# Remove build directories and release output
+[group('build')]
+clean:
+    rm -rf build build-static build-win build-test build-fuzz dist
+
+# ---------------------------------------------------------------------------------------------
+# Test
+
+# Sessions handshake and chat over an in-memory network. -v also prints every session line and
+# check, then the summary.
+# Build and run the engine test (-v for everything)
+[group('test')]
+test *flags:
+    cmake -B build-test -DCHAT_TESTS=ON
+    cmake --build build-test -j {{num_cpus()}} --target engine_test
+    ./build-test/tests/engine_test "$@"
+
+# Fuzz one target (bencode, json, pgp, text, engine or image) for a number of seconds (needs clang)
+[group('test')]
+fuzz target="engine" seconds="300":
+    cmake -B build-fuzz -DCHAT_FUZZ=ON -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Debug
+    cmake --build build-fuzz -j {{num_cpus()}} --target fuzz_{{target}}
+    mkdir -p fuzz-corpus/{{target}}
+    ASAN_OPTIONS=detect_leaks=0 ./build-fuzz/tests/fuzz_{{target}} fuzz-corpus/{{target}} \
+        $(test -d tests/seeds/{{target}} && echo tests/seeds/{{target}}) -dict=tests/fuzz.dict -max_total_time={{seconds}}
+
+# ---------------------------------------------------------------------------------------------
+# Release
+
+# minisign.pub gets committed; the password-protected secret key stays offline and backed up,
+# never in the repo. Set CHAT_SIGNING_KEY to keep it somewhere other than ~/.minisign.
+# Make the release signing key
+[group('release')]
+keygen:
+    #!/bin/sh
+    set -eu
+    key="${CHAT_SIGNING_KEY:-$HOME/.minisign/chat-release.key}"
+    if [ -e minisign.pub ] || [ -e "$key" ]; then echo "minisign.pub or $key already exists" >&2; exit 1; fi
+    mkdir -p "$(dirname "$key")"
+    minisign -G -p minisign.pub -s "$key"
+    echo "commit minisign.pub; back up $key somewhere safe"
+
 # Put standalone release binaries and SHA256SUMS in dist/
-dist: build-static build-win
+[group('release')]
+dist: (build "linux") (build "windows")
     rm -rf dist
     mkdir dist
     cp build-static/chat dist/chat-linux-x86_64
@@ -153,18 +202,6 @@ _append-list dir:
         { cat BUILDS; printf '%s\n%08dCHATBLD1' "$sig" "$len"; } >> "$f"
     done
 
-# minisign.pub gets committed; the password-protected secret key stays offline and backed up,
-# never in the repo. Set CHAT_SIGNING_KEY to keep it somewhere other than ~/.minisign.
-# Make the release signing key
-keygen:
-    #!/bin/sh
-    set -eu
-    key="${CHAT_SIGNING_KEY:-$HOME/.minisign/chat-release.key}"
-    if [ -e minisign.pub ] || [ -e "$key" ]; then echo "minisign.pub or $key already exists" >&2; exit 1; fi
-    mkdir -p "$(dirname "$key")"
-    minisign -G -p minisign.pub -s "$key"
-    echo "commit minisign.pub; back up $key somewhere safe"
-
 # Releases what's under "## Unreleased" in CHANGELOG.md as VERSION: that heading becomes
 # "## VERSION", CMakeLists.txt gets the version, and both are committed and tagged vVERSION.
 # VERSION defaults to the one in CMakeLists.txt, or the patch after it once that one is published.
@@ -172,10 +209,11 @@ keygen:
 # from the tag. Signing happens here, offline, so a compromised GitHub account can't publish an
 # update that chat will install.
 # Build, sign and publish a release (needs zig, minisign, gh)
-[positional-arguments]
+[group('release')]
 release version="":
     #!/bin/sh
     set -eu
+    just={{quote(just_executable())}}
     key="${CHAT_SIGNING_KEY:-$HOME/.minisign/chat-release.key}"
     test -e minisign.pub || { echo "no minisign.pub - run just keygen" >&2; exit 1; }
     test -z "$(git status --porcelain)" || { echo "working tree not clean" >&2; exit 1; }
@@ -214,12 +252,12 @@ release version="":
     test "$(cmake_version)" = "$v" || { echo "CMakeLists.txt says $(cmake_version), not $v" >&2; exit 1; }
     test "$(git rev-parse HEAD)" = "$(git rev-parse "v$v^{commit}")" || { echo "HEAD is not tag v$v" >&2; exit 1; }
 
-    just dist
+    "$just" dist
     # Each binary gets the signed list of this release's binaries, which peers check builds with.
     # SHA256SUMS then covers the binaries as published, list included. Two signatures: two prompts.
     minisign -S -s "$key" -m dist/BUILDS -t "chat builds v$v"
     minisign -V -p minisign.pub -m dist/BUILDS
-    just _append-list dist
+    "$just" _append-list dist
     (cd dist && sha256sum chat-linux-x86_64 chat-windows-x86_64.exe > SHA256SUMS)
     minisign -S -s "$key" -m dist/SHA256SUMS -t "chat v$v"
     minisign -V -p minisign.pub -m dist/SHA256SUMS
@@ -239,7 +277,3 @@ release version="":
     git push --atomic origin ${branch:+"$branch"} "refs/tags/v$v"
     gh release create "v$v" --title "v$v" --notes-file dist/notes.md --verify-tag \
         dist/chat-linux-x86_64 dist/chat-windows-x86_64.exe dist/SHA256SUMS dist/SHA256SUMS.minisig
-
-# Remove build directories and release output
-clean:
-    rm -rf build build-static build-win build-test build-fuzz dist

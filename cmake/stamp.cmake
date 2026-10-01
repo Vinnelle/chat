@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Copyright (C) 2026 finlay@tuta.com
 # Writes build_stamp.h: when the build ran and which source it came from. CHAT_BUILD_ID is the
-# same in a filename-safe form, used by `just test-build`.
+# same in a filename-safe form, used by `just build test`.
 string(TIMESTAMP now "%Y-%m-%d %H:%M:%S UTC" UTC)
 string(TIMESTAMP compact "%Y%m%d-%H%M%S" UTC)
 set(rev "nogit")

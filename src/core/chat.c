@@ -2229,14 +2229,19 @@ static cmd_result_t cmd_send(void *ctx, const char *arg) {
         char full[1024];
         if (home) { snprintf(full, sizeof full, "%s%s", home, path + 1); copy_str(path, full, sizeof path); }
     }
+    chat_send_file(c, path);
+    return CMD_OK;
+}
+
+void chat_send_file(chat_t *c, const char *path) {
     uint64_t size = 0;
     FILE *f = platform_open_regular(path, &size);
-    if (!f) { ui_print(c, "* can't send %s: not a file chat can read", path); return CMD_OK; }
+    if (!f) { ui_print(c, "* can't send %s: not a file chat can read", path); return; }
     if (size > FILE_HARD_MAX) {
         fclose(f);
         char lim[32]; file_format_size(FILE_HARD_MAX, lim, sizeof lim);
         ui_print(c, "* can't send %s: files go up to %s", path, lim);
-        return CMD_OK;
+        return;
     }
     // Hashed as it's read now; chunks are read from the same open file later, so a file changed
     // since shows up as a hash that doesn't match, and nothing else is ever sent in its place.
@@ -2251,9 +2256,9 @@ static cmd_result_t cmd_send(void *ctx, const char *arg) {
         total += n;
         if (total > size) break;
     }
-    if (ferror(f) || total != size) { fclose(f); ui_print(c, "* can't send %s: it changed while it was read", path); return CMD_OK; }
+    if (ferror(f) || total != size) { fclose(f); ui_print(c, "* can't send %s: it changed while it was read", path); return; }
     file_entry_t *e = file_new(c, NULL);
-    if (!e) { fclose(f); ui_print(c, "* can't offer more files at once - :cancel one you offered first"); return CMD_OK; }
+    if (!e) { fclose(f); ui_print(c, "* can't offer more files at once - :cancel one you offered first"); return; }
     e->mine = 1;
     memcpy(e->owner, c->my_id, ID_LEN);
     gen_random(e->fid, FILE_ID_LEN);
@@ -2278,7 +2283,6 @@ static cmd_result_t cmd_send(void *ctx, const char *arg) {
     if (held) ui_print(c, "* not offered to %d peer%s whose verify code you haven't compared", held, held == 1 ? "" : "s");
     else if (!sent) ui_print(c, "* nobody else is here yet - it's offered to whoever joins");
     if (e->image) ui_print(c, "* it's offered as a picture: others see it hidden until they choose :show %d", e->num);
-    return CMD_OK;
 }
 
 static void file_request(chat_t *c, file_entry_t *e, peer_t *p, double now) {
@@ -2605,7 +2609,7 @@ const command_t CHAT_COMMANDS[] = {
     { "net",        NULL,     NULL,              "network report and diagnosis",                    cmd_net },
     { "port",       NULL,     "[N]",             "show or change this session's udp port",          cmd_port },
     { "set",        NULL,     "[NAME [VALUE]]",  "show or change nick, colour, notify, preview, net", cmd_set },
-    { "send",       NULL,     "PATH",            "offer a file; nobody gets it unless they fetch it", cmd_send },
+    { "send",       NULL,     "[PATH]",          "offer a file; nobody gets it unless they fetch it", cmd_send },
     { "files",      NULL,     NULL,              "the files offered here, and how they're coming",   cmd_files },
     { "download",   "dl",     "N [anyway]",      "save file N in Downloads (anyway: past your limit)", cmd_download },
     { "cancel",     NULL,     "N",               "stop fetching file N, or stop offering yours",     cmd_cancel },

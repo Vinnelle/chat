@@ -47,6 +47,7 @@
   the same four bootstrap servers with the room's lookup key.
 
 ### Added
+- `:send` without a path opens a file browser to pick the file to offer.
 - **Files and pictures**: `:send PATH` offers a file to the session; nothing moves until someone
   fetches it with `:download N` (saved in `~/Downloads`), or, for a PNG or JPEG, `:show N`,
   which draws it in the chat under the line that offered it (`:hide N` tucks it away). `:files`
@@ -69,6 +70,9 @@
   read each other's session frames there.
 - A handshake takes a few seconds, and a re-handshake up to half a minute, going a slot at a
   time.
+- `just build` takes what to build: `just build linux` (was `just build-static`),
+  `just build windows` or `win` (was `build-win`), `just build all` (was `all`) and
+  `just build test [all|linux|windows]` (was `test-build`). Build directories keep their names.
 
 ### Fixed
 - `--nonostr` and `--nostr-always` were undone by the routing choice: `--simple` without a
