@@ -10,6 +10,7 @@ set(CHAT_CORE_SOURCES
     ${PROJECT_SOURCE_DIR}/src/app/tui.c
     ${PROJECT_SOURCE_DIR}/src/core/chat.c
     ${PROJECT_SOURCE_DIR}/src/core/cmd.c
+    ${PROJECT_SOURCE_DIR}/src/core/files.c
     ${PROJECT_SOURCE_DIR}/src/crypto/crypto.c
     ${PROJECT_SOURCE_DIR}/src/crypto/age.c
     ${PROJECT_SOURCE_DIR}/src/crypto/pgp.c

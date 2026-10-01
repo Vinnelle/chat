@@ -288,8 +288,9 @@ static void push_log(const char *fmt, ...) {
 }
 
 static void session_print(void *ui, const char *hhmm, const char *text, const uint8_t *rgb,
-                          unsigned flags, int color_len) {
+                          unsigned flags, int color_len, int file) {
     session_slot_t *s = (session_slot_t *)ui;
+    (void)file;
     if (flags & LINE_CHAT) {
         tui_scrollback_push(&s->sb, hhmm, text, rgb, (flags & LINE_MENTION) != 0, color_len);
         if (s != g_app.selected) s->unread = 1;
@@ -2998,8 +2999,9 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
 }
 
 static void plain_print(void *ui, const char *hhmm, const char *text, const uint8_t *rgb,
-                        unsigned flags, int color_len) {
+                        unsigned flags, int color_len, int file) {
     (void)ui;
+    (void)file;
     int mention = (flags & LINE_MENTION) != 0;
     int ansi = term_ansi_ok();
     if (ansi && mention) printf("[%s] \x1b[1m\x1b[48;2;110;70;10m%s\x1b[0m\n", hhmm, text);

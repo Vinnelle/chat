@@ -524,6 +524,52 @@ long platform_read_file(const char *utf8_path, void *buf, size_t cap) {
     return got;
 }
 
+FILE *platform_open_regular(const char *utf8_path, uint64_t *size) {
+    wchar_t wp[1400];
+    if (!to_wide(utf8_path, wp, 1400)) return NULL;
+    HANDLE h = CreateFileW(wp, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+    LARGE_INTEGER sz;
+    if (GetFileType(h) != FILE_TYPE_DISK || !GetFileSizeEx(h, &sz) || sz.QuadPart < 0) { CloseHandle(h); return NULL; }
+    int fd = _open_osfhandle((intptr_t)h, _O_RDONLY | _O_BINARY);
+    if (fd < 0) { CloseHandle(h); return NULL; }
+    FILE *f = _fdopen(fd, "rb");
+    if (!f) { _close(fd); return NULL; }
+    *size = (uint64_t)sz.QuadPart;
+    return f;
+}
+
+int platform_downloads_dir(char *out, size_t cap) {
+    const char *home = platform_home_dir();
+    if (!home) return -1;
+    int n = snprintf(out, cap, "%s/Downloads", home);
+    if (n <= 0 || (size_t)n >= cap) return -1;
+    wchar_t wp[1400];
+    if (!to_wide(out, wp, 1400)) return -1;
+    CreateDirectoryW(wp, NULL);
+    DWORD a = GetFileAttributesW(wp);
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) ? 0 : -1;
+}
+
+FILE *platform_create_new(const char *utf8_path) {
+    wchar_t wp[1400];
+    if (!to_wide(utf8_path, wp, 1400)) return NULL;
+    HANDLE h = CreateFileW(wp, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+    int fd = _open_osfhandle((intptr_t)h, _O_WRONLY | _O_BINARY);
+    if (fd < 0) { CloseHandle(h); return NULL; }
+    FILE *f = _fdopen(fd, "wb");
+    if (!f) _close(fd);
+    return f;
+}
+
+int platform_move_new(const char *from, const char *to) {
+    wchar_t wf[1400], wt[1400];
+    if (!to_wide(from, wf, 1400) || !to_wide(to, wt, 1400)) return -1;
+    // Without MOVEFILE_REPLACE_EXISTING it fails when the name is taken.
+    return MoveFileExW(wf, wt, 0) ? 0 : -1;
+}
+
 double now_seconds(void) {
     static LARGE_INTEGER freq;
     LARGE_INTEGER now;

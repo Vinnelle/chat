@@ -29,6 +29,8 @@ typedef struct {
     int joining, unheralded_joins;   // "joining" lines not yet followed by "joined", and "joined" without one
     int compare_prompts;   // "compare this code with ..."
     int held;              // "not sent to ...: compare verify codes first"
+    int mismatched;        // "file N ... didn't match what was offered"
+    int withdrawn;         // "NICK no longer offers file N"
 } log_t;
 
 static chat_t A, B, C;
@@ -44,7 +46,8 @@ static int verbose;
            if (verbose) printf("  fail  %s\n", #cond); } \
 } while (0)
 
-static void on_print(void *ui, const char *hhmm, const char *text, const uint8_t *rgb, unsigned flags, int color_len) {
+static void on_print(void *ui, const char *hhmm, const char *text, const uint8_t *rgb, unsigned flags, int color_len, int file) {
+    (void)file;
     log_t *l = ui;
     (void)hhmm; (void)rgb; (void)color_len;
     if (verbose) printf("  [%s%s] %s\n", l->who, (flags & LINE_CHAT) ? " chat" : "", text);
@@ -53,6 +56,8 @@ static void on_print(void *ui, const char *hhmm, const char *text, const uint8_t
         if (strncmp(text, "* anon", 6) == 0 && strstr(text, " joined (")) l->anon_joins++;
         if (strncmp(text, "* compare this code with ", 25) == 0) l->compare_prompts++;
         if (strncmp(text, "* not sent to ", 14) == 0) l->held++;
+        if (strstr(text, "didn't match what was offered")) l->mismatched++;
+        if (strstr(text, " no longer offers file ")) l->withdrawn++;
         if (strncmp(text, "* joining: peer ", 16) == 0) l->joining++;
         else if (strstr(text, " joined (")) { if (l->joining > 0) l->joining--; else l->unheralded_joins++; }
         return;
@@ -846,6 +851,195 @@ static void test_images(double *t) {
           && strcmp(image_kind(JPEG_GREY, sizeof JPEG_GREY), "jpeg") == 0, "images weren't told apart");
 }
 
+// ---- files ----
+
+static struct { int calls, num; size_t len; uint8_t data[65536]; } g_viewed;
+
+static void on_view(void *ui, int num, const char *name, const uint8_t *data, size_t len) {
+    (void)ui; (void)name;
+    g_viewed.calls++;
+    g_viewed.num = num;
+    g_viewed.len = len;
+    memcpy(g_viewed.data, data, len < sizeof g_viewed.data ? len : sizeof g_viewed.data);
+}
+
+static int offer_named(chat_t *c, const char *name) {
+    for (int n = c->file_seq; n >= 1; n--) {
+        const file_entry_t *e = chat_file(c, n);
+        if (e && !e->mine && strcmp(e->name, name) == 0) return n;
+    }
+    return 0;
+}
+
+static int write_file(const char *path, const uint8_t *data, size_t len) {
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    size_t w = fwrite(data, 1, len, f);
+    return fclose(f) == 0 && w == len ? 0 : -1;
+}
+
+static int same_file(const char *path, const uint8_t *data, size_t len) {
+    static uint8_t buf[300000];
+    long n = platform_read_file(path, buf, sizeof buf);
+    return n == (long)len && memcmp(buf, data, len) == 0;
+}
+
+static int dl_over(chat_t *c, int n) {
+    const file_entry_t *e = chat_file(c, n);
+    return !e || e->dl == DL_DONE || e->dl == DL_FAILED;
+}
+
+static int part_files_left(const char *dir) {
+    char cmd[700];
+    snprintf(cmd, sizeof cmd, "ls -a '%s' | grep -c '^\\.chat-' > /dev/null", dir);
+    return system(cmd) == 0;
+}
+
+static void test_files(double *t) {
+    // Downloads of the test's own.
+    static char home[] = "/tmp/chat-files-XXXXXX";
+    CHECK(mkdtemp(home) != NULL, "no temporary folder");
+    setenv("HOME", home, 1);
+    char dl[600], path[600], cmd[700], want[700];
+    snprintf(dl, sizeof dl, "%s/Downloads", home);
+    A.file_view = B.file_view = on_view;
+    static uint8_t data[200000];
+    gen_random(data, sizeof data);
+
+    // A file offered, and nothing moves until bob asks.
+    snprintf(path, sizeof path, "%s/notes.txt", home);
+    write_file(path, data, 5000);
+    snprintf(cmd, sizeof cmd, "send %s", path);
+    chat_run_command(&A, cmd);
+    RUN_UNTIL(t, 20, offer_named(&B, "notes.txt") > 0);
+    int n = offer_named(&B, "notes.txt");
+    CHECK(n > 0 && log_count(&log_b, "offers notes.txt (5 KB) - :download") == 1, "bob didn't see the offer");
+    CHECK(n > 0 && chat_file(&B, n)->size == 5000 && chat_file(&B, n)->dl == DL_NONE, "the offer came wrong, or started by itself");
+    CHECK(chat_file_fetch(&B, n, 1, 0) != 0, "a file not offered as a picture was fetched to show");
+
+    // Saved, whole, under its name; again, under the next one; no partial file left either time.
+    CHECK(chat_file_fetch(&B, n, 0, 0) == 0, "bob couldn't fetch notes.txt");
+    RUN_UNTIL(t, 120, dl_over(&B, n));
+    snprintf(want, sizeof want, "%s/notes.txt", dl);
+    CHECK(chat_file(&B, n)->dl == DL_DONE && same_file(want, data, 5000), "notes.txt didn't arrive whole");
+    CHECK(chat_file_fetch(&B, n, 0, 0) == 0, "bob couldn't fetch notes.txt again");
+    RUN_UNTIL(t, 120, dl_over(&B, n));
+    snprintf(want, sizeof want, "%s/notes (2).txt", dl);
+    CHECK(same_file(want, data, 5000), "the second copy wasn't saved beside the first");
+    CHECK(!part_files_left(dl), "a partial file was left in Downloads");
+
+    // Past bob's limit only with "anyway".
+    chat_set_file_options(&B, 1000, 0);
+    CHECK(chat_file_fetch(&B, n, 0, 0) != 0, "a file over the limit was fetched");
+    CHECK(chat_file_fetch(&B, n, 0, 1) == 0, "anyway didn't fetch past the limit");
+    RUN_UNTIL(t, 120, dl_over(&B, n));
+    snprintf(want, sizeof want, "%s/notes (3).txt", dl);
+    CHECK(same_file(want, data, 5000), "the file fetched anyway didn't arrive");
+    chat_set_file_options(&B, 0, 0);
+
+    // A picture, fetched to show: handed over whole, never saved.
+    snprintf(path, sizeof path, "%s/pic.png", home);
+    write_file(path, PNG_4X2, sizeof PNG_4X2);
+    snprintf(cmd, sizeof cmd, "send %s", path);
+    chat_run_command(&A, cmd);
+    RUN_UNTIL(t, 20, offer_named(&B, "pic.png") > 0);
+    n = offer_named(&B, "pic.png");
+    CHECK(n > 0 && chat_file(&B, n)->image && log_count(&log_b, ":show") >= 1, "the picture wasn't offered as one");
+    g_viewed.calls = 0;
+    CHECK(chat_file_fetch(&B, n, 1, 0) == 0, "bob couldn't fetch the picture to show");
+    RUN_UNTIL(t, 60, g_viewed.calls > 0);
+    CHECK(g_viewed.calls == 1 && g_viewed.num == n && g_viewed.len == sizeof PNG_4X2
+          && memcmp(g_viewed.data, PNG_4X2, sizeof PNG_4X2) == 0, "the picture wasn't handed over whole");
+    snprintf(want, sizeof want, "%s/pic.png", dl);
+    CHECK(platform_read_file(want, data + 199000, 10) < 0, "a picture fetched to show was saved");
+
+    // Changed after it was offered: thrown away, not saved.
+    snprintf(path, sizeof path, "%s/changing.bin", home);
+    write_file(path, data, 3000);
+    snprintf(cmd, sizeof cmd, "send %s", path);
+    chat_run_command(&A, cmd);
+    RUN_UNTIL(t, 20, offer_named(&B, "changing.bin") > 0);
+    n = offer_named(&B, "changing.bin");
+    FILE *f = fopen(path, "r+b");
+    if (f) { fputc(data[0] ^ 1, f); fclose(f); }
+    CHECK(chat_file_fetch(&B, n, 0, 0) == 0, "bob couldn't fetch changing.bin");
+    RUN_UNTIL(t, 120, dl_over(&B, n));
+    snprintf(want, sizeof want, "%s/changing.bin", dl);
+    CHECK(chat_file(&B, n)->dl == DL_FAILED && log_b.mismatched == 1
+          && platform_read_file(want, data + 199000, 10) < 0 && !part_files_left(dl), "a changed file was kept");
+
+    // Fast transfers: the same file in a fraction of the time.
+    snprintf(path, sizeof path, "%s/big.bin", home);
+    write_file(path, data, 40000);
+    chat_set_file_options(&A, 0, 1);
+    chat_set_file_options(&B, 0, 1);
+    snprintf(cmd, sizeof cmd, "send %s", path);
+    chat_run_command(&A, cmd);
+    RUN_UNTIL(t, 20, offer_named(&B, "big.bin") > 0);
+    n = offer_named(&B, "big.bin");
+    double began = *t;
+    CHECK(chat_file_fetch(&B, n, 0, 0) == 0, "bob couldn't fetch big.bin");
+    RUN_UNTIL(t, 120, dl_over(&B, n));
+    snprintf(want, sizeof want, "%s/big.bin", dl);
+    CHECK(same_file(want, data, 40000) && *t - began < 15.0, "40 KB took %.1f s with fast transfers", *t - began);
+    chat_set_file_options(&A, 0, 0);
+    chat_set_file_options(&B, 0, 0);
+
+    // Stopped part way: nothing left behind.
+    CHECK(chat_file_fetch(&B, n, 0, 0) == 0, "bob couldn't fetch big.bin again");
+    RUN_FOR(t, 4);
+    snprintf(cmd, sizeof cmd, "cancel %d", n);
+    chat_run_command(&B, cmd);
+    CHECK(chat_file(&B, n)->dl == DL_NONE && !part_files_left(dl), "a cancelled download left something");
+
+    // No longer offered: a fetch is told so.
+    int mine = 0;
+    for (int k = 1; k <= A.file_seq; k++) if (chat_file(&A, k) && chat_file(&A, k)->mine && strcmp(chat_file(&A, k)->name, "big.bin") == 0) mine = k;
+    snprintf(cmd, sizeof cmd, "cancel %d", mine);
+    chat_run_command(&A, cmd);
+    CHECK(chat_file_fetch(&B, n, 0, 0) == 0, "bob couldn't ask for big.bin");
+    RUN_UNTIL(t, 60, dl_over(&B, n));
+    CHECK(chat_file(&B, n)->dl == DL_FAILED && log_b.withdrawn == 1, "a withdrawn file wasn't refused");
+
+    snprintf(cmd, sizeof cmd, "rm -rf '%s'", home);
+    if (system(cmd) != 0) printf("couldn't remove %s\n", home);
+}
+
+static void test_file_names(double *t) {
+    (void)t;
+    static const char *const CASES[][2] = {
+        { "photo.jpg", "photo.jpg" },
+        { "../../etc/passwd", "passwd" },
+        { "C:\\Windows\\evil.exe", "evil.exe" },
+        { "..", "file" },
+        { ".bashrc", "bashrc" },
+        { "   ", "file" },
+        { "a\x1b[2Jb.txt", "a[2Jb.txt" },
+        { "invoice\xe2\x80\xaegpj.exe", "invoicegpj.exe" },   // a right-to-left override, gone
+        { "what?.txt", "what_.txt" },
+        { "con.txt", "_con.txt" },
+        { "NUL", "_NUL" },
+        { "LPT1.log", "_LPT1.log" },
+        { "trailing. ", "trailing" },
+        { "na\tme", "name" },
+        { "", "file" },
+    };
+    char out[FILE_NAME_MAX + 1];
+    for (size_t i = 0; i < sizeof CASES / sizeof CASES[0]; i++) {
+        file_clean_name(CASES[i][0], out);
+        CHECK(strcmp(out, CASES[i][1]) == 0, "name '%s' became '%s', not '%s'", CASES[i][0], out, CASES[i][1]);
+    }
+    char longname[400];
+    memset(longname, 'x', sizeof longname - 1);
+    longname[sizeof longname - 1] = '\0';
+    file_clean_name(longname, out);
+    CHECK(strlen(out) == FILE_NAME_MAX, "a long name came out %zu bytes", strlen(out));
+    uint64_t v;
+    CHECK(file_parse_size("8M", &v) == 0 && v == 8u * 1024 * 1024 && file_parse_size("512 KB", &v) == 0 && v == 512 * 1024
+          && file_parse_size("1.5G", &v) == 0 && v == 1610612736ull && file_parse_size("100", &v) == 0 && v == 100
+          && file_parse_size("x", &v) != 0 && file_parse_size("5Q", &v) != 0 && file_parse_size("-1", &v) != 0, "sizes parse wrong");
+}
+
 static void test_parsers(double *t) {
     (void)t;
     // An address Tor itself handed out, and the same with one character changed.
@@ -918,7 +1112,7 @@ int main(int argc, char **argv) {
         { "junk", test_junk }, { "lookalike nick", test_lookalike_nick },
         { "third peer", test_third_peer }, { "candidates settle", test_candidates_settle }, { "builds", test_builds },
         { "parsers", test_parsers }, { "dht keys", test_dht_keys }, { "dht", test_dht }, { "read file", test_read_file },
-        { "identity keys", test_identity_keys }, { "images", test_images },
+        { "identity keys", test_identity_keys }, { "images", test_images }, { "file names", test_file_names }, { "files", test_files },
     };
     size_t n_tests = sizeof tests / sizeof tests[0];
     int failed[sizeof tests / sizeof tests[0]], n_failed = 0;

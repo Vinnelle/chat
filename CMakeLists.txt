@@ -159,6 +159,7 @@ add_executable(chat
     src/app/update.c
     src/core/chat.c
     src/core/cmd.c
+    src/core/files.c
     src/crypto/crypto.c
     src/crypto/age.c
     src/crypto/pgp.c

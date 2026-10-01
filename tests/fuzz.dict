@@ -21,3 +21,9 @@
 "[::1]:9"
 "\x01A"
 "\x01B"
+# File records
+"fo\x09"
+"fg\x09"
+"fd\x09"
+"fx\x09"
+"image"

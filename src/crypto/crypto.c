@@ -143,6 +143,16 @@ int hmac_sha256(const uint8_t *key, size_t keylen, const uint8_t *data, size_t l
     return 0;
 }
 
+_Static_assert(sizeof(crypto_hash_sha256_state) <= sizeof(((sha256_ctx_t *)0)->state), "sha256_ctx_t too small");
+
+void sha256_init(sha256_ctx_t *h) { crypto_hash_sha256_init((crypto_hash_sha256_state *)(void *)h->state); }
+void sha256_update(sha256_ctx_t *h, const void *data, size_t len) {
+    crypto_hash_sha256_update((crypto_hash_sha256_state *)(void *)h->state, data, len);
+}
+void sha256_final(sha256_ctx_t *h, uint8_t out[32]) {
+    crypto_hash_sha256_final((crypto_hash_sha256_state *)(void *)h->state, out);
+}
+
 void sha256_hash(const void *data, size_t len, uint8_t out[32]) {
     crypto_hash_sha256(out, data, len);
 }
