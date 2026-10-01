@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.11
 
 ### Security
 - Desktop notifications on Linux are transient: the desktop shows them but keeps them out of
