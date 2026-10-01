@@ -218,6 +218,7 @@ typedef struct {
     int color_enabled;
     routing_t route;
     int route_chosen;
+    int nostr_flag;   // what --nonostr or --nostr-always asked for, or -1
     notify_mode_t notify_mode;
     notify_preview_t notify_preview;
     int verify_optional;
@@ -922,19 +923,22 @@ static const char *const ROUTE_CHOICE_LINES[] = {
      "its own; connecting takes longer"),
 };
 
+// A routing choice doesn't undo --nonostr or --nostr-always: DHT + Nostr uses the relays as
+// they say, and only DHT alone turns the relays off.
 static void apply_route_choice(int choice) {
     if (choice == 3) {
         g_app.route.mode = ROUTE_TOR;
     } else {
         g_app.route.mode = ROUTE_DHT;
-        g_app.route.nostr = choice == 1 ? NOSTR_FALLBACK : NOSTR_OFF;
+        g_app.route.nostr = choice == 2 ? NOSTR_OFF : g_app.nostr_flag >= 0 ? g_app.nostr_flag : NOSTR_FALLBACK;
     }
     g_app.route_chosen = 1;
 }
 
 static const char *route_label(void) {
     if (g_app.route.mode == ROUTE_TOR) return "Tor onion services only";
-    return g_app.route.nostr ? "DHT, with Nostr relay fallback" : "DHT only";
+    return g_app.route.nostr == NOSTR_ALWAYS ? "DHT, with Nostr relays always"
+         : g_app.route.nostr ? "DHT, with Nostr relay fallback" : "DHT only";
 }
 
 // ---- the settings page ----
@@ -3247,7 +3251,8 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
 
     o.port = port;
     if (!g_app.route_chosen) {
-        int choice = 1;
+        // Without a terminal to ask, --nonostr means DHT only.
+        int choice = g_app.nostr_flag == NOSTR_OFF ? 2 : 1;
         if (tty) {
             for (size_t i = 0; i < sizeof ROUTE_CHOICE_LINES / sizeof ROUTE_CHOICE_LINES[0]; i++)
                 printf("%s\n", ROUTE_CHOICE_LINES[i] + 2);
@@ -3349,6 +3354,7 @@ int main(int argc, char **argv) {
     char peer_args[MAX_PEER_ARGS][PEER_ARG_LEN]; int n_peer_args = 0;
     int has_color = 0, force_simple = 0, do_update = 0, relays_given = 0;
     routing_defaults(&g_app.route);
+    g_app.nostr_flag = -1;
     g_app.notify_mode = NOTIFY_MENTIONS;
     uint8_t color[3] = {0, 0, 0};
 
@@ -3380,9 +3386,9 @@ int main(int argc, char **argv) {
         } else if (strcmp(key, "noportmap") == 0) {
             g_app.route.portmap = 0;
         } else if (strcmp(key, "nonostr") == 0) {
-            g_app.route.nostr = NOSTR_OFF;
+            g_app.route.nostr = g_app.nostr_flag = NOSTR_OFF;
         } else if (strcmp(key, "nostr-always") == 0) {
-            g_app.route.nostr = NOSTR_ALWAYS;
+            g_app.route.nostr = g_app.nostr_flag = NOSTR_ALWAYS;
         } else if (strcmp(key, "file-limit") == 0 && i + 1 < argc) {
             uint64_t v;
             if (file_parse_size(argv[++i], &v) != 0 || v == 0 || v > FILE_HARD_MAX) {

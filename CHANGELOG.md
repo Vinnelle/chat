@@ -110,6 +110,11 @@
   and a terminal resize no longer cuts a frame short.
 - libsodium's build started a compiler per file at once, which could run a small machine out
   of memory.
+- `--nonostr` and `--nostr-always` were undone by the routing choice: `--simple` without a
+  terminal, or `--routing dht+nostr` given after them, went back to the relay fallback, so
+  `--nonostr` still connected to the Nostr relays. They now hold whatever the routing, and
+  `--simple --nonostr` without a terminal routes DHT only. The routing line says when the
+  relays are always on.
 
 ### Added
 - A page of every key and command: `F1`, `?` in NORMAL, or `:help`. `Enter` on a command puts it
