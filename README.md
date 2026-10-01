@@ -603,7 +603,8 @@ than the running build, chat checks that the release's `SHA256SUMS` carries a va
 from the release key built into chat, downloads the binary for your platform, checks its
 SHA-256 against `SHA256SUMS`, and replaces the executable in place. A release without a valid
 signature is refused. Restart chat to
-run the new version. `chat --update` exits with status 1 if the update failed. It needs `curl` (on `PATH` on Linux; on Windows, the one built into Windows 10+ in `System32`) and
+run the new version. Inside chat, `:update` shows each step in a box as it goes, with a
+progress bar for the download; Esc hides the box and the update carries on. `chat --update` exits with status 1 if the update failed. It needs `curl` (on `PATH` on Linux; on Windows, the one built into Windows 10+ in `System32`) and
 write access to the folder that holds the executable.
 
 ### Options
