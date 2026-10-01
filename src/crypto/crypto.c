@@ -411,7 +411,7 @@ int identity_from_password(const char *password, const char *device_id, identity
 #define PASS_MAGIC "chatkey1"
 
 // Limits past these come from a tampered file, which could otherwise ask for any amount of memory.
-static int lock_key(const char *passphrase, pass_lock_t *lk) {
+static int derive_lock_key(const char *passphrase, pass_lock_t *lk) {
     const uint8_t *h = lk->header;
     uint32_t ops = (uint32_t)h[8] << 24 | (uint32_t)h[9] << 16 | (uint32_t)h[10] << 8 | h[11];
     uint32_t mem_kib = (uint32_t)h[12] << 24 | (uint32_t)h[13] << 16 | (uint32_t)h[14] << 8 | h[15];
@@ -428,13 +428,13 @@ int pass_lock_new(const char *passphrase, pass_lock_t *lk) {
         lk->header[12 + i] = (uint8_t)(mem_kib >> (24 - 8 * i));
     }
     randombytes_buf(lk->header + 16, PASS_HEADER_LEN - 16);
-    return lock_key(passphrase, lk);
+    return derive_lock_key(passphrase, lk);
 }
 
 int pass_lock_of(const char *passphrase, const uint8_t *sealed, size_t len, pass_lock_t *lk) {
     if (len < PASS_SEAL_OVERHEAD || memcmp(sealed, PASS_MAGIC, 8) != 0) return PASS_FORMAT;
     memcpy(lk->header, sealed, PASS_HEADER_LEN);
-    return lock_key(passphrase, lk);
+    return derive_lock_key(passphrase, lk);
 }
 
 int pass_seal(const pass_lock_t *lk, const void *plain, size_t len, uint8_t *out, size_t cap, size_t *out_len) {
