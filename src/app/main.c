@@ -2081,8 +2081,9 @@ static void begin_help(void) {
 
 // ---- :changelog ----
 
-// The changelog built into this binary, as paragraphs: headings, bullets (with the lines under
-// them run together), and blank lines between. Markdown's ** and ` are left out.
+// The changelog built into this binary, as paragraphs of Markdown for the page to lay out:
+// headings, list items (nested by their indent), numbered items, quotes, fenced code and rules,
+// with the lines that carry a paragraph on run together. The inline marks stay in the text.
 static int changelog_paras(const tui_para_t **out) {
     static tui_para_t paras[1024];
     static char *text;
@@ -2092,48 +2093,83 @@ static int changelog_paras(const tui_para_t **out) {
     size_t len = strlen(CHANGELOG_TEXT);
     text = malloc(len + 1);
     if (!text) { *out = paras; return 0; }
-    // Strip the markup in place: what's left stays NUL-terminated per paragraph below.
-    size_t o = 0;
-    for (size_t i = 0; i < len; i++) {
-        if (CHANGELOG_TEXT[i] == '`') continue;
-        if (CHANGELOG_TEXT[i] == '*' && CHANGELOG_TEXT[i + 1] == '*') { i++; continue; }
-        text[o++] = CHANGELOG_TEXT[i];
-    }
-    text[o] = '\0';
-    char *para = NULL;
-    for (char *line = text; line && n < (int)(sizeof paras / sizeof paras[0]) - 1; ) {
+    memcpy(text, CHANGELOG_TEXT, len + 1);
+    const int max = (int)(sizeof paras / sizeof paras[0]) - 1;
+    char *para = NULL;   // the paragraph a next line may join, if any
+    int fenced = 0;
+    for (char *line = text; line && n < max; ) {
         char *eol = strchr(line, '\n');
         if (eol) *eol = '\0';
         char *next = eol ? eol + 1 : NULL;
         size_t ll = strlen(line);
-        while (ll > 0 && (line[ll - 1] == '\r' || line[ll - 1] == ' ')) line[--ll] = '\0';
-        // A line that carries on the paragraph above (indented, or plain text under plain text)
-        // joins it: the NUL that ended the paragraph becomes a space.
-        int cont = para && ll > 0 && (line[0] == ' ' || (paras[n - 1].kind == TUI_P_TEXT && line[0] != '#' && line[0] != '-'));
-        if (cont) {
-            char *t = line;
-            while (*t == ' ') t++;
-            memmove(para + strlen(para) + 1, t, strlen(t) + 1);
-            para[strlen(para)] = ' ';
-        } else if (ll == 0) {
-            if (n > 0 && paras[n - 1].kind != TUI_P_BLANK) paras[n++] = (tui_para_t){ TUI_P_BLANK, "" };
-            para = NULL;
-        } else if (strncmp(line, "## ", 3) == 0) {
-            para = line + 3;
-            paras[n++] = (tui_para_t){ TUI_P_HEADING, para };
-        } else if (strncmp(line, "### ", 4) == 0) {
-            para = line + 4;
-            paras[n++] = (tui_para_t){ TUI_P_SUBHEADING, para };
-        } else if (strncmp(line, "# ", 2) == 0) {
-            para = NULL;   // the file's own title: the page has one
-        } else if (strncmp(line, "- ", 2) == 0) {
-            para = line + 2;
-            paras[n++] = (tui_para_t){ TUI_P_BULLET, para };
-        } else {
-            para = line;
-            paras[n++] = (tui_para_t){ TUI_P_TEXT, para };
-        }
+        while (ll > 0 && (line[ll - 1] == '\r' || (!fenced && line[ll - 1] == ' '))) line[--ll] = '\0';
+        int indent = 0;
+        while (line[indent] == ' ') indent++;
+        char *raw = line, *t = line + indent;
         line = next;
+        if (strncmp(t, "```", 3) == 0 || strncmp(t, "~~~", 3) == 0) {
+            fenced = !fenced;
+            para = NULL;
+            continue;
+        }
+        if (fenced) {
+            paras[n++] = (tui_para_t){ .kind = TUI_P_CODE, .text = raw };
+            continue;
+        }
+        if (*t == '\0') {
+            if (n > 0 && paras[n - 1].kind != TUI_P_BLANK) paras[n++] = (tui_para_t){ .kind = TUI_P_BLANK, .text = "" };
+            para = NULL;
+            continue;
+        }
+        int hashes = 0;
+        while (t[hashes] == '#') hashes++;
+        if (hashes > 0 && hashes <= 6 && t[hashes] == ' ') {
+            para = NULL;
+            if (hashes == 1) continue;   // the file's own title: the page has one
+            paras[n++] = (tui_para_t){ .kind = hashes == 2 ? TUI_P_HEADING : TUI_P_SUBHEADING, .text = t + hashes + 1 };
+            continue;
+        }
+        // A rule: three or more of one of - * _, nothing else but spaces.
+        if (*t == '-' || *t == '*' || *t == '_') {
+            int marks = 0, other = 0;
+            for (const char *p = t; *p; p++) {
+                if (*p == *t) marks++;
+                else if (*p != ' ') other = 1;
+            }
+            if (marks >= 3 && !other) {
+                paras[n++] = (tui_para_t){ .kind = TUI_P_RULE, .text = "" };
+                para = NULL;
+                continue;
+            }
+        }
+        if ((*t == '-' || *t == '*' || *t == '+') && t[1] == ' ') {
+            para = t + 2;
+            paras[n++] = (tui_para_t){ .kind = TUI_P_BULLET, .text = para, .level = indent / 2 };
+            continue;
+        }
+        int digits = 0;
+        while (t[digits] >= '0' && t[digits] <= '9') digits++;
+        if (digits > 0 && digits <= 6 && (t[digits] == '.' || t[digits] == ')') && t[digits + 1] == ' ') {
+            tui_para_t p = { .kind = TUI_P_NUMBERED, .level = indent / 3 };
+            memcpy(p.marker, t, (size_t)digits + 1);
+            p.marker[digits + 1] = '\0';
+            para = t + digits + 2;
+            p.text = para;
+            paras[n++] = p;
+            continue;
+        }
+        int quote = *t == '>';
+        if (quote) { t++; while (*t == ' ') t++; }
+        // A line under a paragraph carries it on (a quote's only under a quote): the NUL that
+        // ended the paragraph becomes a space.
+        if (para && *t && (!quote || paras[n - 1].kind == TUI_P_QUOTE)) {
+            size_t pl = strlen(para);
+            memmove(para + pl + 1, t, strlen(t) + 1);
+            para[pl] = ' ';
+            continue;
+        }
+        para = t;
+        paras[n++] = (tui_para_t){ .kind = quote ? TUI_P_QUOTE : TUI_P_TEXT, .text = para };
     }
     while (n > 0 && paras[n - 1].kind == TUI_P_BLANK) n--;
     if (n > 0 && paras[0].kind == TUI_P_BLANK) { memmove(paras, paras + 1, sizeof paras[0] * (size_t)(n - 1)); n--; }
