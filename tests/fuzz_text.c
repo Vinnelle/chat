@@ -83,6 +83,13 @@ static const tui_image_t *fuzz_image(const void *ctx, int file) {
     return file == 1 && g_pic.w > 0 ? &g_pic : NULL;
 }
 
+// The same file on its way, how far along and what's said beside the bar as the input says.
+static tui_progress_t g_progress;
+static const tui_progress_t *fuzz_progress(const void *ctx, int file) {
+    (void)ctx;
+    return file == 1 && g_progress.text[0] ? &g_progress : NULL;
+}
+
 // The frames go to /dev/null; this is for the sanitizers' benefit.
 static void fuzz_render(const char *s, const uint8_t *data, size_t size) {
     static tui_scrollback_t sb, console;
@@ -104,7 +111,8 @@ static void fuzz_render(const char *s, const uint8_t *data, size_t size) {
                         (flags & 32) ? head : (int)(strlen(s) / 3));
     tui_scrollback_push(&console, "12:34", s, (flags & 1) ? rgb : NULL, 0, 0);
     if (size > 5) tui_set_background((const uint8_t[3]){ data[5], data[5], (uint8_t)(data[5] ^ 0x80) });
-    tui_session_row_t session = { .online = 3, .unread = flags & 1, .state = (tui_session_state_t)(flags % 3) };
+    tui_session_row_t session = { .online = 3, .unread = size > 8 ? data[8] : 0, .mention = flags & 1,
+                                  .state = (tui_session_state_t)(flags % 3) };
     copy_str(session.label, s, sizeof session.label);
     tui_peer_row_t peer = { .verify = flags % 3, .modified = (flags & 8) != 0, .you = (flags & 16) != 0 };
     copy_str(peer.nick, s, sizeof peer.nick);
@@ -119,13 +127,29 @@ static void fuzz_render(const char *s, const uint8_t *data, size_t size) {
     in.modal = 1;
     in.suggest = fuzz_suggest;
     if (flags & 128) { in.mode = TUI_IMODE_COMMAND; copy_str(in.cmd, s, sizeof in.cmd); in.cmd_len = (int)strlen(in.cmd); }
+    // The nick that's lit where it's mentioned: the start of the text, so it's there to find.
+    char self[MAX_NICK + 1];
+    copy_str(self, s, size > 9 ? 1 + data[9] % MAX_NICK : sizeof self);
+    g_progress.permille = size > 11 ? (int)data[11] * 5 - 100 : 0;   // a little out of range either side too
+    copy_str(g_progress.text, (flags & 1) ? s : "", sizeof g_progress.text);
     tui_view_t view = { (flags & 4) != 0, (flags & 8) != 0, (flags & 16) != 0, (flags & 2) ? s : NULL, s,
-                        (tui_session_state_t)(flags % 3), s, (flags & 4) ? s : NULL, flags % 5, fuzz_image, NULL };
+                        (tui_session_state_t)(flags % 3), s, (flags & 4) ? s : NULL, flags % 5, fuzz_image, NULL,
+                        (flags & 8) ? self : NULL, size > 10 ? data[10] % 4 : 0, flags % 7, flags & 1, fuzz_progress,
+                        (flags & 32) ? s : NULL };
     const tui_kv_t net[1] = { { s, s } };
-    tui_bar_t bar = { .chip = s, .tone = (tui_tone_t)(flags % 5), .prompt = (flags & 32) ? s : NULL, .input = &in,
+    // A dialog over the screen, with the text as its title, paragraphs, field, status and note.
+    tui_input_t field = in;
+    field.modal = 0;
+    field.mode = TUI_IMODE_INSERT;
+    const tui_para_t paras[3] = { { .kind = (tui_para_kind_t)(flags % 9), .text = s, .level = flags % 4, .marker = "1." },
+                                  { .kind = TUI_P_BLANK, .text = "" }, { .kind = TUI_P_BULLET, .text = s } };
+    tui_dialog_t dialog = { .title = s, .text = paras, .n_text = (flags & 2) ? 3 : 0,
+                            .input = (flags & 4) ? NULL : &field, .mask = (flags & 8) != 0, .placeholder = s,
+                            .status = (flags & 4) ? s : NULL, .note = (flags & 1) ? s : NULL, .keys = s };
+    tui_bar_t bar = { .chip = s, .tone = (tui_tone_t)(flags % 5), .input = &in,
                       .mask_input = (flags & 128) != 0, .message = (flags & 2) ? s : NULL, .hint = s,
                       .badge = (tui_identity_badge_t)(flags % 4), .nick = s, .nick_color = rgb, .placeholder = s,
-                      .limit = flags % 300 };
+                      .limit = flags % 300, .warn = (flags & 16) ? s : NULL, .dialog = (flags & 32) ? &dialog : NULL };
     tui_render(rows, cols, &session, 1, 0, &peer, 1, net, 1, &sb, &console, &view, &bar, (flags & 64) != 0);
     tui_render_bar(rows, cols, &view, &bar, (flags & 64) != 0);
     tui_row_t row[2] = { { s, s, (flags & 1) ? s : NULL, (tui_value_kind_t)(flags % 6), (flags & 4) ? rgb : NULL },
@@ -134,7 +158,7 @@ static void fuzz_render(const char *s, const uint8_t *data, size_t size) {
     tui_page_t page = { .title = s, .clock = s, .intro = (flags & 2) ? s : NULL, .nav = (flags & 4) ? nav : NULL,
                         .n_nav = 2, .nav_sel = flags % 3, .rows = row, .n_rows = 2, .selected = flags % 3,
                         .help = s, .usage = (flags & 1) ? s : NULL, .button = (flags & 8) ? s : NULL,
-                        .editing = (flags & 16) != 0, .keys = (flags & 32) != 0 };
+                        .keys = (flags & 16) != 0 };
     in.mode = TUI_IMODE_INSERT;
     bar.input = (flags & 16) ? &in : NULL;
     tui_render_page(rows, cols, &page, &bar, (flags & 64) != 0);

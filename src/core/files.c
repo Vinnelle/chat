@@ -112,3 +112,13 @@ void file_format_size(uint64_t n, char *out, size_t cap) {
     else if (n < 1024u * 1024 * 1024) snprintf(out, cap, "%.1f MB", (double)n / (1024.0 * 1024.0));
     else snprintf(out, cap, "%.1f GB", (double)n / (1024.0 * 1024.0 * 1024.0));
 }
+
+void file_format_duration(double seconds, char *out, size_t cap) {
+    if (!(seconds < 60.0 * 60 * 24 * 365)) seconds = 60.0 * 60 * 24 * 365;   // NaN too
+    long min = (long)(seconds / 60.0 + 0.5);
+    if (seconds < 60.0) snprintf(out, cap, "under a minute");
+    else if (min < 60) snprintf(out, cap, "about %ld min", min);
+    else if (min >= 48 * 60) snprintf(out, cap, "about %ld days", (min + 720) / 1440);
+    else if (min % 60 == 0 || min >= 600) snprintf(out, cap, "about %ld h", (min + 30) / 60);
+    else snprintf(out, cap, "about %ld h %ld min", min / 60, min % 60);
+}

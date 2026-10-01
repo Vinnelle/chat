@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define MAX_PLAIN (KEM_PUB_LEN * 2 + 256)
+#define MAX_PLAIN SEAL_MAX_BODY
 
 void crypto_setup(void) {
     if (sodium_init() < 0) {
@@ -231,21 +231,10 @@ int ratchet_peek(const ratchet_t *r, uint32_t target_index, uint8_t message_key[
     return 0;
 }
 
-int ratchet_derive(ratchet_t *r, uint32_t target_index, uint8_t message_key[32]) {
-    ratchet_t result;
-    if (ratchet_peek(r, target_index, message_key, &result) != 0) return -1;
-    *r = result;
-    return 0;
-}
-
 static size_t padded_body(size_t plain_len, size_t min_body) {
     size_t body = plain_len + 2;
     body += (PAD_BLOCK - body % PAD_BLOCK) % PAD_BLOCK;
     return body < min_body ? min_body : body;
-}
-
-size_t sealed_len(size_t plain_len, size_t header_len, size_t min_body) {
-    return header_len + padded_body(plain_len, min_body) + AEAD_TAG_LEN;
 }
 
 int sealed_len_ok(size_t frame_len, size_t header_len, size_t min_body) {
@@ -309,16 +298,21 @@ int room_unseal(const uint8_t room_key[ROOM_KEY_LEN], const uint8_t *frame, size
                           data, data_cap, data_len);
 }
 
-int session_seal(const uint8_t message_key[32], uint32_t index, const void *data, size_t len,
-                  uint8_t *out, size_t out_cap, size_t *out_len) {
+int session_seal_padded(const uint8_t message_key[32], uint32_t index, const void *data, size_t len, size_t min_body,
+                        uint8_t *out, size_t out_cap, size_t *out_len) {
     uint8_t idx_be[4] = { (uint8_t)(index >> 24), (uint8_t)(index >> 16), (uint8_t)(index >> 8), (uint8_t)index };
     size_t ct_len;
     if (out_cap < SESSION_HEADER_LEN) return -1;
-    if (seal_common(message_key, idx_be, 4, data, len, SESSION_PAD_TARGET, &ct_len, out + 4,
+    if (seal_common(message_key, idx_be, 4, data, len, min_body, &ct_len, out + 4,
                      out + 4 + AEAD_NONCE_LEN, out_cap - SESSION_HEADER_LEN) != 0) return -1;
     memcpy(out, idx_be, 4);
     *out_len = 4 + AEAD_NONCE_LEN + ct_len;
     return 0;
+}
+
+int session_seal(const uint8_t message_key[32], uint32_t index, const void *data, size_t len,
+                  uint8_t *out, size_t out_cap, size_t *out_len) {
+    return session_seal_padded(message_key, index, data, len, SESSION_PAD_TARGET, out, out_cap, out_len);
 }
 
 int session_unseal(const uint8_t message_key[32], uint32_t index, const uint8_t *frame, size_t frame_len,
@@ -409,6 +403,63 @@ int identity_from_password(const char *password, const char *device_id, identity
     *idkp = kp;
     sodium_memzero(seed, sizeof seed);
     sodium_memzero(&kp, sizeof kp);
+    return 0;
+}
+
+// The header: "chatkey1", Argon2id's opslimit and memlimit (KiB, big-endian), salt. Then each
+// secret sealed: the header, a nonce, the sealed secret.
+#define PASS_MAGIC "chatkey1"
+
+// Limits past these come from a tampered file, which could otherwise ask for any amount of memory.
+static int lock_key(const char *passphrase, pass_lock_t *lk) {
+    const uint8_t *h = lk->header;
+    uint32_t ops = (uint32_t)h[8] << 24 | (uint32_t)h[9] << 16 | (uint32_t)h[10] << 8 | h[11];
+    uint32_t mem_kib = (uint32_t)h[12] << 24 | (uint32_t)h[13] << 16 | (uint32_t)h[14] << 8 | h[15];
+    if (ops < 1 || ops > 16 || mem_kib < 8 || mem_kib > 1024u * 1024u) return PASS_FORMAT;
+    return crypto_pwhash(lk->key, sizeof lk->key, passphrase, strlen(passphrase), h + 16, ops, (size_t)mem_kib * 1024u,
+                         crypto_pwhash_ALG_ARGON2ID13) == 0 ? 0 : PASS_NOMEM;
+}
+
+int pass_lock_new(const char *passphrase, pass_lock_t *lk) {
+    memcpy(lk->header, PASS_MAGIC, 8);
+    const uint32_t ops = KDF_OPSLIMIT, mem_kib = KDF_MEMLIMIT / 1024u;
+    for (int i = 0; i < 4; i++) {
+        lk->header[8 + i] = (uint8_t)(ops >> (24 - 8 * i));
+        lk->header[12 + i] = (uint8_t)(mem_kib >> (24 - 8 * i));
+    }
+    randombytes_buf(lk->header + 16, PASS_HEADER_LEN - 16);
+    return lock_key(passphrase, lk);
+}
+
+int pass_lock_of(const char *passphrase, const uint8_t *sealed, size_t len, pass_lock_t *lk) {
+    if (len < PASS_SEAL_OVERHEAD || memcmp(sealed, PASS_MAGIC, 8) != 0) return PASS_FORMAT;
+    memcpy(lk->header, sealed, PASS_HEADER_LEN);
+    return lock_key(passphrase, lk);
+}
+
+int pass_seal(const pass_lock_t *lk, const void *plain, size_t len, uint8_t *out, size_t cap, size_t *out_len) {
+    if (cap < len + PASS_SEAL_OVERHEAD) return PASS_FORMAT;
+    memcpy(out, lk->header, PASS_HEADER_LEN);
+    uint8_t *nonce = out + PASS_HEADER_LEN;
+    randombytes_buf(nonce, AEAD_NONCE_LEN);
+    unsigned long long ct_len;
+    crypto_aead_xchacha20poly1305_ietf_encrypt(nonce + AEAD_NONCE_LEN, &ct_len, plain, len, out, PASS_HEADER_LEN,
+                                               NULL, nonce, lk->key);
+    *out_len = PASS_HEADER_LEN + AEAD_NONCE_LEN + (size_t)ct_len;
+    return 0;
+}
+
+int pass_unseal(const pass_lock_t *lk, const uint8_t *in, size_t len, void *plain, size_t cap, size_t *plain_len) {
+    if (len < PASS_SEAL_OVERHEAD || memcmp(in, PASS_MAGIC, 8) != 0) return PASS_FORMAT;
+    if (cap < len - PASS_SEAL_OVERHEAD) return PASS_FORMAT;
+    if (memcmp(in, lk->header, PASS_HEADER_LEN) != 0) return PASS_WRONG;
+    unsigned long long n;
+    const uint8_t *nonce = in + PASS_HEADER_LEN;
+    if (crypto_aead_xchacha20poly1305_ietf_decrypt(plain, &n, NULL, nonce + AEAD_NONCE_LEN,
+                                                   len - PASS_HEADER_LEN - AEAD_NONCE_LEN, in, PASS_HEADER_LEN,
+                                                   nonce, lk->key) != 0)
+        return PASS_WRONG;
+    *plain_len = (size_t)n;
     return 0;
 }
 

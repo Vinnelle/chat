@@ -23,6 +23,7 @@ typedef struct {
     tui_line_t lines[TUI_SCROLLBACK];
     int head;
     int count;
+    unsigned total;    // every line ever pushed, those scrolled out of it too
 } tui_scrollback_t;
 
 void tui_scrollback_push(tui_scrollback_t *sb, const char *hhmm, const char *text, const uint8_t *rgb,
@@ -40,6 +41,13 @@ typedef struct {
     const uint8_t *rgb;
 } tui_image_t;
 
+// A file on its way, on a row under the line offering it: a bar for how much has come (in
+// thousandths), and text after it ("34% · 50 KB of 146 KB · about 6 min left").
+typedef struct {
+    int permille;
+    char text[112];
+} tui_progress_t;
+
 #define TUI_ROW_LABEL_MAX 40
 
 typedef enum { TUI_SESSION_STARTING = 0, TUI_SESSION_CONNECTING, TUI_SESSION_LIVE } tui_session_state_t;
@@ -47,7 +55,8 @@ typedef enum { TUI_SESSION_STARTING = 0, TUI_SESSION_CONNECTING, TUI_SESSION_LIV
 typedef struct {
     char label[TUI_ROW_LABEL_MAX];
     int online;
-    int unread;
+    int unread;        // messages since it was last looked at
+    int mention;       // and one of them mentions you
     tui_session_state_t state;
 } tui_session_row_t;
 
@@ -206,13 +215,41 @@ typedef struct {
     // The picture shown under the line offering file, or NULL while it's hidden.
     const tui_image_t *(*image)(const void *ctx, int file);
     const void *image_ctx;
+    // Your nick, lit where a message says @nick. new_lines: how many of the newest messages came
+    // while the session wasn't on screen, ruled off from the rest (0 for none). elsewhere: messages
+    // unread in the other sessions, told in the chat's title while the sidebar isn't there to show
+    // them, and elsewhere_mention if one of them mentions you.
+    const char *self;
+    int new_lines;
+    int elsewhere;
+    int elsewhere_mention;
+    // How far a file being fetched has got, for the row under the line offering it (given
+    // image_ctx too), or NULL while it isn't on its way.
+    const tui_progress_t *(*progress)(const void *ctx, int file);
+    const char *build_label;   // a test build's, right of the console's title
 } tui_view_t;
+
+// A question or a field, in a box over the middle of the screen. status stands in for input when
+// what comes isn't typed (a paste).
+typedef struct tui_para tui_para_t;
+typedef struct {
+    const char *title;
+    const tui_para_t *text;
+    int n_text;
+    const tui_input_t *input;
+    int mask;
+    const char *placeholder;
+    const char *status;
+    const char *note;
+    const char *keys;
+} tui_dialog_t;
 
 // The bottom row and the input. The chip says where you are, then your identity and nick, then
 // message (the reply to the last thing done, until the next key) and hint ("key action · key
-// action") at the right. On the chat screen input is in the box over it, titled prompt, with
-// placeholder while it's empty and a count against limit (if not 0); on a page it's the field
-// being typed in.
+// action") at the right. On the chat screen input is in the box over it, with placeholder while
+// it's empty and a count against limit (if not 0); on a page it's the field being typed in. The box
+// grows a row at a time, up to a few, as what's typed wraps. warn titles it, yellow, for as long as
+// it stands ("what · what to do"). With a dialog up, input is the box drawn under it.
 typedef struct {
     const char *chip;
     tui_tone_t tone;
@@ -222,10 +259,11 @@ typedef struct {
     const char *nick;
     const uint8_t *nick_color;
     const tui_input_t *input;
-    const char *prompt;
     const char *placeholder;
     int mask_input;
     int limit;
+    const char *warn;
+    const tui_dialog_t *dialog;
 } tui_bar_t;
 
 void tui_render(int rows, int cols,
@@ -234,8 +272,10 @@ void tui_render(int rows, int cols,
                 const tui_scrollback_t *sb, const tui_scrollback_t *console,
                 const tui_view_t *view, const tui_bar_t *bar, int color_enabled);
 
-// Redraws only the input box and the bottom row.
-void tui_render_bar(int rows, int cols, const tui_view_t *view, const tui_bar_t *bar, int color_enabled);
+// Redraws only the input box and the bottom row: 0, or -1, drawing nothing, when the box is to be
+// a different height from the last whole frame's, or a dialog is up, and the frame has to be drawn
+// again.
+int tui_render_bar(int rows, int cols, const tui_view_t *view, const tui_bar_t *bar, int color_enabled);
 
 // A whole frame the same as the last one drawn isn't sent again. After anything that may have
 // changed the screen behind chat's back (a resize), this makes the next one go out regardless.
@@ -253,12 +293,11 @@ typedef struct {
     const uint8_t *swatch; // a sample of this colour before the value, or NULL
 } tui_row_t;
 
-// A list page (settings, the pages under it, and help): rows by section with one selected, the
-// selected row's help and usage under them, and a button after the rows if button is set
-// (selected == n_rows selects it). nav lists the sections on the left, nav_sel lit; without it they
+// A list page (settings, the pages under it, and help): rows by section with one selected, a
+// button after the rows if button is set (selected == n_rows selects it), and the selected row's
+// help and usage over the bottom of them. nav lists the sections on the left, nav_sel lit; without it they
 // come from the rows. title goes in the page's border, as its place among the pages; clock at its
-// right end. With editing, the selected row's value is bar->input, being typed. keys draws the
-// labels as keys.
+// right end. keys draws the labels as keys.
 typedef struct {
     const char *title;
     const char *clock;
@@ -272,7 +311,6 @@ typedef struct {
     const char *help;
     const char *usage;
     const char *button;
-    int editing;
     int keys;
 } tui_page_t;
 
@@ -286,12 +324,12 @@ typedef enum {
     TUI_P_TEXT = 0, TUI_P_HEADING, TUI_P_SUBHEADING, TUI_P_BULLET, TUI_P_NUMBERED, TUI_P_QUOTE, TUI_P_CODE,
     TUI_P_RULE, TUI_P_BLANK
 } tui_para_kind_t;
-typedef struct {
+struct tui_para {
     tui_para_kind_t kind;
     const char *text;     // Markdown, inline marks and all
     int level;            // a list item's depth, from 0
     char marker[8];       // a numbered item's "3."
-} tui_para_t;
+};
 int tui_render_text(int rows, int cols, const char *title, const char *clock, const tui_para_t *paras, int n,
                     int *scroll, const tui_bar_t *bar, int color_enabled);
 

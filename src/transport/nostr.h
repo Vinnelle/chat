@@ -47,6 +47,8 @@ nostr_t *nostr_new(const uint8_t tag_key[NOSTR_KEY_LEN], const uint8_t wrap_key[
                    const char *proxy, nostr_deliver_fn deliver, nostr_log_fn log, void *ctx);
 void nostr_free(nostr_t *n);
 void nostr_set_proxy(nostr_t *n, const char *socks);
+// The proxy's tor has just reached the Tor network: what failed while it couldn't is tried again now.
+void nostr_retry_now(nostr_t *n);
 // On: connect and stay connected. Off: every connection closes, and none opens until it's on.
 void nostr_set_active(nostr_t *n, int on);
 int nostr_active(const nostr_t *n);

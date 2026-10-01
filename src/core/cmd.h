@@ -23,9 +23,6 @@ const char *cmd_parse(const char *line, char word[CMD_WORD_MAX]);
 
 const command_t *cmd_find(const command_t *table, const char *word);
 
-// First command name across the NULL-terminated list of tables that extends `typed`, or NULL.
-const char *cmd_complete(const command_t *const *tables, const char *typed);
-
 void cmd_format_help(const command_t *cmd, char prefix, char *out, size_t cap);
 
 #endif

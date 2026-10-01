@@ -33,15 +33,6 @@ const command_t *cmd_find(const command_t *table, const char *word) {
     return NULL;
 }
 
-const char *cmd_complete(const command_t *const *tables, const char *typed) {
-    if (!typed[0] || strchr(typed, ' ')) return NULL;
-    size_t tlen = strlen(typed);
-    for (; *tables; tables++)
-        for (const command_t *c = *tables; c->name; c++)
-            if (strlen(c->name) > tlen && strncmp(c->name, typed, tlen) == 0) return c->name;
-    return NULL;
-}
-
 void cmd_format_help(const command_t *cmd, char prefix, char *out, size_t cap) {
     char synopsis[64];
     snprintf(synopsis, sizeof synopsis, "%c%s%s%s", prefix, cmd->name, cmd->args ? " " : "", cmd->args ? cmd->args : "");

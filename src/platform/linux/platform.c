@@ -442,6 +442,56 @@ int platform_move_new(const char *from, const char *to) {
     return -1;
 }
 
+int platform_config_dir(char *out, size_t cap, int create) {
+    const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
+    char base[900];
+    int n;
+    // The XDG spec ignores a relative one.
+    if (xdg && xdg[0] == '/') n = snprintf(base, sizeof base, "%s", xdg);
+    else if (home && home[0] == '/') n = snprintf(base, sizeof base, "%s/.config", home);
+    else return -1;
+    if (n <= 0 || (size_t)n >= sizeof base) return -1;
+    n = snprintf(out, cap, "%s/chat", base);
+    if (n <= 0 || (size_t)n >= cap) return -1;
+    if (!create) return 0;
+    if (mkdir(base, 0700) != 0 && errno != EEXIST) return -1;
+    if (mkdir(out, 0700) != 0 && errno != EEXIST) return -1;
+    // Not a link to somewhere else.
+    struct stat st;
+    if (lstat(out, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != geteuid()) return -1;
+    return (st.st_mode & 077) && chmod(out, 0700) != 0 ? -1 : 0;
+}
+
+int platform_write_private(const char *utf8_path, const void *data, size_t len) {
+    char tmp[4096];
+    int n = snprintf(tmp, sizeof tmp, "%s.new", utf8_path);
+    if (n <= 0 || (size_t)n >= sizeof tmp) return -1;
+    unlink(tmp);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_NOCTTY | O_CLOEXEC, 0600);
+    if (fd < 0) return -1;
+    const char *p = data;
+    int ok = 1;
+    for (size_t left = len; ok && left > 0; ) {
+        ssize_t w = write(fd, p, left);
+        if (w < 0 && errno == EINTR) continue;
+        if (w <= 0) ok = 0;
+        else { p += w; left -= (size_t)w; }
+    }
+    if (ok && fsync(fd) != 0) ok = 0;
+    if (close(fd) != 0) ok = 0;
+    if (!ok || rename(tmp, utf8_path) != 0) { unlink(tmp); return -1; }
+    // The rename is only on disk once the folder is.
+    char dir[4096];
+    copy_str(dir, utf8_path, sizeof dir);
+    char *slash = strrchr(dir, '/');
+    if (slash && slash != dir) {
+        *slash = '\0';
+        int dfd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (dfd >= 0) { fsync(dfd); close(dfd); }
+    }
+    return 0;
+}
+
 double now_seconds(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);

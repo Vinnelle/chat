@@ -15,6 +15,7 @@
 #endif
 
 #define G_H       "\xe2\x94\x80"   // ─
+#define G_HEAVY   "\xe2\x94\x81"   // ━
 #define G_V       "\xe2\x94\x82"   // │
 #define G_TL      "\xe2\x95\xad"   // ╭
 #define G_TR      "\xe2\x95\xae"   // ╮
@@ -58,6 +59,7 @@ void tui_scrollback_push(tui_scrollback_t *sb, const char *hhmm, const char *tex
     l->file = 0;
     sb->head = (sb->head + 1) % TUI_SCROLLBACK;
     if (sb->count < TUI_SCROLLBACK) sb->count++;
+    sb->total++;
 }
 
 void tui_scrollback_clear(tui_scrollback_t *sb) {
@@ -1002,13 +1004,79 @@ static void draw_image_row(pen_t *p, const tui_image_t *im, int cols, int r) {
     wapp(p->w, "\x1b[0m");
 }
 
+// A file on its way: a bar, lit as far as it's got (heavier, without colour), and what it says.
+static void draw_progress(pen_t *p, const tui_progress_t *pg) {
+    int room = p->room - p->used;
+    int bw = room >= 40 ? 16 : room >= 24 ? 8 : 0;
+    int lit = pg->permille <= 0 ? 0 : pg->permille >= 1000 ? bw : pg->permille * bw / 1000;
+    if (bw) {
+        sty(p->w, S_ACCENT);
+        for (int i = 0; i < lit; i++) wapp(p->w, G_HEAVY);
+        sty(p->w, S_FAINT);
+        for (int i = lit; i < bw; i++) wapp(p->w, G_H);
+        p->used += bw;
+        ptext(p, S_PLAIN, " ");
+    }
+    pell(p, S_FAINT, pg->text, p->room - p->used);
+}
+
+// A chat line's text in style st, with each @nick that's self lit, as the chat finds them: any case,
+// and whatever follows.
+static void draw_body(pen_t *p, style_t st, const char *t, const char *self) {
+    size_t sl = self ? strlen(self) : 0;
+    char run[TUI_LINE_MAX + 1];
+    size_t rn = 0;
+    for (size_t i = 0; t[i]; ) {
+        int at = sl > 0 && t[i] == '@';
+        for (size_t k = 0; at && k < sl; k++)
+            if (tolower((unsigned char)t[i + 1 + k]) != tolower((unsigned char)self[k])) at = 0;
+        if (!at) {
+            if (rn < sizeof run - 1) run[rn++] = t[i];
+            i++;
+            continue;
+        }
+        run[rn] = '\0';
+        ptext(p, st, run);
+        rn = 0;
+        char nick[TUI_LINE_MAX + 1];
+        size_t nl = 1 + sl < sizeof nick ? 1 + sl : sizeof nick - 1;
+        memcpy(nick, t + i, nl);
+        nick[nl] = '\0';
+        ptext(p, S_YELLOW_BOLD, nick);
+        i += 1 + sl;
+    }
+    run[rn] = '\0';
+    ptext(p, st, run);
+}
+
+// The rule over the n messages that came while the session wasn't on screen.
+static void draw_new_rule(grid_t *g, int row, int n) {
+    gpen_t gp;
+    grid_open(g, row, &gp);
+    pen_t *p = &gp.p;
+    char label[24];
+    snprintf(label, sizeof label, " %d new ", n);
+    int lw = (int)strlen(label), lead = 4;
+    sty(p->w, S_ACCENT);
+    for (; p->used < lead && p->used < p->room; p->used++) wapp(p->w, G_H);
+    if (p->used + lw <= p->room) ptext(p, S_ACCENT_BOLD, label);
+    sty(p->w, S_ACCENT);
+    for (; p->used < p->room; p->used++) wapp(p->w, G_H);
+    grid_close(g, row, &gp);
+}
+
 static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *sb, int skip, int console,
                        const tui_view_t *v) {
     if (!sb || nrows <= 0 || sb->count == 0) return;
     int W = g->w;
     if (skip >= sb->count) skip = sb->count - 1;
     if (skip < 0) skip = 0;
+    // The rule goes over the oldest of the new messages, and only with older ones above it.
+    int fresh = !console && v && v->new_lines > 0 && v->new_lines < sb->count ? v->new_lines : 0;
+    const char *self = !console && v ? v->self : NULL;
     int time_w = W >= 36 ? 7 : 0;
+    // The name column: as wide as the widest name in view, up to a third of the pane. A name wider
+    // than that goes on a row of its own, so it takes no room in the column.
     int nw = 0;
     if (!console) {
         for (int k = skip; k < sb->count && k < skip + nrows; k++) {
@@ -1016,9 +1084,8 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
             const char *body;
             if (!split_chat_line(SB_AT(sb, k), name, sizeof name, &body)) continue;
             int c = utf8_str_cols(name);
-            if (c > nw) nw = c;
+            if (c > nw && c <= W / 3) nw = c;
         }
-        if (nw > W / 3) nw = W / 3;
     }
     int aligned = W - time_w - nw - 2 >= 16;
     int bottom = first + nrows - 1;
@@ -1030,8 +1097,12 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
         if (!chat && body[0] == '*' && body[1] == ' ') body += 2;
         int name_c = chat ? utf8_str_cols(name) : 0;
 
+        // A name wider than the column ("bob (code not compared)" in a narrow pane) goes on a row
+        // of its own over the text, so the text still lines up; cut, it could lose what the chat
+        // adds to it.
+        int stacked = chat && aligned && name_c > nw;
         int first_pre, rest_pre;
-        if (chat && aligned) { first_pre = time_w + (name_c > nw ? name_c : nw) + 2; rest_pre = time_w + nw + 2; }
+        if (chat && aligned) first_pre = rest_pre = time_w + nw + 2;
         else if (chat) { first_pre = time_w + name_c + 1; rest_pre = time_w; }
         else first_pre = rest_pre = time_w;
         if (first_pre > W - 1) first_pre = W - 1 > 0 ? W - 1 : 0;
@@ -1049,10 +1120,14 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
             if (img_cols < 1) img_cols = 1;
         }
         int nimg = image_rows(im, img_cols);
+        // A file on its way: a row under the line, over the picture it may become.
+        const tui_progress_t *pg = chat && l->file && v && v->progress ? v->progress(v->image_ctx, l->file) : NULL;
+        int under = nimg + (pg ? 1 : 0);
 
-        // Run on from the line above: same person, same minute, and that line in view to say who.
+        // Run on from the line above: same person, same minute, that line in view to say who, and
+        // no rule between them.
         int grouped = 0;
-        if (chat && k + 1 < sb->count && bottom - nch - nimg >= first) {
+        if (chat && k + 1 < sb->count && k + 1 != fresh && bottom - nch - under >= first) {
             const tui_line_t *older = SB_AT(sb, k + 1);
             char oname[96];
             const char *ob;
@@ -1060,9 +1135,21 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
                    && split_chat_line(older, oname, sizeof oname, &ob) && strcmp(oname, name) == 0;
         }
 
+        int head = stacked && !grouped;
+
         int warn = console && strncmp(body, "warning:", 8) == 0;
         style_t body_style = l->mention ? S_BOLD : warn ? S_YELLOW : console ? S_FAINT : S_PLAIN;
         int body_rgb = !chat && l->has_color && !warn;
+
+        int hrow = bottom - under - nch;
+        if (head && hrow >= first && hrow < first + nrows && hrow < g->rows) {
+            gpen_t gp;
+            grid_open(g, hrow, &gp);
+            if (time_w) ptext(&gp.p, l->mention ? S_YELLOW_BOLD : S_FAINT, l->hhmm);
+            pspace(&gp.p, time_w);
+            draw_name(&gp.p, name, l->has_color ? l->rgb : NULL);
+            grid_close(g, hrow, &gp);
+        }
 
         for (int r = 0; r < nimg; r++) {
             int row = bottom - (nimg - 1 - r);
@@ -1073,13 +1160,21 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
             draw_image_row(&gp.p, im, img_cols, r);
             grid_close(g, row, &gp);
         }
+        int prow = bottom - nimg;
+        if (pg && prow >= first && prow < first + nrows && prow < g->rows) {
+            gpen_t gp;
+            grid_open(g, prow, &gp);
+            pspace(&gp.p, rest_pre);
+            draw_progress(&gp.p, pg);
+            grid_close(g, prow, &gp);
+        }
         for (int c = 0; c < nch; c++) {
-            int row = bottom - nimg - (nch - 1 - c);
+            int row = bottom - under - (nch - 1 - c);
             if (row < first || row >= first + nrows || row >= g->rows) continue;
             gpen_t gp;
             grid_open(g, row, &gp);
             pen_t *p = &gp.p;
-            if (c == 0) {
+            if (c == 0 && !head) {
                 if (time_w && !grouped) ptext(p, l->mention ? S_YELLOW_BOLD : S_FAINT, l->hhmm);
                 pspace(p, time_w);
                 if (chat && !grouped) {
@@ -1096,12 +1191,15 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
             if (body_rgb) {
                 sty_rgb(p->w, l->rgb, 0, 0);
                 p->used += wapp_trunc(p->w, piece, p->room - p->used);
+            } else if (chat) {
+                draw_body(p, body_style, piece, self);
             } else {
                 ptext(p, body_style, piece);
             }
             grid_close(g, row, &gp);
         }
-        bottom -= nch + nimg;
+        bottom -= nch + under + head;
+        if (k + 1 == fresh && bottom >= first && bottom < g->rows) draw_new_rule(g, bottom--, fresh);
     }
 }
 
@@ -1147,9 +1245,7 @@ static void draw_welcome(grid_t *g, int first, int nrows) {
     };
     int nkeys = (int)(sizeof KEYS / sizeof KEYS[0]);
     int W = g->w;
-    const char *tagline = W >= 52 ? "serverless " G_MID " end-to-end encrypted " G_MID " post-quantum"
-                                  : "end-to-end encrypted";
-    int n = 3 + nkeys;
+    int n = 2 + nkeys;
     int top = first + (nrows - n) / 2 - nrows / 10;
     if (top < first) top = first;
     gpen_t gp;
@@ -1159,17 +1255,10 @@ static void draw_welcome(grid_t *g, int first, int nrows) {
         ptext(&gp.p, S_ACCENT_BOLD, G_DIAMOND " chat");
         grid_close(g, top, &gp);
     }
-    if (top + 1 < first + nrows) {
-        grid_open(g, top + 1, &gp);
-        int c = utf8_str_cols(tagline);
-        pspace(&gp.p, c < W ? (W - c) / 2 : 0);
-        ptext(&gp.p, S_FAINT, tagline);
-        grid_close(g, top + 1, &gp);
-    }
     int block = 9 + 20;
     int left = block < W ? (W - block) / 2 : 0;
     for (int i = 0; i < nkeys; i++) {
-        int row = top + 3 + i;
+        int row = top + 2 + i;
         if (row >= first + nrows) break;
         grid_open(g, row, &gp);
         pspace(&gp.p, left);
@@ -1188,7 +1277,9 @@ static void draw_chat_pane(grid_t *g, int first, int nrows, const tui_scrollback
 
 static const char HIDDEN_HINT[] = "Chat and console are hidden\nctrl+t shows the chat " G_MID " ctrl+o the console";
 
-static void chat_title(span_t *t, const tui_view_t *v) {
+// The session's state and name, what's new in the others while there's no sidebar to show it, and
+// the subtitle.
+static void chat_title(span_t *t, const tui_view_t *v, int sidebar_shown) {
     if (!v->title) { ptext(&t->p, S_BOLD, "welcome"); return; }
     static const char *const GLYPH[] = { G_RING, G_DOTTED, G_DOT };
     static const style_t STYLE[] = { S_FAINT, S_YELLOW, S_GREEN };
@@ -1196,6 +1287,12 @@ static void chat_title(span_t *t, const tui_view_t *v) {
     ptext(&t->p, STYLE[st], GLYPH[st]);
     ptext(&t->p, S_PLAIN, " ");
     ptext(&t->p, S_BOLD, v->title);
+    if (!sidebar_shown && v->elsewhere > 0) {
+        char n[48];
+        snprintf(n, sizeof n, "%s%d new elsewhere", v->elsewhere_mention ? "@" : "", v->elsewhere);
+        ptext(&t->p, S_FAINT, " " G_MID " ");
+        ptext(&t->p, v->elsewhere_mention ? S_YELLOW_BOLD : S_ACCENT_BOLD, n);
+    }
     if (v->subtitle && v->subtitle[0]) {
         ptext(&t->p, S_FAINT, " " G_MID " ");
         ptext(&t->p, S_FAINT, v->subtitle);
@@ -1203,8 +1300,8 @@ static void chat_title(span_t *t, const tui_view_t *v) {
 }
 
 // The console over the chat, sharing an edge, in one box; either fills it alone.
-static void draw_main(wbuf_t *w, rect_t m, int boxed, const tui_scrollback_t *sb, const tui_scrollback_t *console,
-                      const tui_view_t *v) {
+static void draw_main(wbuf_t *w, rect_t m, int boxed, int sidebar_shown, const tui_scrollback_t *sb,
+                      const tui_scrollback_t *console, const tui_view_t *v) {
     int show_con = console && v->console, show_chat = v->chat;
     if (!boxed) {
         grid_reset(&g_grid, m.h, m.w);
@@ -1224,16 +1321,23 @@ static void draw_main(wbuf_t *w, rect_t m, int boxed, const tui_scrollback_t *sb
         if (inner - con_h - 1 < 4) con_h = inner - 1 - 4;
         if (con_h < 1) show_con = 0;
     }
-    span_t clock, ctitle, ktitle;
+    span_t clock, ctitle, ktitle, kright;
     span_init(&clock, m.w);
     if (v->clock) ptext(&clock.p, S_FAINT, v->clock);
     span_init(&ctitle, title_room(m.w, clock.p.used));
-    if (show_chat) chat_title(&ctitle, v);
+    if (show_chat) chat_title(&ctitle, v, sidebar_shown);
     else if (!show_con) ptext(&ctitle.p, S_FAINT, "hidden");
-    span_init(&ktitle, title_room(m.w, show_chat ? 0 : clock.p.used));
+    span_init(&kright, title_room(m.w, 0) - 9);   // after "console"
+    int clock_room = show_chat ? 0 : clock.p.used + 2;
+    if (v->build_label) pell(&kright.p, S_FAINT, v->build_label, kright.p.room - clock_room);
+    if (!show_chat && v->clock) {
+        if (kright.p.used) ptext(&kright.p, S_FAINT, "  ");
+        ptext(&kright.p, S_FAINT, v->clock);
+    }
+    span_init(&ktitle, title_room(m.w, kright.p.used));
     ptext(&ktitle.p, S_FAINT, "console");
     // Its bottom edge is the input box's top, which draw_input() draws.
-    if (show_con) edge(w, m.top, m.left, m.w, top_left(m), G_TR, bs, &ktitle, show_chat ? NULL : &clock);
+    if (show_con) edge(w, m.top, m.left, m.w, top_left(m), G_TR, bs, &ktitle, &kright);
     else edge(w, m.top, m.left, m.w, top_left(m), G_TR, bs, &ctitle, &clock);
     sides(w, m.top + 1, inner, m.left, m.w, bs);
 
@@ -1267,18 +1371,27 @@ static void heading(pen_t *p, const char *title, int count) {
     }
 }
 
+// A session: its name, then a badge with how many messages came while it wasn't on screen (yellow,
+// and '@' first, when one mentions you), its state and how many are online.
 static void session_line(pen_t *p, const tui_session_row_t *s, int sel) {
     static const char *const GLYPH[] = { G_RING, G_DOTTED, G_DOT };
     static const style_t STYLE[] = { S_FAINT, S_YELLOW, S_GREEN };
     unsigned st = (unsigned)s->state < 3 ? (unsigned)s->state : 2;
-    char count[16];
+    char count[16], badge[16] = "";
     snprintf(count, sizeof count, "%d", s->online);
-    int unread = s->unread && !sel;
-    int right = 2 + (int)strlen(count) + (unread ? 2 : 0);
+    if (!sel && s->unread > 0)
+        snprintf(badge, sizeof badge, " %s%d%s ", s->mention ? "@" : "", s->unread > 99 ? 99 : s->unread,
+                 s->unread > 99 ? "+" : "");
+    int bw = badge[0] ? (int)strlen(badge) + 1 : 0;
+    int right = 2 + (int)strlen(count) + bw;
     ptext(p, sel ? S_ACCENT_BOLD : S_PLAIN, sel ? G_PTR " " : "  ");
-    pell(p, sel ? S_ACCENT_BOLD : unread ? S_BOLD : S_PLAIN, s->label, p->room - p->used - right - 1);
+    pell(p, sel ? S_ACCENT_BOLD : badge[0] ? S_BOLD : S_PLAIN, s->label, p->room - p->used - right - 1);
     pspace(p, p->room - right);
-    if (unread) ptext(p, S_ACCENT_BOLD, G_BULLET " ");
+    if (badge[0]) {
+        sty_pill(p->w, s->mention ? TUI_TONE_COMMAND : TUI_TONE_PAGE);
+        p->used += wapp_trunc(p->w, badge, p->room - p->used);
+        ptext(p, S_PLAIN, " ");
+    }
     ptext(p, STYLE[st], GLYPH[st]);
     ptext(p, S_FAINT, " ");
     ptext(p, S_FAINT, count);
@@ -1462,6 +1575,107 @@ static int draw_menu(wbuf_t *w, rect_t in_r, rect_t over, const tui_input_t *in,
     return 1;
 }
 
+// The input box holds this many rows of text at most, fewer on a short screen.
+#define INPUT_ROWS_MAX 6
+#define WRAP_MAX ((int)sizeof(((tui_input_t *)0)->buf) + 2)
+
+typedef struct { int n, start[WRAP_MAX], cur_row, cur_col; } wrap_t;
+
+// The input's text wrapped to rows width columns wide: where each row starts, and the cursor's row
+// and column. A row ends after the last space that fits, the space hanging at its end, or, in a
+// word longer than a row, where the row is full. The cursor may stand in the column after a full
+// row, the box's padding; past that, after a space hanging there at the end of the text, it starts
+// a row of its own.
+static void input_wrap(const tui_input_t *in, int width, wrap_t *wr) {
+    const char *s = in->buf;
+    int len = in->len, pos = 0;
+    if (width < 1) width = 1;
+    wr->n = 0;
+    wr->start[wr->n++] = 0;
+    while (pos < len && wr->n < WRAP_MAX - 1) {
+        int take = (int)wrap_chunk(s + pos, (size_t)(len - pos), width);
+        if (pos + take >= len) break;
+        if (s[pos + take] == ' ') take++;
+        pos += take;
+        if (pos < len) wr->start[wr->n++] = pos;
+    }
+    int r = 0;
+    while (r + 1 < wr->n && wr->start[r + 1] <= in->cursor) r++;
+    int col;
+    utf8_fit_cols(s + wr->start[r], (size_t)(in->cursor - wr->start[r]), INT_MAX, &col);
+    if (col > width) {
+        if (r + 1 < wr->n || wr->n >= WRAP_MAX) col = width;
+        else { wr->start[wr->n++] = len; r++; col = 0; }
+    }
+    wr->cur_row = r;
+    wr->cur_col = col;
+}
+
+// The rows of text the input box holds at box_w columns wide: what's typed, wrapped, most at most.
+// The command line, a hidden field and an empty one (its placeholder) take one.
+static int input_rows(const tui_bar_t *bar, int box_w, int most) {
+    const tui_input_t *in = bar->input;
+    if (most < 1) most = 1;
+    if (!in || in->len == 0 || bar->mask_input || in->mode == TUI_IMODE_COMMAND) return 1;
+    static wrap_t wr;
+    input_wrap(in, box_w - 6, &wr);
+    return wr.n < most ? wr.n : most;
+}
+
+// What's typed over nrows rows from row, wrapped and scrolled to the cursor's row, in a box's
+// inner width columns. The first row starts with the prompt's mark, and the rest line up under it.
+static void draw_wrapped(wbuf_t *w, int row, int left, int width, int nrows, const tui_input_t *in, tui_tone_t tone,
+                         int *cr, int *cc) {
+    static wrap_t wr;
+    input_wrap(in, width - 4, &wr);
+    int first = wr.cur_row - nrows + 1;
+    if (first > wr.n - nrows) first = wr.n - nrows;
+    if (first < 0) first = 0;
+    const char *nick = in->mode == TUI_IMODE_INSERT ? mention_suggestion(in) : NULL;
+    for (int i = 0; i < nrows; i++) {
+        int k = first + i;
+        pen_t p;
+        inner_begin(w, &p, row + i, left, width);
+        if (k == 0) {
+            sty_tone(w, tone, 1);
+            p.used += wapp_trunc(w, G_PTR " ", p.room);
+        } else {
+            pspace(&p, 2);
+        }
+        if (k < wr.n) {
+            int end = k + 1 < wr.n ? wr.start[k + 1] : in->len;
+            char piece[sizeof in->buf];
+            memcpy(piece, in->buf + wr.start[k], (size_t)(end - wr.start[k]));
+            piece[end - wr.start[k]] = '\0';
+            ptext(&p, S_PLAIN, piece);
+            if (nick && k == wr.cur_row) ptext(&p, S_FAINT, nick + (in->cursor - mention_start(in)));
+        }
+        inner_end(&p);
+    }
+    *cr = row + wr.cur_row - first;
+    *cc = left + 3 + wr.cur_col;
+}
+
+// The input box's title without a prompt: "what · what to do", the first yellow and the rest lit as
+// keys are, or what alone when both don't fit.
+static void draw_warn(pen_t *p, const char *warn) {
+    static const char SEP[] = " " G_MID " ";
+    const char *sep = strstr(warn, SEP);
+    char what[256];
+    size_t n = sep ? (size_t)(sep - warn) : strlen(warn);
+    if (n >= sizeof what) n = sizeof what - 1;
+    memcpy(what, warn, n);
+    what[n] = '\0';
+    const char *todo = sep ? sep + sizeof SEP - 1 : NULL;
+    int room = p->room - p->used;
+    if (todo && utf8_str_cols(what) + 3 + utf8_str_cols(todo) > room) todo = NULL;
+    pell(p, S_YELLOW_BOLD, what, room);
+    if (todo) {
+        ptext(p, S_FAINT, SEP);
+        ptext(p, S_ACCENT, todo);
+    }
+}
+
 // Draws the input box (or, unboxed, its one row) and leaves the cursor's place in *cr, *cc. Its top
 // edge is the bottom of the chat's box, or of the menu over it; it says how many newer messages
 // are hidden below the chat.
@@ -1470,8 +1684,8 @@ static void draw_input(wbuf_t *w, rect_t r, int boxed, const tui_bar_t *bar, con
     const tui_input_t *in = bar->input;
     *cr = 0;
     if (!in || r.h < 1) return;
-    const char *bs = border_sgr((int)bar->tone);
-    int row = r.top, left = r.left, width = r.w;
+    const char *bs = border_sgr(bar->dialog ? -1 : (int)bar->tone);
+    int row = r.top, left = r.left, width = r.w, nrows = 1;
     if (boxed) {
         if (in->mode == TUI_IMODE_COMMAND) draw_menu(w, r, over, in, bs);
         span_t title, more, count;
@@ -1482,22 +1696,24 @@ static void draw_input(wbuf_t *w, rect_t r, int boxed, const tui_bar_t *bar, con
             ptext(&more.p, S_ACCENT_BOLD, t);
         }
         span_init(&title, title_room(r.w, more.p.used));
-        if (bar->prompt) {
-            sty_tone(title.p.w, bar->tone, 1);
-            title.p.used += wapp_trunc(title.p.w, bar->prompt, title.p.room);
-        }
+        if (bar->warn && in->mode != TUI_IMODE_COMMAND) draw_warn(&title.p, bar->warn);
         span_init(&count, r.w);
         if (bar->limit > 0 && in->len > 0 && in->mode != TUI_IMODE_COMMAND) {
             char t[32];
             snprintf(t, sizeof t, "%d/%d", in->len, bar->limit);
             ptext(&count.p, in->len > bar->limit ? S_RED_BOLD : S_FAINT, t);
         }
+        nrows = r.h - 2 > 1 ? r.h - 2 : 1;
         edge(w, r.top, r.left, r.w, G_LT, G_RT, bs, &title, &more);
-        sides(w, r.top + 1, 1, r.left, r.w, bs);
-        edge(w, r.top + 2, r.left, r.w, bottom_left(r), G_BR, bs, NULL, &count);
+        sides(w, r.top + 1, nrows, r.left, r.w, bs);
+        edge(w, r.top + 1 + nrows, r.left, r.w, bottom_left(r), G_BR, bs, NULL, &count);
         row = r.top + 1;
         left = r.left + 1;
         width = r.w - 2;
+        if (in->mode != TUI_IMODE_COMMAND && in->len > 0 && !bar->mask_input) {
+            draw_wrapped(w, row, left, width, nrows, in, bar->tone, cr, cc);
+            return;
+        }
     }
     pen_t p;
     inner_begin(w, &p, row, left, width);
@@ -1570,9 +1786,16 @@ static void draw_status(wbuf_t *w, int row, int cols, const tui_bar_t *bar) {
     wapp(w, "\x1b[0m");
 }
 
+static void finish_frame(wbuf_t *w, int rows, int cols, const tui_bar_t *bar, int cr, int cc);
+
+// The input box's height in the last whole chat frame, or 0 after anything else was drawn.
+static int g_input_h;
+
 // One frame, split by lines: the sidebar's right side is the chat's left, and the chat's bottom
-// edge is the input box's top.
-static void chat_layout(int rows, int cols, const tui_view_t *v, rect_t *side, rect_t *main_r, rect_t *input, int *boxed) {
+// edge is the input box's top. The box is as tall as what's typed wraps to, a third of what the
+// screen has over the frame's edges at most, so the chat keeps the most of it.
+static void chat_layout(int rows, int cols, const tui_view_t *v, const tui_bar_t *bar, rect_t *side, rect_t *main_r,
+                        rect_t *input, int *boxed) {
     *boxed = rows >= 10 && cols >= 40;
     int sbw = 0;
     if (*boxed && v->sidebar) {
@@ -1582,7 +1805,11 @@ static void chat_layout(int rows, int cols, const tui_view_t *v, rect_t *side, r
         if (cols - sbw < 44) sbw = 0;
     }
     *side = (rect_t){ 1, 1, rows - 1, sbw };
-    int x = sbw > 0 ? sbw : 1, ih = *boxed ? 3 : 1;
+    int x = sbw > 0 ? sbw : 1, ih = 1;
+    if (*boxed) {
+        int most = (rows - 8) / 3;
+        ih = 2 + input_rows(bar, cols - x + 1, most < INPUT_ROWS_MAX ? most : INPUT_ROWS_MAX);
+    }
     *input = (rect_t){ rows - ih, x, ih, cols - x + 1 };
     *main_r = (rect_t){ 1, x, rows - ih - (*boxed ? 0 : 1), cols - x + 1 };
 }
@@ -1598,26 +1825,28 @@ void tui_render(int rows, int cols,
     wbuf_t w = { g_frame, FRAME_CAP, 0 };
     rect_t side, main_r, input;
     int boxed;
-    chat_layout(rows, cols, view, &side, &main_r, &input, &boxed);
+    chat_layout(rows, cols, view, bar, &side, &main_r, &input, &boxed);
+    g_input_h = input.h;
 
     begin_frame(&w);
     if (side.w > 0) draw_sidebar(&w, side, sessions, n_sessions, selected, peers, n_peers, net, n_net);
-    draw_main(&w, main_r, boxed, sb, console, view);
+    draw_main(&w, main_r, boxed, side.w > 0, sb, console, view);
     int cr, cc;
     draw_input(&w, input, boxed, bar, view, main_r, &cr, &cc);
-    draw_status(&w, rows, cols, bar);
-    place_cursor(&w, cr, cc, bar->input);
-    end_frame(&w, 1);
+    finish_frame(&w, rows, cols, bar, cr, cc);
 }
 
-void tui_render_bar(int rows, int cols, const tui_view_t *view, const tui_bar_t *bar, int color_enabled) {
+int tui_render_bar(int rows, int cols, const tui_view_t *view, const tui_bar_t *bar, int color_enabled) {
     clamp_size(&rows, &cols);
     g_color = color_enabled;
     g_row_bg = "";
     wbuf_t w = { g_frame, FRAME_CAP, 0 };
     rect_t side, main_r, input;
     int boxed;
-    chat_layout(rows, cols, view, &side, &main_r, &input, &boxed);
+    chat_layout(rows, cols, view, bar, &side, &main_r, &input, &boxed);
+    // A row more or less for the input moves the chat's bottom edge: that takes a whole frame. So
+    // does a dialog.
+    if (input.h != g_input_h || bar->dialog) return -1;
 
     begin_frame(&w);
     int cr, cc;
@@ -1625,6 +1854,7 @@ void tui_render_bar(int rows, int cols, const tui_view_t *view, const tui_bar_t 
     draw_status(&w, rows, cols, bar);
     place_cursor(&w, cr, cc, bar->input);
     end_frame(&w, 0);
+    return 0;
 }
 
 // ---- list pages ----
@@ -1699,74 +1929,8 @@ static void draw_value(pen_t *p, const tui_row_t *r, int on) {
     }
 }
 
-enum { PL_BLANK, PL_HEADING, PL_ROW };
+enum { PL_BLANK, PL_HEADING, PL_ROW, PL_BUTTON };
 #define PAGE_LINES 2048
-
-// The rows, by section, in nrows rows from top: scrolled so the selected row shows with its
-// heading and as much of the rest of its section as fits, or to the end with the button selected.
-// Leaves the cursor's place in *cr, *cc when the selected row is being typed in.
-static void draw_list(wbuf_t *w, int top, int left, int iw, int nrows, const tui_page_t *pg, const tui_bar_t *bar,
-                      int *cr, int *cc) {
-    static int kind[PAGE_LINES], arg[PAGE_LINES];
-    int n = 0, sel_line = -1, head_line = -1, end_line = -1, head = -1;
-    for (int i = 0; i < pg->n_rows && n < PAGE_LINES - 3; i++) {
-        if (pg->rows[i].section) {
-            if (sel_line >= 0 && end_line < 0) end_line = n - 1;
-            if (i > 0) { kind[n] = PL_BLANK; n++; }
-            head = n;
-            kind[n] = PL_HEADING; arg[n] = i; n++;
-        }
-        if (i == pg->selected) { sel_line = n; head_line = head >= 0 ? head : n; }
-        kind[n] = PL_ROW; arg[n] = i; n++;
-    }
-    if (end_line < 0) end_line = n - 1;
-    int scroll = 0;
-    if (pg->selected >= pg->n_rows) scroll = n - nrows;
-    else if (sel_line >= 0) {
-        scroll = end_line - nrows + 1;
-        if (scroll < sel_line - nrows + 1) scroll = sel_line - nrows + 1;
-        if (scroll > head_line) scroll = head_line > sel_line - nrows + 1 ? head_line : sel_line - nrows + 1;
-    }
-    if (scroll < 0) scroll = 0;
-
-    int cw = iw - 2, lw = 0, any_value = 0;
-    for (int i = 0; i < pg->n_rows; i++) {
-        int c = utf8_str_cols(pg->rows[i].label);
-        if (c > lw) lw = c;
-        if (pg->rows[i].value) any_value = 1;
-    }
-    lw += 3;
-    if (!any_value || lw > (cw - 2) / 2) lw = any_value ? (cw - 2) / 2 : cw - 2;
-    for (int r = 0; r < nrows; r++) {
-        int li = scroll + r, row = top + r;
-        if (li >= n || kind[li] == PL_BLANK) { blank_row(w, row, left, iw); continue; }
-        const tui_row_t *pr = &pg->rows[arg[li]];
-        pen_t p;
-        if (kind[li] == PL_HEADING) {
-            inner_begin(w, &p, row, left, iw);
-            ptext(&p, S_ACCENT_BOLD, pr->section);
-            inner_end(&p);
-            continue;
-        }
-        int on = arg[li] == pg->selected;
-        int editing = on && pg->editing && bar->input;
-        row_select(on);
-        inner_begin(w, &p, row, left, iw);
-        ptext(&p, on ? S_ACCENT_BOLD : S_PLAIN, on ? G_PTR " " : "  ");
-        pell(&p, on ? S_ACCENT_BOLD : pg->keys ? S_ACCENT : S_PLAIN, pr->label, pr->value || editing ? lw - 2 : lw);
-        if (pr->value || editing) pspace(&p, 2 + lw);
-        if (editing) {
-            ptext(&p, S_ACCENT_BOLD, G_RSAQ " ");
-            int c = draw_field(&p, bar->input, bar->mask_input, bar->placeholder);
-            *cr = row;
-            *cc = left + 1 + (c < p.room ? c : p.room - 1);
-        } else if (pr->value) {
-            draw_value(&p, pr, on);
-        }
-        inner_end(&p);
-        row_select(0);
-    }
-}
 
 static void draw_button(wbuf_t *w, int row, int left, int iw, const tui_page_t *pg) {
     pen_t p;
@@ -1786,10 +1950,75 @@ static void draw_button(wbuf_t *w, int row, int left, int iw, const tui_page_t *
     inner_end(&p);
 }
 
+// The rows, by section, then the button, in nrows rows from top: scrolled so the selected row
+// shows in the first view of them with its heading and as much of the rest of its section as fits.
+// The help goes over the rest, so how much of it there is moves nothing.
+static void draw_list(wbuf_t *w, int top, int left, int iw, int view, int nrows, const tui_page_t *pg) {
+    static int kind[PAGE_LINES], arg[PAGE_LINES];
+    int n = 0, sel_line = -1, head_line = -1, end_line = -1, head = -1;
+    for (int i = 0; i < pg->n_rows && n < PAGE_LINES - 5; i++) {
+        if (pg->rows[i].section) {
+            if (sel_line >= 0 && end_line < 0) end_line = n - 1;
+            if (i > 0) { kind[n] = PL_BLANK; n++; }
+            head = n;
+            kind[n] = PL_HEADING; arg[n] = i; n++;
+        }
+        if (i == pg->selected) { sel_line = n; head_line = head >= 0 ? head : n; }
+        kind[n] = PL_ROW; arg[n] = i; n++;
+    }
+    if (end_line < 0) end_line = n - 1;
+    if (pg->button) {
+        kind[n] = PL_BLANK; n++;
+        if (pg->selected >= pg->n_rows) sel_line = head_line = end_line = n;
+        kind[n] = PL_BUTTON; n++;
+    }
+    int scroll = 0;
+    if (sel_line >= 0) {
+        scroll = end_line - view + 1;
+        if (scroll < sel_line - view + 1) scroll = sel_line - view + 1;
+        if (scroll > head_line) scroll = head_line > sel_line - view + 1 ? head_line : sel_line - view + 1;
+    }
+    if (scroll < 0) scroll = 0;
+
+    int cw = iw - 2, lw = 0, any_value = 0;
+    for (int i = 0; i < pg->n_rows; i++) {
+        int c = utf8_str_cols(pg->rows[i].label);
+        if (c > lw) lw = c;
+        if (pg->rows[i].value) any_value = 1;
+    }
+    lw += 3;
+    if (!any_value || lw > (cw - 2) / 2) lw = any_value ? (cw - 2) / 2 : cw - 2;
+    for (int r = 0; r < nrows; r++) {
+        int li = scroll + r, row = top + r;
+        if (li >= n || kind[li] == PL_BLANK) { blank_row(w, row, left, iw); continue; }
+        if (kind[li] == PL_BUTTON) { draw_button(w, row, left, iw, pg); continue; }
+        const tui_row_t *pr = &pg->rows[arg[li]];
+        pen_t p;
+        if (kind[li] == PL_HEADING) {
+            inner_begin(w, &p, row, left, iw);
+            ptext(&p, S_ACCENT_BOLD, pr->section);
+            inner_end(&p);
+            continue;
+        }
+        int on = arg[li] == pg->selected;
+        row_select(on);
+        inner_begin(w, &p, row, left, iw);
+        ptext(&p, on ? S_ACCENT_BOLD : S_PLAIN, on ? G_PTR " " : "  ");
+        pell(&p, on ? S_ACCENT_BOLD : pg->keys ? S_ACCENT : S_PLAIN, pr->label, pr->value ? lw - 2 : lw);
+        if (pr->value) {
+            pspace(&p, 2 + lw);
+            draw_value(&p, pr, on);
+        }
+        inner_end(&p);
+        row_select(0);
+    }
+}
+
 void tui_render_page(int rows, int cols, const tui_page_t *page, const tui_bar_t *bar, int color_enabled) {
     clamp_size(&rows, &cols);
     g_color = color_enabled;
     g_row_bg = "";
+    g_input_h = 0;
     wbuf_t w = { g_frame, FRAME_CAP, 0 };
 
     // The sections on the left: as given, or the rows' own, with the selected row's lit.
@@ -1820,25 +2049,28 @@ void tui_render_page(int rows, int cols, const tui_page_t *page, const tui_bar_t
     int left = boxed ? r.left + 1 : r.left, iw = boxed ? r.w - 2 : r.w;
     int cw = iw - 2;
 
-    // Under the rows, past an edge titled with the selected row: its help and usage. Over them,
-    // the intro. Rows go first when there's no room for all of it.
+    // Over the bottom of the rows, past an edge titled with the selected row: its help and usage.
+    // The rows scroll as if those were as long as they get, so the rows stay put as they change.
+    // Over the rows, the intro. Rows go first when there's no room for all of it.
     static size_t hoff[5], hlen[5], ioff[3], ilen[3];
     int hl = boxed && page->help && page->help[0] ? wrap_rows(page->help, cw, cw, hoff, hlen, 5) : 0;
     int ul = boxed && page->usage && page->usage[0] ? 1 : 0;
     int il = boxed && page->intro && page->intro[0] ? wrap_rows(page->intro, cw, cw, ioff, ilen, 3) : 0;
     int btn = page->button ? 2 : 0;
-    int list;
+    int hmax = boxed ? 5 : 0, umax = boxed;
+    int list, view;
     for (;;) {
-        int help_block = hl + ul ? hl + ul + 1 : 0;
-        list = ih - help_block - (il ? il + 1 : 0) - btn;
-        if (list >= 4 || (!il && hl <= 2 && !(hl + ul))) break;
+        list = ih - (il ? il + 1 : 0);
+        view = list - (hmax + umax ? hmax + umax + 1 : 0);
+        if (view >= 4 + btn || (!il && !(hmax + umax))) break;
         if (il) il = 0;
-        else if (hl > 2) hl = 2;
-        else hl = ul = 0;
+        else if (hmax > 2) hmax = 2;
+        else hmax = umax = 0;
     }
-    if (list < 1) list = 1;
+    if (hl > hmax) hl = hmax;
+    if (!umax) ul = 0;
+    if (view < 1) view = 1;
 
-    int cr = 0, cc = 0;
     if (boxed) {
         span_t title, right;
         span_init(&right, r.w);
@@ -1860,12 +2092,10 @@ void tui_render_page(int rows, int cols, const tui_page_t *page, const tui_bar_t
     }
     if (il && row < end) blank_row(&w, row++, left, iw);
     if (list > end - row) list = end - row;
-    draw_list(&w, row, left, iw, list, page, bar, &cr, &cc);
-    row += list;
-    if (btn && row + 1 < end) {
-        blank_row(&w, row++, left, iw);
-        draw_button(&w, row++, left, iw, page);
-    }
+    int shown = list - (hl + ul ? hl + ul + 1 : 0);
+    if (shown < 0) shown = 0;
+    draw_list(&w, row, left, iw, view, shown, page);
+    row += shown;
     if (hl + ul && row < end) {
         span_t about;
         span_init(&about, title_room(r.w, 0));
@@ -1891,9 +2121,7 @@ void tui_render_page(int rows, int cols, const tui_page_t *page, const tui_bar_t
     }
     while (row < end) blank_row(&w, row++, left, iw);
 
-    draw_status(&w, rows, cols, bar);
-    place_cursor(&w, cr, cc, bar->input);
-    end_frame(&w, 1);
+    finish_frame(&w, rows, cols, bar, 0, 0);
 }
 
 // ---- a page of text ----
@@ -2072,6 +2300,7 @@ int tui_render_text(int rows, int cols, const char *title, const char *clock, co
     clamp_size(&rows, &cols);
     g_color = color_enabled;
     g_row_bg = "";
+    g_input_h = 0;
     wbuf_t w = { g_frame, FRAME_CAP, 0 };
     int boxed = rows >= 6 && cols >= 20;
     rect_t r = { 1, 1, rows - 1, cols };
@@ -2099,8 +2328,107 @@ int tui_render_text(int rows, int cols, const char *title, const char *clock, co
     text_draw_t d = { &w, top, left, iw, tw, *scroll, ih };
     layout_text(paras, n, tw, draw_text_row, &d);
     for (int v = total - *scroll; v < ih; v++) blank_row(&w, top + v, left, iw);
-    draw_status(&w, rows, cols, bar);
-    place_cursor(&w, 0, 0, bar->input);
-    end_frame(&w, 1);
+    finish_frame(&w, rows, cols, bar, 0, 0);
     return most;
+}
+
+// ---- a dialog over the screen ----
+
+#define DIALOG_NOTE_ROWS 6
+
+static int dialog_rows(int text_n, int field, int note_n) {
+    return 1 + (text_n ? text_n + 1 : 0) + (field ? 2 : 0) + (note_n ? note_n + 1 : 0);
+}
+
+// What doesn't fit goes from the end of the text, then of the note; the field always shows.
+static void draw_dialog(wbuf_t *w, int rows, int cols, const tui_dialog_t *d, int *cr, int *cc) {
+    *cr = 0;
+    int avail = rows - 1;
+    int bw = cols - 4 < 76 ? cols - 4 : 76, mx = 2, my = 1;
+    int iw = bw - 2, tw = iw - 4;
+    int text_n = d->n_text > 0 ? layout_text(d->text, d->n_text, tw, NULL, NULL) : 0;
+    static size_t noff[DIALOG_NOTE_ROWS], nlen[DIALOG_NOTE_ROWS];
+    int note_n = d->note && d->note[0] ? wrap_rows(d->note, tw, tw, noff, nlen, DIALOG_NOTE_ROWS) : 0;
+    int field = d->input || d->status;
+    if (dialog_rows(text_n, field, note_n) + 2 + 2 * my > avail) my = 0;
+    while (dialog_rows(text_n, field, note_n) + 2 > avail && (text_n > 0 || note_n > 0)) {
+        if (text_n > 0) text_n--;
+        else note_n--;
+    }
+    int inner = dialog_rows(text_n, field, note_n);
+    if (inner > avail - 2) inner = avail - 2 > 1 ? avail - 2 : 1;
+    int bh = inner + 2, outer_h = bh + 2 * my, outer_w = bw + 2 * mx;
+    int top = 1 + (avail - outer_h) / 2, left = 1 + (cols - outer_w) / 2;
+    if (top < 1) top = 1;
+
+    const char *was = g_row_bg;
+    g_row_bg = g_color && g_have_bg ? g_sel_bg : "";
+    for (int r = 0; r < outer_h; r++) {
+        at(w, top + r, left);
+        sty(w, S_PLAIN);
+        for (int i = 0; i < outer_w; i++) wapp(w, " ");
+    }
+    rect_t bx = { top + my, left + mx, bh, bw };
+    char bs[48];
+    snprintf(bs, sizeof bs, "%s%s", border_sgr(TUI_TONE_PROMPT), g_row_bg);
+    span_t title, keys;
+    span_init(&keys, bw - 8);
+    if (d->keys) draw_hint(&keys.p, d->keys);
+    span_init(&title, title_room(bw, 0));
+    if (d->title) ptext(&title.p, S_ACCENT_BOLD, d->title);
+    edge(w, bx.top, bx.left, bw, G_TL, G_TR, bs, &title, NULL);
+    sides(w, bx.top + 1, inner, bx.left, bw, bs);
+    edge(w, bx.top + bh - 1, bx.left, bw, G_BL, G_BR, bs, NULL, &keys);
+
+    int row = bx.top + 1, end = row + inner, x = bx.left + 1;
+    blank_row(w, row++, x, iw);
+    if (text_n > 0) {
+        text_draw_t td = { w, row, x, iw, tw, 0, text_n < end - row ? text_n : end - row };
+        layout_text(d->text, d->n_text, tw, draw_text_row, &td);
+        row += td.h;
+        if (row < end) blank_row(w, row++, x, iw);
+    }
+    if (field && row < end) {
+        pen_t p;
+        inner_begin(w, &p, row, x, iw);
+        pspace(&p, 1);
+        if (d->input) {
+            ptext(&p, S_ACCENT_BOLD, G_RSAQ " ");
+            p.room--;
+            int c = draw_field(&p, d->input, d->mask, d->placeholder);
+            p.room++;
+            *cr = row;
+            *cc = x + 1 + c;
+        } else {
+            pell(&p, S_FAINT, d->status, p.room - p.used - 1);
+        }
+        inner_end(&p);
+        row++;
+        if (row < end) blank_row(w, row++, x, iw);
+    }
+    for (int i = 0; i < note_n && row < end; i++, row++) {
+        char piece[TUI_LINE_MAX];
+        size_t n = nlen[i] < sizeof piece - 1 ? nlen[i] : sizeof piece - 1;
+        memcpy(piece, d->note + noff[i], n);
+        piece[n] = '\0';
+        pen_t p;
+        inner_begin(w, &p, row, x, iw);
+        pspace(&p, 1);
+        ptext(&p, S_FAINT, piece);
+        inner_end(&p);
+    }
+    while (row < end) blank_row(w, row++, x, iw);
+    g_row_bg = was;
+}
+
+// cr 0 hides the cursor, unless a dialog's field takes it.
+static void finish_frame(wbuf_t *w, int rows, int cols, const tui_bar_t *bar, int cr, int cc) {
+    const tui_input_t *in = bar->input;
+    if (bar->dialog) {
+        draw_dialog(w, rows, cols, bar->dialog, &cr, &cc);
+        in = bar->dialog->input;
+    }
+    draw_status(w, rows, cols, bar);
+    place_cursor(w, cr, cc, in);
+    end_frame(w, 1);
 }

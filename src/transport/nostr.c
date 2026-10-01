@@ -1051,6 +1051,14 @@ void nostr_set_proxy(nostr_t *n, const char *socks) {
     }
 }
 
+void nostr_retry_now(nostr_t *n) {
+    for (int i = 0; i < n->n_relays; i++) {
+        relay_t *r = &n->relays[i];
+        r->next_try = 0;
+        r->fails = 0;
+    }
+}
+
 int nostr_relays_up(const nostr_t *n) {
     int k = 0;
     for (int i = 0; i < n->n_relays; i++) {

@@ -157,6 +157,8 @@ add_executable(chat
     src/app/main.c
     src/app/tui.c
     src/app/update.c
+    src/app/install.c
+    src/common/toml.c
     src/core/chat.c
     src/core/cmd.c
     src/core/files.c
@@ -214,9 +216,7 @@ target_include_directories(chat PRIVATE src src/platform/${CHAT_OS} ${CMAKE_BINA
 target_link_libraries(chat PRIVATE ${SODIUM_STATIC_LIB} ${OQS_STATIC_LIB} ${MBEDTLS_STATIC_LIBS} ${SECP256K1_STATIC_LIB})
 
 if(WIN32)
-
     target_compile_definitions(chat PRIVATE SODIUM_STATIC=1 SECP256K1_STATIC=1 WIN32_LEAN_AND_MEAN)
-
     target_link_libraries(chat PRIVATE ws2_32 bcrypt advapi32 shell32 user32 crypt32 iphlpapi)
     target_link_options(chat PRIVATE -static)
 else()
@@ -253,12 +253,10 @@ endfunction()
 
 function(chat_try_link_flag flag)
     string(MAKE_C_IDENTIFIER "LDFLAG${flag}" var)
-
     set(CMAKE_TRY_COMPILE_TARGET_TYPE EXECUTABLE)
     if(HAVE_CHECK_LINKER_FLAG)
         check_linker_flag(C ${flag} ${var})
     else()
-
         set(CMAKE_REQUIRED_LINK_OPTIONS ${flag})
         check_c_compiler_flag("" ${var})
     endif()
@@ -268,7 +266,6 @@ function(chat_try_link_flag flag)
 endfunction()
 
 if(NOT MSVC)
-
     chat_try_compile_flag(-fstack-protector-strong)
     chat_try_compile_flag(-fstack-clash-protection)
 
@@ -289,12 +286,10 @@ if(NOT MSVC)
 endif()
 
 if(WIN32)
-
     chat_try_link_flag(-Wl,--dynamicbase)
     chat_try_link_flag(-Wl,--nxcompat)
     chat_try_link_flag(-Wl,--high-entropy-va)
 elseif(NOT MSVC)
-
     chat_try_compile_flag(-fPIE)
     chat_try_link_flag(-pie)
     chat_try_link_flag(-Wl,-z,relro)

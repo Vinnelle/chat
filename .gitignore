@@ -6,6 +6,11 @@
 /build-fuzz/
 /dist/
 /test-builds/
+build_stamp.h
+*.o
+*.a
+*.obj
+*.exe
 
 # Fuzzing (just fuzz)
 /fuzz-corpus/
@@ -13,13 +18,8 @@ crash-*
 leak-*
 oom-*
 timeout-*
-build_stamp.h
-*.o
-*.a
-*.obj
-*.exe
 
-# Fetched dependencies (libsodium, liboqs)
+# Fetched dependencies (libsodium, liboqs, Mbed TLS, libsecp256k1)
 *-ext/
 
 # Editors / OS

@@ -47,29 +47,68 @@
   the same four bootstrap servers with the room's lookup key.
 
 ### Added
+- `:install` saves your settings and signing key, so they're there the next time chat starts.
+  It asks first, saying what that leaves on disk: a trail that shows chat is used there. The
+  settings you've changed go in `~/.config/chat/settings` (`%LOCALAPPDATA%\chat` on Windows),
+  named as `:set` names them, and the key in `~/.config/chat/key`. Both are sealed with one
+  passphrase you choose (Argon2id, XChaCha20-Poly1305), asked for even with no key to keep, and
+  nothing in them is in the clear. A key installed later is sealed under the same passphrase,
+  without asking for it again. From then on a setting you change is saved as you change it, and
+  chat starts on your sessions rather than the settings page. At the start it asks for the
+  passphrase, or takes it from `CHAT_INSTALL_PASSWORD`, and a wrong one says so; options on the
+  command line win over what's saved, for that run. `:uninstall` deletes it all. Sessions,
+  messages, peers and files are never saved.
 - `:send` without a path opens a file browser to pick the file to offer.
 - **Files and pictures**: `:send PATH` offers a file to the session; nothing moves until someone
   fetches it with `:download N` (saved in `~/Downloads`), or, for a PNG or JPEG, `:show N`,
   which draws it in the chat under the line that offered it (`:hide N` tucks it away). `:files`
   lists them and `:cancel N` stops one. A file is kept only if its SHA-256 matches the offer,
   is saved under a cleaned-up name without ever replacing anything, and a picture shown is never
-  written to disk. Files move in chat's steady slots, invisible on the wire but slow; **Fast
-  file transfers** (`:set fastfiles on`, `--fast-files`) sends them in quick bursts instead.
+  written to disk. Files move in chat's steady slots, invisible on the wire but slow (about
+  25 KB a minute); **Fast file transfers** (`:set fastfiles on`, `--fast-files`) sends yours in
+  quick bursts instead. Through the relays, where a Tor member and a DHT member meet, a slot
+  carries two chunks, since every relay event is sealed the same size anyway, and fast transfers
+  come as often as the relays allow, about twice the steady pace. While a file comes, a row
+  under the line that offered it shows how far it's got and about how long it has left. Chunks
+  lost on the way are asked for again as soon as the rest of their run has come, a transfer
+  carries on through rekeys, and a fetch waits up to two minutes for a sender who drops out,
+  going on from where it got to if they come back.
   **File size limit** (`:set filelimit`, `--file-limit`, 8 MB by default) is the most fetched
   without saying `anyway`; files go up to 1 GB. Pictures are decoded by chat's own PNG and
   baseline JPEG readers, which never hold the full-size image.
 - `:changelog` (or `:news`) shows this changelog on a page of its own, built into chat so it
   reads offline, with its Markdown rendered: headings, bold, italic and `code`, links, nested
   lists, numbered items, quotes, code blocks and rules. In `--simple` it prints it.
+- **Unread counts**: a session with messages you haven't seen shows how many beside its name in
+  the sidebar, in yellow with an `@` when one of them mentions you. With the sidebar hidden, the
+  chat's title says how many are new elsewhere. Back in that session, a `N new` rule marks where
+  they start, until you leave it or send.
+- Your nick is lit wherever a message mentions it (`@nick`), not just the time beside it.
+- While a peer's verify code is still to be compared, the box you type in says your messages
+  aren't sent to them, with `:verify NICK` to see the code. Only the console said so, once per
+  message.
 
 ### Changed
+- Everything chat asks for comes up in a box over the screen, titled with what it's for and
+  with its keys in its bottom edge: a new session's password, the id and password to join one,
+  a setting's new value, a native key's password, a pasted key, and `:install`'s questions.
+  They were the input box at the bottom, or a field in the row being changed.
+- The settings page has no Layout section any more: `Ctrl+B`, `Ctrl+O` and `Ctrl+T` (`s`, `c`
+  and `C` in NORMAL) show and hide the sidebar, the console and the chat, and `:set sidebar`,
+  `console` and `chat` are gone.
+- The input box grows a row at a time as what you type wraps, up to six rows (fewer on a short
+  terminal), instead of scrolling the line sideways out of view.
 - Direct routing is now called DHT routing: `--routing dht+nostr` and `--routing dht`, and
   `dht` on the settings page. `--routing direct+nostr` and `--routing direct` still work.
 - This version and 0.1.10 can't reach each other over UDP: the datagrams are a new size and
   room frames' pieces have a new header. They meet through the Nostr relays, or over Tor, and
   read each other's session frames there.
 - A handshake takes a few seconds, and a re-handshake up to half a minute, going a slot at a
-  time.
+  time; through the relays, a minute or so. A rekey waits for a re-handshake still going with
+  anyone, so two can't cross (crossing, they broke each other's cookies), and a peer in the
+  middle of one gets the overlap's time more before it's dropped for going quiet.
+- Binaries from `just build test` say so: `testing <build id>` at the right of the console's top
+  edge, and in `--version`.
 - `just build` takes what to build: `just build linux` (was `just build-static`),
   `just build windows` or `win` (was `build-win`), `just build all` (was `all`) and
   `just build test [all|linux|windows]` (was `test-build`). Build directories keep their names.
@@ -80,6 +119,11 @@
   `--nonostr` still connected to the Nostr relays. They now hold whatever the routing, and
   `--simple --nonostr` without a terminal routes DHT only. The routing line says when the
   relays are always on.
+- `Enter` on a message past the 250-byte limit sent it with its end cut off. It now stays in the
+  box, whose count is already red, and the bottom row says how much too long it is.
+- In a narrow chat, a name too wide for the name column (`bob (code not compared)`) pushed its
+  message's first row to the right of the rows it wrapped onto. The name now goes on a row of
+  its own over the text.
 
 ## 0.1.10
 

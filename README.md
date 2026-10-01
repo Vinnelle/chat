@@ -34,8 +34,9 @@ any member could sit between two others and read what they say. When a peer join
 a verify code to compare with them over another channel (in person, a call); it's the same on
 both ends only if nobody is in between. Nothing you send reaches a peer until you've said it
 matched with `:verify NICK ok` (`:verify NICK no` if it didn't: that peer then gets nothing).
-Messages from a peer whose code you haven't compared show `(code not compared)`, and the
-sidebar says `compare code`. If the peer signs with an identity (below), its code needs
+Messages from a peer whose code you haven't compared show `(code not compared)`, the
+sidebar says `compare code`, and the box you type in says your messages aren't sent to them,
+with `:verify NICK` to see the code. If the peer signs with an identity (below), its code needs
 comparing once per session: back with a fresh handshake signed by the same key, it's trusted
 again. **Compare verify codes** on the settings page (`:set verify optional`,
 `--verify-optional`) sends to everyone, compared or not.
@@ -51,13 +52,14 @@ Optional **identity signing** lets peers verify who they're talking to. Choose i
 - `pgp:KEYFILE` — sign with an unencrypted armored EdDSA secret key exported from real gpg
 
 In settings, the picker lists **Off**, then **AGE** and **PGP**, each with **Native** (a key
-made there), a key file (picked in a browser) and a key paste. A key of your own is never
-written to disk.
+made there), a key file (picked in a browser) and a key paste. A key of your own is only
+written to disk by `:install`, sealed (see [Installing](#installing)).
 
 A **Native** key asks for a password (`--identity age` or `pgp` asks at startup, or takes it
 from `CHAT_SIGN_PASSWORD`). The key is made from that password and this OS install's machine
 id (`/etc/machine-id`, or `MachineGuid` on Windows) with Argon2id, so the same password on
-the same device and OS always makes the same key and fingerprint, and nothing is stored.
+the same device and OS always makes the same key and fingerprint, and nothing is stored
+(unless you `:install`).
 **Always use the same password if you want to keep an established signing identity**: a
 different password, or a typo, makes a different key, and peers see a new fingerprint. The
 same password makes the same key whether you pick AGE or PGP. Reinstalling the OS changes the
@@ -106,7 +108,8 @@ it takes to join one with a blank password.
 ## Routing
 
 chat opens on its settings page, and **Routing** heads it. `--routing` presets it, and
-`Ctrl+S` or `:set` brings the page back later.
+`Ctrl+S` or `:set` brings the page back later. Once `:install` has saved your settings, chat
+starts with them on your sessions instead.
 
 1. **DHT + Nostr fallback** (recommended). Peers talk over UDP, straight to each other.
 2. **DHT only.** The same without relays. Some peers behind strict NATs won't connect, and
@@ -223,7 +226,8 @@ sends UDP, never connects anywhere directly, and never resolves an `.onion` name
 through DNS. Connecting takes a minute or two
 while the onion services are published and found.
 
-Settings last until chat exits. Like everything else, they're never written to disk.
+Settings last until chat exits. Like everything else, they're never written to disk unless you
+ask: `:install` saves them, and from then on each change (see [Installing](#installing)).
 
 ## Files and pictures
 
@@ -231,15 +235,23 @@ Settings last until chat exits. Like everything else, they're never written to d
 to whoever joins or is compared later); `:send` alone picks the file in a file browser. Nothing else happens until someone chooses to fetch it:
 `:download N` saves it, and for a picture (PNG or JPEG) `:show N` draws it in the chat, under
 the line that offered it. Pictures stay hidden until you ask; `:hide N` tucks one away again.
-`:files` lists what's been offered and how far each fetch has got; `:cancel N` stops one, or
-stops offering a file of yours.
+While a file comes, a row under that line shows how far it's got and about how long it has
+left. `:files` lists what's been offered and how far each fetch has got; `:cancel N` stops one,
+or stops offering a file of yours.
 
 - **What's on the wire.** A file goes in the same slots as everything else, in the places that
   would otherwise carry nothing, so with **Fast file transfers** off a transfer looks like any
-  other moment: a photo takes minutes, though, and a big file hours. With it on, your slots to
-  the peer you're transferring with come every few milliseconds while it runs: seconds instead
-  of minutes, but anyone watching your network can see a burst about the size of the file (never
-  what's in it). Each side's setting speeds only its own slots, and never through the relays.
+  other moment: about 25 KB a minute, so a photo takes minutes, and a big file hours. With it
+  on, your slots to the peer you're sending to come every few milliseconds while it runs:
+  seconds instead of minutes, but anyone watching your network can see a burst about the size
+  of the file (never what's in it). It's the sender's setting that speeds a transfer up.
+- **Through the relays.** A Tor member and a DHT member only meet on the Nostr relays, where
+  slots are a few seconds apart. Every relay event is sealed the same size, so a slot there
+  carries two chunks at no cost: about 12 KB a minute. Fast transfers can't burst there, but
+  your slots to that peer come as often as the relays allow, about twice the steady pace, and
+  the relays see that rate. A transfer carries on through rekeys, and a fetch waits up to two
+  minutes for a sender who drops out, going on from where it got to if they come back (with a
+  new verify code, once that's compared again).
 - **What's kept.** A file comes a window of chunks at a time, written in order and hashed, and
   it's kept only if its SHA-256 is the one in the offer: a file changed after it was offered,
   or tampered with, is thrown away. It's written to a new, private, hidden file in
@@ -271,10 +283,10 @@ sha256sum -c --ignore-missing SHA256SUMS
 
 ## Installation
 
-chat is deliberately not packaged or installable. The point is to leave no trace: apart
-from the executable itself, nothing should persist on the machine. A package manager would
-record the install and add files outside your control, so no packages (AUR or otherwise)
-are provided.
+chat is deliberately not packaged. The point is to leave no trace: apart from the executable
+itself, nothing persists on the machine unless you ask for it with `:install` (see
+[Installing](#installing)). A package manager would record the install and add files outside
+your control, so no packages (AUR or otherwise) are provided.
 
 Where you keep the executable is up to you. The recommended place is a user-owned folder
 on your `PATH`, such as `~/.local/bin`, because updating replaces the executable in place
@@ -294,12 +306,74 @@ sudo chat --update
 
 This may differ on your system, and it doesn't matter if you never intend to update.
 
-Opt-in persistence may be added later, for example:
+Opt-in **chat history** may be added later, with other members of the session told that you
+are saving it. It would stay off unless you turn it on.
 
-- **chat history**, with other members of the session told that you are saving it
-- **config**, so options like nick and colour survive a restart
+### Installing
 
-Both would stay off unless you turn them on.
+`:install`, in the full-screen UI, saves your settings and signing key so they're there the
+next time chat starts. It asks first, and says what that leaves on disk: **a trail**, files
+that tell anyone who can read the disk (an admin, malware, a backup, forensics) that chat is
+used there.
+
+Both files are sealed with one passphrase you choose, typed twice, even with no signing key to
+keep. Argon2id (512 MiB, as for a session) makes a key from it with a salt, and
+XChaCha20-Poly1305 seals each file under that key. Each starts with what Argon2id needs, its
+limits and the salt, and nothing else is in the clear: not your nick, routing or relays, and not
+the key's public half, so neither file can be tied to the fingerprint peers know you by.
+
+- `~/.config/chat/settings` (`$XDG_CONFIG_HOME/chat` if that's set; `%LOCALAPPDATA%\chat`
+  on Windows, which a roaming profile doesn't carry): the settings you've changed from chat's
+  defaults. A default left out still changes when a later version changes it. The Tor control
+  password is never saved. Sealed inside, they're TOML:
+
+  ```toml
+  [network]
+  routing = "tor"
+  lan = false
+  relays = ["wss://relay.primal.net", "wss://nostr.mom"]
+
+  [profile]
+  nick = "alice"
+  colour = "purple"
+
+  [chat]
+  filelimit = "64M"
+  notify = "all"
+  ```
+
+  Its tables are the settings page's sections, and its keys the names `:set` takes: a switch
+  is `true` or `false`, `port` a number, `relays` a list, and the rest strings, written as
+  `:set` takes them. A key chat can't use is left out, and the console says so.
+- `~/.config/chat/key`: your signing key, its kind and where it came from.
+
+Only you can open the folder and the files (`0700`, `0600`), and each file is written whole,
+then renamed into place, so a crash never leaves half of one. Sessions, their ids and
+passwords, messages, peers and files are never saved.
+
+At the start chat asks for the passphrase in a box (on the terminal with `--simple` or
+`--update`), or takes it from `CHAT_INSTALL_PASSWORD`. One Argon2id run opens both files, and a
+wrong passphrase says so, where a native key's mistyped password quietly makes a different key.
+It reads the settings first, so an option on the command line still wins for that run, and it
+starts on your sessions rather than the settings page. `--identity` signs with another key for
+that run and leaves the saved one unused. `Esc` starts without what's saved: from chat's
+defaults, on the settings page, and nothing changed that run is saved. Since the sealed routing
+could be Tor, chat won't guess at it: with what's saved still sealed, no terminal to ask and no
+`--routing`, it doesn't start, and `--update` doesn't download.
+
+From then on, a setting you change in chat is saved as you change it, whether on the settings
+page or with `:set`, and the bottom row's reply to it ends `· saved`. chat holds the key Argon2id
+made, locked in memory, until it exits, so saving takes neither the passphrase nor Argon2id. An
+option on the command line isn't saved: it lasts for that run, and what's saved comes back next
+time. The signing key is saved only by `:install`, so a key you try out isn't kept by accident:
+a key chosen later says so in the console, and `:install` seals it under the same passphrase,
+without asking for it. `:install` again saves everything in use, the command line's options
+too. It keeps the saved key unless another is in use, which it replaces (it says so first);
+with signing off, the saved key stays. Run while what's saved is still sealed, `:install` asks
+for its passphrase first; if it's forgotten, `:uninstall` and then `:install` start afresh.
+`:uninstall` deletes chat's files, and the folder if nothing else is in it. Deleting isn't
+erasing: the disk (a journal, copy-on-write snapshots, an SSD's spare blocks) and its backups
+can keep what was in them.
 
 ## Build
 
@@ -337,7 +411,8 @@ just build windows      # Windows binary in build-win/ (needs zig)
 just run --nick you     # build, then run
 just build test         # Linux and Windows binaries in test-builds/<date>-<time>/, offer to run this system's
 just build test linux   # the same for one system (or: windows); the other system's needs zig
-just clean              # remove build directories
+                        # (a test build says "testing <build id>" over its console, and in --version)
+just clean              # remove build directories and test builds
 ```
 
 Test builds are named `chat-<build id>-<system>-<arch>`, such as
@@ -412,6 +487,11 @@ that session reaches them: route, port or tor, relays, port mapping, DHT and tra
 selected session's chat fills the rest, with its console over it, and you type in the box at
 the bottom.
 
+A session with messages you haven't seen shows how many beside its name, in yellow with an
+`@` when one of them mentions you; with the sidebar hidden, the chat's title says how many are
+new elsewhere. Back in that session, a `N new` rule marks where they start, until you leave it
+or send. Your nick is lit wherever a message mentions it.
+
 It draws in the terminal's own colours (its foreground, background and 16-colour palette), so
 it takes on whatever theme the terminal has, light or dark, and follows it when it changes.
 Peers' colours are exact; chat asks the terminal for its background colour and eases any that
@@ -420,7 +500,8 @@ wouldn't read on it. `NO_COLOR` keeps it to bold, faint and reverse.
 It starts on the settings page, so routing, nickname, colour, signing identity and the rest
 are set up in one place. **Start chatting** at the bottom (or `Esc`) goes on to your sessions.
 Nothing reaches the network before that: no tor is looked for or started, and no `--peer` name
-is looked up (in Tor mode it never is, since the lookup would go around Tor).
+is looked up (in Tor mode it never is, since the lookup would go around Tor). Once `:install`
+has saved your settings, it starts on your sessions, and `Ctrl+S` opens the page.
 
 | Key | Action |
 | --- | --- |
@@ -440,8 +521,13 @@ did (until your next key), and what the keys do there.
 The input line is a small vim. It starts in NORMAL (`h`/`l` move, `0`/`$` ends, `x` delete,
 `j`/`k` switch session, `s`/`c`/`C` toggle the sidebar/console/chat); `i`/`a`/`I`/`A` go to INSERT, where Enter sends, `Ctrl+W` deletes the
 word before the cursor and `Ctrl+U` everything before it, and `Esc` goes back to NORMAL. The input box's
-border takes the mode's colour. Password and session-id prompts are plain fields: `Enter`
-confirms, `Esc` cancels, and your draft comes back afterwards.
+border takes the mode's colour, and the box grows a row at a time as what you type wraps, up
+to six rows (fewer on a short terminal). The count under it turns red past a message's 250
+bytes, and `Enter` then leaves the message in the box instead of sending it cut short.
+Whatever chat asks for (a password, a session id, a setting's new value, whether to go on)
+comes up in a box over the screen, titled with what it's for and with its keys in its bottom
+edge: `Enter` confirms, `Esc` cancels, and your draft comes back afterwards. A question takes
+`y` or `n`.
 
 Typing `@` and the start of a nick shows the rest of the name dimmed; `Tab` completes it.
 
@@ -467,6 +553,8 @@ command; `Enter` on a command there puts it on the command line.
 | `:port [N]` | show or move this session's UDP port (`0` picks a free one) |
 | `:copyid` | copy the session id to the clipboard |
 | `:update` | install the latest release |
+| `:install` | save your settings and signing key on this computer, once it has said what that leaves on disk (see [Installing](#installing)) |
+| `:uninstall` | delete what `:install` saved |
 | `:changelog` | what changed in each version (`:news`); built in, so it reads offline |
 | `:send [PATH]` | offer a file, picked in a file browser without PATH (see [Files and pictures](#files-and-pictures)) |
 | `:files` | the files offered here, and how each fetch is going |
@@ -494,12 +582,11 @@ values after a name. Under each row's help, the page shows the `:set` that does 
 | `sign` | `off`, or an `age` or `pgp` key made from a password typed on the page; a key file or pasted key is chosen there too |
 | `verify` | `required` (nothing reaches a peer until you've compared its code), `optional` |
 | `filelimit` | the biggest file fetched without `anyway`: `8M`, `500K`, `1G` |
-| `fastfiles` | `on` (transfers in quick bursts), `off` (chat's steady slots) |
+| `fastfiles` | `on` (what you send goes in quick bursts; through the relays, as fast as they allow), `off` (chat's steady slots) |
 | `notify` | `all`, `mentions`, `none` |
 | `preview` | what a notification shows: `off` (only that a message came), `nick` (who from), `message` (who, and what); never the session |
 | `net` | `normal`, `verbose` (every handshake packet, relay and Tor event) |
 | `port` | the UDP port for new sessions (`0` picks a free one) |
-| `sidebar`, `console`, `chat` | `on`, `off` |
 
 The settings page, the pages under it (the signing identity picker and the key file browser)
 and the help page all take the same keys: `j`/`k` move, `g`/`G` go to the ends, `Tab` /
@@ -521,6 +608,8 @@ write access to the folder that holds the executable.
 
 ### Options
 
+An option given here wins, for that run, over what `:install` saved.
+
 | Option | Meaning |
 | --- | --- |
 | `--nick NAME` | Display name (random `swift-otter42`-style if omitted) |
@@ -534,12 +623,12 @@ write access to the folder that holds the executable.
 | `--nostr-always` | Stay on the relays all the time, not only while they're needed |
 | `--verify-optional` | Send to peers whose verify code you haven't compared |
 | `--file-limit SIZE` | The biggest file fetched without `anyway` (default `8M`, up to `1G`) |
-| `--fast-files` | Transfer files in quick bursts rather than chat's steady slots |
+| `--fast-files` | Send files in quick bursts rather than chat's steady slots (through the relays, as fast as they allow) |
 | `--relay URL` | A Nostr relay (`wss://...`) to use instead of the defaults; up to 6 |
 | `--tor-launch auto\|always\|never` | Which tor Tor mode uses: a running one if possible, else chat's own (`auto`); always chat's own; or only a running one |
 | `--tor-path PATH` | The tor program chat starts (default: `tor` on `PATH` or in the usual folders) |
 | `--tor-socks`, `--tor-control` | Where to look for a running tor's SOCKS and control ports (`HOST:PORT`) |
-| `--identity ...` | `age` or `pgp` for a key made from a password (asked for, or `CHAT_SIGN_PASSWORD`), or `age:KEYFILE` or `pgp:KEYFILE` for your own (see [Security](#security)) |
+| `--identity ...` | `age` or `pgp` for a key made from a password (asked for, or `CHAT_SIGN_PASSWORD`), or `age:KEYFILE` or `pgp:KEYFILE` for your own (see [Security](#security)); for that run, in place of a key `:install` saved |
 | `--simple` | Plain `[HH:MM] ...` lines, one session, stdin, `:name` runs a command — the automatic fallback when stdout isn't a tty |
 | `--session ID` | Join a session at startup (with `--port`, `--peer`) |
 | `--update` | Install the latest release and exit, without opening chat (see [Updating](#updating)) |

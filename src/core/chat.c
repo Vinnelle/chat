@@ -38,7 +38,7 @@ const char *routing_mode_name(route_mode_t m) { return m == ROUTE_TOR ? "tor" : 
 static void ui_print_colored(chat_t *c, const uint8_t rgb[3], const char *fmt, ...);
 static void ui_chat(chat_t *c, const uint8_t rgb[3], int mention, const char *name, const char *text);
 static void ui_chat_file(chat_t *c, const uint8_t rgb[3], int mention, const char *name, const char *text, int file);
-static void file_next_chunk(chat_t *c, peer_t *p, char *text, size_t cap);
+static int file_next_chunk(chat_t *c, peer_t *p, char *text, size_t *pos, size_t cap);
 static void file_on_record(chat_t *c, peer_t *p, char **f, int n, double now);
 static void files_tick(chat_t *c, double now);
 static void file_offer_all(chat_t *c, peer_t *p);
@@ -418,34 +418,51 @@ static void send_room(chat_t *c, const char *text, addr_t to, sock_t sock) {
     }
 }
 
+static int relayed_count(const chat_t *c) {
+    int n = 0;
+    for (int i = 0; i < c->peer_hi; i++) n += c->peers[i].used && c->peers[i].ok && c->peers[i].addr.kind == ADDR_NOSTR;
+    return n;
+}
+
 static double cover_interval(chat_t *c, const peer_t *p) {
     int live = live_count(c);
     if (live < 1) live = 1;
     double scale = (double)live / (COVER_MAX_RATE * COVER_INTERVAL);
     double iv = COVER_INTERVAL * (scale > 1.0 ? scale : 1.0);
     if (p && p->addr.kind == ADDR_NOSTR) {
-        int relayed = 0;
-        for (int i = 0; i < c->peer_hi; i++) relayed += c->peers[i].used && c->peers[i].ok && c->peers[i].addr.kind == ADDR_NOSTR;
-        double least = (double)relayed / NOSTR_MAX_RATE;
+        double least = (double)relayed_count(c) / NOSTR_MAX_RATE;
         if (least < NOSTR_COVER_INTERVAL) least = NOSTR_COVER_INTERVAL;
         if (iv < least) iv = least;
     }
     return iv;
 }
 
+// The slots of a fast transfer through the relays, instead of iv: all relayed peers' together no
+// more than NOSTR_FAST_RATE a second however many are fast, and never closer than NOSTR_FAST_INTERVAL.
+static double relay_fast_interval(chat_t *c, double iv) {
+    double fast = (double)relayed_count(c) / NOSTR_FAST_RATE;
+    if (fast < NOSTR_FAST_INTERVAL) fast = NOSTR_FAST_INTERVAL;
+    return fast < iv ? fast : iv;
+}
+
+// What a frame through the relays carries has to fit in an event, with the sender and recipient.
+_Static_assert(RELAY_FRAME <= NOSTR_WRAP_PLAIN - 2 * ID_LEN - 2, "a relay frame has to fit in a relay event");
+
 static ratchet_t *send_chain_for(peer_t *p) {
     if (!p->send_chain.started && p->old_until > 0.0 && p->old_send.started) return &p->old_send;
     return &p->send_chain;
 }
 
-static int frame_on_chain(ratchet_t *chain, const char *text, uint8_t *frame, size_t frame_cap,
+// Seals text as the chain's next frame, with a body of body bytes (a UDP cell's, or a relay
+// frame's) unless it needs more.
+static int frame_on_chain(ratchet_t *chain, const char *text, size_t body, uint8_t *frame, size_t frame_cap,
                           size_t *len, uint32_t *index) {
     uint32_t idx = chain->index;
     ratchet_t advanced;
     uint8_t mk[32];
     int rc = -1;
     if (ratchet_peek(chain, idx, mk, &advanced) == 0
-        && session_seal(mk, idx, text, strlen(text), frame, frame_cap, len) == 0) {
+        && session_seal_padded(mk, idx, text, strlen(text), body, frame, frame_cap, len) == 0) {
         *chain = advanced;
         *index = idx;
         rc = 0;
@@ -480,7 +497,7 @@ static int send_peer(chat_t *c, peer_t *p, const char *text) { return queue_reco
 // Straight out, outside the slots: only for the "bye" of a session that's ending.
 static void send_now(chat_t *c, peer_t *p, const char *text) {
     uint8_t frame[UDP_CELL]; size_t len; uint32_t idx;
-    if (frame_on_chain(send_chain_for(p), text, frame, sizeof frame, &len, &idx) != 0) return;
+    if (frame_on_chain(send_chain_for(p), text, SESSION_PAD_TARGET, frame, sizeof frame, &len, &idx) != 0) return;
     xmit(c, c->sock, frame, len, p->addr);
     crypto_wipe(frame, sizeof frame);
 }
@@ -520,7 +537,11 @@ static void run_slot(chat_t *c, peer_t *p) {
         return;
     }
 
-    char text[RECORD_MAX + 1] = "nop";
+    // Through the relays, to a peer that reads several records to a frame, the frame is as big as
+    // a relay event holds (there they're all one size anyway), with room for two chunks of a file.
+    int big = p->batches && p->addr.kind == ADDR_NOSTR;
+    size_t cap = big ? RELAY_RECORD_MAX : RECORD_MAX;
+    char text[RELAY_RECORD_MAX + 1] = "nop";
     sendq_t *taken[16];
     int n_taken = 0, old_chain = first ? first->old_chain : 0;
     size_t pos = 0;
@@ -534,7 +555,7 @@ static void run_slot(chat_t *c, peer_t *p) {
         }
         if (!next || next->old_chain != old_chain || (rq && !overtake && next->seq > rq->seq)) break;
         size_t l = strlen(next->text);
-        if (n_taken && (!p->batches || pos + 1 + l > RECORD_MAX || n_taken == 16)) break;
+        if (n_taken && (!p->batches || pos + 1 + l > cap || n_taken == 16)) break;
         if (n_taken) text[pos++] = '\n';
         memcpy(text + pos, next->text, l);
         pos += l;
@@ -542,12 +563,13 @@ static void run_slot(chat_t *c, peer_t *p) {
         taken[n_taken++] = next;
         after = next->seq;
     }
-    // Nothing else to say: the next chunk of a file this peer asked for, if there is one.
-    if (n_taken == 0 && p->serving) file_next_chunk(c, p, text, sizeof text);
+    // Room left: the next chunks of a file this peer asked for. Over UDP a chunk takes a slot of
+    // its own, one that would carry a nop; through the relays, as many as fit after the rest.
+    while (p->serving && (big || n_taken == 0) && file_next_chunk(c, p, text, &pos, cap)) {}
     ratchet_t *chain = old_chain && p->old_until > 0.0 && p->old_send.started ? &p->old_send : send_chain_for(p);
-    uint8_t frame[UDP_CELL]; size_t len; uint32_t idx;
+    uint8_t frame[RELAY_FRAME]; size_t len; uint32_t idx;
     // No chain yet (a responder waiting on the kx): what's queued waits too.
-    if (frame_on_chain(chain, text, frame, sizeof frame, &len, &idx) == 0) {
+    if (frame_on_chain(chain, text, big ? SEAL_MAX_BODY : SESSION_PAD_TARGET, frame, sizeof frame, &len, &idx) == 0) {
         xmit(c, c->sock, frame, len, p->addr);
         for (int i = 0; i < n_taken; i++) crypto_wipe(taken[i], sizeof *taken[i]);
         if (rq) p->room_waited++;
@@ -742,6 +764,11 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
         slot->next_cover = carry.next_cover;
         slot->announces_rekey = carry.announces_rekey;
         slot->batches = carry.batches;
+        // A file it's fetching from us goes on from where it got to: a rekey mustn't stall it.
+        slot->serving = carry.serving;
+        memcpy(slot->serve_fid, carry.serve_fid, FILE_ID_LEN);
+        slot->serve_next = carry.serve_next;
+        slot->serve_end = carry.serve_end;
         // The same peer, as the rk it announced proves: a code compared stays compared.
         slot->code_ok = carry.code_ok;
         slot->next_rehello = carry.next_rehello;
@@ -784,7 +811,7 @@ static void probe_path(chat_t *c, peer_t *p, addr_t addr) {
     uint8_t frame[UDP_CELL];
     size_t len;
     uint32_t idx;
-    if (frame_on_chain(send_chain_for(p), "nop", frame, sizeof frame, &len, &idx) != 0) return;
+    if (frame_on_chain(send_chain_for(p), "nop", SESSION_PAD_TARGET, frame, sizeof frame, &len, &idx) != 0) return;
     xmit(c, c->sock, frame, len, addr);
     crypto_wipe(frame, sizeof frame);
 }
@@ -1518,6 +1545,19 @@ static int pending_any(const chat_t *c) {
     return 0;
 }
 
+// A re-handshake still going with p: ours (not yet on our keys with p, or not yet sure p has the
+// new chains), or p's (a key it announced that we haven't re-handshaken with).
+static int rehandshaking_with(const chat_t *c, const peer_t *p) {
+    return p->keygen != c->keygen || !p->chain_confirmed
+        || (p->next_pub_set && memcmp(p->next_pub, p->pub, PUB_LEN) != 0);
+}
+
+static int rehandshaking(const chat_t *c) {
+    for (int i = 0; i < c->peer_hi; i++)
+        if (c->peers[i].used && c->peers[i].ok && rehandshaking_with(c, &c->peers[i])) return 1;
+    return 0;
+}
+
 // Our next key, announced over the session p reads now, or (old) the one it read before our
 // rekey, until it has re-handshaken.
 static void send_rk(chat_t *c, peer_t *p, int old) {
@@ -1733,12 +1773,19 @@ void chat_tick(chat_t *c, double now) {
             else if (p->old_until > 0.0 && p->old_send.started) send_rk(c, p, 1);
         }
         if (p->old_until > 0.0 && now > p->old_until) rekey_drop_overlap(p);
-        if (p->ok && now - p->seen > PEER_TIMEOUT) drop_peer(c, p, "timed out");
+        // Mid re-handshake a peer's frames can go unread for a while: the initiator's, from its kx
+        // until the responder takes it, a cookie round trip later. Through the relays, a slot every
+        // five seconds or so, that's the best part of a minute, and has been more than the timeout:
+        // there it gets the overlap's time more before it's dropped.
+        double timeout = PEER_TIMEOUT
+                       + (p->addr.kind == ADDR_NOSTR && rehandshaking_with(c, p) ? REKEY_OVERLAP : 0.0);
+        if (p->ok && now - p->seen > timeout) drop_peer(c, p, "timed out");
     }
 
     if (now >= c->next_rekey) {
         if (c->rekey_due == 0.0) c->rekey_due = now;
-        if (!pending_any(c) || now - c->rekey_due > REKEY_DRAIN_GRACE) {
+        double waited = now - c->rekey_due;
+        if ((!pending_any(c) || waited > REKEY_DRAIN_GRACE) && (!rehandshaking(c) || waited > REKEY_DEFER_MAX)) {
             session_rekey(c, now);
             c->rekey_due = 0.0;
             c->next_rekey = now + REKEY_INTERVAL + jitter(REKEY_INTERVAL * 0.2);
@@ -1766,6 +1813,9 @@ void chat_tick(chat_t *c, double now) {
             continue;
         }
         run_slot(c, p);
+        // Through the relays a transfer can't burst: the slots of a fast one we're sending come as
+        // often as they allow instead.
+        if (c->fast_files && p->ok && p->serving && p->addr.kind == ADDR_NOSTR) iv = relay_fast_interval(c, iv);
         p->next_cover = now + iv + jitter(iv * 0.25);
     }
     if (!c->created && !c->warned_lonely && !c->ever_connected && now - c->start > LONELY_HINT_AFTER) {
@@ -2134,6 +2184,34 @@ static peer_t *file_owner(chat_t *c, const file_entry_t *e) {
     return p && p->ok ? p : NULL;
 }
 
+uint64_t chat_file_got(const file_entry_t *e) {
+    uint64_t got = e->done;
+    for (int i = 0; i < e->win_n && i < FILE_WINDOW; i++) {
+        if (!(e->win_got >> i & 1)) continue;
+        uint64_t off = e->win_off + (uint64_t)i * FILE_CHUNK;
+        got += off < e->size && e->size - off < FILE_CHUNK ? e->size - off : FILE_CHUNK;
+    }
+    return got < e->size ? got : e->size;
+}
+
+// The bytes p sends in a slot when nothing else is: a chunk over UDP or Tor, two through the relays.
+static double file_slot_bytes(const peer_t *p) {
+    return (p->batches && p->addr.kind == ADDR_NOSTR ? 2.0 : 1.0) * FILE_CHUNK;
+}
+
+double chat_file_eta(const chat_t *cc, const file_entry_t *e, double now) {
+    chat_t *c = (chat_t *)cc;
+    peer_t *p = file_owner(c, e);
+    if (!p) return -1.0;
+    if (!peer_trusted(c, p)) return -2.0;
+    uint64_t got = chat_file_got(e);
+    double left = (double)(e->size - got), took = now - e->since;
+    // The pace so far, once a few chunks make one. Until then, chat's steady pace on its path:
+    // a slot comes up to a quarter of its interval late, an eighth on average.
+    if (got >= 4 * FILE_CHUNK && took > 0.0) return left * took / (double)got;
+    return left / file_slot_bytes(p) * cover_interval(c, p) * 1.125;
+}
+
 // Stops a download: the partial file deleted, what was in memory wiped.
 static void file_stop_download(file_entry_t *e, dl_state_t to) {
     if (e->out) { fclose(e->out); e->out = NULL; }
@@ -2285,6 +2363,8 @@ void chat_send_file(chat_t *c, const char *path) {
     if (e->image) ui_print(c, "* it's offered as a picture: others see it hidden until they choose :show %d", e->num);
 }
 
+// Asks p for the first run of the window that hasn't come: the whole window, to begin with. What
+// came after the run isn't asked for again.
 static void file_request(chat_t *c, file_entry_t *e, peer_t *p, double now) {
     if (e->win_n == 0) {
         uint64_t left = e->size - e->win_off;
@@ -2294,10 +2374,13 @@ static void file_request(chat_t *c, file_entry_t *e, peer_t *p, double now) {
     }
     int first = 0;
     while (first < e->win_n && (e->win_got >> first & 1)) first++;
+    int end = first;
+    while (end < e->win_n && !(e->win_got >> end & 1)) end++;
+    e->req_end = end;
     char fidhex[FILE_ID_LEN * 2 + 1]; hex_encode(e->fid, FILE_ID_LEN, fidhex);
     char rec[96];
     snprintf(rec, sizeof rec, "fg\t%s\t%llu\t%d", fidhex, (unsigned long long)(e->win_off + (uint64_t)first * FILE_CHUNK),
-             e->win_n - first);
+             end - first);
     send_peer(c, p, rec);
     double iv = c->fast_files && p->addr.kind != ADDR_NOSTR ? FILE_FAST_INTERVAL : cover_interval(c, p);
     e->retry_at = now + 6.0 * iv + 4.0;
@@ -2373,8 +2456,9 @@ int chat_file_fetch(chat_t *c, int num, int view, int anyway) {
     }
     e->view = view;
     e->done = e->win_off = 0;
-    e->win_n = 0;
+    e->win_n = e->req_end = 0;
     e->retries = 0;
+    e->gone_since = 0.0;
     e->win = malloc((size_t)FILE_WINDOW * FILE_CHUNK);
     if (view) e->mem = malloc(e->size ? (size_t)e->size : 1);
     if (!e->win || (view && !e->mem)) { file_stop_download(e, DL_FAILED); ui_print(c, "* out of memory"); return -1; }
@@ -2390,11 +2474,17 @@ int chat_file_fetch(chat_t *c, int num, int view, int anyway) {
     }
     sha256_init(&e->hash);
     e->dl = DL_ACTIVE;
+    e->since = now_seconds();
     if (e->size == 0) { file_finish(c, e); return 0; }
-    file_request(c, e, p, now_seconds());
-    int fast = c->fast_files && p->addr.kind != ADDR_NOSTR;
-    ui_print(c, "* fetching file %d (%s) from %s%s", num, sz, name,
-             fast ? " - fast transfers are on" : " - at chat's steady pace; :set fastfiles on is quicker but shows on the wire");
+    file_request(c, e, p, e->since);
+    // How long it takes is up to the sender: fast transfers speed what you send.
+    char eta[48]; file_format_duration(chat_file_eta(c, e, e->since), eta, sizeof eta);
+    if (p->addr.kind == ADDR_NOSTR)
+        ui_print(c, "* fetching file %d (%s) from %s through the relays: %s at chat's steady pace, up to half that if "
+                    "%s has fast transfers on", num, sz, name, eta, name);
+    else
+        ui_print(c, "* fetching file %d (%s) from %s: %s at chat's steady pace, seconds if %s has fast transfers on",
+                 num, sz, name, eta, name);
     return 0;
 }
 
@@ -2438,9 +2528,17 @@ static cmd_result_t cmd_files(void *ctx, const char *arg) {
         char who[CHAT_NAME_LEN] = "you";
         peer_t *p = e->mine ? NULL : find_peer_by_id(c, e->owner);
         if (!e->mine) { if (p) chat_peer_name(c, p, who); else copy_str(who, "someone who left", sizeof who); }
-        char state[64] = "";
+        char state[128] = "";
         if (e->mine) copy_str(state, e->fp ? "offered" : "no longer offered", sizeof state);
-        else if (e->dl == DL_ACTIVE) snprintf(state, sizeof state, "fetching, %d%%", e->size ? (int)(e->done * 100 / e->size) : 100);
+        else if (e->dl == DL_ACTIVE) {
+            uint64_t got = chat_file_got(e);
+            double s = chat_file_eta(c, e, now_seconds());
+            char gs[32], eta[48];
+            file_format_size(got, gs, sizeof gs);
+            if (s >= 0.0) { file_format_duration(s, eta, sizeof eta); strcat(eta, " left"); }
+            else copy_str(eta, s < -1.0 ? "waiting until verify codes are compared" : "waiting for its sender", sizeof eta);
+            snprintf(state, sizeof state, "fetching, %d%% (%s), %s", e->size ? (int)(got * 100 / e->size) : 100, gs, eta);
+        }
         else if (e->dl == DL_DONE) copy_str(state, e->view ? "shown" : "saved", sizeof state);
         else if (e->dl == DL_FAILED) copy_str(state, "failed", sizeof state);
         else copy_str(state, e->image ? ":show or :download" : ":download", sizeof state);
@@ -2450,19 +2548,27 @@ static cmd_result_t cmd_files(void *ctx, const char *arg) {
     return CMD_OK;
 }
 
-// A chunk for p in a slot that would carry a nop: the next one it asked for.
-static void file_next_chunk(chat_t *c, peer_t *p, char *text, size_t cap) {
+// The next chunk p asked for, as a record after the *pos bytes of text there are (in place of a nop
+// if none), if it fits in cap: 1 if it went in.
+static int file_next_chunk(chat_t *c, peer_t *p, char *text, size_t *pos, size_t cap) {
     file_entry_t *e = file_by_fid(c, c->my_id, p->serve_fid);
-    if (!e || !e->fp || p->serve_next >= p->serve_end) { p->serving = 0; return; }
-    uint8_t buf[FILE_CHUNK];
+    if (!e || !e->fp || p->serve_next >= p->serve_end) { p->serving = 0; return 0; }
     size_t want = p->serve_end - p->serve_next < FILE_CHUNK ? (size_t)(p->serve_end - p->serve_next) : FILE_CHUNK;
-    if (fseek(e->fp, (long)p->serve_next, SEEK_SET) != 0 || fread(buf, 1, want, e->fp) != want) { p->serving = 0; return; }
     char fidhex[FILE_ID_LEN * 2 + 1]; hex_encode(e->fid, FILE_ID_LEN, fidhex);
-    int head = snprintf(text, cap, "fd\t%s\t%llu\t", fidhex, (unsigned long long)p->serve_next);
-    if (head < 0 || (size_t)head + (want + 2) / 3 * 4 + 1 > cap) { p->serving = 0; return; }
-    base64_encode(buf, want, text + head);
+    char head[64];
+    int hl = snprintf(head, sizeof head, "%sfd\t%s\t%llu\t", *pos ? "\n" : "", fidhex, (unsigned long long)p->serve_next);
+    if (hl < 0 || *pos + (size_t)hl + (want + 2) / 3 * 4 > cap) return 0;
+    uint8_t buf[FILE_CHUNK];
+    if (fseek(e->fp, (long)p->serve_next, SEEK_SET) != 0 || fread(buf, 1, want, e->fp) != want) { p->serving = 0; return 0; }
+    memcpy(text + *pos, head, (size_t)hl);
+    *pos += (size_t)hl;
+    base64_encode(buf, want, text + *pos);
+    *pos += (want + 2) / 3 * 4;
+    text[*pos] = '\0';
+    crypto_wipe(buf, sizeof buf);
     p->serve_next += want;
     if (p->serve_next >= p->serve_end) p->serving = 0;
+    return 1;
 }
 
 static int parse_u64(const char *s, uint64_t *out) {
@@ -2549,7 +2655,13 @@ static void file_on_record(chat_t *c, peer_t *p, char **f, int n, double now) {
         double iv = c->fast_files && p->addr.kind != ADDR_NOSTR ? FILE_FAST_INTERVAL : cover_interval(c, p);
         e->retry_at = now + 6.0 * iv + 4.0;
         uint64_t full = e->win_n == 64 ? ~0ull : (1ull << e->win_n) - 1;
-        if (e->win_got != full) return;
+        if (e->win_got != full) {
+            // The last of the run asked for has come, and the window still has a gap: what's in it
+            // was lost on the way (or never asked for), so it's asked for now rather than once the
+            // retry is due. Through the relays that's half a minute saved.
+            if ((int)idx + 1 == e->req_end) file_request(c, e, p, now);
+            return;
+        }
         // The window whole: in order onto the file (or into memory), and into the hash.
         size_t bytes = e->size - e->win_off < (uint64_t)e->win_n * FILE_CHUNK ? (size_t)(e->size - e->win_off)
                                                                               : (size_t)e->win_n * FILE_CHUNK;
@@ -2581,12 +2693,27 @@ static void files_tick(chat_t *c, double now) {
         file_entry_t *e = &c->files[i];
         if (!e->used || e->dl != DL_ACTIVE) continue;
         peer_t *p = file_owner(c, e);
-        if (!p) {
+        // Its sender may only have stalled out for a moment (a Tor circuit, a relay). The fetch
+        // waits for them, and, back with a new verify code, for that to be compared again.
+        if (!p || !peer_trusted(c, p)) {
+            if (p || e->gone_since == 0.0) e->gone_since = now;
+            if (p || now - e->gone_since < FILE_OWNER_GRACE) continue;
             file_stop_download(e, DL_FAILED);
             ui_print(c, "* whoever offered file %d left before it came - fetch it again once they're back", e->num);
             continue;
         }
+        // Back after a moment away: what it was sending went with its old session, so it's asked
+        // again from where it got to.
+        if (e->gone_since > 0.0) {
+            e->gone_since = 0.0;
+            e->retries = 0;
+            file_request(c, e, p, now);
+            continue;
+        }
         if (now < e->retry_at) continue;
+        // Mid re-handshake with its sender, what we ask may go on keys it can't read yet: the retry
+        // waits for it to finish rather than being spent. One that never does times the peer out.
+        if (rehandshaking_with(c, p)) { e->retry_at = now + 1.0; continue; }
         if (++e->retries > FILE_RETRIES) {
             char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
             file_stop_download(e, DL_FAILED);
@@ -2795,15 +2922,8 @@ void chat_tor_set_ports(chat_t *c, const char *socks, const char *control) {
     if (c->nostr) nostr_set_proxy(c->nostr, socks);
 }
 
-void chat_route_summary(const chat_t *c, char *out, size_t cap) {
-    if (c->route.mode == ROUTE_TOR) {
-        size_t p = (size_t)snprintf(out, cap, "tor%s", c->tor && tor_my_onion(c->tor)[0] ? "" : " (waiting)");
-        if (c->nostr && p < cap) snprintf(out + p, cap - p, "+nostr %d/%d", nostr_relays_up(c->nostr), nostr_relay_total(c->nostr));
-        return;
-    }
-    size_t p = (size_t)snprintf(out, cap, "dht");
-    if (c->pm && portmap_mapped(c->pm, NULL) && p < cap) p += (size_t)snprintf(out + p, cap - p, "+map");
-    if (c->nostr && p < cap) snprintf(out + p, cap - p, "+nostr %d/%d", nostr_relays_up(c->nostr), nostr_relay_total(c->nostr));
+void chat_tor_connected(chat_t *c) {
+    if (c->nostr) nostr_retry_now(c->nostr);
 }
 
 void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify_fn notify, void *ui) {

@@ -29,12 +29,13 @@
 // SESSION_MIN_BODY, what 0.1.10 and earlier seal.
 #define SESSION_PAD_TARGET 960
 #define SESSION_MIN_BODY 384
+// The biggest body anything is sealed with or read at: a handshake's two KEM keys and change.
+#define SEAL_MAX_BODY (KEM_PUB_LEN * 2 + 256)
 
 #define ROOM_PAD_TARGET 2560
 
 #define ROOM_HEADER_LEN AEAD_NONCE_LEN
 #define SESSION_HEADER_LEN (4 + AEAD_NONCE_LEN)
-size_t sealed_len(size_t plain_len, size_t header_len, size_t min_body);
 // True if frame_len is a length the sealer can produce (padding to PAD_BLOCK, at least min_body):
 // a free check that turns most junk away before any key is derived or tag checked.
 int sealed_len_ok(size_t frame_len, size_t header_len, size_t min_body);
@@ -116,8 +117,6 @@ void session_verify_code(const uint8_t prk[32], uint8_t code[VERIFY_LEN]);
 
 void ratchet_seed(const uint8_t prk[32], const uint8_t owner_pub[PUB_LEN], ratchet_t *r);
 
-int ratchet_derive(ratchet_t *r, uint32_t target_index, uint8_t message_key[32]);
-
 int ratchet_peek(const ratchet_t *r, uint32_t target_index, uint8_t message_key[32], ratchet_t *result);
 
 int room_seal(const uint8_t room_key[ROOM_KEY_LEN], const void *data, size_t len,
@@ -126,6 +125,9 @@ int room_unseal(const uint8_t room_key[ROOM_KEY_LEN], const uint8_t *frame, size
                  uint8_t *data, size_t data_cap, size_t *data_len);
 int session_seal(const uint8_t message_key[32], uint32_t index, const void *data, size_t len,
                   uint8_t *out, size_t out_cap, size_t *out_len);
+// As session_seal, with a body of at least min_body (up to SEAL_MAX_BODY) instead of SESSION_PAD_TARGET.
+int session_seal_padded(const uint8_t message_key[32], uint32_t index, const void *data, size_t len, size_t min_body,
+                        uint8_t *out, size_t out_cap, size_t *out_len);
 int session_unseal(const uint8_t message_key[32], uint32_t index, const uint8_t *frame, size_t frame_len,
                     uint8_t *data, size_t data_cap, size_t *data_len);
 
@@ -192,6 +194,27 @@ void gen_identity_keypair(identity_keypair_t *kp);
 // guess slow. idkp changes only on success; -1 when the memory for it isn't free.
 #define ID_KDF_LABEL "chat-identity-v1"
 int identity_from_password(const char *password, const char *device_id, identity_keypair_t *idkp);
+
+// Secrets kept on disk under one passphrase. A lock is the key Argon2id makes from it with a
+// salt, and its header (format, limits, salt); XChaCha20-Poly1305 seals each secret under that key,
+// with the header as associated data. Everything sealed under a lock carries its header, so one
+// Argon2id run opens it all, and sealing more takes none.
+#define PASS_HEADER_LEN 32
+#define PASS_SEAL_OVERHEAD (PASS_HEADER_LEN + AEAD_NONCE_LEN + AEAD_TAG_LEN)
+#define PASS_WRONG  -1   // or sealed under another lock, or changed since it was sealed
+#define PASS_NOMEM  -2
+#define PASS_FORMAT -3
+typedef struct {
+    uint8_t header[PASS_HEADER_LEN];
+    uint8_t key[32];
+} pass_lock_t;
+// A new lock, with a salt of its own: 0 or PASS_NOMEM.
+int pass_lock_new(const char *passphrase, pass_lock_t *lk);
+// The lock sealed was sealed under, if passphrase is its passphrase, which only pass_unseal can
+// tell: 0, PASS_FORMAT or PASS_NOMEM.
+int pass_lock_of(const char *passphrase, const uint8_t *sealed, size_t len, pass_lock_t *lk);
+int pass_seal(const pass_lock_t *lk, const void *plain, size_t len, uint8_t *out, size_t cap, size_t *out_len);
+int pass_unseal(const pass_lock_t *lk, const uint8_t *in, size_t len, void *plain, size_t cap, size_t *plain_len);
 
 // An X25519 secret (an AGE key's) as an Ed25519 identity: the public key converts back to the same
 // X25519 public key, so the AGE recipient shown is the key's own. idkp changes only on success.

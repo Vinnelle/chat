@@ -48,10 +48,12 @@ build what="native" *args:
 # natively, the other is cross-built with zig. With all, a failed cross build only leaves that binary out. Only with a
 # terminal to answer on does it ask; any further arguments go to chat if it runs. Each binary is
 # chat-<build id>-<system>-<arch>, the build id saying which source it's from and when it was built.
+# Each says "testing <build id>" over its console.
 # Build into test-builds/<date>-<time>/ (all, linux or windows), then offer to run this system's binary
 _build-test target="all" *args:
     #!/bin/sh
     set -eu
+    export CHAT_TEST_BUILD=1
     target="$1"
     shift
     case "$target" in
@@ -133,10 +135,10 @@ _build-test target="all" *args:
 run *args: build
     ./build/chat "$@"
 
-# Remove build directories and release output
+# Remove build directories, test builds and release output
 [group('build')]
 clean:
-    rm -rf build build-static build-win build-test build-fuzz dist
+    rm -rf build build-static build-win build-test build-fuzz test-builds dist
 
 # ---------------------------------------------------------------------------------------------
 # Test
@@ -150,7 +152,7 @@ test *flags:
     cmake --build build-test -j {{num_cpus()}} --target engine_test
     ./build-test/tests/engine_test "$@"
 
-# Fuzz one target (bencode, json, pgp, text, engine or image) for a number of seconds (needs clang)
+# Fuzz one target (bencode, json, pgp, text, engine, image or toml) for a number of seconds (needs clang)
 [group('test')]
 fuzz target="engine" seconds="300":
     cmake -B build-fuzz -DCHAT_FUZZ=ON -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Debug
