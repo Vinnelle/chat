@@ -424,6 +424,7 @@ command; `Enter` on a command there puts it on the command line.
 | `:port [N]` | show or move this session's UDP port (`0` picks a free one) |
 | `:copyid` | copy the session id to the clipboard |
 | `:update` | install the latest release |
+| `:changelog` | what changed in each version (`:news`); built in, so it reads offline |
 
 ### Settings
 

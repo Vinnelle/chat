@@ -129,6 +129,8 @@
 - `Tab` / `Shift+Tab` jump between sections on the settings and help pages.
 - `Ctrl+U` in INSERT deletes everything before the cursor.
 - `NO_COLOR` keeps the UI to bold, faint and reverse.
+- `:changelog` (or `:news`) shows this changelog on a page of its own, built into chat so it
+  reads offline. In `--simple` it prints it.
 
 ### Changed
 - `just test-build` names each binary after its build id, as `chat-<build id>-<system>-<arch>`:

@@ -265,4 +265,15 @@ typedef struct {
 
 void tui_render_page(int rows, int cols, const tui_page_t *page, const tui_bar_t *bar, int color_enabled);
 
+// A page of text to read (the changelog): paragraphs wrapped to the page's width, headings bold,
+// bullets hanging. *scroll is how many rows down from the top it starts, clamped to what the page
+// can scroll; returns that most.
+typedef enum { TUI_P_TEXT = 0, TUI_P_HEADING, TUI_P_SUBHEADING, TUI_P_BULLET, TUI_P_BLANK } tui_para_kind_t;
+typedef struct {
+    tui_para_kind_t kind;
+    const char *text;
+} tui_para_t;
+int tui_render_text(int rows, int cols, const char *title, const char *clock, const tui_para_t *paras, int n,
+                    int *scroll, const tui_bar_t *bar, int color_enabled);
+
 #endif

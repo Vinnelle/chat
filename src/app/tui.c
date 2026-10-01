@@ -1835,3 +1835,84 @@ void tui_render_page(int rows, int cols, const tui_page_t *page, const tui_bar_t
     place_cursor(&w, cr, cc, bar->input);
     end_frame(&w, 1);
 }
+
+// ---- a page of text ----
+
+// Calls row(ctx, v, style, indent, text, len) for each row the paragraphs wrap to at width w, v
+// counting from 0; returns how many rows there are.
+typedef void (*text_row_fn)(void *ctx, int v, style_t s, int indent, const char *text, size_t len);
+
+static int layout_text(const tui_para_t *paras, int n, int w, text_row_fn row, void *ctx) {
+    int v = 0;
+    for (int i = 0; i < n; i++) {
+        const tui_para_t *pa = &paras[i];
+        if (pa->kind == TUI_P_BLANK || !pa->text || !pa->text[0]) { if (row) row(ctx, v, S_PLAIN, 0, "", 0); v++; continue; }
+        style_t st = pa->kind == TUI_P_HEADING ? S_ACCENT_BOLD : pa->kind == TUI_P_SUBHEADING ? S_BOLD : S_PLAIN;
+        int hang = pa->kind == TUI_P_BULLET ? 2 : 0;
+        static size_t off[256], len[256];
+        int k = wrap_rows(pa->text, w - hang, w - hang, off, len, 256);
+        for (int j = 0; j < k; j++, v++)
+            if (row) row(ctx, v, st, j == 0 && hang ? -hang : hang, pa->text + off[j], len[j]);
+    }
+    return v;
+}
+
+typedef struct {
+    wbuf_t *w;
+    int top, left, iw, first, h;
+} text_draw_t;
+
+static void draw_text_row(void *ctx, int v, style_t s, int indent, const char *text, size_t len) {
+    text_draw_t *d = ctx;
+    if (v < d->first || v >= d->first + d->h) return;
+    pen_t p;
+    inner_begin(d->w, &p, d->top + (v - d->first), d->left, d->iw);
+    pspace(&p, 1);
+    // A bullet's first row starts with the bullet; the rows after it hang under its text.
+    if (indent < 0) { ptext(&p, S_ACCENT, "\xe2\x80\xa2 "); }
+    else pspace(&p, 1 + indent);
+    char piece[TUI_LINE_MAX * 4];
+    if (len >= sizeof piece) len = sizeof piece - 1;
+    memcpy(piece, text, len);
+    piece[len] = '\0';
+    ptext(&p, s, piece);
+    inner_end(&p);
+}
+
+int tui_render_text(int rows, int cols, const char *title, const char *clock, const tui_para_t *paras, int n,
+                    int *scroll, const tui_bar_t *bar, int color_enabled) {
+    clamp_size(&rows, &cols);
+    g_color = color_enabled;
+    g_row_bg = "";
+    wbuf_t w = { g_frame, FRAME_CAP, 0 };
+    int boxed = rows >= 6 && cols >= 20;
+    rect_t r = { 1, 1, rows - 1, cols };
+    int top = boxed ? r.top + 1 : r.top, ih = boxed ? r.h - 2 : r.h;
+    int left = boxed ? r.left + 1 : r.left, iw = boxed ? r.w - 2 : r.w;
+    int tw = iw - 3;   // less the box's padding either side and the margin before the text
+    if (tw < 8) tw = 8;
+    int total = layout_text(paras, n, tw, NULL, NULL);
+    int most = total > ih ? total - ih : 0;
+    if (*scroll > most) *scroll = most;
+    if (*scroll < 0) *scroll = 0;
+
+    begin_frame(&w);
+    if (boxed) {
+        span_t t, right;
+        span_init(&right, r.w);
+        char where[48];
+        snprintf(where, sizeof where, "%d%%", most ? *scroll * 100 / most : 100);
+        ptext(&right.p, S_FAINT, where);
+        if (clock) { ptext(&right.p, S_FAINT, "  "); ptext(&right.p, S_FAINT, clock); }
+        span_init(&t, title_room(r.w, right.p.used));
+        crumb_title(&t, title ? title : "");
+        box(&w, r, border_sgr(TUI_TONE_PAGE), &t, &right, NULL);
+    }
+    text_draw_t d = { &w, top, left, iw, *scroll, ih };
+    layout_text(paras, n, tw, draw_text_row, &d);
+    for (int v = total - *scroll; v < ih; v++) blank_row(&w, top + v, left, iw);
+    draw_status(&w, rows, cols, bar);
+    place_cursor(&w, 0, 0, bar->input);
+    end_frame(&w, 1);
+    return most;
+}
