@@ -3,235 +3,241 @@
 ## Unreleased
 
 ### Changed
-- **Compare verify codes** on the settings page is `optional` by default: what you send goes
-  to every peer, compared or not. `:set verify required`, or the new `--verify-required`, holds
-  it back from a peer until you've said its code matched (`:verify NICK ok`).
-  `--verify-optional` is still taken.
-- `:update` opens a box over the chat that shows the update as it goes: a console of each step
-  (what it fetched from GitHub, the signature and SHA-256 checks, where it installed), a
-  progress bar under it that follows the download, and under that what it's doing, put plainly
-  ("Checking GitHub for a newer release", "Release v0.4.0 found", "Downloading v0.4.0",
-  "Installing v0.4.0"). Esc hides the box and the update carries on; `:update` brings it back.
-  What it came to still goes to the console.
+- **Compare verify codes** on the settings page is now `optional` by default. What you send
+  goes to every peer, whether you've compared codes or not. `:set verify required`, or the new
+  `--verify-required`, holds messages back from a peer until you've marked its code as matching
+  (`:verify NICK ok`). `--verify-optional` still works.
+- `:update` opens a box over the chat that shows the update while it runs. At the top is a
+  console with each step: what it fetched from GitHub, the signature and SHA-256 checks, and
+  where it installed. Under that is a progress bar for the download, then a line saying what
+  it's doing now ("Checking GitHub for a newer release", "Release v0.4.0 found",
+  "Downloading v0.4.0", "Installing v0.4.0"). Esc hides the box and the update keeps going.
+  `:update` shows it again. The result still goes to the console.
 
 ## 0.4.0-beta.1
 
 ### Security
 - Verify codes and identity fingerprints are 128 bits, shown in groups of four hex digits. A
-  room member between two peers picks both handshakes' keys, so it could search two sets of
-  64-bit codes for a pair that match. The first 16 digits are still what 0.3.1 shows.
-- chat logs in to a tor control port with SAFECOOKIE or a password only. The old COOKIE login
-  sent the cookie file's bytes to whatever answered on the port, and while tor isn't running
-  any local program can listen there and name any file chat can read. The cookie file is read
-  only if it's a regular file of a cookie's size.
-- On Linux, `:update` runs curl and notifications run notify-send only from an absolute `PATH`
-  entry or a usual folder, and only a program no one but root or you can change, as for tor.
-  A relative `PATH` entry such as `.` could run one from the current folder. A program or
-  folder writable by a group other than root's or yours is refused too.
-- Desktop notifications only say that a message came, or that you were mentioned. They showed
-  the sender, the text and the session's id; desktops keep notifications (Windows writes them
-  to disk), and with a blank password the id is all it takes to join. **Notification preview**
-  on the settings page (`:set preview off|nick|message`, also in `--simple`) brings back the
-  sender, or the sender and the text, for whoever wants them. A notification never names the
-  session.
-- Everything chat sends over UDP is masked with a key made from the session id and password,
-  so on the network each datagram is random bytes. The ratchet counter at the front of every
-  session frame, and the marker, id and numbering at the front of every piece of a handshake,
-  went in the clear: enough to pick chat's traffic out of anything else, and to follow a peer
-  from one address to the next by its counter. What still shows is addresses, ports, sizes and
-  timing. The relays and Tor already hide what they carry, and carry it as before.
-- LAN beacons go to a UDP port of the room's own (49152-65535, made from its id and password),
-  not to 47474, which told everyone on the network that chat was running.
-- The DHT lookup key changes every hour. It was the same for a room's whole life, so anyone
-  who saw it once, a DHT node or a crawler, could watch who joined the room for as long as it
-  was used. For ten minutes either side of the hour, the other hour's key is looked up too.
-- With the three changes above, 0.3.1 and this version can't find each other through the DHT
-  or on the LAN, or reach each other over UDP. They meet through the Nostr relays, on by
-  default, or over Tor, which work between them as before.
-- Each connection to a relay subscribes under an id of its own. The same id at every relay,
-  kept through reconnections, let relays that compare notes tie one member's connections
-  together, Tor circuits included.
-- Mbed TLS is built as a TLS client with forward-secret key exchanges only: no server or DTLS
-  code, no renegotiation, no static RSA or DH key exchange, no legacy ciphers, and no PSA key
-  store, which would keep keys in files.
-- The conversation and console as shown, and the screen's buffers, are locked in memory like
-  the keys, so they aren't written to swap (as far as `RLIMIT_MEMLOCK` allows).
-- On Windows, a crash ends chat at once, so Windows Error Reporting can't write a dump of its
-  memory to disk.
-- Cookie challenges are rate-limited, so hellos replayed from a forged address can't make chat
-  a traffic reflector. A session frame from an address no peer has is tried against every
+  room member between two peers picks the keys for both handshakes, so it could search two sets
+  of 64-bit codes for a matching pair. The first 16 digits are the same as what 0.3.1 shows.
+- chat only logs in to a tor control port with SAFECOOKIE or a password. The old COOKIE login
+  sent the cookie file's contents to whatever answered on the port, and while tor isn't running
+  any local program can listen there and name any file chat can read. The cookie file is only
+  read if it's a regular file of the right size.
+- On Linux, `:update` only runs curl, and notifications only run notify-send, from an absolute
+  `PATH` entry or a standard folder, and only if the program can't be changed by anyone but root
+  or you, the same as for tor. A relative `PATH` entry such as `.` could run one from the
+  current folder. A program or folder writable by a group other than root's or yours is also
+  refused.
+- Desktop notifications only say that a message came in, or that you were mentioned. They used
+  to show the sender, the text and the session id. Desktops keep notifications (Windows writes
+  them to disk), and with a blank password the id is all someone needs to join.
+  **Notification preview** on the settings page (`:set preview off|nick|message`, also in
+  `--simple`) shows the sender, or the sender and the text, if you want them. A notification
+  never names the session.
+- Everything chat sends over UDP is masked with a key made from the session id and password, so
+  on the network each datagram is random bytes. Before, the ratchet counter at the start of
+  every session frame, and the marker, id and numbering at the start of every handshake piece,
+  were sent in the clear. That was enough to pick out chat's traffic, and to follow a peer from
+  one address to the next by its counter. Addresses, ports, sizes and timing are still visible.
+  The relays and Tor already hide what they carry, and carry it as before.
+- LAN beacons go to a UDP port specific to the room (49152-65535, made from its id and
+  password), not to 47474, which told everyone on the network that chat was running.
+- The DHT lookup key changes every hour. It used to stay the same for as long as the room
+  existed, so anyone who saw it once, such as a DHT node or a crawler, could watch who joined
+  the room for as long as it was used. For ten minutes either side of the hour, the other
+  hour's key is looked up as well.
+- Because of the three changes above, 0.3.1 and this version can't find each other through the
+  DHT or on the LAN, or reach each other over UDP. They can still meet through the Nostr relays,
+  which are on by default, or over Tor.
+- Each relay connection subscribes under its own id. Using the same id at every relay, kept
+  across reconnections, let relays that share data link one member's connections together,
+  including over Tor circuits.
+- Mbed TLS is built as a TLS client with forward secret key exchanges only. There's no server or
+  DTLS code, no renegotiation, no static RSA or DH key exchange, no legacy ciphers, and no PSA
+  key store, which would keep keys in files.
+- The conversation and console on screen, and the screen buffers, are locked in memory like the
+  keys, so they aren't written to swap (as far as `RLIMIT_MEMLOCK` allows).
+- On Windows, a crash ends chat immediately, so Windows Error Reporting can't write a dump of
+  its memory to disk.
+- Cookie challenges are rate limited, so hellos replayed from a forged address can't turn chat
+  into a traffic reflector. A session frame from an address no peer has is tried against every
   peer's keys at a limited rate, so junk of the right size can't use up the CPU.
-- LAN beacons are only taken from real broadcasts, not from room members over the relays or
+- LAN beacons are only accepted from real broadcasts, not from room members over the relays or
   Tor.
-- Desktop notifications on Linux are transient: the desktop shows them but keeps them out of
-  its notification history, which recorded when messages came (and, with previews on, what
-  they said) after chat had exited.
-- Every datagram chat sends a connected peer goes in a slot of that peer's, one every 1.5 to
-  1.9 seconds whether or not there's anything to say. A message, its ack, a message passed on
-  to other members, a nick change and a re-handshake's pieces all wait for a slot, so when and
-  how much goes no longer shows when anyone typed, or who first sent what in a group. Sending
-  a message to several members no longer goes out to all of them at the same instant. A
-  message takes up to two slots to arrive, and its ack as long to come back.
-- Every UDP datagram is one 1004-byte cell: a session frame fills one, and a room frame goes in
-  pieces padded to whole cells. Session frames were 428 bytes and pieces 1008, 1008 and 608,
-  a pattern that picked chat out of other traffic.
-- The `hi` every 10 seconds to every connected peer is gone: it was three pieces that marked
-  chat's traffic as clearly as any header. A peer gets a `hi` only when it has gone quiet, or
-  hasn't re-handshaken with new keys.
-- Nothing you send reaches a peer until you've compared its verify code with them over another
-  channel and said so with `:verify NICK ok`. Anyone with a session's id and password could sit
-  between two members and read what they said; the code is the same on both ends only if
-  nobody does. When a peer joins, chat shows the code to compare. `:verify NICK no` marks one
-  that differs, which then gets nothing. Messages from a peer not compared show
-  `(code not compared)`, and the sidebar says `compare code` until it is. A peer whose signing
-  identity was confirmed this way and comes back with a fresh handshake signed by the same key
-  needs no second comparison. **Compare verify codes** on the settings page (`:set verify
-  optional`, `--verify-optional`) sends to everyone, compared or not.
-- DHT routing goes to the Nostr relays only while it needs them: while nobody is reached
-  yet, while a peer is reached only through them, or while one's UDP has gone quiet. It leaves
-  them a minute after. Before, every DHT-routed member's address stayed connected to the
-  relays for the whole session. `:set nostr always` (or `--nostr-always`) keeps the old way, for
-  rooms with Tor members, who meet DHT members only on the relays.
-- Each ten minutes' relay tag has connections of its own, asking for that tag alone: a new one
-  to each relay a minute or two before the ten minutes start, and the last one closed a minute
-  or two after they end. Each connection asked for the previous, current and next tags and
-  moved on under the same subscription, which chained every ten minutes to the next for the
-  relay. A relay still sees the address a connection comes from.
-- The DHT node id changes with the lookup key, each hour: the same id for a whole session tied
-  one hour's key to the next for every node that saw both. Around the hour's change, each
-  hour's key is looked up under its own id.
-- DHT queries say `ro` (BEP 43): chat is a read-only node, which never answered queries, and
-  now other nodes don't expect it to.
-- A DHT lookup starts from the nodes that answered earlier ones, and asks the bootstrap servers
-  only while it knows fewer than eight. Every lookup, every 30 seconds while alone, went to
-  the same four bootstrap servers with the room's lookup key.
+- Desktop notifications on Linux are transient. The desktop shows them but doesn't keep them in
+  its notification history, which used to record when messages came in (and, with previews on,
+  what they said) after chat had exited.
+- Every datagram chat sends to a connected peer goes in one of that peer's slots, one every 1.5
+  to 1.9 seconds, whether or not there's anything to send. Messages, acks, messages passed on to
+  other members, nick changes and re-handshake pieces all wait for a slot. This means the
+  timing and size of traffic no longer show when someone typed, or who sent a message first in
+  a group. A message sent to several members no longer goes out to all of them at the same
+  moment. A message takes up to two slots to arrive, and its ack the same to come back.
+- Every UDP datagram is one 1004-byte cell. A session frame fills one cell, and a room frame is
+  split into pieces padded to whole cells. Before, session frames were 428 bytes and pieces were
+  1008, 1008 and 608, which made chat easy to pick out from other traffic.
+- The `hi` sent to every connected peer every 10 seconds is gone. It was three pieces, and it
+  marked chat's traffic as clearly as a header would. A peer now only gets a `hi` when it has
+  gone quiet, or hasn't re-handshaken with new keys.
+- Nothing you send goes to a peer until you've compared its verify code with them over another
+  channel and marked it with `:verify NICK ok`. Anyone with a session's id and password could
+  sit between two members and read what they said. The code only matches on both ends if
+  nobody is in the middle. When a peer joins, chat shows the code to compare. `:verify NICK no`
+  marks a code that didn't match, and that peer then gets nothing. Messages from a peer you
+  haven't compared show `(code not compared)`, and the sidebar says `compare code` until you do.
+  If a peer's signing identity was confirmed this way and it comes back with a fresh handshake
+  signed by the same key, you don't need to compare again. **Compare verify codes** on the
+  settings page (`:set verify optional`, `--verify-optional`) sends to everyone, compared or
+  not.
+- DHT routing only connects to the Nostr relays while it needs them: before anyone is reached,
+  while a peer is only reachable through them, or while a peer's UDP has gone quiet. It
+  disconnects a minute after. Before, every DHT-routed member's address stayed connected to
+  the relays for the whole session. `:set nostr always` (or `--nostr-always`) keeps the old
+  behaviour, for rooms with Tor members, who can only meet DHT members on the relays.
+- Each ten-minute relay tag gets its own connections, which only ask for that tag. A new
+  connection to each relay opens a minute or two before the ten minutes start, and the last one
+  closes a minute or two after they end. Before, each connection asked for the previous,
+  current and next tags and moved on under the same subscription, which let a relay link each
+  ten minutes to the next. A relay still sees the address a connection comes from.
+- The DHT node id changes with the lookup key every hour. Using the same id for a whole session
+  linked one hour's key to the next for every node that saw both. Around the change of hour,
+  each hour's key is looked up under its own id.
+- DHT queries set `ro` (BEP 43). chat is a read-only node and never answered queries, and now
+  other nodes don't expect it to.
+- A DHT lookup starts from the nodes that answered earlier lookups, and only asks the bootstrap
+  servers while it knows fewer than eight. Before, every lookup (every 30 seconds while alone)
+  went to the same four bootstrap servers with the room's lookup key.
 
 ### Fixed
-- A message sent just before a peer rekeyed or rejoined could be lost: the re-handshake threw
-  away its retries.
-- Joining or creating a session without the 512 MiB of free memory its key takes quit chat on
-  the spot, leaving the terminal in raw mode and the other sessions without a goodbye. The
+- A message sent just before a peer rekeyed or rejoined could be lost, because the re-handshake
+  discarded its retries.
+- Joining or creating a session without the 512 MiB of free memory its key needs quit chat
+  immediately, leaving the terminal in raw mode and the other sessions without a goodbye. The
   session now doesn't start, and chat says why.
-- In Tor mode, a long session could no longer reach new members once it had heard of 58 onion
-  addresses. The one used longest ago now makes room.
-- The DHT's bootstrap lookup, which runs on a thread, could write into a session after it
-  closed.
-- A key file, or a Tor cookie file, that was a FIFO or a device hung chat.
-- A native build (`just build`, `just build test`) used the build machine's CPU features in
-  liboqs unconditionally, so a copy could crash on a CPU without them. It picks AVX2 code at run
-  time now.
-- `--simple` writing into a pipe that closes no longer kills chat before its sessions leave,
-  and a terminal resize no longer cuts a frame short.
-- libsodium's build started a compiler per file at once, which could run a small machine out
-  of memory.
-- `--nonostr` and `--nostr-always` were undone by the routing choice: `--simple` without a
+- In Tor mode, a long session stopped reaching new members once it had seen 58 onion addresses.
+  The least recently used one is now dropped to make room.
+- The DHT bootstrap lookup, which runs on a thread, could write into a session after it closed.
+- A key file or Tor cookie file that was a FIFO or a device made chat hang.
+- A native build (`just build`, `just build test`) always used the build machine's CPU features
+  in liboqs, so a copy could crash on a CPU without them. It now picks AVX2 code at run time.
+- `--simple` writing to a pipe that closes no longer kills chat before its sessions leave, and a
+  terminal resize no longer cuts a frame short.
+- libsodium's build started a compiler for every file at once, which could run a small machine
+  out of memory.
+- `--nonostr` and `--nostr-always` were overridden by the routing choice. `--simple` without a
   terminal, or `--routing dht+nostr` given after them, went back to the relay fallback, so
-  `--nonostr` still connected to the Nostr relays. They now hold whatever the routing, and
-  `--simple --nonostr` without a terminal routes DHT only. The routing line says when the
-  relays are always on.
-- `Enter` on a message past the 250-byte limit sent it with its end cut off. It now stays in the
-  box, whose count is already red, and the bottom row says how much too long it is.
+  `--nonostr` still connected to the Nostr relays. They now apply whatever the routing, and
+  `--simple --nonostr` without a terminal uses DHT only. The routing line says when the relays
+  are always on.
+- `Enter` on a message over the 250-byte limit sent it with the end cut off. It now stays in the
+  box, where the count is already red, and the bottom row says how far over the limit it is.
 
 ### Added
-- A page of every key and command: `F1`, `?` in NORMAL, or `:help`. `Enter` on a command puts it
-  on the command line.
-- The command line shows a menu of the commands that match what's typed, the settings (with
-  their values now) after `set `, and a setting's values after its name. `Up` / `Down` pick,
-  `Tab` completes, and `Enter` on a name only started runs what the menu has picked. After a
-  command that takes a nick (`verify `), it lists the peers online that match, with each one's
-  verify state, and shows the rest of the picked one dimmed, as `@` does.
-- `/` on an empty line, in INSERT or NORMAL, opens the command line, as in other chat programs.
-  A line that can't be a command (`/shrug`, `/usr/bin`) turns back into text as it's typed and
-  is sent as a message, never refused as an unknown command; `//` does the same straight away.
+- A page listing every key and command: `F1`, `?` in NORMAL, or `:help`. `Enter` on a command
+  puts it on the command line.
+- The command line shows a menu of commands that match what's typed, the settings (with their
+  current values) after `set `, and a setting's values after its name. `Up` / `Down` pick,
+  `Tab` completes, and `Enter` on a partly typed name runs what the menu has selected. After a
+  command that takes a nick (`verify `), it lists the online peers that match, with each one's
+  verify state, and shows the rest of the selected nick dimmed, like `@` does.
+- `/` on an empty line, in INSERT or NORMAL, opens the command line, like other chat programs.
+  A line that can't be a command (`/shrug`, `/usr/bin`) turns back into text as you type and is
+  sent as a message, rather than refused as an unknown command. `//` does the same straight
+  away.
 - `PgUp` / `PgDn` scroll the chat back and forward (`Ctrl+U` / `Ctrl+D` in NORMAL, `G` back to
-  the newest), and the chat's edge says how many newer messages are below.
-- In NORMAL, `s`, `c` and `C` show or hide the sidebar, the console and the chat, as `Ctrl+B`,
-  `Ctrl+O` and `Ctrl+T` do.
-- `Tab` / `Shift+Tab` jump between sections on the settings and help pages.
+  the newest), and the edge of the chat shows how many newer messages are below.
+- In NORMAL, `s`, `c` and `C` show or hide the sidebar, the console and the chat, like `Ctrl+B`,
+  `Ctrl+O` and `Ctrl+T`.
+- `Tab` / `Shift+Tab` move between sections on the settings and help pages.
 - `Ctrl+U` in INSERT deletes everything before the cursor.
-- `NO_COLOR` keeps the UI to bold, faint and reverse.
-- `:install` saves your settings and signing key, so they're there the next time chat starts.
-  It asks first, saying what that leaves on disk: a trail that shows chat is used there. The
+- `NO_COLOR` limits the UI to bold, faint and reverse.
+- `:install` saves your settings and signing key so they're there the next time chat starts.
+  It asks first, and says what it leaves on disk, which shows chat is used on that machine. The
   settings you've changed go in `~/.config/chat/settings` (`%LOCALAPPDATA%\chat` on Windows),
-  named as `:set` names them, and the key in `~/.config/chat/key`. Both are sealed with one
-  passphrase you choose (Argon2id, XChaCha20-Poly1305), asked for even with no key to keep, and
-  nothing in them is in the clear. A key installed later is sealed under the same passphrase,
-  without asking for it again. From then on a setting you change is saved as you change it, and
-  chat starts on your sessions rather than the settings page. At the start it asks for the
-  passphrase, or takes it from `CHAT_INSTALL_PASSWORD`, and a wrong one says so; options on the
-  command line win over what's saved, for that run. `:uninstall` deletes it all. Sessions,
-  messages, peers and files are never saved.
+  using the names `:set` uses, and the key goes in `~/.config/chat/key`. Both are sealed with
+  one passphrase you choose (Argon2id, XChaCha20-Poly1305), which it asks for even with no key
+  to save, and nothing in them is stored in the clear. A key installed later is sealed under
+  the same passphrase without asking for it again. After that, a setting is saved when you
+  change it, and chat starts on your sessions instead of the settings page. On startup it asks
+  for the passphrase, or reads it from `CHAT_INSTALL_PASSWORD`, and says so if it's wrong.
+  Command line options override what's saved, for that run. `:uninstall` deletes it all.
+  Sessions, messages, peers and files are never saved.
 - `:send` without a path opens a file browser to pick the file to offer.
-- **Files and pictures**: `:send PATH` offers a file to the session; nothing moves until someone
-  fetches it with `:download N` (saved in `~/Downloads`), or, for a PNG or JPEG, `:show N`,
-  which draws it in the chat under the line that offered it (`:hide N` tucks it away). `:files`
-  lists them and `:cancel N` stops one. A file is kept only if its SHA-256 matches the offer,
-  is saved under a cleaned-up name without ever replacing anything, and a picture shown is never
-  written to disk. Files move in chat's steady slots, invisible on the wire but slow (about
-  25 KB a minute); **Fast file transfers** (`:set fastfiles on`, `--fast-files`) sends yours in
-  quick bursts instead. Through the relays, where a Tor member and a DHT member meet, a slot
-  carries two chunks, since every relay event is sealed the same size anyway, and fast transfers
-  come as often as the relays allow, about twice the steady pace. While a file comes, a row
-  under the line that offered it shows how far it's got and about how long it has left. Chunks
-  lost on the way are asked for again as soon as the rest of their run has come, a transfer
-  carries on through rekeys, and a fetch waits up to two minutes for a sender who drops out,
-  going on from where it got to if they come back.
-  **File size limit** (`:set filelimit`, `--file-limit`, 8 MB by default) is the most fetched
-  without saying `anyway`; files go up to 1 GB. Pictures are decoded by chat's own PNG and
-  baseline JPEG readers, which never hold the full-size image.
-- `:changelog` (or `:news`) shows this changelog on a page of its own, built into chat so it
-  reads offline, with its Markdown rendered: headings, bold, italic and `code`, links, nested
-  lists, numbered items, quotes, code blocks and rules. In `--simple` it prints it.
-- **Unread counts**: a session with messages you haven't seen shows how many beside its name in
-  the sidebar, in yellow with an `@` when one of them mentions you. With the sidebar hidden, the
-  chat's title says how many are new elsewhere. Back in that session, a `N new` rule marks where
-  they start, until you leave it or send.
-- Your nick is lit wherever a message mentions it (`@nick`), not just the time beside it.
-- While a peer's verify code is still to be compared, the box you type in says your messages
-  aren't sent to them, with `:verify NICK` to see the code. Only the console said so, once per
-  message.
+- **Files and pictures**: `:send PATH` offers a file to the session. Nothing is transferred
+  until someone fetches it with `:download N` (saved in `~/Downloads`), or, for a PNG or JPEG,
+  `:show N`, which draws it in the chat under the line that offered it (`:hide N` hides it).
+  `:files` lists them and `:cancel N` stops one. A file is only kept if its SHA-256 matches the
+  offer. It's saved under a cleaned up name and never replaces an existing file. A picture
+  that's shown is never written to disk. Files are sent in chat's regular slots, so they don't
+  show up as a transfer on the network, but this is slow (about 25 KB a minute). **Fast file
+  transfers** (`:set fastfiles on`, `--fast-files`) sends your files in quick bursts instead.
+  Through the relays, where Tor and DHT members meet, a slot carries two chunks, since every
+  relay event is sealed to the same size anyway. Fast transfers there go as often as the relays
+  allow, about twice the normal rate. While a file downloads, a row under the line that offered
+  it shows progress and roughly how long is left. Lost chunks are requested again once the rest
+  of their run has arrived, a transfer continues through rekeys, and a fetch waits up to two
+  minutes for a sender who drops out, then resumes if they come back.
+  **File size limit** (`:set filelimit`, `--file-limit`, 8 MB by default) is the largest file
+  fetched without adding `anyway`. Files can be up to 1 GB. Pictures are decoded by chat's own
+  PNG and baseline JPEG decoders, which never hold the full size image in memory.
+- `:changelog` (or `:news`) shows this changelog on its own page. It's built into chat so it
+  works offline, and the Markdown is rendered: headings, bold, italic and `code`, links, nested
+  lists, numbered items, quotes, code blocks and rules. In `--simple` it's printed.
+- **Unread counts**: a session with messages you haven't seen shows how many next to its name
+  in the sidebar. It's yellow with an `@` when one of them mentions you. With the sidebar
+  hidden, the chat title shows how many new messages there are in other sessions. When you go
+  back to a session, a `N new` line marks where the new messages start, until you leave it or
+  send something.
+- Your nick is highlighted wherever a message mentions it (`@nick`), not just the time next to
+  it.
+- While a peer's verify code hasn't been compared, the input box says your messages aren't
+  being sent to them, and that `:verify NICK` shows the code. Before, only the console said so,
+  once per message.
 
 ### Changed
-- `just build test` names each binary after its build id, as `chat-<build id>-<system>-<arch>`:
-  the source it was built from (`git describe`) and when, in UTC, as `chat --version` shows.
-- The full-screen UI is redrawn as one rounded frame split by lines, each part titled in its
-  border: a sidebar with the sessions, their peers and how the selected one reaches them, the
-  console over the chat, and the input under it, outlined in the mode's colour. A bottom row
-  shows the mode, whether you sign, your nick and what the keys do.
-- The UI draws in the terminal's own colours, so it takes on the terminal's theme, light or
-  dark, and follows it when it changes (where the terminal reports that). Peers' colours stay
-  exact, but are eased toward readable on the terminal's background once it has told chat what
-  that is.
-- The chat lines up in columns (time, nick, text); a run of messages from one peer in one
-  minute shows the time and nick once. A new session, one still connecting, and one with no
+- `just build test` names each binary after its build id, as `chat-<build id>-<system>-<arch>`.
+  The build id is the source it was built from (`git describe`) and the build time in UTC, as
+  shown by `chat --version`.
+- The full-screen UI is drawn as one rounded frame split by lines, with each part titled in its
+  border. There's a sidebar with the sessions, their peers and how the selected one reaches
+  them, the console above the chat, and the input below it, outlined in the mode's colour. A
+  bottom row shows the mode, whether you sign, your nick and what the keys do.
+- The UI uses the terminal's own colours, so it matches the terminal's theme, light or dark,
+  and follows it when it changes (if the terminal reports that). Peers' colours stay the same,
+  but are adjusted to be readable on the terminal's background once the terminal has reported
+  what that is.
+- The chat is laid out in columns (time, nick, text). A run of messages from one peer in the
+  same minute shows the time and nick once. A new session, one still connecting, and one with no
   messages yet say so, and what to do next.
-- The peers list shows whether each is verified, and a modified client, in words while they
-  fit; a lookalike's `#id` and its state are never cut for its nick.
+- The peers list shows whether each peer is verified, and whether it's a modified client, in
+  words while there's room. A lookalike's `#id` and its state are never cut off to fit its nick.
 - The settings page lists its sections on the left, draws switches and choices as such, and
-  shows each row's `:set` under its help. Text rows are edited in place. The page chat opens on
-  ends in **Start chatting**.
-- Release binaries are less than half the size: Linux 1.3 MB instead of 2.9 MB, Windows 1.2 MB
-  instead of 3.0 MB. libsecp256k1 keeps only its signing tables, Mbed TLS only a client,
-  unused code in every dependency is left out when linking, and builds are stripped as they're
+  shows each row's `:set` command under its help text. Text rows are edited in place. The
+  settings page chat opens on ends with **Start chatting**.
+- Release binaries are less than half the size: Linux is 1.3 MB instead of 2.9 MB, and Windows
+  1.2 MB instead of 3.0 MB. libsecp256k1 keeps only its signing tables, Mbed TLS only the client,
+  unused code in every dependency is left out at link time, and builds are stripped when
   linked.
-- The full-screen UI sends nothing to the terminal while the screen stays the same. It redrew
-  the whole screen every second, which over SSH was a steady stream.
-- Everything chat asks for comes up in a box over the screen, titled with what it's for and
-  with its keys in its bottom edge: a new session's password, the id and password to join one,
-  a setting's new value, a native key's password, a pasted key, and `:install`'s questions.
-  They were the input box at the bottom, or a field in the row being changed.
-- The settings page has no Layout section any more: `Ctrl+B`, `Ctrl+O` and `Ctrl+T` (`s`, `c`
-  and `C` in NORMAL) show and hide the sidebar, the console and the chat, and `:set sidebar`,
+- The full-screen UI sends nothing to the terminal while the screen hasn't changed. It used to
+  redraw the whole screen every second, which was a constant stream of data over SSH.
+- Every prompt now opens in a box over the screen, titled with what it's for and with its keys
+  shown in the bottom edge. This covers a new session's password, the id and password to join
+  one, a setting's new value, a native key's password, a pasted key, and `:install`'s
+  questions. Before, these used the input box at the bottom, or a field in the row being
+  changed.
+- The settings page no longer has a Layout section. `Ctrl+B`, `Ctrl+O` and `Ctrl+T` (`s`, `c`
+  and `C` in NORMAL) show and hide the sidebar, the console and the chat. `:set sidebar`,
   `console` and `chat` are gone.
-- The input box grows a row at a time as what you type wraps, up to six rows (fewer on a short
-  terminal), instead of scrolling the line sideways out of view.
+- The input box grows one row at a time as the text wraps, up to six rows (fewer on a short
+  terminal), instead of scrolling the line sideways.
 - Direct routing is now called DHT routing: `--routing dht+nostr` and `--routing dht`, and
   `dht` on the settings page. `--routing direct+nostr` and `--routing direct` still work.
-- A handshake takes a few seconds, and a re-handshake up to half a minute, going a slot at a
-  time; through the relays, a minute or so. A rekey waits for a re-handshake still going with
-  anyone, so two can't cross (crossing, they broke each other's cookies), and a peer in the
-  middle of one gets the overlap's time more before it's dropped for going quiet.
-- Binaries from `just build test` say so: `testing <build id>` at the right of the console's top
+- A handshake takes a few seconds, and a re-handshake up to half a minute, since each step waits
+  for a slot. Through the relays it takes about a minute. A rekey waits for any re-handshake
+  still in progress, so two can't overlap (when they did, they broke each other's cookies), and
+  a peer in the middle of one gets extra time before it's dropped for going quiet.
+- Binaries from `just build test` say so: `testing <build id>` on the right of the console's top
   edge, and in `--version`.
 - `just build` takes what to build: `just build linux` (was `just build-static`),
   `just build windows` or `win` (was `build-win`), `just build all` (was `all`) and
@@ -362,7 +368,7 @@
   the relays are off, and the AGE recipient without an AGE identity.
 
 ### Fixed
-- A second Ctrl+C, SIGTERM or SIGHUP soon after the first killed chat on the spot, before
+- A second Ctrl+C, SIGTERM or SIGHUP soon after the first killed chat immediately, before
   sessions said bye, keys were wiped and the terminal was restored: the quit handler was reset
   after the first signal (glibc's `signal()` does that with `_POSIX_C_SOURCE`, and the Windows
   C runtime always does). The handler now stays in place.

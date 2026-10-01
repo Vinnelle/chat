@@ -42,18 +42,17 @@ static const char *USAGE =
     "            [--session ID --port UDP_PORT --peer HOST:PORT ...]\n"
     "       chat --update | --version\n"
     "\n"
-    "With a real terminal, chat opens a full-screen UI: sessions you've joined or created\n"
-    "sit in a list on the left (switch with Tab/Shift+Tab), with who's online and how the\n"
-    "session reaches them below it; the selected one's chat fills the rest, and you type in\n"
-    "the box at the bottom. It draws in the terminal's own colours, so it takes on the\n"
-    "terminal's theme, light or dark, and follows it when it changes. It starts on the\n"
-    "settings page, where routing, your nickname, colour, signing key and the rest are set\n"
-    "up in one place; Start chatting at the bottom (or Esc) goes on to your sessions.\n"
-    "Nothing reaches the network before that: no tor is looked for or started, and no\n"
-    "--peer name is looked up. Once :install has saved your settings, it starts on your\n"
-    "sessions instead.\n"
+    "In a terminal, chat opens a full-screen UI. Sessions you've joined or created are listed\n"
+    "on the left (Tab/Shift+Tab to switch), with who's online and how the session reaches\n"
+    "them below that. The selected session's chat takes up the rest, and you type in the box\n"
+    "at the bottom. The UI uses the terminal's own colours, so it matches a light or dark\n"
+    "theme and follows it when it changes. chat starts on the settings page, where you set\n"
+    "routing, your nickname, colour, signing key and the rest. Start chatting at the bottom\n"
+    "(or Esc) goes to your sessions. Nothing goes on the network before that: no tor is\n"
+    "looked for or started, and no --peer name is looked up. Once :install has saved your\n"
+    "settings, chat starts on your sessions instead.\n"
     "\n"
-    "  Ctrl+N     create a new session (asks for a password; blank is fine, still encrypts)\n"
+    "  Ctrl+N     create a new session (asks for a password; blank still encrypts)\n"
     "  Ctrl+J     join an existing session (asks for its id, then its password)\n"
     "  Tab        next session       Shift+Tab   previous session (j/k in NORMAL too)\n"
     "  PgUp/PgDn  scroll the chat back and forward (Ctrl+U/Ctrl+D in NORMAL, G the newest)\n"
@@ -63,114 +62,117 @@ static const char *USAGE =
     "  F1         every key and command on one page (also ? in NORMAL, and :help)\n"
     "  Ctrl+C     quit chat (every open session leaves cleanly first)\n"
     "\n"
-    "Each session has two sections: the conversation, and a console above it for everything\n"
-    "that isn't chat - people joining and leaving, the internet lookup, command output. A\n"
-    "session you joined is locked (the chat says \"connecting\") until someone answers.\n"
-    "The bottom row says where you are, what the keys do there, and the reply to what you\n"
-    "just did, until your next key.\n"
+    "Each session has two parts: the conversation, and a console above it for everything\n"
+    "else, such as people joining and leaving, network lookups and command output. A session\n"
+    "you joined is locked (the chat says \"connecting\") until someone answers. The bottom\n"
+    "row shows where you are, what the keys do there, and the result of your last action,\n"
+    "until the next key.\n"
     "\n"
-    "The input line is a small vim. It starts in NORMAL: h/l move, 0/$ ends, x delete,\n"
-    "j/k switch session, s/c/C hide/show the sidebar/console/chat.\n"
+    "The input line works like a small vim. It starts in NORMAL: h/l move, 0/$ go to the\n"
+    "ends, x deletes, j/k switch session, s/c/C hide/show the sidebar/console/chat.\n"
     "  i/a/I/A  NORMAL -> INSERT, where Enter sends\n"
-    "  /        on an empty line: the command line, with a menu of what fits. Once what's\n"
-    "           typed can't be a command (/shrug, /usr/bin) it's text again, sent as typed\n"
+    "  /        on an empty line: the command line, with a menu of matching commands. Once\n"
+    "           the text can't be a command (/shrug, /usr/bin) it's sent as normal text\n"
     "  Ctrl+W   delete a word          Ctrl+U   delete back to the start of the line\n"
     "  Esc      INSERT -> NORMAL\n"
     "  :        NORMAL -> COMMAND: type a command, Tab completes, Up/Down pick from the\n"
-    "           menu, Enter runs, Esc cancels. After :verify it lists the peers online\n"
-    "           whose nick starts with what's typed, as @ does in INSERT\n"
-    "Whatever chat asks for (a password, a session id, a setting's new value, a question)\n"
-    "comes up in a box over the screen: Enter confirms, Esc cancels, a question takes y or\n"
-    "n, and whatever you were typing before comes back afterwards.\n"
+    "           menu, Enter runs, Esc cancels. After :verify it lists the online peers\n"
+    "           whose nick starts with what's typed, like @ does in INSERT\n"
+    "Prompts (a password, a session id, a setting's new value, a question) open in a box\n"
+    "over the screen. Enter confirms, Esc cancels, a question takes y or n, and whatever you\n"
+    "were typing comes back afterwards.\n"
     "\n"
-    "Commands run from the command line (/ on an empty line, or : in NORMAL); anything else\n"
-    "typed is sent:\n"
+    "Commands run from the command line (/ on an empty line, or : in NORMAL). Anything else\n"
+    "you type is sent:\n"
     "  :new :join :quit (:q) :quitall (:qa) :copyid :update :peers :verify NICK [ok|no] :net\n"
-    "  :port [N] :set [NAME [VALUE]] :install :uninstall :help   - :help opens a page of keys\n"
-    "  and commands\n"
+    "  :port [N] :set [NAME [VALUE]] :install :uninstall :help   (:help opens a page of keys\n"
+    "  and commands)\n"
     "\n"
-    "Anyone with a session's id and password can sit between two other members: chat shows\n"
-    "a verify code when a peer joins, to compare with them over another channel (a call, in\n"
-    "person), and :verify NICK ok says it matched. --verify-required (:set verify required)\n"
-    "sends nothing to a peer until then.\n"
+    "Anyone with a session's id and password can sit between two other members. When a peer\n"
+    "joins, chat shows a verify code to compare with them over another channel (a call, in\n"
+    "person), and :verify NICK ok marks it as matching. --verify-required (:set verify\n"
+    "required) sends nothing to a peer until then.\n"
     "\n"
-    "Each setting is a row on the settings page, and :set NAME VALUE sets it without opening\n"
+    "Each setting is a row on the settings page. :set NAME VALUE changes it without opening\n"
     "the page (:set nick bob, :set net verbose, :set routing tor). :set alone opens the page,\n"
-    "and :set NAME opens it on that row. The page and those under it take the same keys:\n"
-    "j/k move, g/G ends, Enter chooses, h/l change a value or go out/in, Tab the next\n"
-    "section, Esc goes back, q closes.\n"
+    "and :set NAME opens it on that row. The settings page and the pages under it use the\n"
+    "same keys: j/k move, g/G go to the ends, Enter chooses, h/l change a value or go out/in,\n"
+    "Tab goes to the next section, Esc goes back, q closes.\n"
     "\n"
-    "Settings and the signing key last until chat exits. :install saves them, once it has\n"
-    "said what that leaves on disk: both in ~/.config/chat (%LOCALAPPDATA%\\chat on Windows),\n"
-    "sealed with one passphrase chat asks for when it starts (or takes from\n"
-    "CHAT_INSTALL_PASSWORD), and the settings saved again whenever one changes. The options\n"
-    "here win over what's saved, for that run only. :uninstall deletes it.\n"
+    "Settings and the signing key last until chat exits. :install saves them, after saying\n"
+    "what that leaves on disk. Both go in ~/.config/chat (%LOCALAPPDATA%\\chat on Windows),\n"
+    "sealed with one passphrase that chat asks for on startup (or reads from\n"
+    "CHAT_INSTALL_PASSWORD), and settings are saved again whenever one changes. Options\n"
+    "given here override what's saved, for that run only. :uninstall deletes it.\n"
     "\n"
-    "  --nick      display name; a random one (\"swift-otter42\"-style) is assigned if\n"
-    "              omitted - :set nick renames it anytime, shared by every session\n"
+    "  --nick      display name. A random one (like \"swift-otter42\") is used if omitted.\n"
+    "              :set nick changes it at any time, for every session\n"
     "  --colour    your display colour in every session; random by default (--color too)\n"
-    "  --routing   how sessions reach peers, preset on the settings page chat opens on:\n"
+    "  --routing   how sessions reach peers, preset on the settings page chat opens on.\n"
     "              dht+nostr: UDP between peers, found through the BitTorrent DHT (IPv4\n"
-    "              and IPv6), the LAN and a router port mapping, with Nostr relays carrying\n"
+    "              and IPv6), the LAN and router port mapping, with Nostr relays carrying\n"
     "              encrypted traffic when UDP can't get through. dht: the same without\n"
     "              relays. tor: Tor onion services, plus the relays through Tor. Tor and\n"
-    "              DHT members only reach each other on the relays: both need them.\n"
-    "  --nodht     skip the BitTorrent DHT (IPv4 and IPv6)\n"
-    "  --noipv6    skip the IPv6 DHT only\n"
-    "  --nolan     skip LAN broadcast discovery\n"
+    "              DHT members can only reach each other on the relays, so both need them.\n"
+    "  --nodht     don't use the BitTorrent DHT (IPv4 and IPv6)\n"
+    "  --noipv6    don't use the IPv6 DHT\n"
+    "  --nolan     don't use LAN broadcast discovery\n"
     "  --noportmap don't ask the router to forward a port (UPnP-IGD, NAT-PMP, PCP)\n"
-    "  --nonostr   no Nostr relays. Tor and DHT members only reach each other\n"
-    "              through them, so with this off they can't\n"
+    "  --nonostr   no Nostr relays. Tor and DHT members can only reach each other\n"
+    "              through them, so with this set they can't\n"
     "  --nostr-always\n"
-    "              stay on the relays all the time. By default DHT routing goes there\n"
-    "              only while nobody is reached yet or a peer's UDP fails, so Tor members\n"
+    "              stay connected to the relays. By default DHT routing only uses them\n"
+    "              while nobody is reached yet or a peer's UDP fails, so Tor members\n"
     "              can't find a room whose members all reach each other directly\n"
     "  --verify-required\n"
     "              send nothing to a peer until you've compared its verify code. By\n"
-    "              default it goes to everyone, compared or not\n"
+    "              default messages go to everyone, compared or not\n"
     "  --file-limit\n"
-    "              the biggest file fetched without saying anyway (default 8M; up to 1G)\n"
+    "              the largest file fetched without adding anyway (default 8M; up to 1G)\n"
     "  --fast-files\n"
-    "              send files in quick bursts rather than chat's steady slots: seconds, not\n"
-    "              minutes, but the network can see a transfer happen. Through the relays\n"
-    "              (Tor and DHT members), as often as they allow: about twice as fast\n"
+    "              send files in quick bursts instead of chat's regular slots. It takes\n"
+    "              seconds instead of minutes, but the transfer is visible on the network.\n"
+    "              Through the relays (Tor and DHT members) it goes as often as they\n"
+    "              allow, about twice as fast\n"
     "  --relay     a Nostr relay (wss://...) to use instead of the defaults; repeatable\n"
     "  --tor-launch\n"
     "              which tor Tor mode uses. auto (default): a tor that's already running if\n"
-    "              its control port lets chat log in (it keeps its entry guards and bridges),\n"
-    "              else chat starts its own. always: chat's own. never: only a running one.\n"
-    "              chat's own tor has random 127.0.0.1 ports, a cookie login, and its data in\n"
-    "              a private temporary folder deleted on exit; it quits if chat does\n"
+    "              its control port lets chat log in (it keeps its entry guards and\n"
+    "              bridges), otherwise chat starts its own. always: chat's own. never: only\n"
+    "              a running one. chat's own tor uses random 127.0.0.1 ports, a cookie login,\n"
+    "              and keeps its data in a private temporary folder deleted on exit. It\n"
+    "              quits if chat does\n"
     "  --tor-path  the tor program to start (default: tor on PATH, or the usual folders)\n"
     "  --tor-socks, --tor-control\n"
     "              where to look for a running tor (default 127.0.0.1:9050 and :9051; Tor\n"
     "              Browser's 9150 and 9151 are tried too)\n"
-    "  --identity  age: an Ed25519 identity, used to sign every session you join, with an\n"
-    "              AGE recipient string (age1...) others can `age -r` encrypt files to.\n"
-    "              pgp: the same as a PGP key, whose public key others can import.\n"
-    "              Both ask for a password (or take it from CHAT_SIGN_PASSWORD) and make\n"
-    "              the key from it and this device's id: the same password on this device\n"
-    "              and OS always makes the same key. Always use the same password to keep\n"
-    "              an established signing identity. Blank makes a new key each run.\n"
-    "              age:KEYFILE, pgp:KEYFILE: sign with your own key instead - an identity\n"
-    "              file from age-keygen, or an UNENCRYPTED armored EdDSA secret key from\n"
-    "              real gpg. Without it chat opens unsigned, or with the key :install saved;\n"
-    "              Signing identity on the settings page (:set sign) sets any of these up\n"
-    "              live, without restarting - a key from a file browser or pasted directly\n"
-    "              (written to disk only by :install, sealed) - or turns it off.\n"
-    "  --simple    skip the full-screen UI even on a real terminal: plain \"[HH:MM] ...\"\n"
-    "              lines, one session, reads lines from stdin; a line starting with : is a\n"
-    "              command (:help lists them). For scripting/low-feature terminals; this is\n"
-    "              also the automatic fallback when stdout isn't a tty.\n"
-    "  --session   also join this session immediately at startup (needs --port; \"chat\n"
-    "              --session ID\" alone still opens straight into the TUI to join by hand)\n"
+    "  --identity  age: an Ed25519 identity that signs every session you join, with an\n"
+    "              AGE recipient (age1...) others can `age -r` encrypt files to.\n"
+    "              pgp: the same key as PGP, whose public key others can import.\n"
+    "              Both ask for a password (or read CHAT_SIGN_PASSWORD) and make the key\n"
+    "              from it and this device's machine id. The same password on the same\n"
+    "              device and OS always gives the same key, so use the same password every\n"
+    "              time to keep your signing identity. A blank password gives a new key\n"
+    "              each run.\n"
+    "              age:KEYFILE, pgp:KEYFILE: sign with your own key instead, either an\n"
+    "              identity file from age-keygen or an UNENCRYPTED armored EdDSA secret key\n"
+    "              from gpg. Without --identity chat starts unsigned, or with the key\n"
+    "              :install saved. Signing identity on the settings page (:set sign) sets\n"
+    "              up any of these, or turns signing off, without restarting. A key can come\n"
+    "              from a file browser or be pasted in, and is only written to disk by\n"
+    "              :install, sealed.\n"
+    "  --simple    don't use the full-screen UI, even in a terminal. Prints plain\n"
+    "              \"[HH:MM] ...\" lines for one session and reads lines from stdin. A line\n"
+    "              starting with : is a command (:help lists them). For scripts and basic\n"
+    "              terminals. This is also used automatically when stdout isn't a tty.\n"
+    "  --session   join this session at startup (needs --port; \"chat --session ID\" alone\n"
+    "              still opens the TUI so you can join yourself)\n"
     "  --update    install the latest release from GitHub and exit, without opening chat\n"
     "  --version   print the version and exit\n"
     "\n"
-    "encrypted with X25519 + ML-KEM-768 (hybrid, post-quantum) + XChaCha20-Poly1305 + a\n"
-    "per-message forward-secrecy ratchet. Nothing is ever written to disk unless you ask\n"
-    "for it (there is no --log flag here - persistence wasn't worth the ephemerality trade\n"
-    "for a multi-session UI; ask if you want it back for a specific session).\n";
+    "Encryption: X25519 + ML-KEM-768 (hybrid, post-quantum), XChaCha20-Poly1305, and a\n"
+    "ratchet per message for forward secrecy. Nothing is written to disk unless you ask\n"
+    "for it with :install or :download. Messages are never saved.\n";
 
 #define MAX_SESSIONS 12
 #define MAX_PEER_ARGS 16
@@ -451,7 +453,7 @@ static void session_file_view(void *ui, int num, const char *name, const uint8_t
     p->shown = 1;
     p->th = th;
     p->ti = (tui_image_t){ th.w, th.h, th.rgb };
-    console_note(s, "* file %d shown (%dx%d) - :hide %d tucks it away", num, th.src_w, th.src_h, num);
+    console_note(s, "* file %d shown (%dx%d) - :hide %d hides it", num, th.src_w, th.src_h, num);
     g_app.dirty = 1;
 }
 
@@ -1091,82 +1093,83 @@ typedef struct {
 
 static const setting_def_t SETTINGS[] = {
     { SET_ROUTING, "Network", "routing", "Routing", K_CHOICE, "dht|tor",
-      "dht: UDP straight between peers, found with the options below. tor: onion services, plus the Nostr "
-      "relays through Tor to meet DHT members - hides your IP address from everyone. Uses a running tor or "
-      "starts chat's own; connecting takes longer. Applies to sessions you open from now on." },
+      "dht: UDP directly between peers, found using the options below. tor: onion services, plus the Nostr "
+      "relays through Tor to meet DHT members. Hides your IP address from everyone. Uses a running tor or "
+      "starts chat's own, and connecting takes longer. Applies to sessions you open from now on." },
     { SET_DHT4, NULL, "dht", "BitTorrent DHT (IPv4)", K_TOGGLE, "on|off",
-      "Finds peers on the internet through the public BitTorrent DHT. Its nodes see your IP address next to a "
-      "lookup key only room members can compute, and a node id that changes with it every hour." },
+      "Finds peers on the internet through the public BitTorrent DHT. DHT nodes see your IP address next to a "
+      "lookup key only room members can work out, and a node id that changes with it every hour." },
     { SET_DHT6, NULL, "dht6", "IPv6 DHT", K_TOGGLE, "on|off",
-      "Also looks peers up on the IPv6 DHT (BEP 32). IPv6 usually has no NAT to punch through, so peers there "
+      "Also looks for peers on the IPv6 DHT (BEP 32). IPv6 usually has no NAT to punch through, so peers there "
       "connect more reliably." },
     { SET_PORTMAP, NULL, "portmap", "Router port mapping", K_TOGGLE, "on|off",
       "Asks your router to forward this session's UDP port (PCP, NAT-PMP or UPnP-IGD), so peers behind NATs that "
-      "can't be hole-punched still reach you. Removed when the session ends; the router may log it." },
+      "can't be hole punched can still reach you. Removed when the session ends. The router may log it." },
     { SET_LAN, NULL, "lan", "LAN discovery", K_TOGGLE, "on|off",
-      "Broadcasts an encrypted beacon on your local network, so room members there find you without the internet." },
+      "Broadcasts an encrypted beacon on your local network, so room members on it can find you without the "
+      "internet." },
     { SET_TOR_LAUNCH, NULL, "torlaunch", "Start chat's own tor", K_CHOICE, "auto|always|never",
-      "auto: use a tor that's already running if its control port lets chat log in - it keeps its entry guards "
-      "and any bridges - else start chat's own. always: chat's own, apart from any other tor, but with new entry "
-      "guards each run and nothing from your torrc. never: only a running tor. Chat's own tor has random "
-      "127.0.0.1 ports, a cookie login and a private temporary folder deleted on exit." },
+      "auto: use a tor that's already running if its control port lets chat log in (it keeps its entry guards "
+      "and any bridges), otherwise start chat's own. always: chat's own, separate from any other tor, but with "
+      "new entry guards each run and nothing from your torrc. never: only a running tor. Chat's own tor uses "
+      "random 127.0.0.1 ports, a cookie login and a private temporary folder deleted on exit." },
     { SET_TOR_PATH, NULL, "torpath", "Tor program", K_TEXT, "PATH",
-      "The tor chat starts: a full path, or empty for tor on PATH or in the usual folders. It has to be a "
-      "program only root or you can change." },
+      "The tor program chat starts: a full path, or empty for tor on PATH or in the usual folders. It must be a "
+      "program that only root or you can change." },
     { SET_TOR_SOCKS, NULL, "torsocks", "Tor SOCKS port", K_TEXT, "HOST:PORT",
       "Where to look for a running tor's SOCKS port (host:port). With the defaults, Tor Browser's "
       "127.0.0.1:9150 is tried too. Applies to sessions you open from now on." },
     { SET_TOR_CONTROL, NULL, "torcontrol", "Tor control port", K_TEXT, "HOST:PORT",
-      "Where to look for a running tor's control port (host:port); it needs ControlPort on, and chat has to be "
+      "Where to look for a running tor's control port (host:port). It needs ControlPort on, and chat has to be "
       "able to read its cookie file (or have its password). Applies to sessions you open from now on." },
     { SET_TOR_PASSWORD, NULL, "torpassword", "Tor control password", K_SECRET, NULL,
       "Only for a tor set up with HashedControlPassword. Kept in memory only. Applies to sessions you open from now on." },
     // Last in the section: the relays apply in both modes, so they stay put when the mode changes.
     { SET_NOSTR, NULL, "nostr", "Nostr relays", K_CHOICE, "off|on|always",
-      "on: DHT routing goes to the relays only while it needs them - nobody reached yet, or a peer UDP doesn't "
-      "reach - and leaves a minute after. always: stays there, so Tor members can find a room whose members all "
-      "reach each other directly (they only meet on the relays). Tor routing reaches them only through Tor, and "
-      "always stays. Each event has a one-off key, a random kind, one size and fresh encryption, under a tag "
-      "that changes every 10 minutes, with a new connection for each." },
+      "on: DHT routing only connects to the relays while it needs them (nobody reached yet, or a peer UDP can't"
+      " reach) and disconnects a minute after. always: stays connected, so Tor members can find a room whose "
+      "members all reach each other directly (they only meet on the relays). Tor routing reaches them through "
+      "Tor and always stays connected. Each event has a one-off key, a random kind, a fixed size and fresh "
+      "encryption, under a tag that changes every 10 minutes, with a new connection for each tag." },
     { SET_RELAYS, NULL, "relays", "Relay list", K_TEXT, "wss://URL ... (up to 6)",
       "The relays the fallback uses: up to 6 wss:// URLs, separated by spaces or commas." },
     { SET_NICK, "Profile", "nick", "Nickname", K_TEXT, "NAME", "Your name in every session." },
     { SET_COLOUR, NULL, "colour", "Colour", K_TEXT, "NAME|#RRGGBB",
-      "Your colour in every session. h/l step through the palette; Enter takes a name or #RRGGBB." },
+      "Your colour in every session. h/l step through the palette, and Enter takes a name or #RRGGBB." },
     { SET_SIGN, NULL, "sign", "Signing identity", K_ACTION, "off|age|pgp",
-      "A key that signs your handshakes so peers can check it's you: an AGE or PGP key made here from a "
-      "password, or your own from a file or pasted in. Enter chooses one, replaces it or turns signing off. Kept "
-      "in memory only, unless :install seals it to disk." },
+      "A key that signs your handshakes so peers can check it's you. Either an AGE or PGP key made here from a "
+      "password, or your own key from a file or pasted in. Enter picks one, replaces it or turns signing off. "
+      "Kept in memory only, unless :install seals it to disk." },
     { SET_AGE_RECIPIENT, NULL, "agerecipient", "AGE recipient", K_ACTION, NULL,
-      "The age1... string others give age -r to encrypt files to you. Enter copies it to the clipboard." },
+      "The age1... string others give to age -r to encrypt files to you. Enter copies it to the clipboard." },
     { SET_PGP_PUBKEY, NULL, "pgpkey", "PGP public key", K_ACTION, NULL,
-      "The public half of the PGP key made here, by its fingerprint, for others to gpg --import. Enter copies "
-      "it to the clipboard; it's in the console too." },
+      "The public half of the PGP key made here, shown by its fingerprint, for others to gpg --import. Enter "
+      "copies it to the clipboard. It's in the console too." },
     { SET_VERIFY, "Chat", "verify", "Compare verify codes", K_CHOICE, "required|optional",
       "Anyone with a session's id and password could sit between two members and read what they say. When a peer "
-      "joins, chat shows a code to compare with them over another channel; it's the same on both ends only if "
-      "nobody is in between. required: nothing you send reaches a peer until you say it matched (:verify NICK ok). "
-      "optional: it goes to everyone, compared or not." },
+      "joins, chat shows a code to compare with them over another channel. It only matches on both ends if "
+      "nobody is in the middle. required: nothing you send goes to a peer until you mark it as matching "
+      "(:verify NICK ok). optional: messages go to everyone, compared or not." },
     { SET_FILE_LIMIT, NULL, "filelimit", "File size limit", K_TEXT, "SIZE (8M, 500K, 1G)",
-      "The biggest file chat fetches when you ask: an offer past it says so, and :download N anyway (or :show N "
-      "anyway) fetches that one all the same. Nothing is ever fetched until you ask. Files go up to 1 GB." },
+      "The largest file chat fetches when you ask. An offer over the limit says so, and :download N anyway (or "
+      ":show N anyway) fetches it regardless. Nothing is fetched until you ask. Files can be up to 1 GB." },
     { SET_FAST_FILES, NULL, "fastfiles", "Fast file transfers", K_TOGGLE, "on|off",
-      "off: files move in chat's steady slots, so a transfer looks like nothing at all on the wire - but slowly: "
+      "off: files are sent in chat's regular slots, so a transfer doesn't show up on the network, but it's slow: "
       "about 25 KB a minute, half that through the relays (where Tor and DHT members meet). on: while you send a "
-      "file, your slots to that peer come every few milliseconds: seconds, not minutes, but anyone watching the "
-      "network sees a burst about the size of the file. Through the relays they come as often as the relays allow, "
-      "about twice the steady pace, and the relays see that. It's the sender's setting that speeds a transfer." },
+      "file, your slots to that peer come every few milliseconds. It takes seconds instead of minutes, but anyone "
+      "watching the network sees a burst about the size of the file. Through the relays it goes as often as they "
+      "allow, about twice the normal rate, and the relays can see that. Only the sender's setting matters." },
     { SET_NOTIFY, NULL, "notify", "Notifications", K_CHOICE, "all|mentions|none",
-      "Desktop notifications, for open sessions and new ones: every message, mentions of your nick, or none." },
+      "Desktop notifications, for open and new sessions: every message, mentions of your nick, or none." },
     { SET_PREVIEW, NULL, "preview", "Notification preview", K_CHOICE, "off|nick|message",
-      "What a notification shows. off: only that a message came. nick: who it's from. message: who, and what "
+      "What a notification shows. off: only that a message came in. nick: who it's from. message: who, and what "
       "they said. Desktops keep notifications (Windows writes them to disk), so what they show can outlast chat. "
-      "The session never shows: its id is all it takes to join one with a blank password." },
+      "The session is never shown, since its id is all someone needs to join one with a blank password." },
     { SET_NET, NULL, "net", "Network log", K_CHOICE, "normal|verbose",
-      "What the console shows of the network, in every session. verbose adds every handshake packet, relay "
+      "How much of the network the console shows, in every session. verbose adds every handshake packet, relay "
       "and Tor event." },
     { SET_PORT, NULL, "port", "UDP port for new sessions", K_TEXT, "N",
-      "The UDP port new sessions listen on; 0 picks a free one each time. :port moves an open session to another." },
+      "The UDP port new sessions listen on. 0 picks a free one each time. :port moves an open session to another." },
 };
 #define N_SETTINGS ((int)(sizeof SETTINGS / sizeof SETTINGS[0]))
 
@@ -2235,7 +2238,7 @@ static void render_settings(int rows_n, int cols_n, const char *clock, const tui
                      "applies at once%s", g_app.installed
                      ? ", and what you change is saved where :install put it."
                      : g_app.locked ? " and lasts until chat exits: what :install saved stays sealed this run."
-                     : " and lasts until chat exits - it's never written to disk unless you :install.");
+                     : " and lasts until chat exits. It's only written to disk if you :install.");
         else
             snprintf(help, sizeof help, "Back to your sessions. Everything here already applies%s",
                      g_app.installed ? ", and is saved." : ".");
@@ -2255,8 +2258,8 @@ static void render_settings(int rows_n, int cols_n, const char *clock, const tui
         .title = "Settings",
         .clock = clock,
         .intro = g_app.onboarding
-            ? "Welcome to chat: serverless and end-to-end encrypted. Look over how it reaches peers, then "
-              "Start chatting - nothing touches the network before that."
+            ? "chat is an end-to-end encrypted chat with no server. Check how it reaches peers, then press "
+              "Start chatting. Nothing goes on the network before that."
             : NULL,
         .rows = rows, .n_rows = n_rows, .selected = sel_row,
         .help = help, .usage = usage[0] ? usage : NULL,
