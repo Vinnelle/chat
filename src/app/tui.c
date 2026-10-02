@@ -1964,7 +1964,8 @@ static void draw_list(wbuf_t *w, int top, int left, int iw, int view, int nrows,
             head = n;
             kind[n] = PL_HEADING; arg[n] = i; n++;
         }
-        if (i == pg->selected) { sel_line = n; head_line = head >= 0 ? head : n; }
+        // Rows before the first heading (or on a page without any) count as under one at the top.
+        if (i == pg->selected) { sel_line = n; head_line = head >= 0 ? head : 0; }
         kind[n] = PL_ROW; arg[n] = i; n++;
     }
     if (end_line < 0) end_line = n - 1;
@@ -1983,7 +1984,7 @@ static void draw_list(wbuf_t *w, int top, int left, int iw, int view, int nrows,
 
     int cw = iw - 2, lw = 0, any_value = 0;
     for (int i = 0; i < pg->n_rows; i++) {
-        int c = utf8_str_cols(pg->rows[i].label);
+        int c = utf8_str_cols(pg->rows[i].label) + (pg->rows[i].prefix ? utf8_str_cols(pg->rows[i].prefix) : 0);
         if (c > lw) lw = c;
         if (pg->rows[i].value) any_value = 1;
     }
@@ -2005,7 +2006,12 @@ static void draw_list(wbuf_t *w, int top, int left, int iw, int view, int nrows,
         row_select(on);
         inner_begin(w, &p, row, left, iw);
         ptext(&p, on ? S_ACCENT_BOLD : S_PLAIN, on ? G_PTR " " : "  ");
-        pell(&p, on ? S_ACCENT_BOLD : pg->keys ? S_ACCENT : S_PLAIN, pr->label, pr->value ? lw - 2 : lw);
+        int pc = 0;
+        if (pr->prefix) {
+            pc = utf8_str_cols(pr->prefix);
+            ptext(&p, S_FAINT, pr->prefix);
+        }
+        pell(&p, on ? S_ACCENT_BOLD : pg->keys ? S_ACCENT : S_PLAIN, pr->label, (pr->value ? lw - 2 : lw) - pc);
         if (pr->value) {
             pspace(&p, 2 + lw);
             draw_value(&p, pr, on);

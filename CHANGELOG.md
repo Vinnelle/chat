@@ -24,11 +24,13 @@
 - The picker, the browser, the path field and the paste box say why chat needs your secret key:
   it signs your handshakes, and only the secret key can make a signature. It stays in memory and
   is never sent.
-- The file browser (for a key file, and for `:send`) lists folders and files under their own
-  headings, with `..` first and hidden ones last. It says which folder it's in and how many
-  folders and files are there, opens on the first entry rather than `..`, and going up selects
-  the folder you came from. `~` goes to the home folder. The key file browser opens in the folder
-  of the key file in use.
+- The file browser (for a key file, and for `:send`) is drawn as a tree: the folder you're in
+  and the folders above it, one level per row, with its folders and then its files under it.
+  Hidden ones come last, and there's no `..` row (`h` goes up). How many levels get their own row
+  depends on the terminal's width. The levels above those are joined into the top row's path,
+  cut from the left with `…` if it's still too long. The top line says how many folders and files
+  there are. Going up selects the folder you came from, and `~` goes to the home folder. The key
+  file browser opens in the folder of the key file in use.
 
 ### Fixed
 - `:install` could keep the old signing key after you picked a different one, and said a key that

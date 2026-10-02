@@ -302,6 +302,7 @@ typedef struct {
     const char *value;     // in a column after the label, or NULL
     tui_value_kind_t kind;
     const uint8_t *swatch; // a sample of this colour before the value, or NULL
+    const char *prefix;    // drawn faint before the label (a tree's lines), or NULL
 } tui_row_t;
 
 // A list page (settings, the pages under it, and help): rows grouped by section with one selected,
