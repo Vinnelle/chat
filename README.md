@@ -237,8 +237,8 @@ anywhere directly, and never looks up an `.onion` name or a relay's name through
 Connecting takes a minute or two while the onion services get published and found.
 
 Settings only last until chat exits. Like everything else, they aren't written to disk unless
-you ask. `:install` saves them, and after that every change is saved, unless you turn
-`autosave` off (see [Installing](#installing)).
+you ask. `:install` saves them, and after that `:save` saves what you change, or turn
+`autosave` on to save every change as you make it (see [Installing](#installing)).
 
 ## Files and pictures
 
@@ -396,13 +396,13 @@ settings page, and nothing you change is saved unless `:install` opens a save la
 chat won't guess. If what's saved is still sealed, there's no terminal to ask on and no
 `--routing`, it won't start, and `--update` won't download.
 
-After that, any setting you change is saved straight away, on the settings page or with `:set`,
-and the reply on the bottom row ends in `· saved`. So is a key you verify or forget. chat keeps
-the key Argon2id made, locked in memory, until it exits, so saving doesn't need the passphrase
-or another Argon2id run. Command line options aren't saved. They last for that run, and what's
-saved comes back next time. With `:set autosave off` (saved itself, so it lasts), changes are
-kept until chat exits and the reply ends in `· not saved (autosave is off)` instead; `:save`
-saves them, and turning autosave back on saves the ones made meanwhile. The signing key is
+After that, a setting you change, on the settings page or with `:set`, is kept until chat exits,
+and the reply on the bottom row ends in `· not saved (autosave is off)`. So is a key you verify
+or forget. `:save` saves them. With `:set autosave on` (saved itself, so it lasts), they're saved
+straight away instead and the reply ends in `· saved`; turning it on saves the ones made
+meanwhile. chat keeps the key Argon2id made, locked in memory, until it exits, so saving doesn't
+need the passphrase or another Argon2id run. Command line options aren't saved. They last for
+that run, and what's saved comes back next time. The signing key is
 only saved by `:save` or `:install`, with autosave on or off, so a key you're just trying out
 isn't kept by accident. If you pick a key later, the console says so, and `:save` seals it under
 the same passphrase without asking for it again. `:save`, or `:install` while a save is open,
@@ -413,7 +413,7 @@ replaces it (and tells you first). With signing off, the saved key stays.
 If you pressed `Esc` at the start, so nothing saved is open, `:install` first asks whether to use
 what's saved. `y` asks for its passphrase (with more than one save, after you pick one from a
 list), and from then on what's saved there is in use, the same as if you'd opened it at the
-start, and settings you change are saved to it. Settings you changed before that which the save
+start, and `:save` (or autosave) saves what you change to it. Settings you changed before that which the save
 doesn't have keep their value and are saved to it, and a command line option doesn't undo a
 setting you changed. Keys you verified are saved to it too, except ones from a save you
 uninstalled in that run: each save keeps its own. `n` makes a new
@@ -430,7 +430,7 @@ have what was in them.
 `~/.config/chat/saves/NAME` (the same `settings` and `key` files), sealed with its own
 passphrase. A name is 1 to 32 letters, digits, `-` and `_`. The save in `~/.config/chat` itself is
 called `default`. The folder names are readable on disk, so pick names that don't say more than
-you want them to. Once a save is open, settings you change are saved to that one, and `:install`
+you want them to. Once a save is open, `:save` (or autosave) saves what you change to that one, and `:install`
 alone saves to it too, after asking first, as above. `:install NAME` for a save that doesn't exist
 yet makes it, with a new passphrase. For one that does, while another save is open, it asks
 whether to save what's in use over it, and then asks for that save's passphrase. To use what's
