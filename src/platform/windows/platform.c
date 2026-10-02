@@ -775,6 +775,15 @@ static int from_wide(const wchar_t *w, char *out, size_t cap) {
     return WideCharToMultiByte(CP_UTF8, 0, w, -1, out, (int)cap, NULL, NULL) > 0 ? 0 : -1;
 }
 
+int platform_full_path(const char *utf8_path, char *out, size_t cap) {
+    wchar_t wp[1400], full[1400];
+    if (!to_wide(utf8_path, wp, 1400)) return -1;
+    DWORD n = GetFullPathNameW(wp, 1400, full, NULL);
+    if (n == 0 || n >= 1400 || from_wide(full, out, cap) != 0) return -1;
+    for (char *c = out; *c; c++) if (*c == '\\') *c = '/';
+    return 0;
+}
+
 static int wide_is_absolute(const wchar_t *p) {
     return (p[0] && p[1] == L':' && (p[2] == L'\\' || p[2] == L'/')) || (p[0] == L'\\' && p[1] == L'\\');
 }

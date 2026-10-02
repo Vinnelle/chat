@@ -9,7 +9,7 @@
 // one passphrase. Nothing is written there before :install.
 
 #define INSTALL_SETTINGS_MAX 8192
-#define INSTALL_KEY_MAX 256
+#define INSTALL_KEY_MAX 1280
 #define INSTALL_NO_FILE -4
 
 // The folder, with ~ for the home folder, to show the user. -1 if there isn't one.

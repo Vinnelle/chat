@@ -156,11 +156,14 @@ static const char *USAGE =
     "              each run.\n"
     "              age:KEYFILE, pgp:KEYFILE: sign with your own key instead, either an\n"
     "              identity file from age-keygen or an UNENCRYPTED armored EdDSA secret key\n"
-    "              from gpg. Without --identity chat starts unsigned, or with the key\n"
-    "              :install saved. Signing identity on the settings page (:set sign) sets\n"
-    "              up any of these, or turns signing off, without restarting. A key can come\n"
-    "              from a file browser or be pasted in, and is only written to disk by\n"
-    "              :install, sealed.\n"
+    "              from gpg. chat needs the secret key because it signs with it; it stays\n"
+    "              in memory and is never sent. Without --identity chat starts unsigned, or\n"
+    "              with the key :install saved. Signing identity on the settings page\n"
+    "              (:set sign) sets up any of these, or turns signing off, without\n"
+    "              restarting. A key file can be picked in a file browser or its path\n"
+    "              typed, and a key can be pasted in. For a key file :install saves its\n"
+    "              path, not the key. Any other key is only written to disk by :install,\n"
+    "              sealed.\n"
     "  --simple    don't use the full-screen UI, even in a terminal. Prints plain\n"
     "              \"[HH:MM] ...\" lines for one session and reads lines from stdin. A line\n"
     "              starting with : is a command (:help lists them). For scripts and basic\n"
@@ -212,6 +215,7 @@ typedef enum {
     MODE_SEND_BROWSE,
     MODE_SIGN_PASTE,
     MODE_SIGN_PASSWORD,
+    MODE_SIGN_PATH,
     MODE_CHAT,
     MODE_NEW_PASSWORD,
     MODE_JOIN_ID,
@@ -233,6 +237,7 @@ typedef enum { KEY_MADE, KEY_DERIVED, KEY_FILE, KEY_PASTED } key_origin_t;
 #define DERIVED_PGP_CREATED 1767225600u
 
 #define MAX_DIR_ITEMS 512
+#define KEY_PATH_MAX 1024
 
 typedef struct {
     char name[200];   // a folder's ends in '/'
@@ -268,7 +273,9 @@ typedef struct {
     int sign_sel;
     key_origin_t key_origin;       // where the identity in use came from
     uint32_t pgp_created;          // a PGP key made here: its creation time, which its fingerprint covers
-    identity_source_t load_kind;   // AGE or PGP: what the key file browser or the paste page takes
+    identity_source_t load_kind;   // AGE or PGP: what the key file browser, the path field or the paste page takes
+    char key_path[KEY_PATH_MAX];   // a key from a file (KEY_FILE): the file's full path, or "" if it isn't known
+    int path_from_browser;         // the path field was opened from the browser, so Esc goes back there
     int tor_launch;
     char tor_path[512];
     uint64_t file_cap;   // 0: the default
@@ -281,6 +288,7 @@ typedef struct {
     int installed, locked;
     int saved_key_known;
     uint8_t saved_key_pub[ID_SIGN_PUB_LEN];
+    char saved_key_path[KEY_PATH_MAX];   // what :install saved is the path to a key file: that path, else ""
     char install_pass[256];
     int unlock_at_start;
     app_mode_t mode;
@@ -900,9 +908,14 @@ static void finish_onboarding(void) {
     g_app.dirty = 1;
 }
 
+// Folders first, then files. In each, ".." first and hidden ones (starting with '.') last.
 static int entry_cmp(const void *a, const void *b) {
     const dir_entry_t *ea = a, *eb = b;
     if (ea->is_dir != eb->is_dir) return eb->is_dir - ea->is_dir;
+    int ua = strcmp(ea->name, "../") == 0, ub = strcmp(eb->name, "../") == 0;
+    if (ua != ub) return ub - ua;
+    int ha = ea->name[0] == '.', hb = eb->name[0] == '.';
+    if (ha != hb) return ha - hb;
     return strcasecmp(ea->name, eb->name);
 }
 
@@ -944,8 +957,20 @@ static int browser_load(browser_t *b, const char *path) {
     copy_str(tmp.path, path, sizeof tmp.path);
     if (platform_list_dir(tmp.path, browser_add, &tmp) != 0) return -1;
     qsort(tmp.items, (size_t)tmp.n_items, sizeof(dir_entry_t), entry_cmp);
+    // The first entry in it, rather than "..".
+    if (tmp.n_items > 1 && strcmp(tmp.items[0].name, "../") == 0) tmp.selected = 1;
     *b = tmp;
     return 0;
+}
+
+// Selects the entry called name (a folder's without its '/'), if it's there.
+static void browser_select(browser_t *b, const char *name) {
+    size_t n = strlen(name);
+    if (!n) return;
+    for (int i = 0; i < b->n_items; i++) {
+        const char *e = b->items[i].name;
+        if (strncmp(e, name, n) == 0 && (e[n] == '\0' || (e[n] == '/' && e[n + 1] == '\0'))) { b->selected = i; return; }
+    }
 }
 
 // The path of an entry in the folder the browser shows, without a folder's trailing '/'.
@@ -1136,10 +1161,10 @@ static const setting_def_t SETTINGS[] = {
     { SET_NICK, "Profile", "nick", "Nickname", K_TEXT, "NAME", "Your name in every session." },
     { SET_COLOUR, NULL, "colour", "Colour", K_TEXT, "NAME|#RRGGBB",
       "Your colour in every session. h/l step through the palette, and Enter takes a name or #RRGGBB." },
-    { SET_SIGN, NULL, "sign", "Signing identity", K_ACTION, "off|age|pgp",
+    { SET_SIGN, NULL, "sign", "Signing identity", K_ACTION, "off|age|pgp|age:PATH|pgp:PATH",
       "A key that signs your handshakes so peers can check it's you. Either an AGE or PGP key made here from a "
       "password, or your own key from a file or pasted in. Enter picks one, replaces it or turns signing off. "
-      "Kept in memory only, unless :install seals it to disk." },
+      "Kept in memory only, unless :install saves it: a key file's path, or any other key sealed to disk." },
     { SET_AGE_RECIPIENT, NULL, "agerecipient", "AGE recipient", K_ACTION, NULL,
       "The age1... string others give to age -r to encrypt files to you. Enter copies it to the clipboard." },
     { SET_PGP_PUBKEY, NULL, "pgpkey", "PGP public key", K_ACTION, NULL,
@@ -1252,7 +1277,8 @@ static int setting_options(setting_id_t id, const char *const **names, int *n) {
 static const char *const SIGN_NAMES[] = { "off", "age", "pgp" };
 
 // What :set takes for a row, for the command line's menu: its values, and the signing identity's
-// kinds (a key file or a pasted key is only chosen on the page).
+// kinds (age:PATH and pgp:PATH, for a key file, are typed in full, and a pasted key is only chosen on
+// the page).
 static int setting_choices(setting_id_t id, const char *const **names, int *n) {
     if (id != SET_SIGN) return setting_options(id, names, n);
     *names = SIGN_NAMES;
@@ -1760,10 +1786,17 @@ static const char *settings_hint(void) {
 
 // ---- the signing identity, chosen on a page under the settings ----
 
-// Off, then for each of AGE and PGP a key made here, one from a file and one pasted in.
+// Off, then for each of AGE and PGP: a key made here, a key file picked in the browser, a key file
+// whose path is typed, and a key pasted in.
 typedef enum {
-    PICK_OFF, PICK_AGE_MADE, PICK_AGE_FILE, PICK_AGE_PASTE, PICK_PGP_MADE, PICK_PGP_FILE, PICK_PGP_PASTE, N_PICKS
+    PICK_OFF,
+    PICK_AGE_MADE, PICK_AGE_FILE, PICK_AGE_PATH, PICK_AGE_PASTE,
+    PICK_PGP_MADE, PICK_PGP_FILE, PICK_PGP_PATH, PICK_PGP_PASTE,
+    N_PICKS
 } sign_pick_t;
+
+// Why a key of your own has to be the secret key, in one sentence for the rows' help.
+#define WHY_SECRET "chat signs your handshakes with it, and only the secret key can make a signature. "
 
 static const struct { const char *section, *label, *help; } SIGN_PICKS[N_PICKS] = {
     { NULL, "Off", "Don't sign. Peers see you as unverified." },
@@ -1771,29 +1804,55 @@ static const struct { const char *section, *label, *help; } SIGN_PICKS[N_PICKS] 
                        "(age -r). Enter asks for a password: the same password on this device and OS always makes "
                        "the same key, so always use the same one to keep an established signing identity. Blank "
                        "makes a new key that lasts until chat exits." },
-    { NULL, "Key file", "Your own AGE key from a file, as age-keygen writes it. Your age1... recipient stays "
-                        "the same." },
-    { NULL, "Paste a key", "Your own AGE key pasted in: the AGE-SECRET-KEY-1... line. Kept in memory: only "
-                           ":install writes it to disk, sealed." },
+    { NULL, "Pick a key file", "Your own AGE key, picked in a file browser: the file age-keygen writes. "
+                               WHY_SECRET "It stays in memory and isn't sent. :install saves the file's path, not "
+                               "the key." },
+    { NULL, "Type a key file path", "Your own AGE key from a file whose path you type, such as "
+                                    "~/.config/age/key.txt. " WHY_SECRET ":install saves the path, not the key." },
+    { NULL, "Paste a key", "Your own AGE key pasted in: the AGE-SECRET-KEY-1... line. " WHY_SECRET "There's no "
+                           "file to point to, so :install seals the key itself to disk." },
     { "PGP", "Native", "A PGP key made here, whose public key is in the settings and the console for others "
                        "to import. Enter asks for a password: the same password on this device and OS always makes "
                        "the same key, so always use the same one to keep an established signing identity. Blank "
                        "makes a new key that lasts until chat exits." },
-    { NULL, "Key file", "Your own key from a file: an unencrypted EdDSA/Ed25519 secret key, armored, as "
-                        "gpg --export-secret-keys --armor writes it." },
-    { NULL, "Paste a key", "Your own key pasted in, armored. Kept in memory: only :install writes it to disk, "
-                           "sealed." },
+    { NULL, "Pick a key file", "Your own key, picked in a file browser: an unencrypted EdDSA/Ed25519 secret key, "
+                               "armored, as gpg --export-secret-keys --armor writes it. " WHY_SECRET ":install "
+                               "saves the file's path, not the key." },
+    { NULL, "Type a key file path", "Your own key from a file whose path you type: an unencrypted, armored "
+                                    "EdDSA/Ed25519 secret key. " WHY_SECRET ":install saves the path, not the key." },
+    { NULL, "Paste a key", "Your own key pasted in, armored. " WHY_SECRET "There's no file to point to, so "
+                           ":install seals the key itself to disk." },
 };
+
+// Why chat asks for your secret key, and what happens to it, for the pages that take one.
+static const char KEY_WHY[] =
+    "**Why the secret key:** chat signs the handshake of every session you join, so peers can check it's "
+    "you. Only the secret key can make a signature; the public key can only check one. The key is kept in "
+    "memory and never sent: peers get your public key and the signatures.";
+
+static const char KEY_FILE_SAVED[] =
+    "**What :install keeps:** this file's path, not the key. chat reads the file again each time it starts, "
+    "so leave it where it is.";
+
+static const char KEY_PASTE_SAVED[] =
+    "**What :install keeps:** with no file to point to, the key itself, sealed with your passphrase. Until "
+    "then it's only in memory. To keep it out of chat's files, save it to a file and pick that instead.";
 
 static const char AGE_PASTE_HELP[] =
     "Paste your AGE secret key now: the AGE-SECRET-KEY-1... line, or the whole file age-keygen wrote. It's read "
-    "when its line ends (Enter, if the paste didn't end it) and kept in memory: only :install writes it to disk, "
-    "sealed.";
+    "when its line ends (Enter, if the paste didn't end it).";
 
 static const char PGP_PASTE_HELP[] =
     "Paste your armored PGP private key now, BEGIN line to END line. It's read as soon as the END line "
-    "arrives and kept in memory: only :install writes it to disk, sealed. It has to be an unencrypted "
-    "EdDSA/Ed25519 key (gpg --export-secret-keys --armor, from a key with no passphrase).";
+    "arrives. It has to be an unencrypted EdDSA/Ed25519 key (gpg --export-secret-keys --armor, from a key "
+    "with no passphrase).";
+
+static const char AGE_PATH_HELP[] =
+    "Type the path to your AGE key file, as age-keygen writes it. ~ is your home folder.";
+
+static const char PGP_PATH_HELP[] =
+    "Type the path to your PGP key file: an unencrypted, armored EdDSA/Ed25519 secret key, as gpg "
+    "--export-secret-keys --armor writes it from a key with no passphrase. ~ is your home folder.";
 
 static const char SIGN_PASSWORD_HELP[] =
     "Type the password to make your key from. The same password on this device and OS always makes the same "
@@ -1830,7 +1889,8 @@ static void identity_chosen(void) {
     }
     show_identity_result();
     if (g_app.installed && g_app.identity_source != IDENT_NONE && !key_in_use_saved())
-        push_log("* this signing key isn't saved: :install seals it with your settings' passphrase%s",
+        push_log("* this signing key isn't saved: :install %s with your settings' passphrase%s",
+                 g_app.key_origin == KEY_FILE && g_app.key_path[0] ? "saves its file's path, sealed" : "seals it",
                  install_has_key() ? ", in place of the saved one" : "");
     else if (g_app.installed && g_app.identity_source == IDENT_NONE && install_has_key())
         push_log("* the saved signing key stays saved, and signs again the next time chat starts");
@@ -1893,22 +1953,109 @@ static void commit_sign_password(void) {
     g_app.mode = MODE_SETTINGS;
 }
 
-// kind's key (AGE or PGP) from the file at path. Returns 0 once it's the identity in use.
-static int load_key_file(identity_source_t kind, const char *path) {
-    int rc = kind == IDENT_AGE ? age_import_secret_key(path, &g_app.identity)
-                               : pgp_import_secret_key(path, &g_app.identity);
+// A typed path with a leading ~ (alone, or followed by /) as the home folder.
+static void expand_home(const char *path, char *out, size_t cap) {
+    const char *home = platform_home_dir();
+    if (home && path[0] == '~' && (path[1] == '\0' || path[1] == '/')) snprintf(out, cap, "%s%s", home, path + 1);
+    else copy_str(out, path, cap);
+}
+
+// path with the home folder as ~, to show.
+static void tilde_path(const char *path, char *out, size_t cap) {
+    const char *home = platform_home_dir();
+    size_t hl = home ? strlen(home) : 0;
+    if (hl > 1 && strncmp(path, home, hl) == 0 && (path[hl] == '/' || path[hl] == '\0'))
+        snprintf(out, cap, "~%s", path + hl);
+    else copy_str(out, path, cap);
+}
+
+// kind's key (AGE or PGP) from the file at path, into kp. Its full path goes in full, for :install to
+// save. Returns 0, or -1 if the file isn't such a key.
+static int read_key_file(identity_source_t kind, const char *path, identity_keypair_t *kp, char *full, size_t cap) {
+    char p[KEY_PATH_MAX];
+    expand_home(path, p, sizeof p);
+    int rc = kind == IDENT_AGE ? age_import_secret_key(p, kp) : pgp_import_secret_key(p, kp);
     if (rc != 0) return -1;
-    g_app.identity_source = kind;
-    g_app.key_origin = KEY_FILE;
+    if (platform_full_path(p, full, cap) != 0) copy_str(full, p, cap);
     return 0;
 }
 
+// kind's key (AGE or PGP) from the file at path. Returns 0 once it's the identity in use.
+static int load_key_file(identity_source_t kind, const char *path) {
+    identity_keypair_t kp;
+    char full[KEY_PATH_MAX];
+    int rc = read_key_file(kind, path, &kp, full, sizeof full);
+    if (rc == 0) {
+        g_app.identity = kp;
+        g_app.identity_source = kind;
+        g_app.key_origin = KEY_FILE;
+        copy_str(g_app.key_path, full, sizeof g_app.key_path);
+    }
+    crypto_wipe(&kp, sizeof kp);
+    return rc;
+}
+
+// The key file in use, if it's kind's, for the browser and the path field to start at.
+static const char *key_path_of(identity_source_t kind) {
+    return g_app.key_origin == KEY_FILE && g_app.identity_source == kind && g_app.key_path[0] ? g_app.key_path : NULL;
+}
+
+static void browser_select(browser_t *b, const char *name);
+
+// Opens in the folder of the key file in use, if there is one, otherwise the home folder.
 static void begin_key_browse(identity_source_t kind) {
     g_app.load_kind = kind;
     const char *home = platform_home_dir();
-    if (!home || browser_load(&g_app.browser, home) != 0) browser_load(&g_app.browser, "/");
+    char dir[KEY_PATH_MAX] = "", name[200] = "";
+    if (key_path_of(kind)) {
+        copy_str(dir, g_app.key_path, sizeof dir);
+        const char *slash = strrchr(g_app.key_path, '/');
+        if (slash) copy_str(name, slash + 1, sizeof name);
+        path_parent(dir);
+    }
+    if (dir[0] && browser_load(&g_app.browser, dir) == 0) browser_select(&g_app.browser, name);
+    else if (!home || browser_load(&g_app.browser, home) != 0) browser_load(&g_app.browser, "/");
     g_app.mode = MODE_SIGN_BROWSE;
     g_app.dirty = 1;
+}
+
+// The field for a key file's path, on the picker or the browser, starting with start (or empty).
+static void begin_key_path(identity_source_t kind, const char *start, int from_browser) {
+    g_app.load_kind = kind;
+    g_app.path_from_browser = from_browser;
+    g_app.saved_input = g_app.input;
+    tui_input_clear(&g_app.input);
+    g_app.input.modal = 0;
+    if (start) {
+        char shown[sizeof g_app.input.buf];
+        tilde_path(start, shown, sizeof shown);
+        copy_str(g_app.input.buf, shown, sizeof g_app.input.buf);
+        g_app.input.len = g_app.input.cursor = (int)strlen(g_app.input.buf);
+    }
+    g_app.mode = MODE_SIGN_PATH;
+    g_app.dirty = 1;
+}
+
+static void end_key_path(void) {
+    g_app.input = g_app.saved_input;
+    crypto_wipe(&g_app.saved_input, sizeof g_app.saved_input);
+    g_app.mode = g_app.path_from_browser ? MODE_SIGN_BROWSE : MODE_SIGN_CHOICE;
+    g_app.dirty = 1;
+}
+
+// A path that isn't a key stays in the field to be fixed.
+static void commit_key_path(void) {
+    char path[sizeof g_app.input.buf];
+    copy_str(path, g_app.input.buf, sizeof path);
+    if (!path[0]) { note("type the key file's path - or Esc to go back"); return; }
+    if (load_key_file(g_app.load_kind, path) != 0) {
+        if (g_app.load_kind == IDENT_AGE) note("%.80s can't be read, or holds no AGE secret key", path);
+        else note("%.80s can't be read, or isn't an unencrypted EdDSA/Ed25519 secret key", path);
+        return;
+    }
+    end_key_path();
+    identity_chosen();
+    g_app.mode = MODE_SETTINGS;
 }
 
 static void paste_clear(void) {
@@ -1929,8 +2076,8 @@ static int try_load_key_from_browser(void) {
     const dir_entry_t *sel = &g_app.browser.items[g_app.browser.selected];
     char full[1200]; browser_entry_path(&g_app.browser, sel, full, sizeof full);
     if (load_key_file(g_app.load_kind, full) != 0) {
-        if (g_app.load_kind == IDENT_AGE) note("%.80s holds no AGE secret key", sel->name);
-        else note("%.80s isn't an unencrypted EdDSA/Ed25519 secret key", sel->name);
+        if (g_app.load_kind == IDENT_AGE) note("%.80s can't be read, or holds no AGE secret key", sel->name);
+        else note("%.80s can't be read, or isn't an unencrypted EdDSA/Ed25519 secret key", sel->name);
         return -1;
     }
     identity_chosen();
@@ -1949,8 +2096,10 @@ static void sign_pick(int pick) {
         case PICK_AGE_MADE:  begin_sign_password(IDENT_AGE); return;
         case PICK_PGP_MADE:  begin_sign_password(IDENT_PGP); return;
         case PICK_AGE_FILE:  begin_key_browse(IDENT_AGE); return;
+        case PICK_AGE_PATH:  begin_key_path(IDENT_AGE, key_path_of(IDENT_AGE), 0); return;
         case PICK_AGE_PASTE: begin_key_paste(IDENT_AGE); return;
         case PICK_PGP_FILE:  begin_key_browse(IDENT_PGP); return;
+        case PICK_PGP_PATH:  begin_key_path(IDENT_PGP, key_path_of(IDENT_PGP), 0); return;
         case PICK_PGP_PASTE: begin_key_paste(IDENT_PGP); return;
         default: return;
     }
@@ -2070,14 +2219,35 @@ static void sign_picker_key(const tui_key_t *key) {
     g_app.dirty = 1;
 }
 
+// Up to the parent folder, with the folder just left selected.
 static void browser_up(void) {
-    char up[900]; copy_str(up, g_app.browser.path, sizeof up);
+    char up[900], name[200] = "";
+    copy_str(up, g_app.browser.path, sizeof up);
+    size_t n = strlen(up);
+    while (n > 1 && up[n - 1] == '/') up[--n] = '\0';
+    const char *slash = strrchr(up, '/');
+    if (slash) copy_str(name, slash + 1, sizeof name);
     path_parent(up);
-    browser_load(&g_app.browser, up);
+    if (browser_load(&g_app.browser, up) == 0) browser_select(&g_app.browser, name);
 }
 
+static void browser_home(void) {
+    const char *home = platform_home_dir();
+    if (home) browser_load(&g_app.browser, home);
+}
+
+// Besides the list keys: / types a path instead, starting with the file selected or the folder
+// shown, and ~ goes to the home folder.
 static void browser_key(const tui_key_t *key) {
     browser_t *b = &g_app.browser;
+    if (key->type == TUI_KEY_CHAR && key->ch_len == 1 && (key->ch[0] == '/' || key->ch[0] == '~')) {
+        if (key->ch[0] == '~') { browser_home(); g_app.dirty = 1; return; }
+        char start[1200];
+        if (b->n_items > 0 && !b->items[b->selected].is_dir) browser_entry_path(b, &b->items[b->selected], start, sizeof start);
+        else path_join(start, sizeof start, b->path, "");
+        begin_key_path(g_app.load_kind, start, 1);
+        return;
+    }
     list_key_t k = list_key(key);
     switch (k) {
         case LIST_LEFT: browser_up(); break;
@@ -2115,6 +2285,7 @@ static void begin_send_browse(void) {
 
 static void send_browser_key(const tui_key_t *key) {
     browser_t *b = &g_app.browser;
+    if (key->type == TUI_KEY_CHAR && key->ch_len == 1 && key->ch[0] == '~') { browser_home(); g_app.dirty = 1; return; }
     list_key_t k = list_key(key);
     switch (k) {
         case LIST_LEFT: browser_up(); break;
@@ -2279,7 +2450,7 @@ static void render_sign_picker(int rows_n, int cols_n, const char *clock, const 
     char help[600], usage[32] = "";
     char now[160]; setting_value(SET_SIGN, now, sizeof now);
     snprintf(help, sizeof help, "%s Now: %s.", SIGN_PICKS[g_app.sign_sel].help, now);
-    static const char *const SET[N_PICKS] = { "off", "age", NULL, NULL, "pgp", NULL, NULL };
+    static const char *const SET[N_PICKS] = { "off", "age", "age:PATH", "age:PATH", NULL, "pgp", "pgp:PATH", "pgp:PATH", NULL };
     if (SET[g_app.sign_sel]) snprintf(usage, sizeof usage, ":set sign %s", SET[g_app.sign_sel]);
     const char *nav[8];
     tui_page_t page = {
@@ -2292,37 +2463,87 @@ static void render_sign_picker(int rows_n, int cols_n, const char *clock, const 
     tui_render_page(rows_n, cols_n, &page, bar, g_app.color_enabled);
 }
 
-// A folder's row is drawn like a row that opens a page.
+// The browser's rows: "..", the folders (drawn like rows that open a page), then the files, each
+// group under its heading. The intro says which folder it is and what's in it.
+static tui_row_t g_browser_rows[MAX_DIR_ITEMS];
+static char g_browser_labels[MAX_DIR_ITEMS][200];
+
+static void browser_rows(const browser_t *b, char *intro, size_t cap) {
+    int folders = 0, files = 0;
+    for (int i = 0; i < b->n_items; i++) {
+        const dir_entry_t *e = &b->items[i];
+        int up = strcmp(e->name, "../") == 0;
+        copy_str(g_browser_labels[i], up ? ".." : e->name, sizeof g_browser_labels[i]);
+        size_t n = strlen(g_browser_labels[i]);
+        if (e->is_dir && n > 1 && g_browser_labels[i][n - 1] == '/') g_browser_labels[i][n - 1] = '\0';
+        const char *section = NULL;
+        if (e->is_dir && !up && folders++ == 0) section = "Folders";
+        if (!e->is_dir && files++ == 0) section = "Files";
+        g_browser_rows[i] = (tui_row_t){ section, g_browser_labels[i], e->is_dir && !up ? "" : NULL, TUI_V_LINK, NULL };
+    }
+    char where[900], f[24] = "", g[24] = "";
+    tilde_path(b->path, where, sizeof where);
+    if (folders) snprintf(f, sizeof f, " \xc2\xb7 %d folder%s", folders, folders == 1 ? "" : "s");
+    if (files) snprintf(g, sizeof g, " \xc2\xb7 %d file%s", files, files == 1 ? "" : "s");
+    snprintf(intro, cap, "%s%s%s", where, folders || files ? f : " \xc2\xb7 empty", g);
+}
+
+// The help for the selected row when it's a folder or "..". Returns 0 for a file.
+static int browser_folder_help(const browser_t *b, char *out, size_t cap) {
+    if (b->n_items == 0) { snprintf(out, cap, "Nothing here. h goes up a folder."); return 1; }
+    const dir_entry_t *e = &b->items[b->selected];
+    if (!e->is_dir) return 0;
+    if (strcmp(e->name, "../") == 0) {
+        char up[900], shown[900];
+        copy_str(up, b->path, sizeof up);
+        path_parent(up);
+        tilde_path(up, shown, sizeof shown);
+        snprintf(out, cap, "Enter goes up to %s.", shown);
+    } else {
+        snprintf(out, cap, "Enter opens %s.", g_browser_labels[b->selected]);
+    }
+    return 1;
+}
+
 static void render_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar) {
-    static tui_row_t rows[MAX_DIR_ITEMS];
     const browser_t *b = &g_app.browser;
-    for (int i = 0; i < b->n_items; i++)
-        rows[i] = (tui_row_t){ NULL, b->items[i].name, b->items[i].is_dir ? "" : NULL, TUI_V_LINK, NULL };
-    char title[1000];
-    snprintf(title, sizeof title, "Settings" CRUMB "Signing identity" CRUMB "%s", b->path);
+    int age = g_app.load_kind == IDENT_AGE;
+    char intro[1000], help[700], usage[1100] = "";
+    browser_rows(b, intro, sizeof intro);
+    if (!browser_folder_help(b, help, sizeof help)) {
+        char full[1200], shown[1200];
+        browser_entry_path(b, &b->items[b->selected], full, sizeof full);
+        tilde_path(full, shown, sizeof shown);
+        snprintf(help, sizeof help, "Enter uses %s as your %s key. " WHY_SECRET "It stays in memory and isn't sent. "
+                 ":install saves this file's path, not the key.", g_browser_labels[b->selected], age ? "AGE" : "PGP");
+        snprintf(usage, sizeof usage, ":set sign %s:%s", age ? "age" : "pgp", shown);
+    }
     const char *nav[8];
     tui_page_t page = {
-        .title = title,
+        .title = age ? "Settings" CRUMB "Signing identity" CRUMB "AGE key file"
+                     : "Settings" CRUMB "Signing identity" CRUMB "PGP key file",
         .clock = clock,
+        .intro = intro,
         .nav = nav, .n_nav = settings_sections(nav, 8), .nav_sel = settings_section_index(SET_SIGN),
-        .rows = rows, .n_rows = b->n_items, .selected = b->selected,
-        .help = SIGN_PICKS[g_app.load_kind == IDENT_AGE ? PICK_AGE_FILE : PICK_PGP_FILE].help,
+        .rows = g_browser_rows, .n_rows = b->n_items, .selected = b->selected,
+        .help = help, .usage = usage[0] ? usage : NULL,
     };
     tui_render_page(rows_n, cols_n, &page, bar, g_app.color_enabled);
 }
 
 static void render_send_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar) {
-    static tui_row_t rows[MAX_DIR_ITEMS];
     const browser_t *b = &g_app.browser;
-    for (int i = 0; i < b->n_items; i++)
-        rows[i] = (tui_row_t){ NULL, b->items[i].name, b->items[i].is_dir ? "" : NULL, TUI_V_LINK, NULL };
-    char title[1000];
-    snprintf(title, sizeof title, "Send a file" CRUMB "%s", b->path);
+    char intro[1000], help[700];
+    browser_rows(b, intro, sizeof intro);
+    if (!browser_folder_help(b, help, sizeof help))
+        snprintf(help, sizeof help, "Enter offers %s to everyone in this session. Nobody gets it unless they fetch it.",
+                 g_browser_labels[b->selected]);
     tui_page_t page = {
-        .title = title,
+        .title = "Send a file",
         .clock = clock,
-        .rows = rows, .n_rows = b->n_items, .selected = b->selected,
-        .help = "offered to everyone here; nobody gets it unless they fetch it",
+        .intro = intro,
+        .rows = g_browser_rows, .n_rows = b->n_items, .selected = b->selected,
+        .help = help,
     };
     tui_render_page(rows_n, cols_n, &page, bar, g_app.color_enabled);
 }
@@ -2626,33 +2847,81 @@ static void load_saved_settings(void) {
 }
 
 // Format, kind, origin, scalar flag, and the creation time a PGP key made here has (its
-// fingerprint covers it), then the key.
-#define KEY_BLOB_LEN (8 + ID_SIGN_PUB_LEN + ID_SIGN_PRIV_LEN)
-_Static_assert(KEY_BLOB_LEN <= INSTALL_KEY_MAX, "a sealed key has room for the signing key");
+// fingerprint covers it), then the public key. Format 1 follows it with the secret key. Format 2,
+// for a key from a file, with the file's full path instead, so the secret key isn't copied: the
+// file is read again when it's opened. The public key tells whether the file still holds that key.
+#define KEY_BLOB_HEAD (8 + ID_SIGN_PUB_LEN)
+#define KEY_BLOB_LEN (KEY_BLOB_HEAD + ID_SIGN_PRIV_LEN)
+#define KEY_BLOB_MAX (KEY_BLOB_HEAD + KEY_PATH_MAX)
+_Static_assert(KEY_BLOB_MAX <= INSTALL_KEY_MAX, "a sealed key has room for the signing key or its path");
 
-static void identity_pack(uint8_t out[KEY_BLOB_LEN]) {
-    out[0] = 1;
+static int key_saved_as_path(void) {
+    return g_app.key_origin == KEY_FILE && g_app.key_path[0];
+}
+
+// Returns the length.
+static size_t identity_pack(uint8_t out[KEY_BLOB_MAX]) {
+    int path = key_saved_as_path();
+    out[0] = path ? 2 : 1;
     out[1] = (uint8_t)g_app.identity_source;
     out[2] = (uint8_t)g_app.key_origin;
     out[3] = (uint8_t)(g_app.identity.scalar != 0);
     for (int i = 0; i < 4; i++) out[4 + i] = (uint8_t)(g_app.pgp_created >> (24 - 8 * i));
     memcpy(out + 8, g_app.identity.pub, ID_SIGN_PUB_LEN);
-    memcpy(out + 8 + ID_SIGN_PUB_LEN, g_app.identity.priv, ID_SIGN_PRIV_LEN);
+    if (!path) {
+        memcpy(out + KEY_BLOB_HEAD, g_app.identity.priv, ID_SIGN_PRIV_LEN);
+        return KEY_BLOB_LEN;
+    }
+    size_t n = strlen(g_app.key_path);
+    memcpy(out + KEY_BLOB_HEAD, g_app.key_path, n);
+    return KEY_BLOB_HEAD + n;
 }
 
-// The saved key's public half is kept even when it isn't used, to tell whether the key in use is the same one.
+// The saved key's public half (and path) is kept even when it isn't used, to tell whether the key
+// in use is the same one. A key file that's gone or changed is said why with saved_note.
 static int identity_unpack(const uint8_t *in, size_t len, int use) {
-    if (len != KEY_BLOB_LEN || in[0] != 1 || (in[1] != IDENT_AGE && in[1] != IDENT_PGP) || in[2] > KEY_PASTED || in[3] > 1)
+    if (len < KEY_BLOB_HEAD || (in[0] != 1 && in[0] != 2) || (in[1] != IDENT_AGE && in[1] != IDENT_PGP)
+        || in[2] > KEY_PASTED || in[3] > 1)
         return -1;
+    int path = in[0] == 2;
+    if (path ? in[2] != KEY_FILE || len == KEY_BLOB_HEAD || len >= KEY_BLOB_MAX : len != KEY_BLOB_LEN) return -1;
+    char saved_path[KEY_PATH_MAX] = "";
+    if (path) {
+        memcpy(saved_path, in + KEY_BLOB_HEAD, len - KEY_BLOB_HEAD);
+        saved_path[len - KEY_BLOB_HEAD] = '\0';
+        if (strlen(saved_path) != len - KEY_BLOB_HEAD) return -1;
+    }
     memcpy(g_app.saved_key_pub, in + 8, ID_SIGN_PUB_LEN);
+    copy_str(g_app.saved_key_path, saved_path, sizeof g_app.saved_key_path);
     g_app.saved_key_known = 1;
     if (!use) return 0;
-    g_app.identity_source = (identity_source_t)in[1];
+    identity_source_t kind = (identity_source_t)in[1];
+    identity_keypair_t kp;
+    char full[KEY_PATH_MAX];
+    if (path) {
+        char shown[KEY_PATH_MAX];
+        tilde_path(saved_path, shown, sizeof shown);
+        if (read_key_file(kind, saved_path, &kp, full, sizeof full) != 0) {
+            saved_note("* your saved signing key's file %.200s can't be read, or no longer holds %s secret key - "
+                       "chat starts unsigned, and :set sign picks a key", shown, kind == IDENT_AGE ? "an AGE" : "a PGP");
+            crypto_wipe(&kp, sizeof kp);
+            return 0;
+        }
+        if (crypto_equal(kp.pub, g_app.saved_key_pub, ID_SIGN_PUB_LEN) != 0)
+            saved_note("* %.200s holds a different key from the one :install saved - chat signs with it, and "
+                       ":install records it", shown);
+    } else {
+        kp.scalar = in[3];
+        memcpy(kp.pub, in + 8, ID_SIGN_PUB_LEN);
+        memcpy(kp.priv, in + KEY_BLOB_HEAD, ID_SIGN_PRIV_LEN);
+    }
+    g_app.identity = kp;
+    crypto_wipe(&kp, sizeof kp);
+    g_app.identity_source = kind;
     g_app.key_origin = (key_origin_t)in[2];
-    g_app.identity.scalar = in[3];
     g_app.pgp_created = (uint32_t)in[4] << 24 | (uint32_t)in[5] << 16 | (uint32_t)in[6] << 8 | in[7];
-    memcpy(g_app.identity.pub, in + 8, ID_SIGN_PUB_LEN);
-    memcpy(g_app.identity.priv, in + 8 + ID_SIGN_PUB_LEN, ID_SIGN_PRIV_LEN);
+    // A key file saved as the key itself, before :install saved paths, has no path to show.
+    copy_str(g_app.key_path, saved_path, sizeof g_app.key_path);
     return 0;
 }
 
@@ -2719,9 +2988,12 @@ static void unlock_at_start(int in_box) {
                from_env ? "" : " (CHAT_INSTALL_PASSWORD opens it)");
 }
 
+// The same key, saved the same way: by its file's path for a key file, otherwise as the key. A key
+// file saved as the key, before :install saved paths, counts as saved until it's picked again.
 static int key_in_use_saved(void) {
     return g_app.identity_source != IDENT_NONE && g_app.saved_key_known
-        && crypto_equal(g_app.saved_key_pub, g_app.identity.pub, ID_SIGN_PUB_LEN);
+        && crypto_equal(g_app.saved_key_pub, g_app.identity.pub, ID_SIGN_PUB_LEN) == 0
+        && strcmp(g_app.saved_key_path, key_saved_as_path() ? g_app.key_path : "") == 0;
 }
 
 // A new passphrase first, since Argon2id is the slow part and can fail if there isn't enough
@@ -2747,17 +3019,19 @@ static void finish_install(const char *passphrase) {
     g_app.installed = 1;
     g_app.locked = 0;
     int key = g_app.identity_source != IDENT_NONE && !key_in_use_saved();
+    int path = key && key_saved_as_path();
     if (key) {
-        uint8_t blob[KEY_BLOB_LEN];
-        identity_pack(blob);
-        int rc = install_write_key(blob, sizeof blob);
+        uint8_t blob[KEY_BLOB_MAX];
+        size_t len = identity_pack(blob);
+        int rc = install_write_key(blob, len);
         crypto_wipe(blob, sizeof blob);
         if (rc != 0) { note("your settings are saved, but your signing key couldn't be written to %s", where); return; }
         memcpy(g_app.saved_key_pub, g_app.identity.pub, ID_SIGN_PUB_LEN);
+        copy_str(g_app.saved_key_path, path ? g_app.key_path : "", sizeof g_app.saved_key_path);
         g_app.saved_key_known = 1;
     }
     push_log("* installed: your settings%s are in %s, sealed, for next time. :uninstall deletes them",
-             key ? " and signing key" : "", where);
+             path ? " and your signing key's path" : key ? " and signing key" : "", where);
     note("installed in %s", where);
 }
 
@@ -2835,6 +3109,7 @@ static void uninstall_confirmed(void) {
     if (install_remove() != 0) { note("couldn't delete everything chat saved in %s", where); return; }
     g_app.installed = g_app.locked = 0;
     g_app.saved_key_known = 0;
+    g_app.saved_key_path[0] = '\0';
     push_log("* uninstalled: chat's files in %s are deleted. What's in use now lasts until chat exits", where);
     note("uninstalled");
 }
@@ -2942,9 +3217,17 @@ static cmd_result_t app_set(void *ctx, const char *arg) {
         for (size_t i = 0; i < sizeof SIGN_VALUES / sizeof SIGN_VALUES[0]; i++)
             if (strcmp(value, SIGN_VALUES[i].name) == 0) pick = SIGN_VALUES[i].pick;
         if (pick == PICK_OFF) { sign_pick(pick); return CMD_OK; }
+        // age:PATH or pgp:PATH: a key file, like --identity takes.
+        if ((strncmp(value, "age:", 4) == 0 || strncmp(value, "pgp:", 4) == 0) && value[4]) {
+            identity_source_t kind = value[0] == 'a' ? IDENT_AGE : IDENT_PGP;
+            if (load_key_file(kind, value + 4) == 0) { identity_chosen(); return CMD_OK; }
+            if (kind == IDENT_AGE) note("%.80s can't be read, or holds no AGE secret key", value + 4);
+            else note("%.80s can't be read, or isn't an unencrypted EdDSA/Ed25519 secret key", value + 4);
+            return CMD_OK;
+        }
         settings_open_at(SET_SIGN);
         begin_sign();
-        if (pick < 0) { note("sign takes off, age or pgp - a key file or a pasted key is chosen here"); return CMD_OK; }
+        if (pick < 0) { note("sign takes off, age, pgp, age:PATH or pgp:PATH - a pasted key is chosen here"); return CMD_OK; }
         // The password is typed on the page, where it's hidden.
         g_app.sign_sel = pick;
         sign_pick(pick);
@@ -3406,6 +3689,7 @@ static void handle_key(const tui_key_t *key) {
         case MODE_SEND_BROWSE: send_browser_key(key); return;
         case MODE_SIGN_PASTE:  paste_key(key); return;
         case MODE_SIGN_PASSWORD:  field_key(key, commit_sign_password, end_sign_password); return;
+        case MODE_SIGN_PATH:      field_key(key, commit_key_path, end_key_path); return;
         case MODE_SETTINGS_EDIT:  field_key(key, commit_setting_edit, end_setting_edit); return;
         case MODE_NEW_PASSWORD:
         case MODE_JOIN_ID:
@@ -3612,8 +3896,14 @@ static int install_paras(tui_para_t *p) {
         copy_str(key, "No signing key: signing is off. One you choose later (`:set sign`) is kept by `:install` again, "
                  "under the same passphrase.", sizeof key);
     else if (key_in_use_saved())
-        snprintf(key, sizeof key, "`%s/key`: your signing key, saved already. It stays as it is.", where);
-    else
+        snprintf(key, sizeof key, "`%s/key`: your signing key%s, saved already. It stays as it is.", where,
+                 g_app.saved_key_path[0] ? "'s path" : "");
+    else if (key_saved_as_path()) {
+        char shown[KEY_PATH_MAX];
+        tilde_path(g_app.key_path, shown, sizeof shown);
+        snprintf(key, sizeof key, "`%s/key`: the path to your signing key, `%.600s`. The key itself isn't copied: "
+                 "chat reads the file each time it starts.%s", where, shown, saved ? " It replaces what's saved there now." : "");
+    } else
         snprintf(key, sizeof key, "`%s/key`: your signing key.%s", where, saved ? " It replaces the key saved there now." : "");
     int n = add_para(p, 0, TUI_P_TEXT, g_app.installed || g_app.locked
         ? "chat is installed here: this saves what's in use now in place of what's saved. **The files are a trail**: "
@@ -3646,7 +3936,10 @@ static int uninstall_paras(tui_para_t *p) {
     snprintf(what, sizeof what, "This deletes what `:install` saved in `%s`: your %s. What's in use now lasts until "
              "chat exits.", where, settings && key ? "sealed settings and signing key" : settings ? "sealed settings" : "sealed signing key");
     int n = add_para(p, 0, TUI_P_TEXT, what);
-    if (key) {
+    if (key && g_app.saved_key_known && g_app.saved_key_path[0]) {
+        n = add_para(p, n, TUI_P_BLANK, "");
+        n = add_para(p, n, TUI_P_TEXT, "The saved key is only the path to your key file. The file itself isn't touched.");
+    } else if (key) {
         n = add_para(p, n, TUI_P_BLANK, "");
         n = add_para(p, n, TUI_P_TEXT, "**A key saved only there is gone for good**, and with it the fingerprint peers "
                                        "know you by.");
@@ -3689,13 +3982,31 @@ static const tui_dialog_t *current_dialog(void) {
             d.placeholder = "password (blank: a new key until chat exits)";
             d.keys = "enter make the key \xc2\xb7 esc back";
             break;
-        case MODE_SIGN_PASTE:
+        case MODE_SIGN_PATH: {
+            int age = g_app.load_kind == IDENT_AGE;
+            d.title = age ? "AGE KEY FILE" : "PGP KEY FILE";
+            int n = add_para(paras, 0, TUI_P_TEXT, age ? AGE_PATH_HELP : PGP_PATH_HELP);
+            n = add_para(paras, n, TUI_P_BLANK, "");
+            n = add_para(paras, n, TUI_P_TEXT, KEY_WHY);
+            n = add_para(paras, n, TUI_P_BLANK, "");
+            d.n_text = add_para(paras, n, TUI_P_TEXT, KEY_FILE_SAVED);
+            d.mask = 0;
+            d.placeholder = age ? "~/.config/age/key.txt" : "~/key.asc";
+            d.keys = "enter use this key \xc2\xb7 esc back";
+            break;
+        }
+        case MODE_SIGN_PASTE: {
+            int n = add_para(paras, 0, TUI_P_TEXT, g_app.load_kind == IDENT_AGE ? AGE_PASTE_HELP : PGP_PASTE_HELP);
+            n = add_para(paras, n, TUI_P_BLANK, "");
+            n = add_para(paras, n, TUI_P_TEXT, KEY_WHY);
+            n = add_para(paras, n, TUI_P_BLANK, "");
+            d.n_text = add_para(paras, n, TUI_P_TEXT, KEY_PASTE_SAVED);
             d.title = g_app.load_kind == IDENT_AGE ? "PASTE AN AGE KEY" : "PASTE A PGP KEY";
-            d.n_text = add_para(paras, 0, TUI_P_TEXT, g_app.load_kind == IDENT_AGE ? AGE_PASTE_HELP : PGP_PASTE_HELP);
             d.input = NULL;
             d.status = g_app.paste_status;
             d.keys = "esc back";
             break;
+        }
         case MODE_SETTINGS_EDIT: {
             const setting_def_t *sd = setting_def(g_edit_id);
             size_t i = 0;
@@ -3801,11 +4112,11 @@ static tui_bar_t current_bar(void) {
         case MODE_SETTINGS:        b.hint = settings_hint(); break;
         case MODE_SIGN_CHOICE:     b.hint = "enter choose \xc2\xb7 j/k move \xc2\xb7 esc back \xc2\xb7 q close"; break;
         case MODE_SIGN_BROWSE:
-            b.hint = "enter open \xc2\xb7 h up a folder \xc2\xb7 j/k move \xc2\xb7 esc back \xc2\xb7 q close";
+            b.hint = "enter open \xc2\xb7 h up \xc2\xb7 / type a path \xc2\xb7 ~ home \xc2\xb7 esc back \xc2\xb7 q close";
             break;
         case MODE_SEND_BROWSE:
             b.chip = "SEND";
-            b.hint = "enter send \xc2\xb7 h up a folder \xc2\xb7 j/k move \xc2\xb7 esc close";
+            b.hint = "enter send \xc2\xb7 h up \xc2\xb7 ~ home \xc2\xb7 j/k move \xc2\xb7 esc close";
             break;
         case MODE_CHAT:
             chat_input(&b, &g_app.input);
@@ -3910,6 +4221,10 @@ static void render(void) {
         case MODE_SIGN_CHOICE:
         case MODE_SIGN_PASTE:
         case MODE_SIGN_PASSWORD:   render_sign_picker(rows_n, cols_n, hhmm, &bar); return;
+        case MODE_SIGN_PATH:
+            if (g_app.path_from_browser) render_browser(rows_n, cols_n, hhmm, &bar);
+            else render_sign_picker(rows_n, cols_n, hhmm, &bar);
+            return;
         case MODE_SIGN_BROWSE:     render_browser(rows_n, cols_n, hhmm, &bar); return;
         case MODE_SEND_BROWSE:     render_send_browser(rows_n, cols_n, hhmm, &bar); return;
         default: break;

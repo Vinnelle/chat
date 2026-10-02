@@ -400,6 +400,17 @@ long platform_read_file(const char *utf8_path, void *buf, size_t cap) {
     return got;
 }
 
+int platform_full_path(const char *utf8_path, char *out, size_t cap) {
+    if (utf8_path[0] == '/') {
+        int n = snprintf(out, cap, "%s", utf8_path);
+        return n > 0 && (size_t)n < cap ? 0 : -1;
+    }
+    char cwd[1024];
+    if (!getcwd(cwd, sizeof cwd)) return -1;
+    int n = snprintf(out, cap, "%s/%s", strcmp(cwd, "/") == 0 ? "" : cwd, utf8_path);
+    return n > 0 && (size_t)n < cap ? 0 : -1;
+}
+
 FILE *platform_open_regular(const char *utf8_path, uint64_t *size) {
     int fd = open(utf8_path, O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC);
     if (fd < 0) return NULL;
