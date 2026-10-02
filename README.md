@@ -410,7 +410,9 @@ If you pressed `Esc` at the start, so nothing saved is open, `:install` first as
 what's saved. `y` asks for its passphrase (with more than one save, after you pick one from a
 list), and from then on what's saved there is in use, the same as if you'd opened it at the
 start, and settings you change are saved to it. Settings you changed before that which the save
-doesn't have keep their value and are saved to it, and so are keys you verified. `n` makes a new
+doesn't have keep their value and are saved to it, and a command line option doesn't undo a
+setting you changed. Keys you verified are saved to it too, except ones from a save you
+uninstalled in that run: each save keeps its own. `n` makes a new
 save instead, with a name and a passphrase of its own (see
 [More than one save](#more-than-one-save)). If you've forgotten a save's passphrase,
 `:uninstall NAME` deletes it. `:uninstall` deletes

@@ -2564,8 +2564,8 @@ static void draw_dialog(wbuf_t *w, int rows, int cols, const tui_dialog_t *d, in
             ptext(&p, on ? S_ACCENT_BOLD : S_PLAIN, on ? G_PTR " " : "  ");
             const char *detail = d->details && d->details[i] ? d->details[i] : "";
             int dw = utf8_str_cols(detail), nw = utf8_str_cols(d->items[i]);
-            // The detail is left out if the name would get fewer than 12 columns (or fewer than its own).
-            if (dw > p.room - p.used - 3 - (nw < 12 ? nw : 12)) dw = 0;
+            // The detail is left out unless the whole name fits beside it.
+            if (nw + 3 + dw > p.room - p.used) dw = 0;
             pell(&p, on ? S_ACCENT_BOLD : S_BOLD, d->items[i], p.room - p.used - (dw ? dw + 3 : 1));
             if (dw) {
                 pspace(&p, p.room - dw - 1);
