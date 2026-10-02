@@ -63,7 +63,7 @@ static int put_utf8(char *out, size_t *n, size_t room, uint32_t cp) {
     return 0;
 }
 
-// Never steps past the end of the text: a failed parse goes on from where it stopped.
+// Never steps past the end of the text. A failed parse continues from where it stopped.
 static int escape(parser_t *ps, char *out, size_t *n, size_t room) {
     static const char FROM[] = "btnfr\"\\", TO[] = "\b\t\n\f\r\"\\";
     char e = *ps->p;

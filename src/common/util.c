@@ -211,7 +211,7 @@ size_t clean_text(const char *in, char *out, size_t max_len) {
     while (i < n) {
         size_t adv;
         uint32_t cp = utf8_next(s, n, i, &adv);
-        // A lone byte of 0x80 or more is malformed: dropped, so the result is always valid UTF-8.
+        // A lone byte of 0x80 or more is malformed and dropped, so the result is always valid UTF-8.
         if (!is_stripped(cp) && !(adv == 1 && cp >= 0x80)) {
             if (o + adv > max_len) break;
             memcpy(out + o, s + i, adv);
@@ -234,7 +234,7 @@ static const char SID_ALPHABET[] = "23456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 void random_session_id(char *out, size_t len) {
     if (len > 64) len = 64;
-    // randombytes_uniform has no modulo bias: every character carries the full log2(30) bits.
+    // randombytes_uniform has no modulo bias, so every character carries the full log2(30) bits.
     for (size_t i = 0; i < len; i++)
         out[i] = SID_ALPHABET[randombytes_uniform((uint32_t)(sizeof(SID_ALPHABET) - 1))];
     out[len] = '\0';

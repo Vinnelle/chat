@@ -109,8 +109,8 @@ size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out) {
     if (b0 == 0x1b) {
         if (len == 1) { out->type = TUI_KEY_ESCAPE; return 1; }
 
-        // An OSC is the terminal answering a query: swallowed whole, up to BEL or ST, so none of
-        // it lands in the input.
+        // An OSC is the terminal answering a query. It's consumed in full, up to BEL or ST, so none of
+        // it ends up in the input.
         if (buf[1] == ']') {
             size_t k = 2;
             while (k < len && buf[k] != 0x07 && !(buf[k] == 0x1b && k + 1 < len && buf[k + 1] == '\\')) k++;
@@ -125,8 +125,8 @@ size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out) {
             return buf[k] == 0x07 ? k + 1 : k + 2;
         }
 
-        // Unknown CSI sequences (Ctrl+arrows, F-keys, focus reports) are swallowed whole, so
-        // their tail doesn't land in the input as text.
+        // Unknown CSI sequences (Ctrl+arrows, F-keys, focus reports) are consumed in full, so the end
+        // of them doesn't end up in the input as text.
         if (len >= 3 && buf[1] == '[') {
             switch (buf[2]) {
                 case 'A': out->type = TUI_KEY_UP;    return 3;
@@ -154,7 +154,7 @@ size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out) {
             while (k < len && buf[k] >= 0x20 && buf[k] <= 0x3f) k++;
             out->type = TUI_KEY_UNKNOWN;
             if (k < len && buf[k] >= 0x40 && buf[k] <= 0x7e) {
-                // "?997;1n" or "?997;2n": the terminal went over to a dark or a light theme.
+                // "?997;1n" or "?997;2n": the terminal switched to a dark or a light theme.
                 if (buf[k] == 'n' && k >= 7 && memcmp(buf + 2, "?997;", 5) == 0) out->type = TUI_KEY_THEME_CHANGED;
                 return k + 1;
             }
@@ -168,8 +168,8 @@ size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out) {
             }
         }
 
-        // Esc and the next key arrived in one read (a fast ':' after Esc, say): the Esc stands
-        // alone, like vim reads it.
+        // Esc and the next key arrived in one read (a fast ':' after Esc, for example). The Esc is
+        // handled on its own, like vim does.
         out->type = (buf[1] == '[' || buf[1] == 'O') ? TUI_KEY_UNKNOWN : TUI_KEY_ESCAPE;
         return 1;
     }
@@ -188,8 +188,8 @@ size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out) {
     if (b0 == 0x13) { out->type = TUI_KEY_SETTINGS; return 1; }
     if (b0 < 0x20) { out->type = TUI_KEY_UNKNOWN; return 1; }
 
-    // Only whole, well-formed characters reach the input line; a stray byte (a C1 control
-    // among them) is dropped rather than echoed to the terminal.
+    // Only complete, valid characters reach the input line. A stray byte (including a C1 control)
+    // is dropped instead of being echoed to the terminal.
     size_t seqlen = 1;
     if ((b0 & 0xe0) == 0xc0) seqlen = 2;
     else if ((b0 & 0xf0) == 0xe0) seqlen = 3;
@@ -246,7 +246,7 @@ static void enter_normal(tui_input_t *in) {
     normal_clamp(in);
 }
 
-// A '/' line may turn back into text only from an empty line: a draft stays put.
+// A '/' line can only turn back into text if it started on an empty line, so a draft isn't changed.
 static void enter_command(tui_input_t *in, char prefix) {
     in->cmd_from_insert = in->mode == TUI_IMODE_INSERT;
     in->cmd_as_text = prefix == '/' && in->len == 0;
@@ -321,7 +321,7 @@ static int insert_feed(tui_input_t *in, const tui_key_t *key) {
             return 1;
         }
         case TUI_KEY_CHAR:
-            // '/' on an empty line opens the COMMAND line, as chat programs have it.
+            // '/' on an empty line opens the COMMAND line, like other chat programs.
             if (in->modal && in->len == 0 && key->ch_len == 1 && key->ch[0] == '/') {
                 enter_command(in, '/');
                 return 1;
@@ -339,7 +339,7 @@ static int insert_feed(tui_input_t *in, const tui_key_t *key) {
         }
         case TUI_KEY_DELETE: delete_at_cursor(in); return 1;
         case TUI_KEY_DELETE_WORD: {
-            // Back over spaces, then the word before them, as vim and readline do.
+            // Back over spaces, then the word before them, like vim and readline.
             int start = in->cursor;
             while (start > 0 && in->buf[start - 1] == ' ') start--;
             while (start > 0 && in->buf[start - 1] != ' ') start--;
@@ -350,7 +350,7 @@ static int insert_feed(tui_input_t *in, const tui_key_t *key) {
             return 1;
         }
         case TUI_KEY_CTRL_U:
-            // Everything before the cursor, as readline has it.
+            // Everything before the cursor, like readline.
             memmove(in->buf, in->buf + in->cursor, (size_t)(in->len - in->cursor));
             in->len -= in->cursor;
             in->cursor = 0;
@@ -373,8 +373,8 @@ static int normal_feed(tui_input_t *in, const tui_key_t *key) {
         switch (key->ch[0]) {
             case 'h': in->cursor = step_left(in, in->cursor); return 1;
             case 'l': in->cursor = step_right(in, in->cursor); normal_clamp(in); return 1;
-            // Left to the caller: they step through the sessions, jump to the newest message, open
-            // the help and show or hide the console, the chat and the sidebar.
+            // Handled by the caller: switching sessions, jumping to the newest message, opening the help,
+            // and showing or hiding the console, the chat and the sidebar.
             case 'j': case 'k': case 'G': case '?': case 'c': case 'C': case 's': return 0;
             case 'i': in->mode = TUI_IMODE_INSERT; return 1;
             case 'a': in->cursor = step_right(in, in->cursor); in->mode = TUI_IMODE_INSERT; return 1;
@@ -434,7 +434,7 @@ void tui_input_command_to_text(tui_input_t *in) {
     insert_bytes(in, text, n);
 }
 
-// COMMAND mode owns every key except Enter, which the caller handles to run the line.
+// COMMAND mode handles every key except Enter, which the caller handles to run the line.
 static int command_feed(tui_input_t *in, const tui_key_t *key) {
     switch (key->type) {
         case TUI_KEY_CHAR:
@@ -448,7 +448,7 @@ static int command_feed(tui_input_t *in, const tui_key_t *key) {
             in->cmd_len += key->ch_len;
             in->cmd[in->cmd_len] = '\0';
             in->menu_sel = 0;
-            // Opened from typing, a line no command can start stays what it was: text.
+            // If it was opened from typing, a line that can't be a command goes back to being text.
             if (in->cmd_as_text && !could_be_command(in)) tui_input_command_to_text(in);
             return 1;
         case TUI_KEY_TAB: {
@@ -508,9 +508,9 @@ int tui_input_feed(tui_input_t *in, const tui_key_t *key) {
 // ---- drawing ----
 //
 // Everything is drawn in the terminal's own colours: its default foreground and background, faint
-// text for what's secondary, and its 16-colour palette for the accents. The UI so takes on the
-// terminal's theme, whatever it is, and changes with it. Peers' colours are the one exception;
-// see readable().
+// text for secondary things, and its 16 colour palette for accents. So the UI matches the
+// terminal's theme, whatever it is, and changes with it. Peers' colours are the only exception
+// (see readable()).
 
 #define FRAME_CAP 262144
 static char g_frame[FRAME_CAP];
@@ -526,8 +526,8 @@ static void wapp(wbuf_t *w, const char *fmt, ...) {
 }
 
 // Appends as much of s as fits in width columns and returns the columns it takes. A malformed
-// byte or a control character goes out as U+FFFD: all text reaches the terminal through here,
-// and nothing in it may start an escape sequence, whatever the terminal's encoding.
+// byte or a control character is written as U+FFFD. All text reaches the terminal through here,
+// and nothing in it can start an escape sequence, whatever the terminal's encoding.
 static int wapp_trunc(wbuf_t *w, const char *s, int width) {
     static const char REPLACEMENT[] = "\xef\xbf\xbd";
     int used = 0;
@@ -547,7 +547,7 @@ static int wapp_trunc(wbuf_t *w, const char *s, int width) {
     return used;
 }
 
-// As wapp_trunc, but text cut short ends in an ellipsis.
+// Like wapp_trunc, but text that's cut off ends in an ellipsis.
 static int wapp_ell(wbuf_t *w, const char *s, int width) {
     if (width <= 0) return 0;
     if (utf8_str_cols(s) <= width) return wapp_trunc(w, s, width);
@@ -559,7 +559,7 @@ static int wapp_ell(wbuf_t *w, const char *s, int width) {
 static void at(wbuf_t *w, int row, int col) { wapp(w, "\x1b[%d;%dH", row, col); }
 
 static int g_color;                  // this frame's: colours, or attributes alone (NO_COLOR)
-static int g_have_bg;                // the terminal has told its background colour
+static int g_have_bg;                // the terminal has reported its background colour
 static uint8_t g_bg[3];
 static char g_sel_bg[32];            // a shade off that background, for the selected row
 static const char *g_row_bg = "";    // the background of the row being drawn, kept through styles
@@ -575,7 +575,7 @@ static const char *const STYLE_MONO[] = {
     "", "\x1b[2m", "\x1b[1m", "", "\x1b[1m", "", "", "\x1b[1m", "", "\x1b[1m",
 };
 
-// Every style starts from nothing but the row's background, so none carries into the next.
+// Every style starts from just the row's background, so nothing carries over into the next.
 static void sty(wbuf_t *w, style_t s) {
     wapp(w, "\x1b[0m%s%s", g_row_bg, (g_color ? STYLE_COLOR : STYLE_MONO)[s]);
 }
@@ -603,7 +603,7 @@ static const char *border_sgr(int tone) {
     return tone >= 0 && tone < 5 ? LIT[tone] : "\x1b[2m";
 }
 
-// Relative luminance, a gamma of 2 standing in for sRGB's curve.
+// Relative luminance, using a gamma of 2 to approximate sRGB's curve.
 static double lum(const uint8_t c[3]) {
     double r = c[0] / 255.0, g = c[1] / 255.0, b = c[2] / 255.0;
     return 0.2126 * r * r + 0.7152 * g * g + 0.0722 * b * b;
@@ -614,9 +614,9 @@ static double contrast(const uint8_t a[3], const uint8_t b[3]) {
     return la > lb ? la / lb : lb / la;
 }
 
-// A person's colour, eased toward the terminal's foreground side until it reads on its background:
-// yellow on a light theme darkens, indigo on a dark one lightens. As it is until the terminal has
-// told its background.
+// A person's colour, moved toward the terminal's foreground until it's readable on the background:
+// yellow on a light theme gets darker, indigo on a dark one gets lighter. Unchanged until the
+// terminal has reported its background.
 static void readable(const uint8_t in[3], uint8_t out[3]) {
     memcpy(out, in, 3);
     if (!g_have_bg) return;
@@ -634,7 +634,7 @@ void tui_set_background(const uint8_t rgb[3]) {
     snprintf(g_sel_bg, sizeof g_sel_bg, "\x1b[48;2;%u;%u;%um", s[0], s[1], s[2]);
 }
 
-// exact: as given (a colour sample), else made readable().
+// exact: used as given (a colour sample), otherwise passed through readable().
 static void sty_rgb(wbuf_t *w, const uint8_t rgb[3], int bold, int exact) {
     wapp(w, "\x1b[0m%s%s", g_row_bg, bold ? "\x1b[1m" : "");
     if (!g_color) return;
@@ -644,14 +644,15 @@ static void sty_rgb(wbuf_t *w, const uint8_t rgb[3], int bold, int exact) {
     wapp(w, "\x1b[38;2;%u;%u;%um", c[0], c[1], c[2]);
 }
 
-// The selected row stands on a shade off the background once it's known, reversed without colour.
+// The selected row uses a slightly different shade of the background once it's known, or reverse
+// video without colour.
 static void row_select(int on) {
     if (!on) g_row_bg = "";
     else if (!g_color) g_row_bg = "\x1b[7m";
     else g_row_bg = g_have_bg ? g_sel_bg : "";
 }
 
-// Writes styled text into a row from its left, room columns at most.
+// Writes styled text into a row from the left, at most room columns.
 typedef struct { wbuf_t *w; int used, room; } pen_t;
 
 static void ptext(pen_t *p, style_t s, const char *t) {
@@ -680,7 +681,7 @@ static void pspace(pen_t *p, int to) {
     while (p->used < to) { wapp(p->w, " "); p->used++; }
 }
 
-// A row inside a box: a column of padding either side of the pen, which covers the rest.
+// A row inside a box: a column of padding on each side of the pen, which fills the rest.
 static void inner_begin(wbuf_t *w, pen_t *p, int row, int left, int width) {
     at(w, row, left);
     sty(w, S_PLAIN);
@@ -700,8 +701,8 @@ static void blank_row(wbuf_t *w, int row, int left, int width) {
     inner_end(&p);
 }
 
-// "key action · key action": each key lit, what it does faint. It takes as many columns as it has
-// characters.
+// "key action · key action": each key highlighted, what it does faint. It takes as many columns as
+// it has characters.
 static void draw_hint(pen_t *p, const char *h) {
     static const char SEP[] = " " G_MID " ";
     for (const char *s = h; *s; ) {
@@ -721,7 +722,7 @@ static void draw_hint(pen_t *p, const char *h) {
     }
 }
 
-// Styled text built before its place is known: a box's titles.
+// Styled text built before its position is known: a box's titles.
 typedef struct { char buf[1024]; wbuf_t w; pen_t p; } span_t;
 
 static void span_init(span_t *s, int room) {
@@ -729,7 +730,7 @@ static void span_init(span_t *s, int room) {
     s->p = (pen_t){ &s->w, 0, room < 0 ? 0 : room };
 }
 
-// The room for a title in an edge width columns wide, beside one right_cols wide at its right.
+// The space for a title in an edge width columns wide, next to one right_cols wide on its right.
 static int title_room(int width, int right_cols) {
     int r = width - 6 - (right_cols > 0 ? right_cols + 2 : 0);
     return r < 0 ? 0 : r;
@@ -782,7 +783,7 @@ static void box(wbuf_t *w, rect_t r, const char *bs, const span_t *title, const 
     edge(w, r.top + r.h - 1, r.left, r.w, bottom_left(r), G_BR, bs, NULL, foot);
 }
 
-// The "◆ chat" and version every screen's left-hand box is titled with.
+// The "◆ chat" and version in the title of every screen's left hand box.
 static void brand(span_t *title, span_t *right, int width) {
     span_init(right, width);
     ptext(&right->p, S_FAINT, "v" CHAT_VERSION);
@@ -798,17 +799,17 @@ void tui_invalidate(void) { g_last_frame_valid = 0; }
 
 static void lock_buffers(void);
 
-// Autowrap is off while a frame draws: a character the width table guesses too narrow is clipped
-// at the right edge instead of pushing the rest of the frame down a row.
+// Autowrap is off while a frame is drawn, so a character the width table thinks is narrower than
+// it is gets clipped at the right edge instead of pushing the rest of the frame down a row.
 static void begin_frame(wbuf_t *w) {
     lock_buffers();
     wapp(w, "\x1b[?2026h\x1b[?25l\x1b[?7l");
 }
 
-// whole: the frame covers the screen, and isn't sent if it's the one already there (the clock
-// redraws every second, but shows minutes).
+// whole: the frame covers the screen, and isn't sent if it's the same as what's already there (the
+// clock redraws every second, but only shows minutes).
 static void end_frame(wbuf_t *w, int whole) {
-    // Written on its own so a frame that filled its buffer still turns autowrap back on.
+    // Written separately so a frame that filled its buffer still turns autowrap back on.
     static const char tail[] = "\x1b[0m\x1b[?7h\x1b[?2026l";
     if (whole) {
         uint8_t h[32];
@@ -852,7 +853,8 @@ typedef struct {
 
 static grid_t g_grid;
 
-// The frame and the grid hold the conversation as drawn: kept out of swap like the scrollbacks.
+// The frame and the grid hold the conversation as drawn, so they're kept out of swap like the
+// scrollbacks.
 static void lock_buffers(void) {
     static int locked;
     if (locked) return;
@@ -896,8 +898,8 @@ static void grid_emit(wbuf_t *w, const grid_t *g, int top, int left, int pad) {
     }
 }
 
-// Bytes of s (len of them) that go on one row of width columns: up to the last space that
-// leaves the row at least a third full, else as much as fits.
+// Bytes of s (len of them) that go on one row of width columns: up to the last space that leaves
+// the row at least a third full, otherwise as much as fits.
 static size_t wrap_chunk(const char *s, size_t len, int width) {
     if (width < 1) width = 1;
     size_t n = utf8_fit_cols(s, len, width, NULL);
@@ -914,7 +916,7 @@ static size_t wrap_chunk(const char *s, size_t len, int width) {
     return n;
 }
 
-// Splits text into rows, the first first_w columns wide and the rest rest_w; returns how many.
+// Splits text into rows, the first first_w columns wide and the rest rest_w. Returns how many.
 static int wrap_rows(const char *text, int first_w, int rest_w, size_t *off, size_t *len, int max) {
     int n = 0;
     const char *tx = text;
@@ -933,8 +935,8 @@ static int wrap_rows(const char *text, int first_w, int rest_w, size_t *off, siz
 
 // ---- the chat and the console ----
 
-// A chat line's name (its first color_len bytes, less a mention's "@ " and the ':' after it) and
-// the text after it. 0 for a line that isn't one.
+// A chat line's name (its first color_len bytes, minus a mention's "@ " and the ':' after it) and
+// the text after it. 0 for a line that isn't a chat line.
 static int split_chat_line(const tui_line_t *l, char *name, size_t cap, const char **body) {
     size_t n = strlen(l->text);
     if (l->color_len <= 1 || (size_t)l->color_len > n || l->text[l->color_len - 1] != ':') return 0;
@@ -950,8 +952,8 @@ static int split_chat_line(const tui_line_t *l, char *name, size_t cap, const ch
     return 1;
 }
 
-// A name as the chat gives it: the nick in its colour, and what the UI adds to it - " (you)", a
-// "#id" telling lookalikes apart - faint. No nick can hold '(' or '#', so those are the UI's own.
+// A name as the chat shows it: the nick in its colour, and what the UI adds to it (" (you)", or a
+// "#id" to tell lookalikes apart) faint. No nick can contain '(' or '#', so those are always the UI's.
 static void draw_name(pen_t *p, const char *name, const uint8_t *rgb) {
     size_t nick = strcspn(name, "#(");
     while (nick > 0 && name[nick - 1] == ' ') nick--;
@@ -967,11 +969,11 @@ static void draw_name(pen_t *p, const char *name, const uint8_t *rgb) {
 
 #define SB_AT(sb, k) (&(sb)->lines[((sb)->head - 1 - (k) + TUI_SCROLLBACK * 2) % TUI_SCROLLBACK])
 
-// Lines from the bottom of nrows grid rows up, newest last, skipping the skip newest. Chat lines
-// line up in columns - time, name, text - and a run from one person in one minute shows the time
-// and name once. The console's lines are faint, its warnings yellow.
-// A picture's rows at width cols: each is two of its pixel rows, the upper as the colour of a
-// half block and the lower as the colour behind it, scaled to the width by the nearest pixel.
+// Lines from the bottom of nrows grid rows upwards, newest last, skipping the skip newest. Chat
+// lines are laid out in columns (time, name, text), and a run from one person in the same minute
+// shows the time and name once. The console's lines are faint, and its warnings yellow.
+// A picture's rows at width cols: each is two of its pixel rows, the upper one as the colour of a
+// half block and the lower one as the colour behind it, scaled to the width by nearest pixel.
 static int image_rows(const tui_image_t *im, int cols) {
     if (!im || im->w < 1 || im->h < 1 || cols < 1) return 0;
     int w = im->w < cols ? im->w : cols;
@@ -985,7 +987,7 @@ static void draw_image_row(pen_t *p, const tui_image_t *im, int cols, int r) {
     int h = (int)(((int64_t)im->h * w + im->w / 2) / im->w);
     if (h < 1) h = 1;
     if (!g_color) {
-        // Without colour there's nothing to draw it with.
+        // It can't be drawn without colour.
         if (r == 0) ptext(p, S_FAINT, "(a picture: it needs a terminal with colour)");
         return;
     }
@@ -1004,7 +1006,7 @@ static void draw_image_row(pen_t *p, const tui_image_t *im, int cols, int r) {
     wapp(p->w, "\x1b[0m");
 }
 
-// A file on its way: a bar, lit as far as it's got (heavier, without colour), and what it says.
+// A file being downloaded: a progress bar (heavier without colour), and its text.
 static void draw_progress(pen_t *p, const tui_progress_t *pg) {
     int room = p->room - p->used;
     int bw = room >= 40 ? 16 : room >= 24 ? 8 : 0;
@@ -1020,8 +1022,8 @@ static void draw_progress(pen_t *p, const tui_progress_t *pg) {
     pell(p, S_FAINT, pg->text, p->room - p->used);
 }
 
-// A chat line's text in style st, with each @nick that's self lit, as the chat finds them: any case,
-// and whatever follows.
+// A chat line's text in style st, with each @nick that matches self highlighted, the same way the
+// chat matches them: any case, followed by anything.
 static void draw_body(pen_t *p, style_t st, const char *t, const char *self) {
     size_t sl = self ? strlen(self) : 0;
     char run[TUI_LINE_MAX + 1];
@@ -1049,7 +1051,7 @@ static void draw_body(pen_t *p, style_t st, const char *t, const char *self) {
     ptext(p, st, run);
 }
 
-// The rule over the n messages that came while the session wasn't on screen.
+// The line above the n messages that came in while the session wasn't on screen.
 static void draw_new_rule(grid_t *g, int row, int n) {
     gpen_t gp;
     grid_open(g, row, &gp);
@@ -1071,12 +1073,12 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
     int W = g->w;
     if (skip >= sb->count) skip = sb->count - 1;
     if (skip < 0) skip = 0;
-    // The rule goes over the oldest of the new messages, and only with older ones above it.
+    // The line goes above the oldest of the new messages, and only if there are older ones above it.
     int fresh = !console && v && v->new_lines > 0 && v->new_lines < sb->count ? v->new_lines : 0;
     const char *self = !console && v ? v->self : NULL;
     int time_w = W >= 36 ? 7 : 0;
     // The name column: as wide as the widest name in view, up to a third of the pane. A name wider
-    // than that goes on a row of its own, so it takes no room in the column.
+    // than that goes on its own row, so it doesn't take up space in the column.
     int nw = 0;
     if (!console) {
         for (int k = skip; k < sb->count && k < skip + nrows; k++) {
@@ -1097,9 +1099,8 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
         if (!chat && body[0] == '*' && body[1] == ' ') body += 2;
         int name_c = chat ? utf8_str_cols(name) : 0;
 
-        // A name wider than the column ("bob (code not compared)" in a narrow pane) goes on a row
-        // of its own over the text, so the text still lines up; cut, it could lose what the chat
-        // adds to it.
+        // A name wider than the column ("bob (code not compared)" in a narrow pane) goes on its own row
+        // above the text, so the text still lines up. Cutting it off could lose what the chat adds to it.
         int stacked = chat && aligned && name_c > nw;
         int first_pre, rest_pre;
         if (chat && aligned) first_pre = rest_pre = time_w + nw + 2;
@@ -1113,19 +1114,19 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
         // A picture shown under the line that offers it, lined up with the text.
         const tui_image_t *im = chat && l->file && v && v->image ? v->image(v->image_ctx, l->file) : NULL;
         int img_cols = W - rest_pre - 1 < TUI_IMAGE_MAX_W ? W - rest_pre - 1 : TUI_IMAGE_MAX_W;
-        // At most half the pane tall, narrower if need be, so the line it's under stays in view.
+        // At most half the pane's height, and narrower if needed, so the line above it stays in view.
         int img_most = nrows / 2 > 4 ? nrows / 2 : 4;
         if (im && image_rows(im, img_cols) > img_most) {
             img_cols = (int)((int64_t)im->w * img_most * 2 / im->h);
             if (img_cols < 1) img_cols = 1;
         }
         int nimg = image_rows(im, img_cols);
-        // A file on its way: a row under the line, over the picture it may become.
+        // A file being downloaded: a row under the line, above where the picture will go if it is one.
         const tui_progress_t *pg = chat && l->file && v && v->progress ? v->progress(v->image_ctx, l->file) : NULL;
         int under = nimg + (pg ? 1 : 0);
 
-        // Run on from the line above: same person, same minute, that line in view to say who, and
-        // no rule between them.
+        // Continues the line above: same person, same minute, that line is in view to show who, and
+        // there's no separator line between them.
         int grouped = 0;
         if (chat && k + 1 < sb->count && k + 1 != fresh && bottom - nch - under >= first) {
             const tui_line_t *older = SB_AT(sb, k + 1);
@@ -1203,8 +1204,8 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
     }
 }
 
-// Lines centred across the grid and a little above its middle: the first bold, the rest faint,
-// but for a line that's just emph (the session's id, to be passed on), lit.
+// Lines centred across the grid, a little above the middle: the first bold and the rest faint,
+// except a line that's just emph (the session's id, to share), which is highlighted.
 static void draw_center(grid_t *g, int first, int nrows, const char *text, const char *emph) {
     const char *lines[12];
     size_t lens[12];
@@ -1277,7 +1278,7 @@ static void draw_chat_pane(grid_t *g, int first, int nrows, const tui_scrollback
 
 static const char HIDDEN_HINT[] = "Chat and console are hidden\nctrl+t shows the chat " G_MID " ctrl+o the console";
 
-// The session's state and name, what's new in the others while there's no sidebar to show it, and
+// The session's state and name, unread counts for other sessions while the sidebar is hidden, and
 // the subtitle.
 static void chat_title(span_t *t, const tui_view_t *v, int sidebar_shown) {
     if (!v->title) { ptext(&t->p, S_BOLD, "welcome"); return; }
@@ -1299,7 +1300,7 @@ static void chat_title(span_t *t, const tui_view_t *v, int sidebar_shown) {
     }
 }
 
-// The console over the chat, sharing an edge, in one box; either fills it alone.
+// The console above the chat, sharing an edge, in one box. Either one fills it if shown alone.
 static void draw_main(wbuf_t *w, rect_t m, int boxed, int sidebar_shown, const tui_scrollback_t *sb,
                       const tui_scrollback_t *console, const tui_view_t *v) {
     int show_con = console && v->console, show_chat = v->chat;
@@ -1371,8 +1372,8 @@ static void heading(pen_t *p, const char *title, int count) {
     }
 }
 
-// A session: its name, then a badge with how many messages came while it wasn't on screen (yellow,
-// and '@' first, when one mentions you), its state and how many are online.
+// A session: its name, then a badge with how many messages came in while it wasn't on screen
+// (yellow, with '@' first, if one mentions you), its state and how many peers are online.
 static void session_line(pen_t *p, const tui_session_row_t *s, int sel) {
     static const char *const GLYPH[] = { G_RING, G_DOTTED, G_DOT };
     static const style_t STYLE[] = { S_FAINT, S_YELLOW, S_GREEN };
@@ -1397,12 +1398,12 @@ static void session_line(pen_t *p, const tui_session_row_t *s, int sel) {
     ptext(p, S_FAINT, count);
 }
 
-// The verify state and a modified client in words while they fit beside the nick, then the verify
-// state alone in words, then both in glyphs; the nick is cut for them, never they for it.
+// The verify state and a modified client in words while they fit next to the nick, then the verify
+// state alone in words, then both as symbols. The nick is cut to make room for them, never the other way.
 static void peer_line(pen_t *p, const tui_peer_row_t *pr) {
     const char *word, *glyph;
     style_t st;
-    // What most needs doing first: codes that differ, a bad signature, a code still to compare.
+    // Most urgent first: codes that differ, a bad signature, a code still to compare.
     if (pr->you) { word = glyph = "you"; st = S_FAINT; }
     else if (pr->code == 3) { word = G_CROSS " codes differ"; glyph = G_CROSS; st = S_RED_BOLD; }
     else if (pr->verify == 2) { word = G_CROSS " invalid"; glyph = G_CROSS; st = S_RED_BOLD; }
@@ -1448,7 +1449,7 @@ static void draw_sidebar(wbuf_t *w, rect_t r, const tui_session_row_t *sessions,
         for (int i = 0; i < n_peers; i++) ADD(L_PEER, i);
     }
     if (n_net > 0) {
-        // At the foot when there's room, else straight after the rest.
+        // At the bottom when there's room, otherwise straight after the rest.
         int start = h - n_net - 1;
         if (start < n + 1) start = n + 1;
         while (n < start && n < h) ADD(L_BLANK, 0);
@@ -1488,8 +1489,8 @@ static void draw_sidebar(wbuf_t *w, rect_t r, const tui_session_row_t *sessions,
 
 // ---- the input box, the menu over it, and the bottom row ----
 
-// The input's line (or placeholder, faint, while it's empty) from the pen on, scrolled so the text
-// before the cursor fits with a column for the cursor itself. Returns the cursor's column.
+// The input line (or a faint placeholder while it's empty) from the pen onwards, scrolled so the
+// text before the cursor fits with a column for the cursor itself. Returns the cursor's column.
 static int draw_field(pen_t *f, const tui_input_t *in, int mask, const char *placeholder) {
     int start = f->used, room = f->room - f->used;
     if (room < 1) return start;
@@ -1525,8 +1526,8 @@ static int draw_field(pen_t *f, const tui_input_t *in, int mask, const char *pla
 
 #define MENU_ROWS 8
 
-// The suggestions for the COMMAND line, at the foot of the box over the input box: the three read
-// as one column. 0 if there are none, or no room.
+// The suggestions for the COMMAND line, at the bottom of the box above the input box, with the
+// three parts laid out as one column. 0 if there are none, or no room.
 static int draw_menu(wbuf_t *w, rect_t in_r, rect_t over, const tui_input_t *in, const char *bs) {
     int count = suggestion_count(in);
     if (count == 0) return 0;
@@ -1575,17 +1576,17 @@ static int draw_menu(wbuf_t *w, rect_t in_r, rect_t over, const tui_input_t *in,
     return 1;
 }
 
-// The input box holds this many rows of text at most, fewer on a short screen.
+// The input box holds at most this many rows of text, fewer on a short screen.
 #define INPUT_ROWS_MAX 6
 #define WRAP_MAX ((int)sizeof(((tui_input_t *)0)->buf) + 2)
 
 typedef struct { int n, start[WRAP_MAX], cur_row, cur_col; } wrap_t;
 
-// The input's text wrapped to rows width columns wide: where each row starts, and the cursor's row
-// and column. A row ends after the last space that fits, the space hanging at its end, or, in a
-// word longer than a row, where the row is full. The cursor may stand in the column after a full
-// row, the box's padding; past that, after a space hanging there at the end of the text, it starts
-// a row of its own.
+// The input text wrapped to rows width columns wide: where each row starts, and the cursor's row
+// and column. A row ends after the last space that fits, with the space at the end of the row, or,
+// in a word longer than a row, where the row is full. The cursor can sit in the column after a full
+// row (the box's padding). Beyond that, after a trailing space at the end of the text, it starts a
+// new row.
 static void input_wrap(const tui_input_t *in, int width, wrap_t *wr) {
     const char *s = in->buf;
     int len = in->len, pos = 0;
@@ -1611,8 +1612,8 @@ static void input_wrap(const tui_input_t *in, int width, wrap_t *wr) {
     wr->cur_col = col;
 }
 
-// The rows of text the input box holds at box_w columns wide: what's typed, wrapped, most at most.
-// The command line, a hidden field and an empty one (its placeholder) take one.
+// The rows of text the input box needs at box_w columns wide: the text, wrapped, up to most. The
+// command line, a hidden field and an empty one (its placeholder) take one row.
 static int input_rows(const tui_bar_t *bar, int box_w, int most) {
     const tui_input_t *in = bar->input;
     if (most < 1) most = 1;
@@ -1622,8 +1623,8 @@ static int input_rows(const tui_bar_t *bar, int box_w, int most) {
     return wr.n < most ? wr.n : most;
 }
 
-// What's typed over nrows rows from row, wrapped and scrolled to the cursor's row, in a box's
-// inner width columns. The first row starts with the prompt's mark, and the rest line up under it.
+// The text over nrows rows from row, wrapped and scrolled to the cursor's row, in a box's inner
+// width columns. The first row starts with the prompt's mark, and the rest line up under it.
 static void draw_wrapped(wbuf_t *w, int row, int left, int width, int nrows, const tui_input_t *in, tui_tone_t tone,
                          int *cr, int *cc) {
     static wrap_t wr;
@@ -1656,8 +1657,8 @@ static void draw_wrapped(wbuf_t *w, int row, int left, int width, int nrows, con
     *cc = left + 3 + wr.cur_col;
 }
 
-// The input box's title without a prompt: "what · what to do", the first yellow and the rest lit as
-// keys are, or what alone when both don't fit.
+// The input box's title without a prompt: "what · what to do", the first part yellow and the rest
+// highlighted like keys, or just the first part when both don't fit.
 static void draw_warn(pen_t *p, const char *warn) {
     static const char SEP[] = " " G_MID " ";
     const char *sep = strstr(warn, SEP);
@@ -1676,9 +1677,9 @@ static void draw_warn(pen_t *p, const char *warn) {
     }
 }
 
-// Draws the input box (or, unboxed, its one row) and leaves the cursor's place in *cr, *cc. Its top
-// edge is the bottom of the chat's box, or of the menu over it; it says how many newer messages
-// are hidden below the chat.
+// Draws the input box (or, without a box, its one row) and puts the cursor position in *cr, *cc.
+// Its top edge is the bottom of the chat's box, or of the menu above it, and shows how many newer
+// messages are hidden below the chat.
 static void draw_input(wbuf_t *w, rect_t r, int boxed, const tui_bar_t *bar, const tui_view_t *v, rect_t over,
                        int *cr, int *cc) {
     const tui_input_t *in = bar->input;
@@ -1761,7 +1762,7 @@ static void draw_status(wbuf_t *w, int row, int cols, const tui_bar_t *bar) {
         ptext(&p, S_FAINT, "  " G_RSAQ " ");
         ptext(&p, S_BOLD, bar->message);
     }
-    // As many of the hints as fit, from the first: they come most useful first.
+    // As many of the hints as fit, starting from the first, since they're ordered most useful first.
     if (bar->hint && bar->hint[0]) {
         static const char SEP[] = " " G_MID " ";
         char fit[256] = "";
@@ -1788,12 +1789,12 @@ static void draw_status(wbuf_t *w, int row, int cols, const tui_bar_t *bar) {
 
 static void finish_frame(wbuf_t *w, int rows, int cols, const tui_bar_t *bar, int cr, int cc);
 
-// The input box's height in the last whole chat frame, or 0 after anything else was drawn.
+// The input box's height in the last full chat frame, or 0 after anything else was drawn.
 static int g_input_h;
 
 // One frame, split by lines: the sidebar's right side is the chat's left, and the chat's bottom
-// edge is the input box's top. The box is as tall as what's typed wraps to, a third of what the
-// screen has over the frame's edges at most, so the chat keeps the most of it.
+// edge is the input box's top. The box is as tall as the wrapped text, up to a third of the space
+// inside the frame, so the chat keeps most of the screen.
 static void chat_layout(int rows, int cols, const tui_view_t *v, const tui_bar_t *bar, rect_t *side, rect_t *main_r,
                         rect_t *input, int *boxed) {
     *boxed = rows >= 10 && cols >= 40;
@@ -1844,8 +1845,8 @@ int tui_render_bar(int rows, int cols, const tui_view_t *view, const tui_bar_t *
     rect_t side, main_r, input;
     int boxed;
     chat_layout(rows, cols, view, bar, &side, &main_r, &input, &boxed);
-    // A row more or less for the input moves the chat's bottom edge: that takes a whole frame. So
-    // does a dialog.
+    // A change in the input's height moves the chat's bottom edge, which needs a full frame. So does
+    // a dialog.
     if (input.h != g_input_h || bar->dialog) return -1;
 
     begin_frame(&w);
@@ -1878,7 +1879,7 @@ static void draw_nav(wbuf_t *w, rect_t r, const char *const *nav, int n_nav, int
     }
 }
 
-// "a › b › c": the way to this page faint, the page itself bold.
+// "a › b › c": the path to this page faint, and the page itself bold.
 static void crumb_title(span_t *t, const char *title) {
     static const char SEP[] = " " G_RSAQ " ";
     for (const char *s = title; ; ) {
@@ -1950,9 +1951,9 @@ static void draw_button(wbuf_t *w, int row, int left, int iw, const tui_page_t *
     inner_end(&p);
 }
 
-// The rows, by section, then the button, in nrows rows from top: scrolled so the selected row
-// shows in the first view of them with its heading and as much of the rest of its section as fits.
-// The help goes over the rest, so how much of it there is moves nothing.
+// The rows, by section, then the button, in nrows rows from top, scrolled so the selected row is
+// visible with its heading and as much of the rest of its section as fits. The help is drawn over
+// the rest, so its length doesn't move anything.
 static void draw_list(wbuf_t *w, int top, int left, int iw, int view, int nrows, const tui_page_t *pg) {
     static int kind[PAGE_LINES], arg[PAGE_LINES];
     int n = 0, sel_line = -1, head_line = -1, end_line = -1, head = -1;
@@ -2021,7 +2022,7 @@ void tui_render_page(int rows, int cols, const tui_page_t *page, const tui_bar_t
     g_input_h = 0;
     wbuf_t w = { g_frame, FRAME_CAP, 0 };
 
-    // The sections on the left: as given, or the rows' own, with the selected row's lit.
+    // The sections on the left: as given, or taken from the rows, with the selected row's highlighted.
     const char *nav[32];
     int n_nav = 0, nav_sel = -1;
     if (page->nav) {
@@ -2042,16 +2043,16 @@ void tui_render_page(int rows, int cols, const tui_page_t *page, const tui_bar_t
     begin_frame(&w);
     if (navw) draw_nav(&w, (rect_t){ 1, 1, rows - 1, navw }, nav, n_nav, nav_sel);
 
-    // Sharing the nav's right side, as the chat shares the sidebar's.
+    // Shares the nav's right side, like the chat shares the sidebar's.
     int x = navw > 0 ? navw : 1;
     rect_t r = { 1, x, rows - 1, cols - x + 1 };
     int top = boxed ? r.top + 1 : r.top, ih = boxed ? r.h - 2 : r.h;
     int left = boxed ? r.left + 1 : r.left, iw = boxed ? r.w - 2 : r.w;
     int cw = iw - 2;
 
-    // Over the bottom of the rows, past an edge titled with the selected row: its help and usage.
-    // The rows scroll as if those were as long as they get, so the rows stay put as they change.
-    // Over the rows, the intro. Rows go first when there's no room for all of it.
+    // Over the bottom of the rows, below an edge titled with the selected row: its help and usage.
+    // The rows scroll as if those were at their longest, so the rows don't move when they change.
+    // Above the rows, the intro. Rows take priority when there's no room for all of it.
     static size_t hoff[5], hlen[5], ioff[3], ilen[3];
     int hl = boxed && page->help && page->help[0] ? wrap_rows(page->help, cw, cw, hoff, hlen, 5) : 0;
     int ul = boxed && page->usage && page->usage[0] ? 1 : 0;
@@ -2175,7 +2176,7 @@ static size_t md_inline(const char *s, char *out, uint8_t *attr, size_t cap) {
             if (close && close[1] == '(' && strchr(close + 2, ')')) {
                 const char *url = close + 2, *ue = strchr(url, ')');
                 for (const char *k = s + i + 1; k < close; k++) PUT(*k, (uint8_t)(cur | A_LINK));
-                // The address too, faint: there's nothing to click.
+                // The address too, faint, since there's nothing to click.
                 PUT(' ', cur); PUT('(', (uint8_t)(cur | A_FAINT));
                 for (const char *k = url; k < ue; k++) PUT(*k, (uint8_t)(cur | A_FAINT));
                 PUT(')', (uint8_t)(cur | A_FAINT));
@@ -2191,7 +2192,7 @@ static size_t md_inline(const char *s, char *out, uint8_t *attr, size_t cap) {
 }
 
 // Calls row(ctx, v, para, plain, attr, off, len, first) for each row the paragraphs wrap to at
-// width w, v counting from 0; returns how many rows there are.
+// width w, with v counting from 0. Returns how many rows there are.
 typedef void (*text_row_fn)(void *ctx, int v, const tui_para_t *pa, const char *plain, const uint8_t *attr,
                             size_t off, size_t len, int first);
 
@@ -2220,7 +2221,7 @@ static int layout_text(const tui_para_t *paras, int n, int w, text_row_fn row, v
         }
         int hang = para_hang(pa);
         if (pa->kind == TUI_P_CODE) {
-            // Code keeps its spaces and lines: one row, cut at the edge.
+            // Code keeps its spaces and lines: one row each, cut off at the edge.
             size_t len = strlen(pa->text) < sizeof plain - 1 ? strlen(pa->text) : sizeof plain - 1;
             memcpy(plain, pa->text, len);
             plain[len] = '\0';
@@ -2271,7 +2272,7 @@ static void draw_text_row(void *ctx, int v, const tui_para_t *pa, const char *pl
     }
     int lvl = pa->level > 6 ? 6 : pa->level;
     int hang = para_hang(pa);
-    // A list item's first row starts with its bullet or number; the rows after it hang under its text.
+    // A list item's first row starts with its bullet or number, and the rows after it are indented under its text.
     if (first && pa->kind == TUI_P_BULLET) {
         pspace(&p, 1 + 2 * lvl);
         ptext(&p, S_ACCENT, lvl % 2 ? "\xe2\x97\xa6 " : "\xe2\x80\xa2 ");
@@ -2306,7 +2307,7 @@ int tui_render_text(int rows, int cols, const char *title, const char *clock, co
     rect_t r = { 1, 1, rows - 1, cols };
     int top = boxed ? r.top + 1 : r.top, ih = boxed ? r.h - 2 : r.h;
     int left = boxed ? r.left + 1 : r.left, iw = boxed ? r.w - 2 : r.w;
-    int tw = iw - 3;   // less the box's padding either side and the margin before the text
+    int tw = iw - 3;   // minus the box's padding on each side and the margin before the text
     if (tw < 8) tw = 8;
     int total = layout_text(paras, n, tw, NULL, NULL);
     int most = total > ih ? total - ih : 0;
@@ -2340,8 +2341,8 @@ static int dialog_rows(int text_n, int field, int note_n) {
     return 1 + (text_n ? text_n + 1 : 0) + (field ? 2 : 0) + (note_n ? note_n + 1 : 0);
 }
 
-// The box's backdrop (a margin mx by my round it), its frame with the title on the top edge and the
-// keys on the bottom, inner rows high and bw wide: the rect inside its sides.
+// The box's backdrop (a margin of mx by my around it), and its frame with the title on the top edge
+// and the keys on the bottom, inner rows high and bw wide. Returns the rect inside its sides.
 static rect_t dialog_frame(wbuf_t *w, int rows, int cols, int bw, int inner, int mx, int my, const tui_dialog_t *d) {
     int avail = rows - 1;
     int bh = inner + 2, outer_h = bh + 2 * my, outer_w = bw + 2 * mx;
@@ -2377,9 +2378,9 @@ static style_t log_style(tui_log_kind_t k) {
 
 #define CONSOLE_ROWS 12
 
-// Something under way: its console in a frame of its own, the last lines that fit, then a bar as wide
-// as the console with how far it's got at its right, then the step it's on. The console gives up
-// rows to a short screen; the rest always shows.
+// Something in progress: its console in its own frame with the last lines that fit, then a progress
+// bar as wide as the console with the percentage on its right, then the current step. The console
+// loses rows on a short screen, but the rest is always shown.
 static void draw_console_dialog(wbuf_t *w, int rows, int cols, const tui_dialog_t *d) {
     int avail = rows - 1;
     int bw = cols - 4 < 100 ? cols - 4 : 100, my = 1;
@@ -2450,7 +2451,7 @@ static void draw_console_dialog(wbuf_t *w, int rows, int cols, const tui_dialog_
     while (row < end) blank_row(w, row++, x, iw);
 }
 
-// What doesn't fit goes from the end of the text, then of the note; the field always shows.
+// What doesn't fit is cut from the end of the text, then from the note. The field is always shown.
 static void draw_dialog(wbuf_t *w, int rows, int cols, const tui_dialog_t *d, int *cr, int *cc) {
     *cr = 0;
     const char *was = g_row_bg;

@@ -13,9 +13,9 @@
 
 typedef enum { UPDATE_LINE_DETAIL = 0, UPDATE_LINE_INFO, UPDATE_LINE_GOOD, UPDATE_LINE_BAD } update_line_kind_t;
 
-// Where an update has got, for its box: what it has done so far (the console, oldest first), how
-// far along it is in thousandths, the size of what's come against the whole while it downloads
-// ("8.4 MB of 20.1 MB", else ""), and the step it's on, put plainly.
+// The progress of an update, for its box: what it has done so far (the console, oldest first),
+// how far along it is in thousandths, how much has downloaded out of the total ("8.4 MB of
+// 20.1 MB", otherwise ""), and a short description of the current step.
 typedef struct {
     int started;       // a run since chat began; the rest is about the last one
     int running;
@@ -38,7 +38,7 @@ int update_poll(char *msg, size_t cap);
 
 int update_run(char *msg, size_t cap);
 
-// A copy of where the current (or last) update has got.
+// A copy of the current (or last) update's progress.
 void update_view(update_view_t *v);
 
 void update_cleanup_stale(void);
@@ -46,8 +46,8 @@ void update_cleanup_stale(void);
 // The release key (minisign, base64) built in from minisign.pub, or "" if there was none.
 const char *update_release_key(void);
 
-// This build as peers are told it: the SHA-256 of the running executable, less the signed list
-// of its release's binaries that a release appends, and that list. Returns -1 if unreadable.
+// This build as reported to peers: the SHA-256 of the running executable, minus the signed list
+// of release binaries that a release appends, and that list. Returns -1 if it can't be read.
 int update_self_build(chat_build_t *b);
 
 #endif

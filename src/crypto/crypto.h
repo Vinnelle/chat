@@ -13,9 +13,9 @@
 #define ROOM_KEY_LEN 32
 #define CHAIN_LEN 32
 
-// 128 bits: a room member in the middle picks both handshakes' keys, so it could search two sets
-// of codes for a match, which 64 bits would let it find in time. The first 8 bytes are what 0.1.9
-// and earlier show, so codes still compare with theirs.
+// 128 bits. A room member in the middle picks the keys for both handshakes, so it could search two
+// sets of codes for a match, which it could find in time with 64 bits. The first 8 bytes are what
+// 0.1.9 and older show, so codes can still be compared with theirs.
 #define VERIFY_LEN 16
 #define DHT_INFOHASH_LEN 20
 #define DHT_KEY_LEN 32
@@ -25,19 +25,19 @@
 #define PAD_BLOCK 64
 #define RATCHET_MAX_SKIP 200
 
-// Every session frame is sealed this big (a whole UDP cell), and read if it's at least
-// SESSION_MIN_BODY, what 0.1.10 and earlier seal.
+// Every session frame is sealed to this size (a whole UDP cell), and read if it's at least
+// SESSION_MIN_BODY, the size 0.1.10 and older seal to.
 #define SESSION_PAD_TARGET 960
 #define SESSION_MIN_BODY 384
-// The biggest body anything is sealed with or read at: a handshake's two KEM keys and change.
+// The largest body anything is sealed with or read at: a handshake's two KEM keys plus a little.
 #define SEAL_MAX_BODY (KEM_PUB_LEN * 2 + 256)
 
 #define ROOM_PAD_TARGET 2560
 
 #define ROOM_HEADER_LEN AEAD_NONCE_LEN
 #define SESSION_HEADER_LEN (4 + AEAD_NONCE_LEN)
-// True if frame_len is a length the sealer can produce (padding to PAD_BLOCK, at least min_body):
-// a free check that turns most junk away before any key is derived or tag checked.
+// True if frame_len is a length the sealer can produce (padding to PAD_BLOCK, at least min_body).
+// A cheap check that rejects most junk before any key is derived or tag checked.
 int sealed_len_ok(size_t frame_len, size_t header_len, size_t min_body);
 
 typedef struct {
@@ -65,7 +65,7 @@ void crypto_unlock(void *buf, size_t len);
 #define KDF_OPSLIMIT 4
 #define KDF_MEMLIMIT (512u * 1024u * 1024u)
 #define KDF_LABEL "chat-kdf-v2"
-// 0, or -1 when the memory for it isn't free.
+// 0, or -1 if there isn't enough free memory.
 int derive_master(const char *password, const char *session_id, uint8_t master[MASTER_LEN]);
 void derive_room_key(const uint8_t master[MASTER_LEN], uint8_t room_key[ROOM_KEY_LEN]);
 // The room's DHT key, and the lookup key it gives for one hour (epoch: Unix time / DHT_EPOCH). The
@@ -74,21 +74,21 @@ void derive_room_key(const uint8_t master[MASTER_LEN], uint8_t room_key[ROOM_KEY
 void derive_dht_key(const uint8_t master[MASTER_LEN], uint8_t key[DHT_KEY_LEN]);
 void dht_epoch_infohash(const uint8_t key[DHT_KEY_LEN], long long epoch, uint8_t infohash[DHT_INFOHASH_LEN]);
 
-// Everything chat sends over UDP is masked with a key of the room's, so that to anyone else each
-// datagram is random bytes: no ratchet counter, no chunk header, nothing the same from one packet
-// to the next. udp_mask XORs all but the last UDP_MASK_IV_LEN bytes with a keystream those bytes
-// pick; they're always an AEAD tag or ciphertext, random already, so it costs no extra bytes. It
-// runs in place, masking twice unmasks, and it returns -1 for a datagram too short to mask.
+// Everything chat sends over UDP is masked with a room key, so to anyone else each datagram is
+// random bytes: no ratchet counter, no chunk header, nothing repeated between packets. udp_mask
+// XORs all but the last UDP_MASK_IV_LEN bytes with a keystream picked by those bytes. They're
+// always an AEAD tag or ciphertext, which is already random, so it costs no extra bytes. It runs
+// in place, masking twice unmasks, and it returns -1 for a datagram too short to mask.
 #define UDP_KEY_LEN 32
 #define UDP_MASK_IV_LEN 16
 void derive_udp_key(const uint8_t master[MASTER_LEN], uint8_t key[UDP_KEY_LEN]);
 int udp_mask(const uint8_t key[UDP_KEY_LEN], uint8_t *d, size_t len);
-// The UDP port the room's LAN beacons go to, 49152-65535: one of the room's own, where a fixed
+// The UDP port the room's LAN beacons go to, 49152-65535. It's specific to the room, since a fixed
 // port would tell anyone on the network that chat is running.
 uint16_t derive_lan_port(const uint8_t master[MASTER_LEN]);
 
-// Nostr: tag_key makes the rotating tag room members' events carry, wrap_key seals each event's
-// whole payload (addressing, datagram and padding) under a fresh nonce.
+// Nostr: tag_key makes the rotating tag on room members' events, and wrap_key seals each event's
+// whole payload (addressing, datagram and padding) with a fresh nonce.
 #define NOSTR_KEY_LEN 32
 #define NOSTR_WRAP_PLAIN 2800
 #define NOSTR_WRAP_LEN (AEAD_NONCE_LEN + NOSTR_WRAP_PLAIN + AEAD_TAG_LEN)
@@ -135,7 +135,7 @@ void cookie_compute(const uint8_t secret[32], const char *addr, const uint8_t pe
                      const uint8_t pub[PUB_LEN], uint8_t cookie[COOKIE_LEN]);
 
 #define BUILD_HASH_LEN 32
-// An executable's SHA-256 as one session shows it to another. It is keyed with both session ids,
+// An executable's SHA-256 as one session reports it to another. It's keyed with both session ids,
 // so a build that matches no release can't be recognised from one session or peer to the next.
 void build_proof(const uint8_t exe_sha256[BUILD_HASH_LEN], const uint8_t from_id[ID_LEN],
                   const uint8_t to_id[ID_LEN], uint8_t proof[BUILD_HASH_LEN]);
@@ -174,7 +174,7 @@ void session_prk_finish(const uint8_t prk_partial[32], const uint8_t kem_ss[KEM_
 #define ID_SIGN_PRIV_LEN 64
 #define ID_SIGN_LEN 64
 
-// 128 bits, so no one can make a key that shows the same. The first 8 bytes are 0.1.9's.
+// 128 bits, so nobody can make a key with the same fingerprint. The first 8 bytes match 0.1.9's.
 #define ID_FP_LEN 16
 
 // priv is libsodium's secret key (the seed, then the public key). With scalar set, it's instead
@@ -188,17 +188,17 @@ typedef struct {
 
 void gen_identity_keypair(identity_keypair_t *kp);
 
-// The identity a password makes on one device: the same password and device id always give the
-// same key, and a different either gives another. The device id isn't secret (any program can
-// read it), so the password is all that keeps the key: Argon2id, as for a session, makes each
-// guess slow. idkp changes only on success; -1 when the memory for it isn't free.
+// The identity a password gives on one device. The same password and device id always give the
+// same key, and changing either gives a different one. The device id isn't secret (any program
+// can read it), so the password is the only protection. Argon2id, as for a session, makes each
+// guess slow. idkp is only changed on success. -1 if there isn't enough free memory.
 #define ID_KDF_LABEL "chat-identity-v1"
 int identity_from_password(const char *password, const char *device_id, identity_keypair_t *idkp);
 
 // Secrets kept on disk under one passphrase. A lock is the key Argon2id makes from it with a
-// salt, and its header (format, limits, salt); XChaCha20-Poly1305 seals each secret under that key,
-// with the header as associated data. Everything sealed under a lock carries its header, so one
-// Argon2id run opens it all, and sealing more takes none.
+// salt, plus its header (format, limits, salt). XChaCha20-Poly1305 seals each secret under that
+// key, with the header as associated data. Everything sealed under a lock includes its header, so
+// one Argon2id run opens all of it, and sealing more doesn't need another run.
 #define PASS_HEADER_LEN 32
 #define PASS_SEAL_OVERHEAD (PASS_HEADER_LEN + AEAD_NONCE_LEN + AEAD_TAG_LEN)
 #define PASS_WRONG  -1   // or sealed under another lock, or changed since it was sealed
@@ -208,16 +208,16 @@ typedef struct {
     uint8_t header[PASS_HEADER_LEN];
     uint8_t key[32];
 } pass_lock_t;
-// A new lock, with a salt of its own: 0 or PASS_NOMEM.
+// A new lock with its own salt: 0 or PASS_NOMEM.
 int pass_lock_new(const char *passphrase, pass_lock_t *lk);
-// The lock sealed was sealed under, if passphrase is its passphrase, which only pass_unseal can
-// tell: 0, PASS_FORMAT or PASS_NOMEM.
+// The lock that sealed was sealed under, if passphrase is the right one (only pass_unseal can
+// tell): 0, PASS_FORMAT or PASS_NOMEM.
 int pass_lock_of(const char *passphrase, const uint8_t *sealed, size_t len, pass_lock_t *lk);
 int pass_seal(const pass_lock_t *lk, const void *plain, size_t len, uint8_t *out, size_t cap, size_t *out_len);
 int pass_unseal(const pass_lock_t *lk, const uint8_t *in, size_t len, void *plain, size_t cap, size_t *plain_len);
 
-// An X25519 secret (an AGE key's) as an Ed25519 identity: the public key converts back to the same
-// X25519 public key, so the AGE recipient shown is the key's own. idkp changes only on success.
+// An X25519 secret (an AGE key's) as an Ed25519 identity. The public key converts back to the same
+// X25519 public key, so the AGE recipient shown is the key's own. idkp is only changed on success.
 int identity_from_x25519(const uint8_t secret[32], identity_keypair_t *idkp);
 
 // Ed25519 over msg, from either form of key.

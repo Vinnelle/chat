@@ -129,7 +129,7 @@ static int is_invisible(uint32_t cp) {
         || (cp >= 0xe0000 && cp <= 0xe007f);
 }
 
-// Fullwidth ASCII, and other brackets and marks that pass for the ones the UI uses, as plain ASCII.
+// Fullwidth ASCII, and other brackets and marks that look like the ones the UI uses, mapped to plain ASCII.
 static uint32_t fold_punct(uint32_t cp) {
     if (cp >= 0xff01 && cp <= 0xff5e) return cp - 0xff01 + 0x21;
     switch (cp) {
@@ -158,8 +158,8 @@ static const struct { uint16_t cp; char ascii; } LOOKALIKES[] = {
     { 0x217c, 'l' },
 };
 
-// What a nick looks like, for comparing: lookalikes as Latin, i/I/1/| as l, 0 as o, case and
-// invisible characters ignored.
+// A nick normalised for comparing: lookalikes mapped to Latin, i/I/1/| to l, 0 to o, with case
+// and invisible characters ignored.
 static void nick_skeleton(const char *nick, char *out, size_t cap) {
     size_t n = strlen(nick), i = 0, o = 0;
     while (i < n) {
@@ -266,7 +266,7 @@ static double jitter(double spread) {
     return spread * ((double)r / 4294967296.0);
 }
 
-// A token from a bucket that fills at rate a second, up to burst: 1 if there was one to take.
+// Takes a token from a bucket that fills at rate per second, up to burst. Returns 1 if there was one.
 static int take_token(double *tokens, double *at, double now, double rate, double burst) {
     if (now > *at) *tokens += (now - *at) * rate;
     if (*tokens > burst) *tokens = burst;
@@ -321,7 +321,7 @@ static void rekey_drop_overlap(peer_t *p) {
     p->old_until = 0.0;
 }
 
-// The DHT's datagrams, never masked: they're ordinary DHT traffic. Names never go out: the
+// The DHT's datagrams, never masked since they're normal DHT traffic. Names are never sent: the
 // bootstrap servers are looked up here.
 static void dht_out(void *ctx, const void *data, size_t len, const addr_t *to, const char *host, uint16_t port) {
     chat_t *c = ctx;
@@ -330,9 +330,9 @@ static void dht_out(void *ctx, const void *data, size_t len, const addr_t *to, c
     net_send(c->sock, data, len, *to);
 }
 
-// Every datagram leaves through here, to UDP, the relays or Tor as its address says. In Tor mode
-// nothing goes out over UDP at all. What goes over UDP is masked first, so on the network it's
-// random bytes; the relays and Tor hide what they carry already, and take it as 0.1.9 sends it.
+// Every datagram is sent from here, over UDP, the relays or Tor depending on its address. In Tor
+// mode nothing is sent over UDP. UDP traffic is masked first, so on the network it's random bytes.
+// The relays and Tor already hide what they carry, and take it in the same form 0.1.9 sends.
 static void xmit(chat_t *c, sock_t sock, const void *data, size_t len, addr_t to) {
     switch (to.kind) {
         case ADDR_NOSTR:
@@ -362,7 +362,7 @@ static void room_piece(const uint8_t *frame, size_t len, const uint8_t id[4], in
     cell[8] = (uint8_t)(len >> 8);
     cell[9] = (uint8_t)len;
     memcpy(cell + CHUNK_HDR, frame + off, n);
-    // Random rather than zeros: a cell's last bytes pick the keystream it's masked with.
+    // Random instead of zeros, since a cell's last bytes pick the keystream it's masked with.
     gen_random(cell + CHUNK_HDR + n, CHUNK_PAYLOAD - n);
 }
 
@@ -378,8 +378,8 @@ static int room_queued(const chat_t *c, int slot) {
     return n;
 }
 
-// A room frame for a connected peer waits for its slots. A peer can have a few; past that (junk
-// replayed at it, say) they're lost, as datagrams would be, and handshakes retry.
+// A room frame for a connected peer waits for its slots. A peer can have a few queued. Beyond
+// that (junk replayed at it, for example) they're lost, like datagrams would be, and handshakes retry.
 static void queue_room(chat_t *c, peer_t *p, const uint8_t *frame, size_t len, addr_t to) {
     int slot = peer_slot(c, p);
     if (room_queued(c, slot) >= 4) return;
@@ -403,7 +403,7 @@ static void send_room(chat_t *c, const char *text, addr_t to, sock_t sock) {
     uint8_t frame[HANDSHAKE_BUF_LEN + 128];
     size_t len;
     if (room_seal(c->room_key, text, strlen(text), frame, sizeof frame, &len) != 0 || len > ROOM_FRAME_MAX) return;
-    // A connected peer's go in its slots, like everything else it gets.
+    // A connected peer's frames go in its slots, like everything else sent to it.
     peer_t *p = sock == c->sock ? live_peer_at(c, to) : NULL;
     if (p) { queue_room(c, p, frame, len, to); return; }
     // Relays and Tor streams take whole frames; UDP takes cells.
@@ -437,8 +437,9 @@ static double cover_interval(chat_t *c, const peer_t *p) {
     return iv;
 }
 
-// The slots of a fast transfer through the relays, instead of iv: all relayed peers' together no
-// more than NOSTR_FAST_RATE a second however many are fast, and never closer than NOSTR_FAST_INTERVAL.
+// The slot interval for a fast transfer through the relays, instead of iv: no more than
+// NOSTR_FAST_RATE a second for all relayed peers together, however many are fast, and never closer
+// than NOSTR_FAST_INTERVAL.
 static double relay_fast_interval(chat_t *c, double iv) {
     double fast = (double)relayed_count(c) / NOSTR_FAST_RATE;
     if (fast < NOSTR_FAST_INTERVAL) fast = NOSTR_FAST_INTERVAL;
@@ -453,8 +454,8 @@ static ratchet_t *send_chain_for(peer_t *p) {
     return &p->send_chain;
 }
 
-// Seals text as the chain's next frame, with a body of body bytes (a UDP cell's, or a relay
-// frame's) unless it needs more.
+// Seals text as the chain's next frame, with a body of body bytes (a UDP cell, or a relay frame)
+// unless it needs more.
 static int frame_on_chain(ratchet_t *chain, const char *text, size_t body, uint8_t *frame, size_t frame_cap,
                           size_t *len, uint32_t *index) {
     uint32_t idx = chain->index;
@@ -471,8 +472,8 @@ static int frame_on_chain(ratchet_t *chain, const char *text, size_t body, uint8
     return rc;
 }
 
-// Queues a record for p's next slot. One the same as a record already waiting isn't queued again:
-// a retry, or an "rk" re-sent, goes once.
+// Queues a record for p's next slot. A record identical to one already waiting isn't queued again,
+// so a retry, or a re-sent "rk", only goes once.
 static int queue_record(chat_t *c, peer_t *p, const char *text, int old_chain) {
     size_t len = strlen(text);
     if (len == 0 || len > RECORD_MAX) return -1;
@@ -494,7 +495,7 @@ static int queue_record(chat_t *c, peer_t *p, const char *text, int old_chain) {
 
 static int send_peer(chat_t *c, peer_t *p, const char *text) { return queue_record(c, p, text, 0); }
 
-// Straight out, outside the slots: only for the "bye" of a session that's ending.
+// Sent immediately, outside the slots. Only used for the "bye" of a session that's ending.
 static void send_now(chat_t *c, peer_t *p, const char *text) {
     uint8_t frame[UDP_CELL]; size_t len; uint32_t idx;
     if (frame_on_chain(send_chain_for(p), text, SESSION_PAD_TARGET, frame, sizeof frame, &len, &idx) != 0) return;
@@ -502,9 +503,9 @@ static void send_now(chat_t *c, peer_t *p, const char *text) {
     crypto_wipe(frame, sizeof frame);
 }
 
-// A peer's slot: one datagram, whatever there is to say. The oldest thing waiting goes first: a
-// piece of a room frame, or a record and, for a peer that reads several to a frame, the ones after
-// it on the same chain while they fit. With nothing waiting, a "nop".
+// A peer's slot: exactly one datagram. The oldest thing waiting goes first: a piece of a room
+// frame, or a record and, for a peer that reads several per frame, the ones after it on the same
+// chain while they fit. With nothing waiting, a "nop".
 static void run_slot(chat_t *c, peer_t *p) {
     int slot = peer_slot(c, p);
     roomq_t *rq = NULL;
@@ -517,10 +518,10 @@ static void run_slot(chat_t *c, peer_t *p) {
         sendq_t *q = &c->sendq[i];
         if (q->used && q->peer_slot == slot && (!first || q->seq < first->seq)) first = q;
     }
-    // Records wait behind a room frame queued before them only while the peer couldn't read them
-    // yet: a message sealed on our new chain before our kx reaches it would be lost. Otherwise
-    // they go first, so a re-handshake doesn't hold a conversation up, but never more than two
-    // slots in a row while the room frame waits, so a busy one doesn't hold up the re-handshake.
+    // Records only wait behind a room frame queued before them while the peer can't read them yet,
+    // since a message sealed on our new chain before our kx reaches it would be lost. Otherwise they
+    // go first, so a re-handshake doesn't hold up a conversation, but never for more than two slots in
+    // a row while the room frame waits, so a busy conversation doesn't hold up the re-handshake.
     int readable = send_chain_for(p) == &p->old_send || p->chain_confirmed;
     int overtake = rq && first && readable && p->room_waited < 2;
     if (rq && (!first || (rq->seq < first->seq && !overtake))) {
@@ -537,8 +538,8 @@ static void run_slot(chat_t *c, peer_t *p) {
         return;
     }
 
-    // Through the relays, to a peer that reads several records to a frame, the frame is as big as
-    // a relay event holds (there they're all one size anyway), with room for two chunks of a file.
+    // Through the relays, to a peer that reads several records per frame, the frame is as big as a
+    // relay event can hold (they're all one size there anyway), with room for two file chunks.
     int big = p->batches && p->addr.kind == ADDR_NOSTR;
     size_t cap = big ? RELAY_RECORD_MAX : RECORD_MAX;
     char text[RELAY_RECORD_MAX + 1] = "nop";
@@ -563,12 +564,12 @@ static void run_slot(chat_t *c, peer_t *p) {
         taken[n_taken++] = next;
         after = next->seq;
     }
-    // Room left: the next chunks of a file this peer asked for. Over UDP a chunk takes a slot of
-    // its own, one that would carry a nop; through the relays, as many as fit after the rest.
+    // Space left over: the next chunks of a file this peer asked for. Over UDP a chunk takes its own
+    // slot, one that would otherwise carry a nop. Through the relays, as many as fit after the rest.
     while (p->serving && (big || n_taken == 0) && file_next_chunk(c, p, text, &pos, cap)) {}
     ratchet_t *chain = old_chain && p->old_until > 0.0 && p->old_send.started ? &p->old_send : send_chain_for(p);
     uint8_t frame[RELAY_FRAME]; size_t len; uint32_t idx;
-    // No chain yet (a responder waiting on the kx): what's queued waits too.
+    // No chain yet (a responder waiting for the kx), so anything queued waits too.
     if (frame_on_chain(chain, text, big ? SEAL_MAX_BODY : SESSION_PAD_TARGET, frame, sizeof frame, &len, &idx) == 0) {
         xmit(c, c->sock, frame, len, p->addr);
         for (int i = 0; i < n_taken; i++) crypto_wipe(taken[i], sizeof *taken[i]);
@@ -615,7 +616,7 @@ static int candidate_reached(chat_t *c, addr_t a) {
 }
 
 // A message resend waits for the ack's round trip: the message waits for a slot here, the ack for
-// one there, and relays take a good deal longer than UDP.
+// a slot there, and relays take a lot longer than UDP.
 static double resend_delay(chat_t *c, const peer_t *p) {
     double slots = 2.0 * cover_interval(c, p) * 1.25;
     return slots + (p->addr.kind == ADDR_NOSTR ? 4.0 + jitter(1.0) : 1.0 + jitter(0.5));
@@ -648,14 +649,14 @@ static void build_k_message(chat_t *c, peer_t *p, char *out, size_t out_cap) {
         identity_sign(&c->identity, c->keys.pub, c->my_id, p->pub, p->id, sig);
         hex_encode(sig, ID_SIGN_LEN, sighex);
     }
-    // After the logging flag, what this build does that older ones don't: "r" announces rekeys,
-    // "b" reads several records to a frame.
+    // After the logging flag, features this build has that older ones don't: "r" announces rekeys,
+    // "b" reads several records per frame.
     snprintf(out, out_cap, "k\t%s\t%s\t%drb\t%d\t%s\t%s", c->nick, colorhex, c->persist, idtype, idpubhex, sighex);
 }
 
-// "v": our version, our executable's hash, and our release's signed list of its binaries (empty
-// fields for a build without one), which p checks the hash against. 0.1.8 sent only the first
-// two, and ignores this.
+// "v": our version, our executable's hash, and our release's signed list of binaries (empty
+// fields for a build without one), which p checks the hash against. 0.1.8 only sent the first
+// two, and ignores the rest.
 static void send_build(chat_t *c, peer_t *p) {
     if (!c->build.ok) return;
     uint8_t proof[BUILD_HASH_LEN];
@@ -685,10 +686,10 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
         if (!p->ok) p->addr = addr;
         return p;
     }
-    // A room member in the middle could swap in its own key at a rekey. A peer that announces
-    // rekeys told us its new key over the current session, which the middle can't touch, so a
-    // new key it never announced is refused. After a short grace (the rk may still be on its
-    // way) that gets a warning.
+    // A room member in the middle could swap in its own key at a rekey. A peer that announces rekeys
+    // sent us its new key over the current session, which the middle can't change, so a new key it
+    // never announced is refused. After a short grace period (the rk may still be on its way) this
+    // gives a warning.
     if (p && p->ok && p->announces_rekey && memcmp(p->pub, their_pub, PUB_LEN) != 0
         && !(p->next_pub_set && memcmp(p->next_pub, their_pub, PUB_LEN) == 0)) {
         if (p->rk_refused_since == 0.0) p->rk_refused_since = now;
@@ -716,8 +717,8 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
     session_prk(c->master, shared, c->keys.pub, c->my_id, their_pub, peer_id, prk_partial);
     crypto_wipe(shared, sizeof shared);
 
-    // carry holds the old chains for the overlap and the kx that may have come early; it is
-    // wiped on the way out.
+    // carry holds the old chains for the overlap and any kx that arrived early. It's wiped before
+    // returning.
     peer_t carry;
     int rejoin = 0;
     if (existing && existing->ok) { carry = *existing; rejoin = 1; }
@@ -725,8 +726,8 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
         int si = (int)(slot - c->peers) + 1;
         if (si > c->peer_hi) c->peer_hi = si;
     }
-    // The same peer again takes its own slot, wiped here rather than forgotten: its messages still
-    // waiting for an ack stay, and go out again on the new chains, so a rekey can't lose one.
+    // The same peer reuses its own slot, which is wiped here instead of dropped. Its messages still
+    // waiting for an ack are kept and sent again on the new chains, so a rekey can't lose one.
     crypto_wipe(slot, sizeof *slot);
     slot->used = 1;
     memcpy(slot->id, peer_id, ID_LEN);
@@ -753,7 +754,7 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
         memcpy(slot->identity_fp, carry.identity_fp, ID_FP_LEN);
         memcpy(slot->vfy, carry.vfy, VERIFY_LEN);
         slot->vfy_set = carry.vfy_set;
-        // The same "v" comes again after the rekey: it mustn't be warned about twice.
+        // The same "v" arrives again after the rekey, and mustn't be warned about twice.
         memcpy(slot->build_version, carry.build_version, sizeof slot->build_version);
         slot->build_state = carry.build_state;
         slot->build_warn = carry.build_warn;
@@ -764,12 +765,12 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
         slot->next_cover = carry.next_cover;
         slot->announces_rekey = carry.announces_rekey;
         slot->batches = carry.batches;
-        // A file it's fetching from us goes on from where it got to: a rekey mustn't stall it.
+        // A file it's fetching from us continues from where it was, so a rekey doesn't stall it.
         slot->serving = carry.serving;
         memcpy(slot->serve_fid, carry.serve_fid, FILE_ID_LEN);
         slot->serve_next = carry.serve_next;
         slot->serve_end = carry.serve_end;
-        // The same peer, as the rk it announced proves: a code compared stays compared.
+        // The same peer, as the rk it announced proves, so a compared code stays compared.
         slot->code_ok = carry.code_ok;
         slot->next_rehello = carry.next_rehello;
     }
@@ -803,9 +804,10 @@ static int we_initiate(const chat_t *c, const peer_t *p) { return memcmp(c->my_i
 static int path_rank(addr_t a) { return a.kind == ADDR_UDP ? 2 : a.kind == ADDR_TOR ? 1 : 0; }
 
 // A connected peer's hi came over a better path than the one we use (UDP punched through after
-// the relays, a Tor stream after the relays). A hi proves nothing - any member can send one - so
-// the path doesn't change on it. Instead a session frame goes back that way: once the peer opens
-// it, the path is proven on its side and it moves there, and its frames then move us.
+// the relays, or a Tor stream after the relays). A hi proves nothing, since any member can send
+// one, so the path doesn't change because of it. Instead a session frame is sent back that way.
+// Once the peer opens it, the path is proven on its side and it switches, and its frames then
+// switch us too.
 static void probe_path(chat_t *c, peer_t *p, addr_t addr) {
     if (!p->ok || path_rank(addr) <= path_rank(p->addr)) return;
     uint8_t frame[UDP_CELL];
@@ -817,10 +819,10 @@ static void probe_path(chat_t *c, peer_t *p, addr_t addr) {
 }
 
 static void finish_kem_decap(chat_t *c, peer_t *p, const uint8_t ct[KEM_CT_LEN]) {
-    // The initiator's chains come from its own encapsulation; only the responder takes a kx.
+    // The initiator's chains come from its own encapsulation. Only the responder takes a kx.
     if (we_initiate(c, p)) return;
     if (p->chain_confirmed) {
-        // The initiator may send its kx while our side of the re-handshake still waits on a cookie.
+        // The initiator may send its kx while our side of the re-handshake is still waiting for a cookie.
         if (memcmp(p->kem_ct, ct, KEM_CT_LEN) != 0) { memcpy(p->kem_ct, ct, KEM_CT_LEN); p->kx_early = 1; }
         return;
     }
@@ -851,7 +853,7 @@ static void connect_peer(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
         send_room(c, c->hi_msg, addr, c->sock);
     }
     if (p->send_chain.started) {
-        // Keep offering the kx until the peer's frames show it took it: the first copy may be lost,
+        // Keep sending the kx until the peer's frames show it was received. The first copy may be lost,
         // or reach the peer before its side of the re-handshake is ready.
         if (we_initiate(c, p) && (fresh || !p->chain_confirmed)) send_kx(c, p, p->addr);
         send_k_now(c, p);
@@ -861,8 +863,8 @@ static void connect_peer(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
 
 #define PX_MAX_BODY (SESSION_PAD_TARGET - 2)
 
-// How to reach p, for "px": its UDP address, or in Tor mode its onion address. Peers only
-// reached through the relays have none to give: the relays introduce them by themselves.
+// How to reach p, for "px": its UDP address, or in Tor mode its onion address. Peers only reached
+// through the relays don't have one, since the relays already connect them.
 static int px_entry(const chat_t *c, const peer_t *p, char out[ADDR_STR_LEN]) {
     if (c->route.mode == ROUTE_TOR) {
         if (!p->onion[0]) return -1;
@@ -930,11 +932,11 @@ static void drop_peer(chat_t *c, peer_t *p, const char *why) {
     }
     forget_peer(c, p);
     if (was_ok) ui_print(c, "* %s %s (%d online)", name, why, live_count(c) + 1);
-    // The one who left may have been the room onion's latest publisher: point it back at us.
+    // The peer who left may have been the latest publisher of the room onion, so point it back at us.
     if (was_ok && c->tor && c->tor_hosting && c->tor_republish_at == 0.0) c->tor_republish_at = now_seconds() + 5.0 + jitter(25.0);
 }
 
-// A version as a peer may name it: short, and nothing a terminal or a URL would read as more.
+// A version as a peer may give it: short, and nothing a terminal or a URL would treat specially.
 static int version_ok(const char *v) {
     size_t n = strlen(v);
     if (n == 0 || n > MAX_VERSION) return 0;
@@ -977,7 +979,7 @@ static int signed_list(const chat_t *c, const char *version, const char *list, c
     return n;
 }
 
-// The warning names p, so it waits for p's join to be announced.
+// The warning includes p's name, so it waits until p's join is announced.
 static void tell_build(chat_t *c, peer_t *p) {
     if (!p->build_warn || !p->announced) return;
     p->build_warn = 0;
@@ -990,7 +992,7 @@ static void tell_build(chat_t *c, peer_t *p) {
 // 0.1.8's format, which has none), and warns about one that isn't a release binary.
 static void check_build(chat_t *c, peer_t *p, const char *version, const uint8_t proof[BUILD_HASH_LEN],
                         const char *list, const char *sig) {
-    // "v" comes with every k: a verdict already given isn't given again.
+    // "v" comes with every k, so a verdict already given isn't repeated.
     int again = p->build_state == BUILD_MODIFIED && strcmp(p->build_version, version) == 0;
     copy_str(p->build_version, version, sizeof p->build_version);
     if (!c->has_release_key) { p->build_state = BUILD_UNCHECKED; return; }
@@ -1050,7 +1052,7 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         } else {
             p->identity_source = IDENT_NONE; p->identity_state = VERIFY_UNVERIFIED;
         }
-        // A re-handshake (rekey, rejoin) re-sends k: say so when the identity behind it moves.
+        // A re-handshake (rekey, rejoin) sends k again. Say so if the identity behind it changes.
         if (had_source != IDENT_NONE) {
             char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
             if (p->identity_source == IDENT_NONE) {
@@ -1084,11 +1086,11 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
             addr_t a;
             size_t il = strlen(item);
             if (il == TOR_ADDR_LEN + 6 && strcmp(item + TOR_ADDR_LEN, ".onion") == 0) {
-                // Only Tor mode follows onion addresses; nothing else may ever look them up.
+                // Only Tor mode uses onion addresses. Nothing else may ever look them up.
                 item[TOR_ADDR_LEN] = '\0';
                 if (c->tor && tor_target(c->tor, item, &a) == 0) add_candidate(c, a);
             } else if (c->route.mode == ROUTE_DHT && addr_parse_ip_port(item, &a) == 0) {
-                // Numeric only: a hostname here would have us resolve whatever a peer names.
+                // Numeric only. A hostname here would make us resolve any name a peer sends.
                 add_candidate(c, a);
             }
             item = comma ? comma + 1 : NULL;
@@ -1109,7 +1111,7 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         int direct = memcmp(origin, p->id, ID_LEN) == 0;
         if (!direct) {
             if (memcmp(origin, c->my_id, ID_LEN) == 0) return;
-            // The origin is connected to us, so its own copy will come: a relayed one could be forged.
+            // The origin is connected to us, so its own copy will arrive. A relayed one could be forged.
             peer_t *op = find_peer_by_id(c, origin);
             if (op && op->ok) return;
         }
@@ -1122,13 +1124,13 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         int mentioned = has_mention(text, c->nick);
         char shown[MAX_NICK + CHAT_NAME_LEN + 48];
         chat_peer_name(c, p, via);
-        // A relayed nick is only the relayer's word, so it always carries the origin's id. Nicks
-        // can't hold brackets, so what's added in them can't be faked.
+        // A relayed nick is only the relayer's claim, so it always includes the origin's id. Nicks can't
+        // contain brackets, so what's added in brackets can't be faked.
         const char *mark = p->code_ok < 0 ? " (codes differ)" : c->verify_required && p->code_ok != 1 ? " (code not compared)" : "";
         if (direct) snprintf(shown, sizeof shown, "%s%s", via, mark);
         else snprintf(shown, sizeof shown, "%s#%.8s (via %s%s)", nick, f[2], via, mark);
         ui_chat(c, direct ? p->color : NULL, mentioned, shown, text);
-        // Only as much as the preview setting lets out: desktops keep what a notification shows.
+        // Only as much as the preview setting allows, since desktops keep what a notification shows.
         if (c->notify && (c->notify_mode == NOTIFY_ALL || (c->notify_mode == NOTIFY_MENTIONS && mentioned)))
             c->notify(c->ui, c->notify_preview >= PREVIEW_NICK ? shown : NULL,
                       c->notify_preview == PREVIEW_MESSAGE ? text : NULL, mentioned);
@@ -1137,7 +1139,7 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         for (int i = 0; i < c->peer_hi; i++) {
             peer_t *q = &c->peers[i];
             if (!q->used || !q->ok || q == p || memcmp(q->id, origin, ID_LEN) == 0) continue;
-            // Passed on only where our own messages would go.
+            // Only passed on to peers our own messages would go to.
             if (q->code_ok < 0 || (c->verify_required && q->code_ok != 1)) continue;
             send_peer(c, q, rejoin);
         }
@@ -1155,10 +1157,10 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
     (void)now;
 }
 
-// Our own hi came back from addr, so it's one of ours: never a candidate. Kept once each, so
-// replays of it can't fill the list.
+// Our own hi came back from addr, so it's one of our addresses and never a candidate. Each is
+// kept once, so replays of it can't fill the list.
 static void note_self_addr(chat_t *c, addr_t addr) {
-    // A relayed address stands for a peer, or a Tor stream: never ours to rule out.
+    // A relayed address represents a peer or a Tor stream, so it's never one of ours.
     if (addr.kind != ADDR_UDP) return;
     int cap = (int)(sizeof c->self_addrs / sizeof c->self_addrs[0]);
     for (int i = 0; i < c->n_self_addrs; i++) if (addr_equal(c->self_addrs[i], addr)) return;
@@ -1187,8 +1189,8 @@ static void on_room(chat_t *c, char *plain, addr_t addr, double now) {
             char shortid[9]; hex_encode(peer_id, 4, shortid);
             ui_print(c, "* hi from %s, peer %s%s", addr_str, shortid, existing ? " (known)" : " (new)");
         }
-        // Anyone who recorded a hi can replay it from anywhere. Take one on trust only if it changes
-        // nothing; new keys, or a new address mid-handshake, must answer a cookie first.
+        // Anyone who recorded a hi can replay it from anywhere. Only accept one without a check if it
+        // changes nothing. New keys, or a new address mid-handshake, must answer a cookie first.
         int trusted = existing && existing->keygen == c->keygen && memcmp(existing->pub, pub, PUB_LEN) == 0
                       && (existing->ok || addr_equal(existing->addr, addr));
         if (trusted) {
@@ -1250,16 +1252,16 @@ static void on_room(chat_t *c, char *plain, addr_t addr, double now) {
         if (p) finish_kem_decap(c, p, ct);
     } else if (n == 2 && strcmp(f[0], "nb") == 0 && addr.kind == ADDR_NOSTR && strlen(f[1]) == 32
                && strcmp(f[1], my_idhex) != 0) {
-        // A member announcing itself on the relays. Someone we already hear from directly
-        // needs nothing; anyone else gets a hi through the relays.
+        // A member announcing itself on the relays. Someone we already hear from directly needs nothing.
+        // Anyone else gets a hi through the relays.
         uint8_t peer_id[ID_LEN];
         if (hex_decode(f[1], 32, peer_id) != 0) return;
         peer_t *known = find_peer_by_id(c, peer_id);
         if (known && known->ok && now - known->seen < UDP_STALE) return;
         add_candidate(c, addr_virtual(ADDR_NOSTR, peer_id));
     } else if (n == 3 && strcmp(f[0], "lan") == 0 && addr.kind == ADDR_UDP && strcmp(f[1], my_idhex) != 0) {
-        // Only a real broadcast says where on the LAN someone is: over the relays or a Tor stream
-        // the port would be rewritten onto an address that stands for a peer.
+        // Only a real broadcast shows where someone is on the LAN. Over the relays or a Tor stream the
+        // port would be applied to an address that represents a peer.
         c->st.lan++;
         int port = atoi(f[2]);
         if (port > 0 && port <= 65535) {
@@ -1316,8 +1318,8 @@ static void note_source(chat_t *c, addr_t a) {
     st->src[slot] = a; st->src_n[slot] = 1;
 }
 
-// A datagram off a UDP socket, unmasked: a piece of a room frame, or a frame. What isn't one is
-// handed to the DHT as it came, since DHT messages are never masked.
+// A datagram from a UDP socket, unmasked: a piece of a room frame, or a frame. Anything else is
+// passed to the DHT unchanged, since DHT messages are never masked.
 static void on_udp(chat_t *c, const uint8_t *raw, size_t len, addr_t addr, double now) {
     c->st.rx++;
     note_source(c, addr);
@@ -1331,7 +1333,7 @@ static void on_udp(chat_t *c, const uint8_t *raw, size_t len, addr_t addr, doubl
     if (c->dht_on && addr.kind == ADDR_UDP) dht_on_packet(&c->dht, raw, len, addr, dht_candidate_cb, c);
 }
 
-// A datagram through the relays or Tor, which carry frames whole, and unmasked.
+// A datagram through the relays or Tor, which carry whole frames, unmasked.
 static void on_relayed(chat_t *c, uint8_t *data, size_t len, addr_t addr, double now) {
     c->st.rx++;
     note_source(c, addr);
@@ -1363,9 +1365,9 @@ static int peer_try_unseal(peer_t *p, const uint8_t *data, size_t len, uint32_t 
     return 1;
 }
 
-// "* NICK (verified) joined": once p's nick and identity are known, which "k" brings. It's the
-// first frame p sends, but it can be lost or overtaken, and another frame opening first would
-// otherwise announce an "anon (unverified)".
+// "* NICK (verified) joined": shown once p's nick and identity are known, which "k" carries. It's
+// the first frame p sends, but it can be lost or overtaken, and another frame opening first would
+// otherwise announce "anon (unverified)".
 static void announce_join(chat_t *c, peer_t *p) {
     p->announced = 1;
     const char *idlabel;
@@ -1378,8 +1380,8 @@ static void announce_join(chat_t *c, peer_t *p) {
     char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
     ui_print_colored(c, p->color, "* %s%s%s joined (%d online)", name, idlabel,
                       p->persists ? " [logging chat locally]" : "", live_count(c) + 1);
-    // A peer that dropped and came back ran a fresh handshake, with nothing tying it to
-    // the one that may have been verified. Someone who forced the drop could be in it.
+    // A peer that dropped and came back did a fresh handshake, with nothing linking it to the one
+    // that may have been verified. Someone who forced the drop could be in the middle of it.
     for (size_t g = 0; g < sizeof c->gone / sizeof c->gone[0]; g++) {
         if (!c->gone[g].used || memcmp(c->gone[g].id, p->id, ID_LEN) != 0) continue;
         c->gone[g].used = 0;
@@ -1399,8 +1401,8 @@ static void announce_join(chat_t *c, peer_t *p) {
             }
     if (p->code_ok == 0) {
         char code[HEX_GROUPS_LEN(VERIFY_LEN)]; hex_groups(p->vfy, VERIFY_LEN, code);
-        // The room's password only proves someone is a member: any member could sit between two
-        // others. The code is the same on both ends only if nobody does.
+        // The room's password only proves someone is a member, and any member could sit between two
+        // others. The code only matches on both ends if nobody is in the middle.
         if (c->verify_required)
             ui_print(c, "* compare this code with %s over another channel (in person, a call): %s - then :verify %s ok, "
                         "or :verify %s no if theirs differs. Until then nothing you send reaches them",
@@ -1427,7 +1429,7 @@ static int on_frame(chat_t *c, uint8_t *data, size_t len, addr_t addr, double no
         on_room(c, (char *)plain, addr, now);
         return 1;
     }
-    // Checked before the peer loop: a frame no sealer could make shouldn't cost ratchet steps.
+    // Checked before the peer loop, so a frame no sealer could produce doesn't cost ratchet steps.
     if (sealed_len_ok(len, SESSION_HEADER_LEN, SESSION_MIN_BODY)) {
         uint32_t index = ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) | ((uint32_t)data[2] << 8) | data[3];
         int hit = -1, fast = -1, on_old = 0;
@@ -1454,8 +1456,8 @@ static int on_frame(chat_t *c, uint8_t *data, size_t len, addr_t addr, double no
             }
             c->st.session_ok++;
             plain[plain_len] = '\0';
-            // The best path that works: direct UDP, then Tor (end to end, no relay in the middle),
-            // then the relays. A worse path takes over only once the better one goes quiet.
+            // The best path that works: direct UDP, then Tor (end to end, no relay in the middle), then the
+            // relays. A worse path is only used once the better one goes quiet.
             if (!addr_equal(p->addr, addr)
                 && (path_rank(addr) >= path_rank(p->addr) || now - p->path_seen[p->addr.kind] > UDP_STALE)) {
                 p->prev_addr = p->addr;
@@ -1466,7 +1468,7 @@ static int on_frame(chat_t *c, uint8_t *data, size_t len, addr_t addr, double no
             int was_pending = !p->ok;
             p->ok = 1;
             if (was_pending) p->ok_since = now;
-            // Records, one to a line: no record holds a newline.
+            // Records, one per line. No record contains a newline.
             for (char *rec = (char *)plain; rec; ) {
                 char *nl = strchr(rec, '\n');
                 if (nl) *nl = '\0';
@@ -1500,7 +1502,7 @@ int chat_sockets(chat_t *c, sock_t out[CHAT_MAX_SOCKS]) {
     int k = 0;
     if (c->sock != SOCK_INVALID) out[k++] = c->sock;
     if (c->lan_sock != SOCK_INVALID) out[k++] = c->lan_sock;
-    // The relays' and Tor's sockets only wake the loop; chat_tick does their I/O.
+    // The relays' and Tor's sockets only wake the loop. chat_tick does their I/O.
     if (c->nostr) k += nostr_sockets(c->nostr, out + k, CHAT_MAX_SOCKS - k);
     if (c->tor) k += tor_sockets(c->tor, out + k, CHAT_MAX_SOCKS - k);
     return k;
@@ -1545,8 +1547,8 @@ static int pending_any(const chat_t *c) {
     return 0;
 }
 
-// A re-handshake still going with p: ours (not yet on our keys with p, or not yet sure p has the
-// new chains), or p's (a key it announced that we haven't re-handshaken with).
+// A re-handshake still in progress with p: ours (not yet on our keys with p, or not yet sure p has
+// the new chains), or p's (a key it announced that we haven't re-handshaken with yet).
 static int rehandshaking_with(const chat_t *c, const peer_t *p) {
     return p->keygen != c->keygen || !p->chain_confirmed
         || (p->next_pub_set && memcmp(p->next_pub, p->pub, PUB_LEN) != 0);
@@ -1580,8 +1582,8 @@ static void session_rekey(chat_t *c, double now) {
     for (int i = 0; i < c->peer_hi; i++) {
         peer_t *p = &c->peers[i];
         if (!p->used) continue;
-        // Announce the new key over the current session before the hi that uses it: queued in
-        // that order, they go in that order.
+        // Announce the new key over the current session before the hi that uses it. They're sent in the
+        // order they're queued.
         if (p->ok) { send_rk(c, p, 0); p->next_rk = now + RK_RESEND; }
         send_room(c, c->hi_msg, p->addr, c->sock);
         p->hello_tries = 0;
@@ -1602,7 +1604,7 @@ static void send_beacon(chat_t *c) {
 
 static void tor_tick(chat_t *c, double now) {
     const char *me = tor_my_onion(c->tor);
-    // Tor published our onion (again, after a restart of tor): peers learn it for px.
+    // Tor published our onion (again, after tor restarted), so peers get it for px.
     if (me[0] && strcmp(me, c->told_onion) != 0) {
         copy_str(c->told_onion, me, sizeof c->told_onion);
         for (int i = 0; i < c->peer_hi; i++)
@@ -1611,7 +1613,7 @@ static void tor_tick(chat_t *c, double now) {
     if (!c->tor_hosting && (c->ever_connected || now - c->start > TOR_HOST_AFTER)) {
         c->tor_hosting = 1;
         tor_host_room(c->tor, -1);
-        // Knocking on our own slot from now on would only reach ourselves.
+        // Trying our own slot from now on would only reach ourselves.
         addr_t mine = tor_room_target(c->tor, tor_hosted_slot(c->tor));
         for (int i = 0; i < MAX_CANDS; i++) if (c->cands[i].used && addr_equal(c->cands[i].addr, mine)) c->cands[i].used = 0;
     }
@@ -1621,9 +1623,9 @@ static void tor_tick(chat_t *c, double now) {
     }
 }
 
-// Whether the relays have work: always in Tor mode (they're where DHT members are met) or when
-// set so; otherwise while nobody is reached yet, while a peer is reached (or being reached) only
-// through them, or while a peer's UDP has gone quiet and they may be needed next.
+// Whether the relays are needed: always in Tor mode (that's where DHT members are met) or when set
+// to always. Otherwise while nobody is reached yet, while a peer is reached (or being reached)
+// only through them, or while a peer's UDP has gone quiet and they may be needed next.
 static int relays_needed(chat_t *c, double now) {
     if (c->route.mode == ROUTE_TOR || c->route.nostr == NOSTR_ALWAYS) return 1;
     if (live_count(c) == 0) return 1;
@@ -1645,8 +1647,7 @@ void chat_tick(chat_t *c, double now) {
     if (c->tor) tor_tick(c, now);
     if (c->pm) {
         portmap_step(c->pm, now);
-        // With a mapping up, the DHT is told the router's forwarded port, not whatever source
-        // port it sees.
+        // With a mapping active, the DHT is given the router's forwarded port, not the source port it sees.
         uint16_t ext = 0;
         int mapped = portmap_mapped(c->pm, &ext);
         if (c->dht_on && mapped && (!c->dht.explicit_port || c->dht.my_port != ext)) {
@@ -1677,7 +1678,7 @@ void chat_tick(chat_t *c, double now) {
     for (int i = 0; i < MAX_CANDS; i++) {
         cand_t *cd = &c->cands[i];
         if (!cd->used) continue;
-        // Reached already, at this address or (relays) under this id: nothing left to try.
+        // Already reached at this address, or (relays) under this id, so there's nothing left to try.
         if (candidate_reached(c, cd->addr)) { cd->used = 0; continue; }
         if (now >= cd->next_try) {
             if (c->probe_tokens < 1.0) break;
@@ -1725,16 +1726,16 @@ void chat_tick(chat_t *c, double now) {
     for (int i = 0; i < c->peer_hi; i++) {
         peer_t *p = &c->peers[i];
         if (!p->used || !p->ok) continue;
-        // Its path gone quiet (UDP, or a Tor stream): try the relays. Frames that come back
-        // through them move the peer there.
+        // Its path (UDP, or a Tor stream) has gone quiet, so try the relays. Frames that come back through
+        // them move the peer there.
         if (c->nostr && p->addr.kind != ADDR_NOSTR && now - p->seen > UDP_STALE) {
             p->prev_addr = p->addr;
             p->addr = addr_virtual(ADDR_NOSTR, p->id);
             if (c->net_verbose) ui_print(c, "* %s went quiet - trying the relays", p->nick);
         }
-        // Slots keep a live peer's path warm, so a hi goes only to one that went quiet, in case it
-        // lost the session, or to one that hasn't re-handshaken with our new keys. Through the
-        // relays a hi costs every member an event: there only the re-handshake gets one.
+        // Slots keep a live peer's path active, so a hi only goes to a peer that went quiet, in case it
+        // lost the session, or to one that hasn't re-handshaken with our new keys. Through the relays a hi
+        // costs every member an event, so there only the re-handshake gets one.
         if (p->k_sent > 0 && p->k_sent < K_SENDS && now >= p->next_k) {
             send_k_now(c, p);
             p->k_sent++;
@@ -1773,10 +1774,10 @@ void chat_tick(chat_t *c, double now) {
             else if (p->old_until > 0.0 && p->old_send.started) send_rk(c, p, 1);
         }
         if (p->old_until > 0.0 && now > p->old_until) rekey_drop_overlap(p);
-        // Mid re-handshake a peer's frames can go unread for a while: the initiator's, from its kx
-        // until the responder takes it, a cookie round trip later. Through the relays, a slot every
-        // five seconds or so, that's the best part of a minute, and has been more than the timeout:
-        // there it gets the overlap's time more before it's dropped.
+        // During a re-handshake a peer's frames can go unread for a while: the initiator's, from its kx
+        // until the responder takes it, a cookie round trip later. Through the relays, with a slot every
+        // five seconds or so, that's most of a minute, which has been longer than the timeout. So there it
+        // gets the overlap time on top before it's dropped.
         double timeout = PEER_TIMEOUT
                        + (p->addr.kind == ADDR_NOSTR && rehandshaking_with(c, p) ? REKEY_OVERLAP : 0.0);
         if (p->ok && now - p->seen > timeout) drop_peer(c, p, "timed out");
@@ -1796,8 +1797,8 @@ void chat_tick(chat_t *c, double now) {
         peer_t *p = &c->peers[i];
         if (!p->used) continue;
         if (p->ok && !p->announced && now - p->ok_since >= JOIN_WAIT) announce_join(c, p);
-        // Slots start once there's a chain to send on: before a peer is connected, its first frame
-        // from us is what connects it.
+        // Slots start once there's a chain to send on. Before a peer is connected, our first frame to it
+        // is what connects it.
         if (!p->ok && !send_chain_for(p)->started) continue;
         double iv = cover_interval(c, p);
         if (p->next_cover == 0.0) { p->next_cover = now + jitter(iv); continue; }
@@ -1813,8 +1814,8 @@ void chat_tick(chat_t *c, double now) {
             continue;
         }
         run_slot(c, p);
-        // Through the relays a transfer can't burst: the slots of a fast one we're sending come as
-        // often as they allow instead.
+        // Through the relays a transfer can't burst. Instead, slots for a fast transfer we're sending come
+        // as often as the relays allow.
         if (c->fast_files && p->ok && p->serving && p->addr.kind == ADDR_NOSTR) iv = relay_fast_interval(c, iv);
         p->next_cover = now + iv + jitter(iv * 0.25);
     }
@@ -1822,8 +1823,8 @@ void chat_tick(chat_t *c, double now) {
         c->warned_lonely = 1;
         ui_print(c, "* nobody has answered for this session yet - check the id and password with "
                      "whoever shared them, or they may not have started their app yet");
-        // DHT and Tor sessions only meet on the relays: without them the room splits in two
-        // without a word.
+        // DHT and Tor sessions only meet on the relays. Without them the room splits in two without any
+        // warning.
         if (!c->nostr)
             ui_print(c, "* Nostr relays are off here, so members using %s routing can't reach you - :set nostr on turns them on%s",
                      c->route.mode == ROUTE_TOR ? "DHT" : "Tor", c->route.mode == ROUTE_TOR ? " (through Tor)" : "");
@@ -1895,7 +1896,7 @@ const char *chat_verify_label(verify_state_t s) {
 
 void chat_build_label(const peer_t *p, char *out, size_t cap) {
     switch (p->build_state) {
-        // Only its word: a client altered to lie can send an official build's hash.
+        // Only its claim. A client modified to lie can send an official build's hash.
         case BUILD_OFFICIAL:  snprintf(out, cap, "says official v%s", p->build_version); break;
         case BUILD_MODIFIED:  snprintf(out, cap, "modified client (says v%s)", p->build_version); break;
         case BUILD_UNCHECKED: snprintf(out, cap, "v%s, build not checked", p->build_version); break;
@@ -1962,7 +1963,7 @@ static cmd_result_t cmd_peers(void *ctx, const char *arg) {
     return CMD_OK;
 }
 
-// The online peer an argument names: a nick, or NICK#ID (a prefix of the id :peers shows) where
+// The online peer an argument refers to: a nick, or NICK#ID (a prefix of the id :peers shows) when
 // nicks look alike. NULL if none, or (*ambiguous) more than one.
 static peer_t *peer_by_name(chat_t *c, const char *arg, int *ambiguous) {
     char name[CHAT_NAME_LEN];
@@ -1992,7 +1993,7 @@ static void pin_identity(chat_t *c, const peer_t *p) {
 
 static cmd_result_t cmd_verify(void *ctx, const char *arg) {
     chat_t *c = ctx;
-    // "NICK", "NICK ok" or "NICK no": the verdict is the last word, as a nick can hold spaces.
+    // "NICK", "NICK ok" or "NICK no". The verdict is the last word, since a nick can contain spaces.
     char who[MAX_TEXT + 1], verdict[8] = "";
     copy_str(who, arg, sizeof who);
     char *sp = strrchr(who, ' ');
@@ -2049,8 +2050,8 @@ static int name_index(const char *const *names, int n, const char *s) {
     return -1;
 }
 
-// The --simple :set, for the settings a session holds itself. The full-screen UI answers :set on
-// its own, with the settings page behind it.
+// The --simple :set, for the settings a session holds itself. The full-screen UI handles :set
+// itself, using the settings page.
 static cmd_result_t cmd_set(void *ctx, const char *arg) {
     chat_t *c = ctx;
     char key[CMD_WORD_MAX];
@@ -2140,7 +2141,7 @@ static cmd_result_t cmd_port(void *ctx, const char *arg) {
     net_close(c->sock);
     c->sock = s;
     c->port = got;
-    // Peers follow the source address of our next hi; the DHT re-announces from the new socket.
+    // Peers follow the source address of our next hi, and the DHT announces again from the new socket.
     c->next_alive = 0;
     c->next_lan = 0;
     if (c->dht_on) { c->dht.my_port = got; c->dht.explicit_port = 0; c->dht.next_lookup = 0; }
@@ -2194,7 +2195,7 @@ uint64_t chat_file_got(const file_entry_t *e) {
     return got < e->size ? got : e->size;
 }
 
-// The bytes p sends in a slot when nothing else is: a chunk over UDP or Tor, two through the relays.
+// The bytes p sends in an otherwise empty slot: one chunk over UDP or Tor, two through the relays.
 static double file_slot_bytes(const peer_t *p) {
     return (p->batches && p->addr.kind == ADDR_NOSTR ? 2.0 : 1.0) * FILE_CHUNK;
 }
@@ -2206,13 +2207,13 @@ double chat_file_eta(const chat_t *cc, const file_entry_t *e, double now) {
     if (!peer_trusted(c, p)) return -2.0;
     uint64_t got = chat_file_got(e);
     double left = (double)(e->size - got), took = now - e->since;
-    // The pace so far, once a few chunks make one. Until then, chat's steady pace on its path:
-    // a slot comes up to a quarter of its interval late, an eighth on average.
+    // The rate so far, once there are enough chunks to measure it. Until then, chat's normal rate on
+    // its path: a slot comes up to a quarter of its interval late, an eighth on average.
     if (got >= 4 * FILE_CHUNK && took > 0.0) return left * took / (double)got;
     return left / file_slot_bytes(p) * cover_interval(c, p) * 1.125;
 }
 
-// Stops a download: the partial file deleted, what was in memory wiped.
+// Stops a download: deletes the partial file and wipes anything in memory.
 static void file_stop_download(file_entry_t *e, dl_state_t to) {
     if (e->out) { fclose(e->out); e->out = NULL; }
     if (e->part_path[0]) { platform_remove(e->part_path); e->part_path[0] = '\0'; }
@@ -2227,8 +2228,8 @@ static void file_free(file_entry_t *e) {
     crypto_wipe(e, sizeof *e);
 }
 
-// A free slot, or the oldest that isn't ours and isn't moving. A peer past FILE_OFFERS_PER_PEER
-// replaces its own oldest instead, so nobody can push everyone else's offers out.
+// A free slot, or the oldest one that isn't ours and isn't being transferred. A peer over
+// FILE_OFFERS_PER_PEER replaces its own oldest instead, so nobody can push out everyone else's offers.
 #define FILE_OFFERS_PER_PEER 16
 static file_entry_t *file_new(chat_t *c, const uint8_t *owner) {
     file_entry_t *pick = NULL;
@@ -2272,7 +2273,7 @@ static void file_send_offer(chat_t *c, peer_t *p, const file_entry_t *e, double 
     snprintf(rec, sizeof rec, "fo\t%s\t%s\t%llu\t%s\t%s\t%s", mid, fidhex, (unsigned long long)e->size, shahex,
              e->image ? "image" : "file", e->name);
     if (send_peer(c, p, rec) != 0) return;
-    // Retried until acked, as a message is.
+    // Retried until acked, like a message.
     for (int s = 0; s < MAX_PENDING_MSGS; s++) {
         pending_msg_t *pm = &c->pending[s];
         if (pm->used) continue;
@@ -2299,7 +2300,7 @@ static cmd_result_t cmd_send(void *ctx, const char *arg) {
     copy_str(path, arg, sizeof path);
     size_t pl = strlen(path);
     while (pl > 0 && path[pl - 1] == ' ') path[--pl] = '\0';
-    // A path pasted in quotes (as file managers copy them) loses them.
+    // Strip quotes from a pasted path (file managers copy them that way).
     if (pl >= 2 && (path[0] == '"' || path[0] == '\'') && path[pl - 1] == path[0]) { memmove(path, path + 1, pl - 2); path[pl - 2] = '\0'; }
     if (!path[0]) { ui_print(c, "* usage: :send PATH - offers a file to everyone here; nobody gets it unless they fetch it"); return CMD_OK; }
     if (path[0] == '~' && (path[1] == '/' || path[1] == '\0')) {
@@ -2321,8 +2322,8 @@ void chat_send_file(chat_t *c, const char *path) {
         ui_print(c, "* can't send %s: files go up to %s", path, lim);
         return;
     }
-    // Hashed as it's read now; chunks are read from the same open file later, so a file changed
-    // since shows up as a hash that doesn't match, and nothing else is ever sent in its place.
+    // Hashed while it's read now. Chunks are read from the same open file later, so a file changed
+    // since then gives a hash that doesn't match, and nothing else is ever sent in its place.
     sha256_ctx_t h;
     sha256_init(&h);
     uint8_t buf[65536], head[8] = { 0 };
@@ -2363,8 +2364,8 @@ void chat_send_file(chat_t *c, const char *path) {
     if (e->image) ui_print(c, "* it's offered as a picture: others see it hidden until they choose :show %d", e->num);
 }
 
-// Asks p for the first run of the window that hasn't come: the whole window, to begin with. What
-// came after the run isn't asked for again.
+// Asks p for the first run of the window that hasn't arrived (the whole window at the start).
+// Anything that arrived after the run isn't requested again.
 static void file_request(chat_t *c, file_entry_t *e, peer_t *p, double now) {
     if (e->win_n == 0) {
         uint64_t left = e->size - e->win_off;
@@ -2386,7 +2387,7 @@ static void file_request(chat_t *c, file_entry_t *e, peer_t *p, double now) {
     e->retry_at = now + 6.0 * iv + 4.0;
 }
 
-// The folder downloads go to, and the name to save as there: name, else "name (2).ext" and on.
+// The folder downloads go to, and the name to save as there: name, otherwise "name (2).ext" and so on.
 static int file_save_as(file_entry_t *e, char *saved, size_t cap) {
     char dir[600];
     if (platform_downloads_dir(dir, sizeof dir) != 0) return -1;
@@ -2419,7 +2420,7 @@ static void file_finish(chat_t *c, file_entry_t *e) {
     char saved[800];
     if (!ok || file_save_as(e, saved, sizeof saved) != 0) {
         file_stop_download(e, DL_FAILED);
-        ui_print(c, "* file %d (%s) came whole, but couldn't be saved in Downloads", e->num, desc);
+        ui_print(c, "* file %d (%s) downloaded, but couldn't be saved in Downloads", e->num, desc);
         return;
     }
     e->part_path[0] = '\0';
@@ -2446,7 +2447,7 @@ int chat_file_fetch(chat_t *c, int num, int view, int anyway) {
     file_format_size(e->size, sz, sizeof sz);
     file_format_size(cap, lim, sizeof lim);
     if (e->size > cap && !anyway) {
-        ui_print(c, "* file %d is %s, over your %s limit - :%s %d anyway fetches it all the same", num, sz, lim,
+        ui_print(c, "* file %d is %s, over your %s limit - :%s %d anyway fetches it regardless", num, sz, lim,
                  view ? "show" : "download", num);
         return -1;
     }
@@ -2465,7 +2466,7 @@ int chat_file_fetch(chat_t *c, int num, int view, int anyway) {
     if (!view) {
         char dir[600];
         if (platform_downloads_dir(dir, sizeof dir) != 0) { file_stop_download(e, DL_FAILED); ui_print(c, "* can't find or make your Downloads folder"); return -1; }
-        // Hidden while it comes in, under a name nobody else picks; renamed once its hash matches.
+        // Hidden while downloading, under a name nothing else will use. Renamed once its hash matches.
         uint8_t r[6]; gen_random(r, sizeof r);
         char rh[13]; hex_encode(r, sizeof r, rh);
         snprintf(e->part_path, sizeof e->part_path, "%s/.chat-%s.part", dir, rh);
@@ -2477,13 +2478,13 @@ int chat_file_fetch(chat_t *c, int num, int view, int anyway) {
     e->since = now_seconds();
     if (e->size == 0) { file_finish(c, e); return 0; }
     file_request(c, e, p, e->since);
-    // How long it takes is up to the sender: fast transfers speed what you send.
+    // How long it takes depends on the sender. Fast transfers only speed up what you send.
     char eta[48]; file_format_duration(chat_file_eta(c, e, e->since), eta, sizeof eta);
     if (p->addr.kind == ADDR_NOSTR)
-        ui_print(c, "* fetching file %d (%s) from %s through the relays: %s at chat's steady pace, up to half that if "
+        ui_print(c, "* fetching file %d (%s) from %s through the relays: %s at chat's normal rate, up to half that if "
                     "%s has fast transfers on", num, sz, name, eta, name);
     else
-        ui_print(c, "* fetching file %d (%s) from %s: %s at chat's steady pace, seconds if %s has fast transfers on",
+        ui_print(c, "* fetching file %d (%s) from %s: %s at chat's normal rate, seconds if %s has fast transfers on",
                  num, sz, name, eta, name);
     return 0;
 }
@@ -2548,8 +2549,8 @@ static cmd_result_t cmd_files(void *ctx, const char *arg) {
     return CMD_OK;
 }
 
-// The next chunk p asked for, as a record after the *pos bytes of text there are (in place of a nop
-// if none), if it fits in cap: 1 if it went in.
+// The next chunk p asked for, as a record after the *pos bytes of text already there (instead of a
+// nop if there are none), if it fits in cap. Returns 1 if it was added.
 static int file_next_chunk(chat_t *c, peer_t *p, char *text, size_t *pos, size_t cap) {
     file_entry_t *e = file_by_fid(c, c->my_id, p->serve_fid);
     if (!e || !e->fp || p->serve_next >= p->serve_end) { p->serving = 0; return 0; }
@@ -2625,9 +2626,9 @@ static void file_on_record(chat_t *c, peer_t *p, char **f, int n, double now) {
         if (strlen(f[1]) != FILE_ID_LEN * 2 || hex_decode(f[1], FILE_ID_LEN * 2, fid) != 0 || parse_u64(f[2], &off) != 0
             || parse_u64(f[3], &count) != 0) return;
         file_entry_t *e = file_by_fid(c, c->my_id, fid);
-        // Only ours, still offered, to someone who'd have been offered it. A file of ours that
-        // isn't (any more) gets "fx"; one that never was gets nothing, so made-up ids can't fill
-        // the queue every peer shares.
+        // Only our files, still offered, to someone who would have been offered them. A file of ours that
+        // isn't offered any more gets "fx". One that never was gets nothing, so made up ids can't fill the
+        // queue every peer shares.
         if (!e) return;
         if (!e->fp || !peer_trusted(c, p)) {
             char rec[40]; snprintf(rec, sizeof rec, "fx\t%s", f[1]);
@@ -2656,13 +2657,13 @@ static void file_on_record(chat_t *c, peer_t *p, char **f, int n, double now) {
         e->retry_at = now + 6.0 * iv + 4.0;
         uint64_t full = e->win_n == 64 ? ~0ull : (1ull << e->win_n) - 1;
         if (e->win_got != full) {
-            // The last of the run asked for has come, and the window still has a gap: what's in it
-            // was lost on the way (or never asked for), so it's asked for now rather than once the
-            // retry is due. Through the relays that's half a minute saved.
+            // The last of the requested run has arrived and the window still has a gap. Whatever is in it was
+            // lost (or never requested), so it's requested now instead of when the retry is due. Through the
+            // relays that saves half a minute.
             if ((int)idx + 1 == e->req_end) file_request(c, e, p, now);
             return;
         }
-        // The window whole: in order onto the file (or into memory), and into the hash.
+        // The window is complete: write it in order to the file (or memory), and add it to the hash.
         size_t bytes = e->size - e->win_off < (uint64_t)e->win_n * FILE_CHUNK ? (size_t)(e->size - e->win_off)
                                                                               : (size_t)e->win_n * FILE_CHUNK;
         if (e->view) memcpy(e->mem + e->done, e->win, bytes);
@@ -2693,17 +2694,17 @@ static void files_tick(chat_t *c, double now) {
         file_entry_t *e = &c->files[i];
         if (!e->used || e->dl != DL_ACTIVE) continue;
         peer_t *p = file_owner(c, e);
-        // Its sender may only have stalled out for a moment (a Tor circuit, a relay). The fetch
-        // waits for them, and, back with a new verify code, for that to be compared again.
+        // Its sender may only have stalled for a moment (a Tor circuit, a relay). The fetch waits for
+        // them, and if they come back with a new verify code, for that to be compared again.
         if (!p || !peer_trusted(c, p)) {
             if (p || e->gone_since == 0.0) e->gone_since = now;
             if (p || now - e->gone_since < FILE_OWNER_GRACE) continue;
             file_stop_download(e, DL_FAILED);
-            ui_print(c, "* whoever offered file %d left before it came - fetch it again once they're back", e->num);
+            ui_print(c, "* whoever offered file %d left before it finished - fetch it again once they're back", e->num);
             continue;
         }
-        // Back after a moment away: what it was sending went with its old session, so it's asked
-        // again from where it got to.
+        // Back after a short time away. What it was sending was lost with its old session, so it's
+        // requested again from where it stopped.
         if (e->gone_since > 0.0) {
             e->gone_since = 0.0;
             e->retries = 0;
@@ -2711,13 +2712,13 @@ static void files_tick(chat_t *c, double now) {
             continue;
         }
         if (now < e->retry_at) continue;
-        // Mid re-handshake with its sender, what we ask may go on keys it can't read yet: the retry
-        // waits for it to finish rather than being spent. One that never does times the peer out.
+        // During a re-handshake with its sender, our request may use keys it can't read yet, so the retry
+        // waits for it to finish instead of being used up. If it never finishes the peer times out.
         if (rehandshaking_with(c, p)) { e->retry_at = now + 1.0; continue; }
         if (++e->retries > FILE_RETRIES) {
             char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
             file_stop_download(e, DL_FAILED);
-            ui_print(c, "* file %d stopped coming from %s - try again later", e->num, name);
+            ui_print(c, "* file %d stopped downloading from %s - try again later", e->num, name);
             continue;
         }
         file_request(c, e, p, now);
@@ -2823,8 +2824,8 @@ static void module_deliver(void *ctx, const uint8_t *data, size_t len, addr_t fr
     on_relayed((chat_t *)ctx, buf, len, from, now);
 }
 
-// The room slots someone else may publish: always worth a hi, since members publishing different
-// slots only find each other by knocking.
+// The room slots someone else may publish. Always worth a hi, since members publishing different
+// slots only find each other by trying them.
 static void knock_room_slots(chat_t *c) {
     for (int i = 0; i < TOR_ROOM_SLOTS; i++)
         if (i != tor_hosted_slot(c->tor)) add_candidate(c, tor_room_target(c->tor, i));
@@ -2850,8 +2851,8 @@ static void start_nostr(chat_t *c) {
     if (c->nostr || !c->route.nostr || c->route.n_relays == 0) return;
     uint8_t tag_key[NOSTR_KEY_LEN], wrap_key[NOSTR_KEY_LEN];
     derive_nostr_keys(c->master, tag_key, wrap_key);
-    // In Tor mode the relays are where DHT peers can be met, and they're only ever reached
-    // through Tor: its SOCKS port, or nothing at all until chat has one.
+    // In Tor mode the relays are where DHT peers can be met, and they're only reached through Tor:
+    // its SOCKS port, or not at all until chat has one.
     const char *proxy = c->route.mode == ROUTE_TOR ? c->route.tor.socks : NULL;
     c->nostr = nostr_new(tag_key, wrap_key, c->my_id, (const char (*)[NOSTR_URL_MAX])c->route.relays, c->route.n_relays,
                          proxy, module_deliver, module_log, c);
@@ -2877,13 +2878,13 @@ static int relays_differ(const routing_t *a, const routing_t *b) {
 int chat_apply_routing(chat_t *c, const routing_t *r) {
     int later = r->mode != c->route.mode || strcmp(r->tor.password, c->route.tor.password) != 0;
     routing_t was = c->route;
-    // The relays apply in both modes: a Tor session reaches them through Tor.
+    // The relays apply in both modes. A Tor session reaches them through Tor.
     c->route.nostr = r->nostr;
     memcpy(c->route.relays, r->relays, sizeof r->relays);
     c->route.n_relays = r->n_relays;
     if (c->nostr && (!r->nostr || relays_differ(&was, r))) {
-        // Peers reached only through the relays move back to waiting for another path; they
-        // time out if none comes.
+        // Peers only reached through the relays go back to waiting for another path, and time out if
+        // none comes.
         nostr_free(c->nostr);
         c->nostr = NULL;
     }
@@ -2901,7 +2902,7 @@ int chat_apply_routing(chat_t *c, const routing_t *r) {
     else if (was.dht4 != r->dht4 || was.dht6 != r->dht6) {
         c->dht.want[DHT_V4] = r->dht4;
         c->dht.want[DHT_V6] = r->dht6;
-        // The bootstrap list only holds the families that were wanted: look it up again.
+        // The bootstrap list only holds the families that were wanted, so look it up again.
         dht_rebootstrap(&c->dht);
     }
 
@@ -2928,7 +2929,7 @@ void chat_tor_connected(chat_t *c) {
 
 void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify_fn notify, void *ui) {
     memset(c, 0, sizeof *c);
-    // Locked before any key lands there. Best effort: a low RLIMIT_MEMLOCK only means they may be
+    // Locked before any key is stored there. Best effort: a low RLIMIT_MEMLOCK only means they may be
     // swapped. The peers hold their chain keys.
     crypto_lock((uint8_t *)c + SECRETS_OFFSET, SECRETS_LEN);
     crypto_lock(c->peers, sizeof c->peers);
@@ -2960,7 +2961,7 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
     c->build = o->build;
     c->build.version[MAX_VERSION] = c->build.list[BUILD_LIST_LEN] = c->build.list_sig[MINISIGN_SIG_B64_LEN] = '\0';
     if (!version_ok(c->build.version)) c->build.ok = 0;
-    // They go out between tabs in "v".
+    // They're sent between tabs in "v".
     if (strspn(c->build.list, "0123456789abcdef,") != strlen(c->build.list)
         || strspn(c->build.list_sig, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=") != strlen(c->build.list_sig))
         c->build.list[0] = c->build.list_sig[0] = '\0';
@@ -2982,7 +2983,7 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
     refresh_hi(c);
 
     if (c->route.mode == ROUTE_TOR) {
-        // No UDP socket at all: whatever goes out, goes through Tor.
+        // No UDP socket at all. Everything goes through Tor.
         uint8_t room_keys[TOR_ROOM_SLOTS][64], room_pubs[TOR_ROOM_SLOTS][32];
         for (int i = 0; i < TOR_ROOM_SLOTS; i++) derive_tor_room_key(c->master, i, room_keys[i], room_pubs[i]);
         c->tor = tor_new(&c->route.tor, (const uint8_t (*)[64])room_keys, (const uint8_t (*)[32])room_pubs,
@@ -2993,7 +2994,7 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
         if (c->tor && c->created) { tor_host_room(c->tor, 0); c->tor_hosting = 1; }
         if (c->tor) { knock_room_slots(c); start_nostr(c); }
     } else {
-        // Without the main socket the caller gives up on this session, so nothing else is started.
+        // Without the main socket the caller abandons this session, so nothing else is started.
         c->sock = net_udp_open(o->port, NET_DUAL, &c->port);
         c->started = c->sock != SOCK_INVALID;
         if (!c->started) c->start_error = "could not open a UDP socket (is the port in use?)";
@@ -3032,7 +3033,7 @@ void chat_shutdown(chat_t *c) {
     stop_dht(c);
     net_close(c->sock);
     net_close(c->lan_sock);
-    // Files we offered close, and downloads under way leave nothing half-written behind.
+    // Files we offered are closed, and downloads in progress don't leave half-written files behind.
     for (int i = 0; i < FILE_OFFERS_MAX; i++) if (c->files[i].used) file_free(&c->files[i]);
     if (c->log_fp) fclose(c->log_fp);
 

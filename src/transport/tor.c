@@ -24,7 +24,7 @@
 #define REPUBLISH_MIN_GAP 60.0
 
 const tor_opts_t TOR_DEFAULTS = { "127.0.0.1:9050", "127.0.0.1:9051", "" };
-// Tor Browser runs its own tor on these; tried when the defaults above don't answer.
+// Tor Browser runs its own tor on these. Tried when the defaults above don't answer.
 static const char *const BROWSER_SOCKS = "127.0.0.1:9150";
 static const char *const BROWSER_CONTROL = "127.0.0.1:9151";
 
@@ -44,7 +44,7 @@ typedef struct {
 
 typedef struct {
     int used;
-    int room;            // one of the room's own onion services: never let go of
+    int room;            // one of the room's own onion services: never released
     char host[TOR_ADDR_LEN + 1];
     uint8_t id[16];
     double next_try, last_used;
@@ -83,7 +83,7 @@ struct tor {
 
     char socks_user[17];
     stream_t *streams[MAX_STREAMS];
-    // The stream whose frames are being handed over: a send to it mustn't close it under us.
+    // The stream whose frames are being passed up. A send to it mustn't close it while that happens.
     int busy;
     target_t targets[MAX_TARGETS];
 
@@ -163,8 +163,8 @@ static int target_has_stream(const tor_t *t, int target) {
     return 0;
 }
 
-// Every member's session has an onion address of its own, new each time, so over a long session
-// the table fills: the target used longest ago that no stream holds makes room.
+// Every member's session has its own onion address, new each time, so over a long session the
+// table fills up. The least recently used target with no stream is dropped to make room.
 static int add_target(tor_t *t, const char *host) {
     double now = now_seconds();
     for (int i = 0; i < MAX_TARGETS; i++)
@@ -212,7 +212,7 @@ tor_t *tor_new(const tor_opts_t *o, const uint8_t room_keys[TOR_ROOM_SLOTS][64],
     hex_encode(user, sizeof user, t->socks_user);
     t->listener = net_tcp_listen_loopback(&t->listen_port);
     if (t->listener == SOCK_INVALID) {
-        // The room's keys are in there: wiped, as tor_free would.
+        // The room's keys are in there, so wipe it like tor_free does.
         crypto_unlock(t->room_keys, sizeof t->room_keys);
         crypto_wipe(t, sizeof *t);
         free(t);
@@ -253,7 +253,7 @@ static void close_ctl(tor_t *t) {
 void tor_free(tor_t *t) {
     if (!t) return;
     for (int i = 0; i < MAX_STREAMS; i++) close_stream(t, i);
-    // Closing the control connection takes our onion services down with it.
+    // Closing the control connection also removes our onion services.
     close_ctl(t);
     if (t->listener != SOCK_INVALID) net_close(t->listener);
     crypto_unlock(t->room_keys, sizeof t->room_keys);
@@ -265,7 +265,7 @@ void tor_set_ports(tor_t *t, const char *socks, const char *control) {
     if (strcmp(t->o.socks, socks) == 0 && strcmp(t->o.control, control) == 0) return;
     copy_str(t->o.socks, socks, sizeof t->o.socks);
     copy_str(t->o.control, control, sizeof t->o.control);
-    // Log in to the new one straight away; streams through the old SOCKS port time out.
+    // Log in to the new one straight away. Streams through the old SOCKS port time out.
     close_ctl(t);
     t->my_onion[0] = '\0';
     t->room_up = 0;
@@ -285,7 +285,7 @@ static const char *socks_addr(const tor_t *t) {
 
 static void ctl_send(tor_t *t, const char *line) {
     size_t len = strlen(line);
-    // The control connection is local and these lines are short: a partial write is a dead tor.
+    // The control connection is local and these lines are short, so a partial write means tor is dead.
     if (net_tcp_send(t->ctl, line, len) != (int)len) { close_ctl(t); t->ctl_state = C_IDLE; t->ctl_next_try = 0; }
 }
 
@@ -298,7 +298,7 @@ static void ctl_fail(tor_t *t, double now, const char *why, int fatal) {
     t->ctl_fails++;
     t->ctl_next_try = now + CTL_RETRY;
     if (t->probe) {
-        // A probe tries the configured ports and, with the defaults, Tor Browser's: then it's done.
+        // A probe tries the configured ports and, with the defaults, Tor Browser's, then stops.
         int defaults = strcmp(t->o.control, TOR_DEFAULTS.control) == 0 && strcmp(t->o.socks, TOR_DEFAULTS.socks) == 0;
         if (fatal || t->ctl_fails >= (defaults ? 2 : 1)) t->probe_done = -1;
         t->ctl_next_try = now;
@@ -354,8 +354,8 @@ static int reply_field(const char *line, const char *key, char *out, size_t cap)
     return -1;
 }
 
-// The path comes from whatever answered on the control port: only a regular file of exactly a
-// cookie's size is read, so it can't be a FIFO that hangs chat, or a file of some other kind.
+// The path comes from whatever answered on the control port. Only a regular file of exactly a
+// cookie's size is read, so it can't be a FIFO that hangs chat, or some other file.
 static int read_cookie(tor_t *t) {
     if (!t->cookie_path[0]) return -1;
     uint8_t buf[sizeof t->cookie + 1];
@@ -383,9 +383,9 @@ static void on_protocolinfo(tor_t *t, double now) {
         t->ctl_state = C_AUTH;
         ctl_send(t, "AUTHENTICATE\r\n");
     } else if (strstr(m, ",SAFECOOKIE,") && read_cookie(t) == 0) {
-        // Only SAFECOOKIE: the plain COOKIE login hands the file's bytes to whatever answers on
-        // the port, and anything can listen there while tor isn't running. Every tor since
-        // 0.2.3 offers SAFECOOKIE, which has the other side prove it read the cookie first.
+        // Only SAFECOOKIE. The plain COOKIE login sends the file's contents to whatever answers on the
+        // port, and anything can listen there while tor isn't running. Every tor since 0.2.3 offers
+        // SAFECOOKIE, where the other side has to prove it read the cookie first.
         gen_random(t->client_nonce, sizeof t->client_nonce);
         char hex[65], line[120];
         hex_encode(t->client_nonce, 32, hex);
@@ -467,10 +467,10 @@ static void on_command_reply(tor_t *t, double now, int ok) {
         t->ctl_fails = 0;
         logf_(t, 0, "* tor: your onion service is %s.onion - peers reach you only through Tor", t->my_onion);
     } else if (cmd == CMD_ADD_ROOM) {
-        // Another session on this same tor already publishes the room: that serves just as well.
+        // Another session on the same tor already publishes the room, which works just as well.
         const char *room = t->room_onion[t->host_slot];
         if (ok && strcmp(sid, room) != 0) {
-            // Joiners compute the address themselves: if Tor's differs, they'd knock on the wrong door.
+            // Joiners work out the address themselves, so if Tor's is different they'd connect to the wrong one.
             logf_(t, 0, "* tor: the room's onion address came out as %.56s, not %s - joining through it won't work",
                   sid, room);
         }
@@ -487,7 +487,7 @@ static void on_command_reply(tor_t *t, double now, int ok) {
     }
 }
 
-// A whole reply has arrived: its last line has a space after the status code.
+// A complete reply has arrived when its last line has a space after the status code.
 static void on_reply(tor_t *t, double now) {
     int ok = atoi(t->reply) == 250;
     switch (t->ctl_state) {
@@ -529,7 +529,7 @@ static void ctl_read(tor_t *t, double now) {
             t->reply_len += llen;
             t->reply[t->reply_len] = '\0';
             int final = llen >= 6 && isdigit((unsigned char)t->ctl_in[0]) && t->ctl_in[3] == ' ';
-            // Asynchronous events (650) aren't asked for; any that come are ignored.
+            // Asynchronous events (650) aren't requested, and any that arrive are ignored.
             int async = strncmp(t->ctl_in, "650", 3) == 0;
             memmove(t->ctl_in, t->ctl_in + llen, t->ctl_in_len - llen + 1);
             t->ctl_in_len -= llen;
@@ -546,13 +546,13 @@ static void ctl_read(tor_t *t, double now) {
 static void ctl_step(tor_t *t, double now) {
     switch (t->ctl_state) {
         case C_FAILED:
-            // A fixable problem (a password, a permission): try again now and then, quietly.
+            // A fixable problem (a password, a permission), so retry every so often without logging.
             if (now < t->ctl_next_try + 50.0) return;
             t->ctl_state = C_IDLE;
             /* fall through */
         case C_IDLE: {
             if (now < t->ctl_next_try || t->probe_done) return;
-            // No tor to talk to yet: chat is still starting its own.
+            // No tor to talk to yet, because chat is still starting its own.
             if (!t->o.control[0]) return;
             // Each failure switches between the configured ports and Tor Browser's, while the
             // configured ones are the defaults.
@@ -760,7 +760,7 @@ int tor_probe_result(const tor_t *t, char *socks, char *control, char *why, size
     } else if (t->probe_done < 0 && why) {
         copy_str(why, t->last_error, why_cap);
     }
-    // -2: a tor answered but won't do; -1: none answered at all.
+    // -2: a tor answered but can't be used. -1: nothing answered.
     return t->probe_done < 0 && t->probe_reached ? -2 : t->probe_done;
 }
 
@@ -788,7 +788,7 @@ static int open_stream(tor_t *t, int target, double now) {
     memcpy(s->id, g->id, 16);
     s->deadline = now + STREAM_OPEN_TIMEOUT;
     s->last_rx = now;
-    // Until it opens, stream_fail's backoff applies; meanwhile don't open a second one.
+    // Until it opens, stream_fail's backoff applies, and a second one isn't opened.
     g->next_try = now + STREAM_OPEN_TIMEOUT;
     return idx;
 }
@@ -812,7 +812,7 @@ int tor_send(tor_t *t, addr_t to, const uint8_t *data, size_t len, double now) {
     }
     stream_t *s = t->streams[idx];
     if (s->target >= 0) t->targets[s->target].last_used = now;
-    // A stream still opening holds a few datagrams; past that they're lost, as UDP ones would be.
+    // A stream that's still opening holds a few datagrams. Any more are lost, as with UDP.
     if (s->tx_len + 2 + len > TX_CAP) return -1;
     s->tx[s->tx_len++] = (uint8_t)(len >> 8);
     s->tx[s->tx_len++] = (uint8_t)len;

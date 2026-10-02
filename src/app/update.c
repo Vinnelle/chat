@@ -42,10 +42,10 @@ static char g_proxy[64];
 
 void update_set_proxy(const char *socks) { copy_str(g_proxy, socks ? socks : "", sizeof g_proxy); }
 
-// ---- where it's got, for the box ----
+// ---- progress, for the box ----
 
-// The update runs on a thread of its own and the screen reads this as it draws: a spinlock is
-// plenty for copies this small.
+// The update runs on its own thread and the screen reads this while drawing. A spinlock is
+// enough for copies this small.
 static char g_lock;
 static update_view_t g_view;
 static char g_dl_path[1100];   // the download on its way, else ""
@@ -66,7 +66,7 @@ static void view_reset(void) {
     view_unlock();
 }
 
-// A line in the console, the oldest going once it's full.
+// A line in the console. The oldest is dropped once it's full.
 static void say(update_line_kind_t kind, const char *fmt, ...) {
     char line[UPDATE_LINE_MAX];
     va_list ap;
@@ -84,7 +84,7 @@ static void say(update_line_kind_t kind, const char *fmt, ...) {
     view_unlock();
 }
 
-// The step it's on, put plainly, and how far that is along.
+// A short description of the current step, and how far along it is.
 static void stage(int permille, const char *fmt, const char *arg) {
     view_lock();
     g_view.permille = permille;
@@ -107,7 +107,7 @@ void update_view(update_view_t *v) {
     long total = g_dl_total;
     view_unlock();
     if (!v->running || !path[0]) return;
-    // curl writes the download straight to the file, so how big that is is how far it's got.
+    // curl writes the download straight to the file, so the file's size is the progress.
     long got = 0;
     FILE *f = platform_fopen(path, "rb");
     if (f) {
@@ -225,8 +225,8 @@ static int sums_lookup(const char *sums, const char *name, uint8_t hash[crypto_h
     return -1;
 }
 
-// The size GitHub gives for the release's file called name, or 0 if it isn't there: it only measures
-// the download for the bar. What vouches for the file is the signed SHA-256.
+// The size GitHub gives for the release file called name, or 0 if it isn't there. It's only used
+// for the progress bar. The file is verified by the signed SHA-256.
 static long asset_size(const char *json, const char *name) {
     char want[80];
     snprintf(want, sizeof want, "\"%s\"", name);
@@ -313,8 +313,8 @@ static int hash_file(const char *path, uint8_t out[crypto_hash_sha256_BYTES], lo
     return 0;
 }
 
-// The message goes to the console log as it always has, and into the box: a failure says so in
-// place of the step it failed at, and leaves the bar where it stopped.
+// The message goes to the console log and into the box. A failure replaces the step it failed
+// at, and leaves the bar where it stopped.
 static void finish(const char *fmt, const char *arg) {
     snprintf(g_msg, sizeof g_msg, fmt, arg);
     const char *text = strncmp(g_msg, "* update: ", 10) == 0 ? g_msg + 10 : g_msg;
@@ -386,7 +386,7 @@ static void update_thread(void *unused) {
     platform_remove(tmp_sums);
 
     // SHA256SUMS comes from the same place as the binary, so on its own it only catches corruption.
-    // The signature, made offline with the release key, is what vouches for it.
+    // The signature, made offline with the release key, is what verifies it.
     stage(130, "Checking %s's signature", tag);
     snprintf(url, sizeof url, "https://github.com/" UPDATE_REPO "/releases/download/%s/SHA256SUMS.minisig", tag);
     say(UPDATE_LINE_DETAIL, "GET %s", url + 8);
@@ -482,7 +482,7 @@ int update_run(char *msg, size_t cap) {
     return g_ok ? 0 : -1;
 }
 
-// ---- this build, as peers are told it ----
+// ---- this build, as reported to peers ----
 
 const char *update_release_key(void) { return RELEASE_PUBKEY; }
 
@@ -533,7 +533,7 @@ int update_self_build(chat_build_t *b) {
         long len = 0;
         for (int i = 0; i < 8 && len >= 0; i++) len = isdigit((unsigned char)foot[i]) ? len * 10 + (foot[i] - '0') : -1;
         if (len > 0 && len <= LIST_MAX && len <= size - LIST_FOOTER) {
-            // The hash leaves the list out: it can't hold a hash of itself.
+            // The hash doesn't include the list, since the list can't contain its own hash.
             core = size - LIST_FOOTER - len;
             if (fseek(f, core, SEEK_SET) == 0 && fread(text, 1, (size_t)len, f) == (size_t)len) {
                 text[len] = '\0';

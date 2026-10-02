@@ -119,7 +119,7 @@ static void mapped(portmap_t *p, double now, int via, uint16_t ext, uint32_t lif
     p->want_external = ext;
     p->state = P_MAPPED;
     p->renewing = 0;
-    // Renew at half the lease; a permanent UPnP mapping (lifetime 0) is only checked hourly.
+    // Renew at half the lease. A permanent UPnP mapping (lifetime 0) is only checked every hour.
     p->renew_at = now + (lifetime ? (double)lifetime / 2.0 : 3600.0);
     if (fresh) {
         char ext_ip[16] = "?";
@@ -197,7 +197,7 @@ static int start_http(portmap_t *p, double now, const char *req, size_t len) {
     return 0;
 }
 
-// Runs the request along. 1 when the response is complete, 0 while waiting, -1 on failure.
+// Moves the request forward. Returns 1 when the response is complete, 0 while waiting, -1 on failure.
 static int http_step(http_t *h, double now) {
     if (h->s == SOCK_INVALID) return -1;
     if (now > h->deadline) return -1;
@@ -471,11 +471,11 @@ static void on_http_done(portmap_t *p, double now) {
             if (send_extip(p, now) == 0) p->state = P_EXTIP;
             else mapped(p, now, VIA_UPNP, p->want_external, p->permanent ? 0 : LEASE);
         } else if (ok && xml_text(body, strlen(body), "errorCode", code, sizeof code) == 0 && atoi(code) == 725 && !p->permanent) {
-            // OnlyPermanentLeasesSupported: map without a lease; it is removed at exit all the same.
+            // OnlyPermanentLeasesSupported: map without a lease. It's still removed on exit.
             p->permanent = 1;
             if (send_add(p, now) != 0) fail(p, now, "can't reach the UPnP gateway");
         } else if (ok && atoi(code) == 718 && p->conflicts < 3) {
-            // ConflictInMappingEntry: someone else has this port; try another.
+            // ConflictInMappingEntry: something else has this port, so try another.
             uint8_t r[2];
             gen_random(r, 2);
             p->want_external = (uint16_t)(20000 + (((unsigned)r[0] << 8 | r[1]) % 40000));
@@ -569,7 +569,7 @@ void portmap_step(portmap_t *p, double now) {
             }
             return;
         case P_FAILED:
-            // The network may have changed (another Wi-Fi, a router reboot): look again later.
+            // The network may have changed (another Wi-Fi, a router reboot), so look again later.
             if (now < p->deadline) return;
             if (p->udp != SOCK_INVALID) { net_close(p->udp); p->udp = SOCK_INVALID; }
             p->state = P_START;

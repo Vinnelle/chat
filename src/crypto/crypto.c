@@ -55,7 +55,7 @@ int derive_master(const char *password, const char *session_id, uint8_t master[M
     crypto_generichash_final(&st, salt, sizeof salt);
     sodium_memzero(&st, sizeof st);
 
-    // Out of memory is a session that can't start, not a reason to take the others down with it.
+    // Running out of memory stops this session from starting, but shouldn't take the others down.
     return crypto_pwhash(master, MASTER_LEN, password, strlen(password), salt,
                          KDF_OPSLIMIT, KDF_MEMLIMIT, crypto_pwhash_ALG_ARGON2ID13) == 0 ? 0 : -1;
 }
@@ -214,7 +214,7 @@ int ratchet_peek(const ratchet_t *r, uint32_t target_index, uint8_t message_key[
     if (!r->started) return -1;
     if (target_index < r->index) return -1;
     if ((uint64_t)target_index - r->index > RATCHET_MAX_SKIP) return -1;
-    // The chain would have nowhere to go after the last index: its index would wrap to 0.
+    // The chain can't go past the last index, since the index would wrap to 0.
     if (target_index == UINT32_MAX) return -1;
     uint8_t cur[CHAIN_LEN], next[CHAIN_LEN];
     memcpy(cur, r->key, CHAIN_LEN);
@@ -410,7 +410,7 @@ int identity_from_password(const char *password, const char *device_id, identity
 // secret sealed: the header, a nonce, the sealed secret.
 #define PASS_MAGIC "chatkey1"
 
-// Limits past these come from a tampered file, which could otherwise ask for any amount of memory.
+// Limits above these mean a tampered file, which could otherwise ask for any amount of memory.
 static int derive_lock_key(const char *passphrase, pass_lock_t *lk) {
     const uint8_t *h = lk->header;
     uint32_t ops = (uint32_t)h[8] << 24 | (uint32_t)h[9] << 16 | (uint32_t)h[10] << 8 | h[11];
@@ -465,7 +465,7 @@ int pass_unseal(const pass_lock_t *lk, const uint8_t *in, size_t len, void *plai
 
 int identity_from_x25519(const uint8_t secret[32], identity_keypair_t *idkp) {
     static const char NONCE_KEY_TAG[] = "chat identity nonce key";
-    // X25519 clamps the secret before it multiplies; the Ed25519 side has to use the same scalar.
+    // X25519 clamps the secret before multiplying, so the Ed25519 side has to use the same scalar.
     uint8_t wide[64] = {0};
     memcpy(wide, secret, 32);
     wide[0] &= 248; wide[31] &= 127; wide[31] |= 64;
@@ -498,7 +498,7 @@ static void sign_with_scalar(const identity_keypair_t *idkp, const uint8_t *msg,
     crypto_hash_sha512_final(&st, h);
     crypto_core_ed25519_scalar_reduce(r, h);
     if (crypto_scalarmult_ed25519_base_noclamp(sig, r) != 0) {
-        // r came out zero (odds 2^-252): no signature, rather than one that gives the scalar away.
+        // r is zero (odds 2^-252). Return no signature rather than one that leaks the scalar.
         memset(sig, 0, ID_SIGN_LEN);
     } else {
         crypto_hash_sha512_init(&st);

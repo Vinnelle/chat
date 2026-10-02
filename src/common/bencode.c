@@ -64,7 +64,7 @@ static be_value *parse_str(be_ctx *c) {
 
 // Children are parsed first, and a child that is itself a list or dict allocates its own children
 // before its node, so a container's direct children aren't adjacent in the pool. Each container
-// records where they landed and copies them into one run for items[] to index.
+// records where they ended up and copies them into one run for items[] to index.
 #define BE_MAX_ITEMS 256
 
 static size_t copy_run(be_ctx *c, const uint16_t *idx, size_t count) {

@@ -11,7 +11,7 @@
 #define ADDR_STR_LEN 72
 
 // Where a datagram goes. ADDR_UDP is a real address. The others name a peer on a relayed
-// transport: ip holds an id the transport picked (a Nostr key prefix, a Tor stream id) and port is 1.
+// transport. ip holds an id the transport picked (a Nostr key prefix, a Tor stream id) and port is 1.
 typedef enum { ADDR_UDP = 0, ADDR_NOSTR = 1, ADDR_TOR = 2 } addr_kind_t;
 
 typedef struct {
@@ -36,9 +36,9 @@ void net_close(sock_t s);
 int net_send(sock_t s, const void *data, size_t len, addr_t to);
 int net_recv(sock_t s, void *buf, size_t buflen, addr_t *from);
 
-// Non-blocking TCP. net_tcp_connect starts a connection; net_tcp_connect_done says 1 once it is
-// up, 0 while it is still going, -1 if it failed. send/recv return the bytes moved, 0 when they
-// would block, -1 on an error or (recv) a closed connection.
+// Non-blocking TCP. net_tcp_connect starts a connection. net_tcp_connect_done returns 1 once it's
+// connected, 0 while it's still connecting, -1 if it failed. send/recv return the bytes moved, 0
+// when they would block, -1 on an error or (recv) a closed connection.
 sock_t net_tcp_connect(addr_t to);
 int net_tcp_connect_done(sock_t s);
 sock_t net_tcp_listen_loopback(uint16_t *port);
@@ -59,7 +59,7 @@ int addr_resolve_all(const char *host, uint16_t port, addr_t *out, int max);
 int addr_resolve(const char *host, uint16_t port, addr_t *out);
 // True for names that only Tor can reach: those must never go to DNS.
 int host_is_onion(const char *host);
-// IP literals only; never touches DNS.
+// IP literals only. Never uses DNS.
 int addr_resolve_numeric(const char *host, uint16_t port, addr_t *out);
 void addr_to_string(addr_t a, char out[ADDR_STR_LEN]);
 int addr_parse_hostport(const char *hostport, addr_t *out);

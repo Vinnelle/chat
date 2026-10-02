@@ -12,7 +12,7 @@
 #define SETTINGS_FILE_MAX (INSTALL_SETTINGS_MAX + PASS_SEAL_OVERHEAD)
 #define KEY_FILE_MAX (INSTALL_KEY_MAX + PASS_SEAL_OVERHEAD)
 
-// With the .new files a crash mid-write leaves.
+// Also removes any .new files left by a crash while writing.
 static const char *const FILES[] = { SETTINGS_NAME, KEY_NAME, SETTINGS_NAME ".new", KEY_NAME ".new" };
 #define N_FILES (sizeof FILES / sizeof FILES[0])
 
@@ -54,7 +54,7 @@ static int has(const char *name) {
 int install_has_settings(void) { return has(SETTINGS_NAME); }
 int install_has_key(void) { return has(KEY_NAME); }
 
-// buf holds max + 1, to tell a file too long for one chat wrote.
+// buf holds max + 1, so a file too long to have been written by chat can be detected.
 static int read_sealed(const char *name, uint8_t *buf, size_t max, size_t *len) {
     char path[1000];
     if (install_path(name, path, sizeof path, 0) != 0) return INSTALL_NO_FILE;
@@ -80,7 +80,7 @@ int install_lock_new(const char *passphrase) {
     return rc;
 }
 
-// Tried on the settings, which are there whenever the key is unless writing them failed.
+// Tried on the settings file, which exists whenever the key file does, unless writing it failed.
 int install_unlock(const char *passphrase) {
     static uint8_t sealed[SETTINGS_FILE_MAX + 1], plain[SETTINGS_FILE_MAX];
     size_t n = 0, got;

@@ -28,17 +28,17 @@
 #define LONELY_HINT_AFTER 15.0
 
 #define CAND_MAX_TRIES 12
-// A candidate hello is ~2.6 KB to an address nobody vouched for. These keep chat from being a
-// traffic reflector: few candidates per host, and a global rate.
+// A candidate hello is ~2.6 KB sent to an address nobody has confirmed. These stop chat being
+// used as a traffic reflector: a few candidates per host, and a global rate limit.
 #define CAND_PER_HOST 4
 #define PROBE_RATE 4.0
 #define PROBE_BURST 16.0
 // A cookie challenge is as big as the hi it answers, and anyone who recorded a hi can replay it
-// with a forged source address: a rate keeps chat from being a reflector for those.
+// with a forged source address. A rate limit stops chat being used as a reflector for those.
 #define CK_RATE 8.0
 #define CK_BURST 32.0
 // A session frame from an address no peer has is tried against every peer's chain. Real ones
-// (a peer that moved) are rare; a rate keeps junk of the right size from eating the CPU.
+// (a peer that moved) are rare, and a rate limit stops junk of the right size using up the CPU.
 #define ROAM_RATE 50.0
 #define ROAM_BURST 100.0
 
@@ -51,11 +51,11 @@
 
 #define HANDSHAKE_BUF_LEN 2700
 
-// Every datagram chat sends over UDP is one cell of this size, a session frame's: a session frame
-// fills one, and a room frame goes in pieces, each padded to a whole cell. A piece is the magic,
-// an id (4), its index, the count, the whole frame's length (2), then up to CHUNK_PAYLOAD of the
-// frame. Like everything chat sends over UDP they're masked (udp_mask), so the magic only shows
-// once unmasked with the room's key. Relays and Tor carry frames whole.
+// Every datagram chat sends over UDP is one cell of this size, the size of a session frame. A
+// session frame fills one, and a room frame is split into pieces, each padded to a whole cell. A
+// piece is the magic, an id (4), its index, the count, the whole frame's length (2), then up to
+// CHUNK_PAYLOAD of the frame. Like everything chat sends over UDP they're masked (udp_mask), so
+// the magic is only visible after unmasking with the room's key. Relays and Tor carry whole frames.
 #define UDP_CELL (SESSION_HEADER_LEN + SESSION_PAD_TARGET + AEAD_TAG_LEN)
 #define CHUNK_MAGIC0 0xC5
 #define CHUNK_MAGIC1 0x7B
@@ -64,22 +64,22 @@
 #define CHUNK_MAX 4
 #define ROOM_FRAME_MAX (CHUNK_MAX * CHUNK_PAYLOAD)
 
-// The most one session frame carries: a record (one line of the protocol), or several joined by
-// newlines for a peer whose "k" says it reads them ("b").
+// The most one session frame can carry: a record (one line of the protocol), or several joined by
+// newlines for a peer whose "k" says it can read them ("b").
 #define RECORD_MAX (SESSION_PAD_TARGET - 2)
 
-// Through the relays a frame can be bigger: they carry every event sealed the same size, whatever
-// is in it. A peer that reads several records to a frame gets frames there as big as it can read,
-// every one that size, which holds two file chunks.
+// Through the relays a frame can be bigger, since every event is sealed to the same size whatever
+// is in it. A peer that reads several records per frame gets frames there as big as it can read,
+// all that size, which fits two file chunks.
 #define RELAY_FRAME (SESSION_HEADER_LEN + SEAL_MAX_BODY + AEAD_TAG_LEN)
 #define RELAY_RECORD_MAX (SEAL_MAX_BODY - 2)
 
 // Ratchet skip allowed when a frame arrives from an address that isn't the peer's. Trial decryption
-// runs against every peer, so the full RATCHET_MAX_SKIP here would let junk packets burn CPU.
+// runs against every peer, so the full RATCHET_MAX_SKIP here would let junk packets waste CPU.
 #define ROAM_MAX_SKIP 16
 
 #define REASM_SLOTS 32
-// A room frame's pieces go one to a slot, so they take a few seconds to come together.
+// A room frame's pieces go one per slot, so it takes a few seconds for all of them to arrive.
 #define REASM_TTL 30.0
 
 #ifndef REKEY_INTERVAL
@@ -87,38 +87,38 @@
 #endif
 
 #define REKEY_DRAIN_GRACE 20.0
-// A rekey also waits while a re-handshake with someone is still going, ours or theirs, this long at
-// most: one that crossed it would start over with keys the other side hasn't seen, and through the
-// relays, where a re-handshake takes the best part of a minute, they kept crossing until the
-// session timed out.
+// A rekey also waits, up to this long, while a re-handshake with anyone is still in progress, ours
+// or theirs. One that overlapped it would restart with keys the other side hasn't seen, and through
+// the relays, where a re-handshake takes most of a minute, they kept overlapping until the session
+// timed out.
 #define REKEY_DEFER_MAX 120.0
 
-// A re-handshake runs through slots, a piece at a time: the old chains stay this long for it.
+// A re-handshake goes through slots one piece at a time, so the old chains are kept this long for it.
 #define REKEY_OVERLAP 90.0
 #define JOIN_WAIT 5.0
 #define K_SENDS 3
 #define K_EVERY 2.0
 
-// Each peer has a slot this often (and up to a quarter more, at random), and every slot sends
-// exactly one datagram, whether or not there's anything to say: queued lines, a piece of a room
-// frame, or a "nop". Nothing goes to a connected peer outside its slots, so when and how much
-// goes says nothing about what was said.
+// Each peer has a slot this often (plus up to a quarter more, at random), and every slot sends
+// exactly one datagram, whether or not there's anything to send: queued lines, a piece of a room
+// frame, or a "nop". Nothing goes to a connected peer outside its slots, so the timing and amount
+// of traffic says nothing about what was said.
 #define COVER_INTERVAL 1.5
 #define COVER_MAX_RATE 8.0
 
-// Relays rate-limit, and every member receives every event: slots to a peer reached through them
-// are sparser, and sparser again with more of them.
+// Relays rate limit, and every member receives every event, so slots to a peer reached through
+// them are further apart, and further still with more such peers.
 #define NOSTR_COVER_INTERVAL 5.0
 #define NOSTR_MAX_RATE 0.33
-// Fast transfers can't burst through the relays: the slots of one we're sending come as often as
-// they allow instead, all relayed peers' together at most NOSTR_FAST_RATE a second (a relay takes
-// 0.5 events a second from a connection), and never closer than NOSTR_FAST_INTERVAL.
+// Fast transfers can't burst through the relays. Instead, slots for a transfer we're sending come
+// as often as the relays allow: at most NOSTR_FAST_RATE a second for all relayed peers together (a
+// relay takes 0.5 events a second from a connection), and never closer than NOSTR_FAST_INTERVAL.
 #define NOSTR_FAST_RATE 0.4
 #define NOSTR_FAST_INTERVAL 2.5
-// A peer's UDP path counts as broken after this long without a frame; its traffic moves to the relays.
+// A peer's UDP path counts as broken after this long without a frame, and its traffic moves to the relays.
 #define UDP_STALE 25.0
-// DHT routing goes to the relays only while something needs them: nobody reached yet, or a
-// peer only they reach, or one whose UDP has gone quiet. They're let go this long after.
+// DHT routing only connects to the relays while something needs them: nobody reached yet, a peer
+// only reachable through them, or a peer whose UDP has gone quiet. They're disconnected this long after.
 #define RELAY_LINGER 60.0
 #define NOSTR_BEACON_ALONE 20.0
 #define NOSTR_BEACON_CONNECTED 90.0
@@ -127,14 +127,14 @@
 
 // ---- files ----
 //
-// A file is offered to the connected peers ("fo"); nothing more moves until someone chooses to
-// fetch it. Then they ask for a window of chunks at a time ("fg") and the sender sends them in
-// the slots that would otherwise carry a nop ("fd"), so a transfer looks like any other moment on
-// the wire; through the relays, two to a slot. With fast transfers on, a peer's slots come much
-// closer together while a transfer runs: quicker, but visible as a burst (through the relays, only
-// as close as they allow). Each chunk lands in its place in the window, and a run of them that
-// didn't come is asked for again; a whole window is written in order and hashed, and the file is
-// kept only if the hash is the one offered.
+// A file is offered to the connected peers ("fo"). Nothing else is sent until someone decides to
+// fetch it. They then ask for a window of chunks at a time ("fg") and the sender sends them in
+// the slots that would otherwise carry a nop ("fd"), so a transfer looks the same as normal
+// traffic. Through the relays it's two per slot. With fast transfers on, a peer's slots come much
+// closer together during a transfer: faster, but visible as a burst (through the relays, only as
+// close as they allow). Each chunk goes in its place in the window, and a run of missing chunks is
+// requested again. A complete window is written in order and hashed, and the file is only kept if
+// the hash matches the offer.
 #define FILE_HARD_MAX (1024ull * 1024 * 1024)
 #define FILE_CAP_DEFAULT (8ull * 1024 * 1024)
 #define FILE_OFFERS_MAX 64
@@ -143,11 +143,11 @@
 #define FILE_CHUNK 690
 #define FILE_WINDOW 64
 #define FILE_FAST_INTERVAL 0.005
-// A file fetched to be shown rather than saved is held in memory: at most this big.
+// A file fetched to be shown rather than saved is held in memory, up to this size.
 #define FILE_VIEW_MAX (64u * 1024 * 1024)
 #define FILE_RETRIES 8
 // A fetch waits up to this long for its sender to come back (a Tor circuit or a relay can stall a
-// peer out), and goes on from where it got to if they do.
+// peer), and continues from where it was if they do.
 #define FILE_OWNER_GRACE 120.0
 
 typedef enum { ROUTE_DHT = 0, ROUTE_TOR = 1 } route_mode_t;
@@ -156,8 +156,8 @@ typedef enum { ROUTE_DHT = 0, ROUTE_TOR = 1 } route_mode_t;
 enum { NOSTR_OFF = 0, NOSTR_FALLBACK = 1, NOSTR_ALWAYS = 2 };
 
 // How a session reaches peers. DHT: UDP, found through the DHT (IPv4, IPv6), LAN broadcast
-// and relays, with a router port mapping to let more of them in, and Nostr relays carrying
-// traffic when UDP can't. Tor: onion services only; nothing else touches the network.
+// and relays, with a router port mapping so more of them can connect, and Nostr relays carrying
+// traffic when UDP can't. Tor: onion services only. Nothing else goes on the network.
 typedef struct {
     route_mode_t mode;
     int dht4, dht6, lan, portmap, nostr;
@@ -194,16 +194,16 @@ typedef struct {
 } reasm_t;
 
 typedef enum { NOTIFY_NONE = 0, NOTIFY_MENTIONS = 1, NOTIFY_ALL = 2 } notify_mode_t;
-// What a desktop notification shows: only that a message came (the default), who it's from, or
-// who and what it says. Never the session: its id is all it takes to join one with a blank
-// password, and desktops keep notifications.
+// What a desktop notification shows: only that a message came in (the default), who it's from, or
+// who and what it says. Never the session, since its id is all someone needs to join one with a
+// blank password, and desktops keep notifications.
 typedef enum { PREVIEW_OFF = 0, PREVIEW_NICK = 1, PREVIEW_MESSAGE = 2 } notify_preview_t;
 typedef enum { IDENT_NONE = 0, IDENT_NATIVE = 1, IDENT_AGE = 2, IDENT_PGP = 3 } identity_source_t;
 
 typedef enum { VERIFY_UNVERIFIED = 0, VERIFY_VERIFIED = 1, VERIFY_FAILED = 2 } verify_state_t;
 
 // What a peer's "v" says about the build it runs. A peer can lie about its hash, so OFFICIAL is
-// only its word; MODIFIED is a build that doesn't claim to be a release's.
+// only its claim. MODIFIED is a build that doesn't claim to be from a release.
 typedef enum {
     BUILD_UNKNOWN = 0,   // it sent none: a build from before "v"
     BUILD_UNCHECKED,     // this build has no release key to check it with
@@ -214,13 +214,13 @@ typedef enum {
 #define MAX_VERSION 15
 
 // A release binary ends with a list of that release's binaries (the SHA-256 of each, without the
-// list) signed with the release key: `just release` appends it. A build sends peers its own list
-// in "v", so they check it with no one else to ask. Three hashes keep "v" inside one
-// normal-sized session frame.
+// list), signed with the release key. `just release` appends it. A build sends peers its own list
+// in "v", so they can check it without asking anyone else. Three hashes keep "v" inside one
+// normal sized session frame.
 #define BUILD_LIST_MAX 3
 #define BUILD_LIST_LEN (BUILD_LIST_MAX * (BUILD_HASH_LEN * 2 + 1))
 
-// This program's build, as it tells peers.
+// This program's build, as reported to peers.
 typedef struct {
     int ok;   // 0 if the executable couldn't be read: nothing is sent
     char version[MAX_VERSION + 1];
@@ -229,7 +229,7 @@ typedef struct {
     char list_sig[MINISIGN_SIG_B64_LEN + 1];    // the list's signature line
 } chat_build_t;
 
-// What a nick looks like once lookalikes, case and invisible characters are folded away.
+// A nick with lookalike characters, case and invisible characters normalised away.
 #define NICK_SKEL_LEN (4 * MAX_NICK + 1)
 
 typedef struct {
@@ -238,8 +238,8 @@ typedef struct {
     char nick[MAX_NICK + 1];
     char nick_skel[NICK_SKEL_LEN];
     addr_t addr;
-    // The address before addr: frames from a peer that just moved, or that come over two Tor
-    // streams at once, keep turning up there too.
+    // The address before addr. Frames from a peer that just moved, or that come over two Tor streams
+    // at once, keep arriving there too.
     addr_t prev_addr;
     double seen, born, next_hello;
     int hello_tries;
@@ -248,11 +248,11 @@ typedef struct {
     // after the first frame opened (ok_since) if it never does, so nobody joins unannounced.
     double ok_since;
     int k_seen, announced;
-    // Our own k goes to a new peer K_SENDS times, a little apart: nothing acks it, and the first
-    // can be lost.
+    // Our own k is sent to a new peer K_SENDS times, a little apart, since nothing acks it and the
+    // first can be lost.
     int k_sent;
     double next_k;
-    // Slots in a row that records took while a room frame of its waited.
+    // Consecutive slots used for records while one of its room frames was waiting.
     int room_waited;
     uint8_t pub[PUB_LEN];
     ratchet_t send_chain;
@@ -283,7 +283,7 @@ typedef struct {
     int vfy_set;
     // Set once a frame opens on the current recv_chain. Until then a replayed kx can't lock in bad chains.
     int chain_confirmed;
-    // Responder only: kem_ct holds a kx that came before its re-handshake did, for do_hello to use.
+    // Responder only: kem_ct holds a kx that arrived before its re-handshake, for do_hello to use.
     int kx_early;
 
     // The peer's k says it announces each new key over the current session ("rk") before it
@@ -297,8 +297,8 @@ typedef struct {
     // Its k says it reads several records in one frame, joined by newlines ("b").
     int batches;
 
-    // The verify code as the user compared it with this peer, over another channel: 0 not yet,
-    // 1 the same, -1 different. Where comparing is required, only 1 gets what's sent.
+    // The result of the user comparing the verify code with this peer over another channel: 0 not
+    // yet, 1 the same, -1 different. When comparing is required, only 1 gets what's sent.
     int code_ok;
 
     ratchet_t old_send, old_recv;
@@ -321,8 +321,8 @@ typedef struct {
     char text[RECORD_MAX + 1];
 } sendq_t;
 
-// A room frame for a connected peer (a re-handshake's hi, ck, hi2 or kx), going out in its slots:
-// over UDP a piece a slot, over the relays or Tor whole.
+// A room frame for a connected peer (a re-handshake's hi, ck, hi2 or kx), sent in its slots: over
+// UDP one piece per slot, over the relays or Tor as a whole.
 #define ROOMQ_MAX 24
 typedef enum { DL_NONE = 0, DL_ACTIVE, DL_DONE, DL_FAILED } dl_state_t;
 
@@ -353,7 +353,7 @@ typedef struct {
     double retry_at;
     int retries;
     double since;                // when the fetch started
-    double gone_since;           // when its sender went, while it's away
+    double gone_since;           // when its sender left, while it's away
 } file_entry_t;
 
 typedef struct {
@@ -377,9 +377,9 @@ typedef struct {
 // "m\t" MID "\t" ORIGIN "\t" NICK "\t" TEXT, with room to spare.
 #define MSG_LINE_LEN (16 + ID_LEN * 2 + MAX_NICK + MAX_TEXT + 16)
 
-// A message waiting for its ack. It keeps the text, not the sealed frame: each retry is sealed
-// afresh on the peer's current chain, since the peer can no longer open an old index once any
-// later frame (a cover nop, say) has reached it.
+// A message waiting for its ack. It keeps the text, not the sealed frame. Each retry is sealed
+// again on the peer's current chain, since the peer can't open an old index once any later frame
+// (a cover nop, for example) has reached it.
 typedef struct {
     int used;
     char mid[9];
@@ -396,11 +396,12 @@ typedef void (*chat_print_fn)(void *ui, const char *hhmm, const char *text, cons
 #define LINE_CHAT 1u
 #define LINE_MENTION 2u
 
-// A file fetched to be shown has come, whole and as offered: its bytes, for the moment of the call.
+// A file fetched to be shown has arrived, complete and matching the offer. Its bytes are only
+// valid during the call.
 typedef void (*chat_file_fn)(void *ui, int num, const char *name, const uint8_t *data, size_t len);
 
-// A message worth a notification. nick and text are NULL unless the session's notify_preview
-// lets the notification show them.
+// A message that should get a notification. nick and text are NULL unless the session's
+// notify_preview allows the notification to show them.
 typedef void (*chat_notify_fn)(void *ui, const char *nick, const char *text, int mentioned);
 
 typedef struct {
@@ -438,8 +439,8 @@ typedef struct {
 
     // Nothing that's sent goes to a peer until the user has compared its verify code (code_ok).
     int verify_required;
-    // Signing identities whose peers' codes the user compared in this session: that peer, back
-    // with a new handshake the same key signed, needs no second comparison.
+    // Signing identities whose peers' codes the user compared in this session. If that peer comes
+    // back with a new handshake signed by the same key, it doesn't need comparing again.
     uint8_t pinned[16][ID_SIGN_PUB_LEN];
     int n_pinned;
 
@@ -483,11 +484,11 @@ typedef struct {
     uint32_t seen_mids[2048];
     int seen_head, seen_count;
 
-    // Verify codes of peers that dropped: a peer that comes back gets a new one, and says so.
+    // Verify codes of peers that dropped. A peer that comes back gets a new one, and chat says so.
     struct { int used; uint8_t id[ID_LEN]; uint8_t vfy[VERIFY_LEN]; } gone[16];
     int gone_head;
 
-    // Token buckets: hellos to candidates, which come from the DHT and other peers unchecked;
+    // Token buckets for: hellos to candidates, which come unchecked from the DHT and other peers;
     // cookie challenges; and session frames tried against every peer (see CK_RATE, ROAM_RATE).
     double probe_tokens, probe_at;
     double ck_tokens, ck_at;
@@ -535,8 +536,8 @@ typedef struct {
     uint64_t file_cap;      // 0: FILE_CAP_DEFAULT
     int fast_files;
 
-    // What peers are told about this build, and the release key (minisign, base64) their builds'
-    // lists are checked with; "" leaves them unchecked.
+    // What peers are told about this build, and the release key (minisign, base64) used to check
+    // their builds' lists. "" leaves them unchecked.
     chat_build_t build;
     char release_key[64];
 } chat_opts_t;
@@ -553,29 +554,30 @@ int chat_submit_line(chat_t *c, const char *line, double now);
 // Runs "name args" (no leading ':') from CHAT_COMMANDS against this session.
 cmd_result_t chat_run_command(chat_t *c, const char *line);
 void chat_send_text(chat_t *c, const char *text, double now);
-// Offers the file at path (as given: no ~ or quotes undone) to everyone here, as :send does.
+// Offers the file at path (used as is: ~ and quotes aren't expanded) to everyone here, like :send.
 void chat_send_file(chat_t *c, const char *path);
 
 extern const command_t CHAT_COMMANDS[];
 
 void chat_set_nick(chat_t *c, const char *nick);
 
-// Files. chat_file_fetch starts fetching file num: to show (view, handed to c->file_view once it's
-// whole) or to save in Downloads. anyway: past the size limit. 0, or -1 having said why.
+// Files. chat_file_fetch starts fetching file num, either to show (view, passed to c->file_view
+// once complete) or to save in Downloads. anyway: fetch even if over the size limit. Returns 0, or
+// -1 after saying why.
 int chat_file_fetch(chat_t *c, int num, int view, int anyway);
 const file_entry_t *chat_file(const chat_t *c, int num);
-// A file being fetched: the bytes that have come, those of the window still to be written included,
-// and about how many seconds the rest takes, at the pace so far or, before there's one, at the pace
-// its path allows. -1 while its sender isn't here, -2 while their verify code waits to be compared
-// again (back after a moment away, with a new one).
+// A file being fetched: the bytes received, including any in the window not written yet, and
+// roughly how many seconds the rest will take, at the rate so far or, before there is one, at the
+// rate its path allows. -1 while its sender is away, -2 while their verify code needs comparing
+// again (they came back with a new one).
 uint64_t chat_file_got(const file_entry_t *e);
 double chat_file_eta(const chat_t *c, const file_entry_t *e, double now);
 void chat_set_file_options(chat_t *c, uint64_t cap, int fast);
 void chat_set_colour(chat_t *c, const uint8_t rgb[3]);
 
-// Cleans a nick and drops the characters the UI puts around nicks ("(verified)", "#id", "name:"),
+// Cleans a nick and removes the characters the UI puts around nicks ("(verified)", "#id", "name:"),
 // including lookalikes such as fullwidth brackets, and invisible characters, so no nick can fake
-// them. Never empty: falls back to "anon".
+// them. Never empty: uses "anon" if nothing is left.
 void chat_clean_nick(const char *in, char out[MAX_NICK + 1]);
 
 // A peer's nick as shown, with "#" and its id prefix added when another peer's nick, or ours,
@@ -587,16 +589,16 @@ void chat_set_identity(chat_t *c, identity_source_t source, const identity_keypa
 
 #define CHAT_MAX_SOCKS 12
 int chat_sockets(chat_t *c, sock_t out[CHAT_MAX_SOCKS]);
-// Whether the session is up: its keys could be made, and its UDP socket (DHT) or its Tor link
-// (Tor). If not, chat_start_error says why.
+// Whether the session started: its keys were made, and its UDP socket (DHT) or its Tor link (Tor)
+// opened. If not, chat_start_error says why.
 int chat_started(const chat_t *c);
 const char *chat_start_error(const chat_t *c);
-// Applies changed routing toggles to a running session. The mode and the Tor settings only
-// apply to sessions opened afterwards; returns 1 if those differ from this session's.
+// Applies changed routing toggles to a running session. The mode and the Tor settings only apply
+// to sessions opened afterwards. Returns 1 if those differ from this session's.
 int chat_apply_routing(chat_t *c, const routing_t *r);
 // Moves a Tor session to the tor at these ports (the one chat started, or found running).
 void chat_tor_set_ports(chat_t *c, const char *socks, const char *control);
-// That tor has reached the Tor network: relays that failed while it was still connecting go again.
+// That tor has connected to the Tor network, so relays that failed while it was connecting are retried.
 void chat_tor_connected(chat_t *c);
 int chat_online_count(const chat_t *c);
 int chat_pending_count(const chat_t *c);

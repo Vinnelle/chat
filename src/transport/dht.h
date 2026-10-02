@@ -17,16 +17,16 @@
 #define DHT_RELOOKUP_CONNECTED 300.0
 #define DHT_BOOT_MAX 12
 #define DHT_RESOLVE_BACKOFF_MAX 300.0
-// For this long either side of the hour, the other hour's lookup key is looked up (and announced
-// under) as well: clocks differ, and members only move to the new key at their next lookup.
+// For this long either side of the hour, the other hour's lookup key is also looked up (and
+// announced under), since clocks differ and members only move to the new key at their next lookup.
 #define DHT_EPOCH_OVERLAP 600
-// Nodes that answered lately, a list per family: lookups start from these, and only go to the
+// Nodes that answered recently, one list per family. Lookups start from these, and only go to the
 // bootstrap servers while fewer than DHT_KNOWN_ENOUGH are known.
 #define DHT_KNOWN_MAX 32
 #define DHT_KNOWN_ENOUGH 8
 
-// How the DHT's datagrams leave: to an address, or (host not NULL) to a name that a proxy looks
-// up at its end, so nothing asks local DNS.
+// Where the DHT's datagrams go: to an address, or (host not NULL) to a name that a proxy looks up
+// at its end, so local DNS is never used.
 typedef void (*dht_send_fn)(void *ctx, const void *data, size_t len, const addr_t *to, const char *host, uint16_t port);
 
 typedef struct {
@@ -77,18 +77,18 @@ typedef struct dht_boot_job dht_boot_job_t;
 typedef struct {
     addr_t boot[DHT_BOOT_MAX];
     int n_boot;
-    // The bootstrap servers' names are looked up on a thread. The session can end, or turn the
-    // DHT off and on, first: the thread only ever writes to its job, and whichever side finishes
+    // The bootstrap servers' names are looked up on a thread. The session can end, or turn the DHT
+    // off and on, before it finishes. The thread only writes to its job, and whichever side finishes
     // last frees it.
     dht_boot_job_t *job;
     double next_resolve;
     int resolve_tries;
-    // The node id of the round under way. Each hour's lookup key has an id of its own, made at
-    // random, so nothing in the DHT's messages ties one hour's lookups to another's.
+    // The node id of the current round. Each hour's lookup key has its own random id, so nothing in
+    // the DHT messages links one hour's lookups to another's.
     uint8_t node_id[20];
     struct { int set; long long epoch; uint8_t id[20]; } ids[2];
-    // The room's DHT key, and the hourly lookup key of the round under way. Near the hour's change
-    // a second round follows for the other hour's key (alt_epoch).
+    // The room's DHT key, and the hourly lookup key of the current round. Near the change of hour a
+    // second round follows for the other hour's key (alt_epoch).
     uint8_t key[DHT_KEY_LEN];
     uint8_t infohash[20];
     long long alt_epoch;
@@ -114,8 +114,8 @@ void dht_init(dht_state_t *d, const uint8_t key[DHT_KEY_LEN], uint16_t my_port, 
 // out as names, for the other end to look up, instead of through local DNS.
 void dht_set_output(dht_state_t *d, dht_send_fn send, void *ctx, int names_remote);
 void dht_start_bootstrap_resolve(dht_state_t *d);
-// Lets go of a bootstrap lookup still running (it frees itself) and wipes the key. Call before
-// dht_init on a state that was used, and when the session ends.
+// Abandons a bootstrap lookup that's still running (it frees itself) and wipes the key. Call
+// before dht_init on a state that was used, and when the session ends.
 void dht_stop(dht_state_t *d);
 // Looks the bootstrap servers up again, for the families wanted now.
 void dht_rebootstrap(dht_state_t *d);

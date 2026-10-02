@@ -33,7 +33,7 @@ static int rng(void *ctx, unsigned char *out, size_t len) {
 }
 
 static void add_der(void *ctx, const uint8_t *der, size_t len) {
-    // A certificate mbedTLS can't read (an odd algorithm, say) is only skipped.
+    // A certificate mbedTLS can't read (an unusual algorithm, for example) is just skipped.
     mbedtls_x509_crt_parse_der((mbedtls_x509_crt *)ctx, der, len);
 }
 
@@ -150,7 +150,7 @@ int tls_read(tls_conn_t *t, void *buf, size_t cap) {
         if (rc > 0) return rc;
         if (rc == 0 || rc == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) { copy_str(t->err, "closed by the server", sizeof t->err); return -1; }
         if (rc == MBEDTLS_ERR_SSL_WANT_READ || rc == MBEDTLS_ERR_SSL_WANT_WRITE) return 0;
-        // TLS 1.3 servers send session tickets after the handshake; there's nothing to do but read on.
+        // TLS 1.3 servers send session tickets after the handshake. Nothing to do but keep reading.
         if (rc == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET) continue;
         note_error(t, rc);
         return -1;

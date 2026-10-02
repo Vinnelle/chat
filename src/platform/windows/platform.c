@@ -36,7 +36,7 @@ typedef struct { DWORD Flags; } chat_extension_point_policy_t;
 
 typedef BOOL (WINAPI *set_mitigation_fn)(int policy, PVOID buf, SIZE_T len);
 
-// A crash ends the process on the spot. Left to the default handler, Windows Error Reporting may
+// A crash ends the process immediately. With the default handler, Windows Error Reporting may
 // write a dump of its memory, keys and messages included, to disk.
 static LONG WINAPI die_quietly(EXCEPTION_POINTERS *info) {
     (void)info;
@@ -506,7 +506,7 @@ FILE *platform_fopen_private(const char *utf8_path, const char *mode) {
 long platform_read_file(const char *utf8_path, void *buf, size_t cap) {
     wchar_t wp[1400];
     if (!to_wide(utf8_path, wp, 1400)) return -1;
-    // A folder won't open without FILE_FLAG_BACKUP_SEMANTICS; a pipe or device isn't FILE_TYPE_DISK.
+    // A folder won't open without FILE_FLAG_BACKUP_SEMANTICS, and a pipe or device isn't FILE_TYPE_DISK.
     HANDLE h = CreateFileW(wp, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
                            FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) return -1;
@@ -571,7 +571,7 @@ int platform_move_new(const char *from, const char *to) {
 }
 
 int platform_config_dir(char *out, size_t cap, int create) {
-    // Local, not Roaming: a roaming profile would copy it to other machines and a server.
+    // Local, not Roaming. A roaming profile would copy it to other machines and a server.
     wchar_t *w = _wgetenv(L"LOCALAPPDATA");
     char base[900];
     if (!w || !w[0] || WideCharToMultiByte(CP_UTF8, 0, w, -1, base, sizeof base, NULL, NULL) <= 0) return -1;
@@ -677,8 +677,8 @@ static int append_quoted(wchar_t *cmd, size_t cap, size_t *pos, const char *arg)
 }
 
 int platform_run_quiet(const char *const argv[]) {
-    // Run argv[0] from System32 only. Left to search, CreateProcess tries the exe's own folder and the
-    // current folder first, so a curl.exe dropped next to chat.exe (say, in Downloads) would run.
+    // Run argv[0] from System32 only. When searching, CreateProcess tries the exe's own folder and the
+    // current folder first, so a curl.exe left next to chat.exe (in Downloads, for example) would run.
     wchar_t app[MAX_PATH + 64], name[64];
     UINT sl = GetSystemDirectoryW(app, MAX_PATH);
     if (sl == 0 || sl >= MAX_PATH || strpbrk(argv[0], "/\\:") || !to_wide(argv[0], name, 56)) return -1;
@@ -696,8 +696,8 @@ int platform_run_quiet(const char *const argv[]) {
     HANDLE nul = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
                              &sa, OPEN_EXISTING, 0, NULL);
     if (nul == INVALID_HANDLE_VALUE) return -1;
-    // The child inherits NUL for its standard handles and nothing else, whatever else in this
-    // process happens to be inheritable.
+    // The child only inherits NUL for its standard handles, even if other handles in this process
+    // are inheritable.
     SIZE_T attr_size = 0;
     InitializeProcThreadAttributeList(NULL, 1, 0, &attr_size);
     LPPROC_THREAD_ATTRIBUTE_LIST attrs = attr_size ? malloc(attr_size) : NULL;
@@ -793,7 +793,7 @@ int platform_find_program(const char *name, const char *path, char *out, size_t 
     wchar_t exe[64];
     if (!to_wide(name, exe, 56)) return -1;
     wcscat(exe, L".exe");
-    // Only absolute PATH entries: CreateProcess-style searching would try the current folder first.
+    // Only absolute PATH entries, since CreateProcess style searching would try the current folder first.
     static wchar_t env[32768];
     DWORD n = GetEnvironmentVariableW(L"PATH", env, 32768);
     if (n > 0 && n < 32768) {
@@ -813,8 +813,8 @@ int platform_find_program(const char *name, const char *path, char *out, size_t 
 }
 
 int platform_private_tempdir(const char *prefix, char *out, size_t cap) {
-    // The user's own temporary folder: its permissions keep other users out, and a random name
-    // that must not exist yet keeps a planted folder from being used.
+    // The user's own temp folder. Its permissions keep other users out, and a random name that must
+    // not exist yet stops a folder someone else created from being used.
     wchar_t base[MAX_PATH + 1], wp[64], dir[MAX_PATH * 2];
     DWORD n = GetTempPathW(MAX_PATH + 1, base);
     if (n == 0 || n > MAX_PATH || !to_wide(prefix, wp, 48)) return -1;
@@ -834,7 +834,7 @@ static int remove_tree_w(const wchar_t *path, int depth) {
     if (a == INVALID_FILE_ATTRIBUTES) return -1;
     if (a & FILE_ATTRIBUTE_READONLY) SetFileAttributesW(path, a & ~(DWORD)FILE_ATTRIBUTE_READONLY);
     if (!(a & FILE_ATTRIBUTE_DIRECTORY)) return DeleteFileW(path) ? 0 : -1;
-    // A link (junction, symlink) goes, not what it points to.
+    // A link (junction, symlink) is deleted, not what it points to.
     if (!(a & FILE_ATTRIBUTE_REPARSE_POINT) && depth < 16) {
         wchar_t pat[MAX_PATH * 2];
         swprintf(pat, MAX_PATH * 2, L"%ls\\*", path);
@@ -871,7 +871,7 @@ platform_proc_t *platform_spawn(const char *const argv[], const char *out_path) 
 
     platform_proc_t *p = calloc(1, sizeof *p);
     if (!p) return NULL;
-    // In a job that ends when chat does, however chat ends.
+    // In a job that ends when chat exits, however it exits.
     p->job = CreateJobObjectW(NULL, NULL);
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION lim;
     memset(&lim, 0, sizeof lim);
@@ -967,7 +967,7 @@ void platform_remove_stale_tempdirs(const char *prefix, const char *lock_rel) {
         wchar_t dir[MAX_PATH * 2], lock[MAX_PATH * 3];
         swprintf(dir, MAX_PATH * 2, L"%ls%ls", base, fd.cFileName);
         swprintf(lock, MAX_PATH * 3, L"%ls\\%ls", dir, wl);
-        // A running tor keeps its lock file open, and then it can't be deleted.
+        // A running tor keeps its lock file open, so it can't be deleted.
         if (!DeleteFileW(lock) && GetLastError() != ERROR_FILE_NOT_FOUND && GetLastError() != ERROR_PATH_NOT_FOUND) continue;
         remove_tree_w(dir, 0);
     } while (FindNextFileW(h, &fd));

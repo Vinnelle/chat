@@ -42,7 +42,7 @@ void platform_harden_process(void) {
     prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
 #endif
 #ifdef PR_SET_NO_NEW_PRIVS
-    // chat only ever runs curl, notify-send and tor; none needs to gain privileges through exec.
+    // chat only runs curl, notify-send and tor, and none of them need to gain privileges through exec.
     prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
 #endif
 
@@ -52,8 +52,8 @@ void platform_harden_process(void) {
         setrlimit(RLIMIT_MEMLOCK, &ml);
     }
 
-    // A write to a pipe whose reader has gone (--simple into a pager that quit, say) is an
-    // error to handle, not a signal that kills chat before its sessions say bye.
+    // A write to a pipe whose reader has gone (--simple into a pager that quit, for example) should
+    // be an error to handle, not a signal that kills chat before its sessions say bye.
     signal(SIGPIPE, SIG_IGN);
 }
 
@@ -73,8 +73,8 @@ int term_stdout_is_tty(void) { return isatty(STDOUT_FILENO); }
 
 extern char **environ;
 
-// Standard handles on /dev/null, every signal back to its default (chat ignores SIGPIPE) and none
-// blocked: how chat runs curl and notify-send. path is absolute, never searched for.
+// How chat runs curl and notify-send: standard handles on /dev/null, every signal reset to its
+// default (chat ignores SIGPIPE) and none blocked. path is absolute and never searched for.
 static int spawn_quiet(pid_t *pid, const char *path, char *const argv[]) {
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
@@ -122,8 +122,8 @@ static void markup_escape(const char *in, char *out, size_t outlen) {
 
 static void notify_run(void *arg) {
     notify_job_t *j = (notify_job_t *)arg;
-    // Transient: shown, but kept out of the desktop's notification history, which would otherwise
-    // record when messages came (and, with previews on, what they said) after chat has exited.
+    // Transient: shown, but not kept in the desktop's notification history, which would otherwise
+    // record when messages came in (and, with previews on, what they said) after chat has exited.
     char *argv[] = { (char *)"notify-send", (char *)"--app-name=chat", (char *)"--hint=int:transient:1", (char *)"--",
                      j->title, j->body, NULL };
     pid_t pid;
@@ -436,7 +436,7 @@ int platform_move_new(const char *from, const char *to) {
     if (link(from, to) == 0) { unlink(from); return 0; }
     if (errno == EEXIST) return -1;
 #ifdef SYS_renameat2
-    // A filesystem without hard links (FAT, some FUSE ones): a rename that refuses to replace.
+    // A filesystem without hard links (FAT, some FUSE ones): use a rename that won't replace.
     if (syscall(SYS_renameat2, AT_FDCWD, from, AT_FDCWD, to, 1u /* RENAME_NOREPLACE */) == 0) return 0;
 #endif
     return -1;
@@ -480,7 +480,7 @@ int platform_write_private(const char *utf8_path, const void *data, size_t len) 
     if (ok && fsync(fd) != 0) ok = 0;
     if (close(fd) != 0) ok = 0;
     if (!ok || rename(tmp, utf8_path) != 0) { unlink(tmp); return -1; }
-    // The rename is only on disk once the folder is.
+    // The rename is only on disk once the folder is synced.
     char dir[4096];
     copy_str(dir, utf8_path, sizeof dir);
     char *slash = strrchr(dir, '/');
@@ -532,8 +532,8 @@ int platform_exe_path(char *out, size_t cap) {
     ssize_t n = readlink("/proc/self/exe", out, cap - 1);
     if (n <= 0 || (size_t)n >= cap - 1) return -1;
     out[n] = '\0';
-    // The kernel appends " (deleted)" once the file we were started from is replaced
-    // (e.g. rebuilt); the path without it is where the executable now lives.
+    // The kernel appends " (deleted)" once the file we were started from is replaced (rebuilt, for
+    // example). The path without it is where the executable is now.
     static const char suffix[] = " (deleted)";
     size_t slen = sizeof suffix - 1;
     if ((size_t)n > slen && strcmp(out + n - slen, suffix) == 0) out[n - slen] = '\0';
@@ -541,8 +541,8 @@ int platform_exe_path(char *out, size_t cap) {
 }
 
 int platform_run_quiet(const char *const argv[]) {
-    // Found as tor is: from an absolute PATH entry or a usual folder, and a program nobody but root
-    // or this user can change. posix_spawnp would also try relative entries, "." among them.
+    // Found the same way as tor: from an absolute PATH entry or a standard folder, and only a program
+    // that root or this user can change. posix_spawnp would also try relative entries, including ".".
     char path[4096];
     if (platform_find_program(argv[0], NULL, path, sizeof path) != 0) return -1;
     pid_t pid;
@@ -597,16 +597,16 @@ void platform_ca_roots(void (*add_der)(void *ctx, const uint8_t *der, size_t len
         if (add_file(ctx, BUNDLES[i]) == 0) return;
 }
 
-// Owned by root or this user, and writable by no one else: no other user, and no group but
-// root's or this user's own (any other group could hold anyone).
+// Owned by root or this user, and writable by no one else: no other user, and no group except
+// root's or this user's own (any other group could include anyone).
 static int only_ours(const struct stat *st) {
     if (st->st_uid != 0 && st->st_uid != geteuid()) return 0;
     if (st->st_mode & S_IWOTH) return 0;
     return !(st->st_mode & S_IWGRP) || st->st_gid == 0 || st->st_gid == getegid();
 }
 
-// A program chat will run: a regular executable file nobody else can swap out, in a folder
-// nobody else can write to.
+// A program chat will run: a regular executable file nobody else can replace, in a folder nobody
+// else can write to.
 static int program_ok(const char *path, char *out, size_t cap) {
     char real[4096];
     if (path[0] != '/' || !realpath(path, real)) return -1;
@@ -632,7 +632,7 @@ int platform_find_program(const char *name, const char *path, char *out, size_t 
         char list[8192];
         copy_str(list, env, sizeof list);
         for (char *save = NULL, *dir = strtok_r(list, ":", &save); dir; dir = strtok_r(NULL, ":", &save)) {
-            // A relative entry ("." or "bin") would run whatever sits in the current folder.
+            // A relative entry ("." or "bin") would run whatever is in the current folder.
             if (dir[0] != '/') continue;
             snprintf(cand, sizeof cand, "%s/%s", dir, name);
             if (program_ok(cand, out, cap) == 0) return 0;
@@ -653,8 +653,8 @@ static int private_dir_ok(const char *dir) {
 }
 
 static const char *tempdir_base(void) {
-    // XDG_RUNTIME_DIR is this user's alone and usually lives in memory; /tmp is the fallback,
-    // where mkdtemp still makes the folder 0700 under a name nobody can guess.
+    // XDG_RUNTIME_DIR belongs to this user only and is usually in memory. /tmp is the fallback,
+    // where mkdtemp still creates the folder as 0700 with a name nobody can guess.
     const char *base = getenv("XDG_RUNTIME_DIR");
     return private_dir_ok(base) ? base : "/tmp";
 }
@@ -677,7 +677,7 @@ static int remove_at(int dirfd, const char *name, int depth) {
         int fd = openat(dirfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         DIR *d = fd >= 0 ? fdopendir(fd) : NULL;
         if (!d && fd >= 0) close(fd);
-        // Deleting while reading can skip entries: go round until a pass finds none.
+        // Deleting while reading can skip entries, so repeat until a pass finds none.
         for (int pass = 0; d && pass < 4; pass++) {
             int found = 0;
             rewinddir(d);
@@ -708,7 +708,7 @@ platform_proc_t *platform_spawn(const char *const argv[], const char *out_path) 
     if (out_path) posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, out_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
     else posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
     posix_spawn_file_actions_adddup2(&fa, STDOUT_FILENO, STDERR_FILENO);
-    // Its own process group: Ctrl+C in the terminal is chat's to handle, and chat stops it after.
+    // Its own process group, so Ctrl+C in the terminal goes to chat, which then stops it.
     posix_spawnattr_t attr;
     posix_spawnattr_init(&attr);
     posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
@@ -718,8 +718,8 @@ platform_proc_t *platform_spawn(const char *const argv[], const char *out_path) 
     sigfillset(&all);
     posix_spawnattr_setsigmask(&attr, &none);
     posix_spawnattr_setsigdefault(&attr, &all);
-    // Our environment, less systemd's hand-over variables: a program started from a service or
-    // a desktop session would otherwise report to (or take sockets from) chat's supervisor.
+    // Our environment, minus systemd's hand-over variables. Otherwise a program started from a
+    // service or a desktop session would report to (or take sockets from) chat's supervisor.
     size_t n = 0;
     while (environ[n]) n++;
     char **env = calloc(n + 1, sizeof *env);
@@ -783,7 +783,7 @@ void platform_remove_stale_tempdirs(const char *prefix, const char *lock_rel) {
         char path[4096], lock[4200];
         snprintf(path, sizeof path, "%s/%s", base, e->d_name);
         struct stat st;
-        // Ours only, made by mkdtemp (0700), and not one another chat is just setting up.
+        // Only ours, created by mkdtemp (0700), and not one another chat is in the middle of setting up.
         if (lstat(path, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != geteuid() || (st.st_mode & 077)
             || now - st.st_mtime < 60) continue;
         snprintf(lock, sizeof lock, "%s/%s", path, lock_rel);

@@ -38,7 +38,7 @@ void file_clean_name(const char *in, char out[FILE_NAME_MAX + 1]) {
     // read as "exe.txt"), and broken UTF-8 with them.
     char clean[4 * FILE_NAME_MAX + 1];
     clean_text(in, clean, sizeof clean - 1);
-    // Only the last part of a path: a name is never somewhere else.
+    // Only the last part of a path, so a name can't point into another folder.
     const char *s = file_basename(clean);
     size_t o = 0;
     for (size_t i = 0; s[i] && o < FILE_NAME_MAX; ) {

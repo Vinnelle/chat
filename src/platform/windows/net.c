@@ -40,7 +40,7 @@ static void tame_connreset(sock_t s) {
 }
 
 // Winsock sockets are inheritable by default, and :update starts curl.exe with handle
-// inheritance on: without this, curl would hold the session's sockets.
+// inheritance on. Without this, curl would hold the session's sockets.
 static sock_t open_socket(int family) {
     sock_t s = socket(family, SOCK_DGRAM, 0);
     if (s != SOCK_INVALID) SetHandleInformation((HANDLE)s, HANDLE_FLAG_INHERIT, 0);

@@ -36,7 +36,7 @@ typedef struct {
 
 const js_value *js_parse(const char *data, size_t len, js_arena *arena);
 const js_value *js_obj_get(const js_value *obj, const char *key);
-// The string, if v is one: NULL otherwise.
+// The string if v is one, otherwise NULL.
 const char *js_str(const js_value *v);
 
 // Appends s (len bytes) as a JSON string, quotes included, escaped as NIP-01 hashes it.
