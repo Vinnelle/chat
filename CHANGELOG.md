@@ -40,6 +40,8 @@
   Yes asks for its passphrase, after picking a save from a list when there's more than one, and
   from then on that save is in use, as if it had been opened at the start. Settings changed
   before that which it doesn't have, and keys verified before that, are kept and saved to it.
+  A command line option doesn't undo a setting changed in that run, and keys from a save
+  uninstalled in that run are left out.
   No makes a new save, with a name and a passphrase of its own. Before, the only choice was to
   save what's in use over it. `:install NAME` for another save while one is open asks whether to
   save over it, then asks for that save's passphrase.
