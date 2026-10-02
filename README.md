@@ -353,7 +353,8 @@ Only you can open the folder and the files (`0700`, `0600`). Each file is writte
 then renamed into place, so a crash can't leave half a file. Sessions, their ids and passwords,
 messages, peers and files are never saved.
 
-`settings` and `key` are the only files chat writes there, and both are always sealed. chat
+`settings` and `key` are the only files chat writes there (and the same two in `saves/NAME` for
+a save made with `:install NAME`, see [More than one save](#more-than-one-save)), and both are always sealed. chat
 never writes your settings in plain text, as `settings.toml` or anything else. The TOML above
 only exists inside the sealed file. If there's a plain text file in that folder, like a
 `settings.toml`, it didn't come from chat. chat doesn't read it, update it or delete it, and
@@ -383,6 +384,25 @@ forgotten it, `:uninstall` then `:install` starts again from scratch. `:uninstal
 chat's files, and the folder if nothing else is in it. Deleting isn't the same as erasing: the
 disk (a journal, copy-on-write snapshots, an SSD's spare blocks) and your backups can still
 have what was in them.
+
+#### More than one save
+
+`:install NAME` saves what's in use as a separate save called NAME, in
+`~/.config/chat/saves/NAME` (the same `settings` and `key` files), sealed with its own
+passphrase. A name is 1 to 32 letters, digits, `-` and `_`. The save in `~/.config/chat` itself is
+called `default`. The folder names are readable on disk, so pick names that don't say more than
+you want them to. Once a save is open, settings you change are saved to that one, and `:install`
+alone saves to it too. `:install NAME` for another save asks for that save's passphrase, or a new
+one if it doesn't exist yet, and from then on that save is the one in use. `:uninstall NAME`
+deletes that save, and `:uninstall` alone deletes the one in use.
+
+With more than one save, chat lists them when it starts: each one's name, whether it has
+settings, a key or both, and when it was last saved. Pick one with `j`/`k` and `Enter`, and chat
+asks for that save's passphrase. `Esc` on the passphrase goes back to the list, and `Esc` on the
+list starts without any of them. With `--simple` or `--update` the list is printed in the
+terminal and you type a number or a name. `--save NAME` skips the list and opens that save.
+Without `--save`, `CHAT_INSTALL_PASSWORD` is tried on each save in turn and opens the first one
+it fits. With only one save, there's no list.
 
 ## Build
 
@@ -563,8 +583,8 @@ puts it on the command line.
 | `:port [N]` | show or change this session's UDP port (`0` picks a free one) |
 | `:copyid` | copy the session id to the clipboard |
 | `:update` | install the latest release |
-| `:install` | save your settings and signing key on this computer, after telling you what that leaves on disk (see [Installing](#installing)) |
-| `:uninstall` | delete what `:install` saved |
+| `:install [NAME]` | save your settings and signing key on this computer, after telling you what that leaves on disk; with NAME, as a save of that name (see [Installing](#installing)) |
+| `:uninstall [NAME]` | delete what `:install` saved (the save in use, or the one called NAME) |
 | `:changelog` | what changed in each version (`:news`); built in, so it works offline |
 | `:send [PATH]` | offer a file, or pick one in a file browser without PATH (see [Files and pictures](#files-and-pictures)) |
 | `:files` | the files offered here, and how each fetch is going |
@@ -642,6 +662,7 @@ Options given here override what `:install` saved, for that run.
 | `--tor-path PATH` | The tor program chat starts (default: `tor` on `PATH` or in the usual folders) |
 | `--tor-socks`, `--tor-control` | Where to look for a running tor's SOCKS and control ports (`HOST:PORT`) |
 | `--identity ...` | `age` or `pgp` for a key made from a password (asked for, or `CHAT_SIGN_PASSWORD`), or `age:KEYFILE` or `pgp:KEYFILE` for your own (see [Security](#security)); for that run, instead of a key `:install` saved |
+| `--save NAME` | Open the save `:install NAME` made, without the list of saves (`default` is the one in `~/.config/chat` itself); if there isn't one, start from the defaults and let `:install` make it (see [Installing](#installing)) |
 | `--simple` | Plain `[HH:MM] ...` lines, one session, stdin, `:name` runs a command. Used automatically when stdout isn't a tty |
 | `--session ID` | Join a session at startup (with `--port`, `--peer`) |
 | `--update` | Install the latest release and exit, without opening chat (see [Updating](#updating)) |

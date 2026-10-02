@@ -595,9 +595,12 @@ int platform_config_dir(char *out, size_t cap, int create) {
     for (char *p = base; *p; p++) if (*p == '\\') *p = '/';
     int n = snprintf(out, cap, "%s/chat", base);
     if (n <= 0 || (size_t)n >= cap) return -1;
-    if (!create) return 0;
+    return create ? platform_private_dir(out) : 0;
+}
+
+int platform_private_dir(const char *utf8_path) {
     wchar_t wp[1400];
-    if (!to_wide(out, wp, 1400)) return -1;
+    if (!to_wide(utf8_path, wp, 1400)) return -1;
     CreateDirectoryW(wp, NULL);
     DWORD a = GetFileAttributesW(wp);
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) && !(a & FILE_ATTRIBUTE_REPARSE_POINT) ? 0 : -1;

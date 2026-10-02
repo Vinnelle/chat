@@ -2402,8 +2402,8 @@ int tui_render_text(int rows, int cols, const char *title, const char *clock, co
 
 #define DIALOG_NOTE_ROWS 6
 
-static int dialog_rows(int text_n, int field, int note_n) {
-    return 1 + (text_n ? text_n + 1 : 0) + (field ? 2 : 0) + (note_n ? note_n + 1 : 0);
+static int dialog_rows(int text_n, int list_n, int field, int note_n) {
+    return 1 + (text_n ? text_n + 1 : 0) + (list_n ? list_n + 1 : 0) + (field ? 2 : 0) + (note_n ? note_n + 1 : 0);
 }
 
 // The box's backdrop (a margin of mx by my around it), and its frame with the title on the top edge
@@ -2533,12 +2533,14 @@ static void draw_dialog(wbuf_t *w, int rows, int cols, const tui_dialog_t *d, in
     static size_t noff[DIALOG_NOTE_ROWS], nlen[DIALOG_NOTE_ROWS];
     int note_n = d->note && d->note[0] ? wrap_rows(d->note, tw, tw, noff, nlen, DIALOG_NOTE_ROWS) : 0;
     int field = d->input || d->status;
-    if (dialog_rows(text_n, field, note_n) + 2 + 2 * my > avail) my = 0;
-    while (dialog_rows(text_n, field, note_n) + 2 > avail && (text_n > 0 || note_n > 0)) {
+    int list_n = d->n_items > 0 ? d->n_items : 0;
+    if (dialog_rows(text_n, list_n, field, note_n) + 2 + 2 * my > avail) my = 0;
+    while (dialog_rows(text_n, list_n, field, note_n) + 2 > avail && (text_n > 0 || note_n > 0 || list_n > 1)) {
         if (text_n > 0) text_n--;
-        else note_n--;
+        else if (note_n > 0) note_n--;
+        else list_n--;
     }
-    int inner = dialog_rows(text_n, field, note_n);
+    int inner = dialog_rows(text_n, list_n, field, note_n);
     if (inner > avail - 2) inner = avail - 2 > 1 ? avail - 2 : 1;
     rect_t in = dialog_frame(w, rows, cols, bw, inner, mx, my, d);
 
@@ -2548,6 +2550,26 @@ static void draw_dialog(wbuf_t *w, int rows, int cols, const tui_dialog_t *d, in
         text_draw_t td = { w, row, x, iw, tw, 0, text_n < end - row ? text_n : end - row };
         layout_text(d->text, d->n_text, tw, draw_text_row, &td);
         row += td.h;
+        if (row < end) blank_row(w, row++, x, iw);
+    }
+    if (list_n > 0) {
+        int first = d->sel >= list_n ? d->sel - list_n + 1 : 0;
+        for (int r = 0; r < list_n && row < end; r++, row++) {
+            int i = first + r, on = i == d->sel;
+            pen_t p;
+            inner_begin(w, &p, row, x, iw);
+            pspace(&p, 1);
+            ptext(&p, on ? S_ACCENT_BOLD : S_PLAIN, on ? G_PTR " " : "  ");
+            const char *detail = d->details && d->details[i] ? d->details[i] : "";
+            int dw = (int)strlen(detail);
+            if (dw > (p.room - p.used) / 2) dw = 0;
+            pell(&p, on ? S_ACCENT_BOLD : S_BOLD, d->items[i], p.room - p.used - (dw ? dw + 3 : 1));
+            if (dw) {
+                pspace(&p, p.room - dw - 1);
+                ptext(&p, S_FAINT, detail);
+            }
+            inner_end(&p);
+        }
         if (row < end) blank_row(w, row++, x, iw);
     }
     if (field && row < end) {

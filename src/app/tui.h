@@ -231,7 +231,7 @@ typedef struct {
 // A line in a dialog's console, styled by kind: a detail faint, then plain, good green, bad red.
 typedef enum { TUI_LOG_DETAIL = 0, TUI_LOG_INFO, TUI_LOG_GOOD, TUI_LOG_BAD } tui_log_kind_t;
 
-// A question or a field, in a box over the middle of the screen. status is shown instead of input
+// A question, a field or a list, in a box over the middle of the screen. status is shown instead of input
 // when the input isn't typed (a paste). A dialog with a console (n_log may be 0) is instead a wider
 // box showing what something is doing: the console's last lines, a progress bar under it, and under
 // that step, a short description of the current step, in step_kind's style.
@@ -253,6 +253,11 @@ typedef struct {
     const char *status;
     const char *note;
     const char *keys;
+    // A list to pick from, under the text, with row sel marked and each row's detail faint on its
+    // right. On a short screen it scrolls to keep sel in view.
+    const char *const *items;
+    const char *const *details;
+    int n_items, sel;
 } tui_dialog_t;
 
 // The bottom row and the input. The chip shows where you are, then your identity and nick, then

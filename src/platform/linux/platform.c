@@ -481,11 +481,15 @@ int platform_config_dir(char *out, size_t cap, int create) {
     if (n <= 0 || (size_t)n >= cap) return -1;
     if (!create) return 0;
     if (mkdir(base, 0700) != 0 && errno != EEXIST) return -1;
-    if (mkdir(out, 0700) != 0 && errno != EEXIST) return -1;
+    return platform_private_dir(out);
+}
+
+int platform_private_dir(const char *utf8_path) {
+    if (mkdir(utf8_path, 0700) != 0 && errno != EEXIST) return -1;
     // Not a link to somewhere else.
     struct stat st;
-    if (lstat(out, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != geteuid()) return -1;
-    return (st.st_mode & 077) && chmod(out, 0700) != 0 ? -1 : 0;
+    if (lstat(utf8_path, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != geteuid()) return -1;
+    return (st.st_mode & 077) && chmod(utf8_path, 0700) != 0 ? -1 : 0;
 }
 
 int platform_write_private(const char *utf8_path, const void *data, size_t len) {

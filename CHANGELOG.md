@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- More than one save. `:install NAME` saves your settings and signing key as a save called
+  NAME, in `~/.config/chat/saves/NAME`, with its own passphrase. `:install` alone keeps using
+  the save in use, and the save in `~/.config/chat` itself is called `default`.
+  `:uninstall NAME` deletes that save. With more than one save, chat lists them when it starts,
+  with what each one holds and when it was last saved, and you pick the one to open before its
+  passphrase is asked for. Esc on the passphrase goes back to the list. `--simple` and `--update`
+  list them in the terminal and take a number or a name. `--save NAME` opens that save without
+  the list, and if there's no save called NAME yet, chat starts from its defaults and
+  `:install` makes it. Without `--save`, `CHAT_INSTALL_PASSWORD` opens the first save it fits.
+  With only one save, chat asks for its passphrase straight away, as before.
+
 ## 0.1.13
 
 ### Changed
