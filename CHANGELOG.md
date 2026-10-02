@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- For a signing key from a file, `:install` now saves the file's path instead of the key, and
+  chat reads the file again each time it starts. If the file is gone, or holds a different key,
+  the console says so. A key file that an earlier `:install` saved as the key keeps loading as
+  before, and is saved as a path the next time you pick it and run `:install`. A pasted key
+  has no file, so `:install` still seals the key itself.
+- The signing identity picker has a **Type a key file path** row under AGE and PGP, for when
+  you'd rather not use the file browser. In the browser, `/` does the same, starting with the
+  selected file. `:set sign age:PATH` and `:set sign pgp:PATH` work too. `~` is your home folder.
+- The picker, the browser, the path field and the paste box say why chat needs your secret key:
+  it signs your handshakes, and only the secret key can make a signature. It stays in memory and
+  is never sent.
+- The file browser (for a key file, and for `:send`) lists folders and files under their own
+  headings, with `..` first and hidden ones last. It says which folder it's in and how many
+  folders and files are there, opens on the first entry rather than `..`, and going up selects
+  the folder you came from. `~` goes to the home folder. The key file browser opens in the folder
+  of the key file in use.
+
+### Fixed
+- `:install` could keep the old signing key after you picked a different one, and said a key that
+  was saved wasn't. It compared the keys the wrong way round.
+
 ## 0.1.12
 
 ### Changed

@@ -53,8 +53,11 @@ trusted again.
 - `pgp:KEYFILE`: sign with an unencrypted armored EdDSA secret key exported from gpg
 
 The picker in settings lists **Off**, **AGE** and **PGP**. Each has **Native** (a key made
-there), a key file (picked in a file browser) and a pasted key. Your own key only gets written
-to disk by `:install`, and it's sealed (see [Installing](#installing)).
+there), a key file (picked in a file browser, or its path typed) and a pasted key. chat needs
+the secret key of your own key because it signs your handshakes with it, and only the secret key
+can make a signature. It stays in memory and is never sent: peers get the public key and the
+signatures. For a key file, `:install` saves the file's path, not the key. A pasted key is only
+written to disk by `:install`, sealed (see [Installing](#installing)).
 
 A **Native** key asks for a password. `--identity age` or `pgp` asks at startup, or reads
 `CHAT_SIGN_PASSWORD`. The key comes from Argon2id over that password and the OS install's
@@ -310,7 +313,9 @@ you're saving it. It would be off unless you turn it on.
 ### Installing
 
 `:install`, in the full screen UI, saves your settings and signing key so they're there next
-time chat starts. It asks first, and tells you what it leaves on disk. The files tell anyone who can read the
+time chat starts. For a key from a file it saves the file's path instead of the key, and reads
+the file again each time chat starts. If the file is gone or holds a different key, the console
+says so. It asks first, and tells you what it leaves on disk. The files tell anyone who can read the
 disk (an admin, malware, a backup, forensics) that chat is used there.
 
 Both files are sealed with one passphrase you pick, typed twice, even if there's no signing
@@ -584,7 +589,7 @@ after a name. Under each row's help, the page shows the `:set` command that does
 | `torpath`, `torsocks`, `torcontrol` | a path, `HOST:PORT`, `HOST:PORT` |
 | `torpassword` | only on the page, where it's hidden |
 | `nick`, `colour` | a name; a colour name or `#RRGGBB` |
-| `sign` | `off`, or an `age` or `pgp` key made from a password typed on the page; a key file or pasted key is picked there too |
+| `sign` | `off`, an `age` or `pgp` key made from a password typed on the page, or `age:PATH` / `pgp:PATH` for a key file; a pasted key is picked on the page |
 | `verify` | `required` (nothing goes to a peer until you've compared its code), `optional` |
 | `filelimit` | the biggest file fetched without `anyway`: `8M`, `500K`, `1G` |
 | `fastfiles` | `on` (what you send goes in quick bursts; through the relays, as fast as they allow), `off` (chat's regular slots) |
@@ -596,7 +601,8 @@ after a name. Under each row's help, the page shows the `:set` command that does
 The settings page, the pages under it (the signing identity picker and the key file browser)
 and the help page all use the same keys: `j`/`k` move, `g`/`G` go to the top/bottom, `Tab` /
 `Shift+Tab` go to the next / previous section, `Enter` picks, `h`/`l` change a value or go out
-of / into a page, `Esc` goes back and `q` closes the page.
+of / into a page, `Esc` goes back and `q` closes the page. In the file browser, `~` goes to the
+home folder, and in the key file browser `/` types a path instead.
 
 With `--simple`, `:set` only covers `nick`, `colour`, `notify`, `preview` and `net`.
 

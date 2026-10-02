@@ -70,6 +70,10 @@ long platform_read_file(const char *utf8_path, void *buf, size_t cap);
 
 int platform_remove(const char *utf8_path);
 
+// path as a full path, taken from the current folder if it's relative. Links aren't followed, so a
+// path saved from it keeps pointing where the user said. Returns -1 if it doesn't fit.
+int platform_full_path(const char *utf8_path, char *out, size_t cap);
+
 // For sending a file. Opens it for reading only if it's a regular file (never a FIFO, device or
 // folder, which could hang chat or never end), with its size in *size. NULL if not.
 FILE *platform_open_regular(const char *utf8_path, uint64_t *size);
