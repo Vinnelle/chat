@@ -24,11 +24,13 @@
   again. `:verify NICK ok` then replaces the key kept for that nick.
 
 ### Changed
-- `:install` while what's saved is still sealed (`Esc` at the start) asks whether to use that
-  save. No makes a new save, with a name and a passphrase of its own. Yes asks whether to save
-  what's in use now over it, or to use what's saved there as if it had been opened at the start,
-  then asks for its passphrase. Before, the only choice was to save over it with its
-  passphrase. Saving over a save other than the open one still needs that save's passphrase.
+- `:install` while nothing saved is open (`Esc` at the start) asks whether to use what's saved.
+  Yes asks for its passphrase, after picking a save from a list when there's more than one, and
+  from then on that save is in use, as if it had been opened at the start. Settings changed
+  before that which it doesn't have, and keys verified before that, are kept and saved to it.
+  No makes a new save, with a name and a passphrase of its own. Before, the only choice was to
+  save what's in use over it. `:install NAME` for another save while one is open asks whether to
+  save over it, then asks for that save's passphrase.
 - A picture that was shown is kept in memory (up to 128 MB in all, the oldest dropped first)
   and wiped when the session closes. `:download N` saves it from there straight away, and
   `:show N` draws it again, without fetching it a second time.

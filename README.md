@@ -391,7 +391,8 @@ wrong passphrase tells you, unlike a native key where a typo quietly makes a dif
 reads the settings first, so a command line option still overrides it for that run, and it starts on
 your sessions instead of the settings page. `--identity` signs with a different key for that
 run and leaves the saved one alone. `Esc` starts without what's saved: chat's defaults, on the
-settings page, and nothing you change that run is saved. Since the saved routing might be Tor,
+settings page, and nothing you change is saved unless `:install` opens a save later in that run
+(see below). Since the saved routing might be Tor,
 chat won't guess. If what's saved is still sealed, there's no terminal to ask on and no
 `--routing`, it won't start, and `--update` won't download.
 
@@ -403,14 +404,16 @@ signing key is only saved by `:install`, so a key you're just trying out isn't k
 accident. If you pick a key later, the console says so, and `:install` seals it under the same
 passphrase without asking for it again. Running `:install` again saves everything in use,
 command line options included. It keeps the saved key unless a different one is in use, in
-which case it replaces it (and tells you first). With signing off, the saved key stays. If you
-run `:install` while what's saved is still sealed (you pressed `Esc` at the start), it asks
-whether to use that save. `n` makes a new save instead, with a name and a passphrase of its
-own (see [More than one save](#more-than-one-save)). `y` then asks whether to save what's in
-use now over it (`y`), or to use what's saved there (`n`), the same as opening it at the start
-would have, and then asks for its passphrase. Either way, settings you change after that are
-saved to it. If you've forgotten its passphrase, `:uninstall` then `:install` starts again from
-scratch. `:uninstall` deletes
+which case it replaces it (and tells you first). With signing off, the saved key stays.
+
+If you pressed `Esc` at the start, so nothing saved is open, `:install` first asks whether to use
+what's saved. `y` asks for its passphrase (with more than one save, after you pick one from a
+list), and from then on what's saved there is in use, the same as if you'd opened it at the
+start, and settings you change are saved to it. Settings you changed before that which the save
+doesn't have keep their value and are saved to it, and so are keys you verified. `n` makes a new
+save instead, with a name and a passphrase of its own (see
+[More than one save](#more-than-one-save)). If you've forgotten a save's passphrase,
+`:uninstall NAME` deletes it. `:uninstall` deletes
 chat's files, and the folder if nothing else is in it. Deleting isn't the same as erasing: the
 disk (a journal, copy-on-write snapshots, an SSD's spare blocks) and your backups can still
 have what was in them.
@@ -422,11 +425,11 @@ have what was in them.
 passphrase. A name is 1 to 32 letters, digits, `-` and `_`. The save in `~/.config/chat` itself is
 called `default`. The folder names are readable on disk, so pick names that don't say more than
 you want them to. Once a save is open, settings you change are saved to that one, and `:install`
-alone saves to it too. `:install NAME` for a save that doesn't exist yet asks for a new
-passphrase. For one that does, it asks whether to use it, and then whether to save what's in
-use now over it; saving over another save needs that save's passphrase. While another save is
-open, `:install NAME` can only save over it: to use what's saved there as it is, start chat with
-`--save NAME`. From then on that save is the one in use. `:uninstall NAME`
+alone saves to it too, after asking first, as above. `:install NAME` for a save that doesn't exist
+yet makes it, with a new passphrase. For one that does, while another save is open, it asks
+whether to save what's in use over it, and then asks for that save's passphrase. To use what's
+saved there as it is instead, start chat with `--save NAME`. While no save is open, it asks
+whether to use it, as above. From then on that save is the one in use. `:uninstall NAME`
 deletes that save, and `:uninstall` alone deletes the one in use.
 
 With more than one save, chat lists them when it starts: each one's name, whether it has
