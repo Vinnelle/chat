@@ -145,6 +145,9 @@
 #define FILE_FAST_INTERVAL 0.005
 // A file fetched to be shown rather than saved is held in memory, up to this size.
 #define FILE_VIEW_MAX (64u * 1024 * 1024)
+// Pictures that were shown stay in memory, up to this much in all (the oldest are dropped first), so
+// :show and :download use them instead of fetching them again.
+#define FILE_CACHE_MAX (128u * 1024 * 1024)
 #define FILE_RETRIES 8
 // A fetch waits up to this long for its sender to come back (a Tor circuit or a relay can stall a
 // peer), and continues from where it was if they do.
@@ -324,7 +327,8 @@ typedef struct {
 // A room frame for a connected peer (a re-handshake's hi, ck, hi2 or kx), sent in its slots: over
 // UDP one piece per slot, over the relays or Tor as a whole.
 #define ROOMQ_MAX 24
-typedef enum { DL_NONE = 0, DL_ACTIVE, DL_DONE, DL_FAILED } dl_state_t;
+// DL_QUEUED: asked for while another file from the same sender is coming. It starts after that one.
+typedef enum { DL_NONE = 0, DL_ACTIVE, DL_DONE, DL_FAILED, DL_QUEUED } dl_state_t;
 
 typedef struct {
     int used;
@@ -340,6 +344,10 @@ typedef struct {
 
     dl_state_t dl;
     int view;                    // fetched to show (into mem), not to save (to out)
+    int also_show, also_save;    // asked for the other way while on its way: shown or saved too once it's here
+    char save_dir[600];          // the folder to save it in, "" for Downloads
+    char saved[800];             // where it was last saved, "" if it wasn't
+    uint8_t *cache;              // a picture shown here: its bytes, checked against sha, for :show and :download
     FILE *out;
     char part_path[640];
     uint8_t *mem;
@@ -561,11 +569,15 @@ extern const command_t CHAT_COMMANDS[];
 
 void chat_set_nick(chat_t *c, const char *nick);
 
-// Files. chat_file_fetch starts fetching file num, either to show (view, passed to c->file_view
-// once complete) or to save in Downloads. anyway: fetch even if over the size limit. Returns 0, or
-// -1 after saying why.
-int chat_file_fetch(chat_t *c, int num, int view, int anyway);
+// Files. chat_file_fetch gets file num, either to show (view, passed to c->file_view once it's
+// here) or to save in dir (NULL or "" for Downloads). A picture already shown, or a file already
+// saved, is used instead of fetching it again if it still matches the offer. While another file
+// from the same sender is coming, it's queued and starts after that one. anyway: fetch even if
+// over the size limit. Returns 0, or -1 after saying why.
+int chat_file_fetch(chat_t *c, int num, int view, int anyway, const char *dir);
 const file_entry_t *chat_file(const chat_t *c, int num);
+// A queued file: the number of the file from the same sender it waits for, or 0.
+int chat_file_queued_after(const chat_t *c, const file_entry_t *e);
 // A file being fetched: the bytes received, including any in the window not written yet, and
 // roughly how many seconds the rest will take, at the rate so far or, before there is one, at the
 // rate its path allows. -1 while its sender is away, -2 while their verify code needs comparing

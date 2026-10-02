@@ -234,11 +234,24 @@ you ask. `:install` saves them, and after that every change is saved (see
 
 `:send PATH` offers a file to everyone in the session whose verify code you've compared (and
 anyone who joins or gets compared later). `:send` on its own opens a file browser to pick one.
-Nothing is sent until someone fetches it. `:download N` saves it, and for a picture (PNG or JPEG)
-`:show N` draws it in the chat under the line that offered it. Pictures stay hidden until you
-ask, and `:hide N` hides one again. While a file is coming in, a row under that line shows the
-progress and roughly how long is left. `:files` lists what's been offered and how far each
-fetch has got. `:cancel N` stops a fetch, or stops offering one of your files.
+Nothing is sent until someone fetches it. `:download N` saves it in `~/Downloads`, and for a
+picture (PNG or JPEG) `:show N` draws it in the chat under the line that offered it. Pictures stay
+hidden until you ask, and `:hide N` hides one again. While a file is coming in, a row under that
+line shows the progress and roughly how long is left. `:files` lists what's been offered, how far
+each fetch has got, and where each file was saved. `:cancel N` stops a fetch, or stops offering
+one of your files.
+
+- **Downloading.** `:download` without a number takes the newest file that isn't saved yet.
+  `:download N FOLDER` saves in another folder, and `:saveto N` picks the folder in a file
+  browser (`s` saves in the folder shown). One file comes from each sender at a time: asking for
+  another queues it, and it starts by itself when the one before it is done. `:cancel N` takes a
+  file off the queue.
+- **No second fetch.** A picture that was shown is kept in memory, so `:download N` saves it
+  straight away and `:show N` draws it again without fetching it. Asking for a file that's already
+  saved says where it is, as long as the saved file still matches the offer's SHA-256. With a
+  FOLDER it's copied from there, and a picture saved earlier is shown from the saved file.
+  `:download N` while a picture is coming to be shown (or `:show N` while it's coming to be
+  saved) does both once it's here.
 
 - **What's on the wire.** Files go in the same slots as everything else, in space that would
   otherwise be empty. With **Fast file transfers** off, a transfer looks the same as any other
@@ -256,9 +269,11 @@ fetch has got. `:cancel N` stops a fetch, or stops offering one of your files.
 - **What's kept.** Files come in a window of chunks at a time, written in order and hashed, and
   only kept if the SHA-256 matches the one in the offer. A file changed after it was offered,
   or tampered with, is thrown away. It's written to a new private hidden file in `~/Downloads`
-  that can't follow a link, then renamed to its real name only if nothing already has that
-  name (`photo (2).jpg` next to an existing `photo.jpg`). Nothing ever gets overwritten. A
-  picture fetched to show is never written to disk, and it's wiped from memory once it's drawn.
+  (or the folder you picked) that can't follow a link, then renamed to its real name only if
+  nothing already has that name (`photo (2).jpg` next to an existing `photo.jpg`). Nothing ever
+  gets overwritten. A picture fetched to show is never written to disk unless you save it. Its
+  bytes stay in memory (up to 128 MB in all, the oldest dropped first) and are wiped when the
+  session closes.
 - **Names.** A name from a peer can't be a path, a hidden file, a Windows device (`CON`, `NUL`)
   or anything the terminal acts on. Folders, control and right-to-left characters, and
   `/ \ : * ? " < > |` are stripped. Nothing chat saves is executable.
@@ -588,9 +603,10 @@ puts it on the command line.
 | `:changelog` | what changed in each version (`:news`); built in, so it works offline |
 | `:send [PATH]` | offer a file, or pick one in a file browser without PATH (see [Files and pictures](#files-and-pictures)) |
 | `:files` | the files offered here, and how each fetch is going |
-| `:download N [anyway]` | save file N in `~/Downloads` (`:dl`); `anyway` if it's over your size limit |
+| `:download [N] [anyway] [FOLDER]` | save file N in `~/Downloads` or FOLDER (`:dl`); the newest file without N; `anyway` if it's over your size limit |
+| `:saveto N [anyway]` | pick a folder in a file browser and save file N there |
 | `:show N [anyway]`, `:hide N` | draw picture N in the chat where it was offered, or hide it |
-| `:cancel N` | stop fetching file N, or stop offering one of yours |
+| `:cancel N` | stop fetching file N or take it off the queue, or stop offering one of yours |
 
 ### Settings
 

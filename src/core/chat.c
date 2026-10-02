@@ -2222,8 +2222,36 @@ static void file_stop_download(file_entry_t *e, dl_state_t to) {
     e->dl = to;
 }
 
+static void file_cache_drop(file_entry_t *e) {
+    if (e->cache) { crypto_wipe(e->cache, e->size ? (size_t)e->size : 1); free(e->cache); e->cache = NULL; }
+}
+
+// Keeps e->mem (a whole file, checked) as e's cache, dropping the oldest others to stay within
+// FILE_CACHE_MAX.
+static void file_cache_keep(chat_t *c, file_entry_t *e) {
+    uint8_t *m = e->mem;
+    e->mem = NULL;
+    if (!m) return;
+    file_cache_drop(e);
+    if (e->size > FILE_CACHE_MAX) { crypto_wipe(m, e->size ? (size_t)e->size : 1); free(m); return; }
+    for (;;) {
+        uint64_t total = e->size;
+        file_entry_t *old = NULL;
+        for (int i = 0; i < FILE_OFFERS_MAX; i++) {
+            file_entry_t *o = &c->files[i];
+            if (!o->used || !o->cache || o == e) continue;
+            total += o->size;
+            if (!old || o->num < old->num) old = o;
+        }
+        if (total <= FILE_CACHE_MAX || !old) break;
+        file_cache_drop(old);
+    }
+    e->cache = m;
+}
+
 static void file_free(file_entry_t *e) {
     file_stop_download(e, DL_NONE);
+    file_cache_drop(e);
     if (e->fp) { fclose(e->fp); e->fp = NULL; }
     crypto_wipe(e, sizeof *e);
 }
@@ -2239,7 +2267,7 @@ static file_entry_t *file_new(chat_t *c, const uint8_t *owner) {
     for (int i = 0; i < FILE_OFFERS_MAX && !pick && theirs < FILE_OFFERS_PER_PEER; i++) if (!c->files[i].used) pick = &c->files[i];
     for (int i = 0; i < FILE_OFFERS_MAX && !pick; i++) {
         file_entry_t *e = &c->files[i];
-        if (e->mine || e->dl == DL_ACTIVE) continue;
+        if (e->mine || e->dl == DL_ACTIVE || e->dl == DL_QUEUED) continue;
         if (theirs >= FILE_OFFERS_PER_PEER && memcmp(e->owner, owner, ID_LEN) != 0) continue;
         if (!pick || e->num < pick->num) pick = e;
     }
@@ -2294,20 +2322,26 @@ static void file_offer_all(chat_t *c, peer_t *p) {
         if (c->files[i].used && c->files[i].mine && c->files[i].fp) file_send_offer(c, p, &c->files[i], now_seconds());
 }
 
-static cmd_result_t cmd_send(void *ctx, const char *arg) {
-    chat_t *c = ctx;
-    char path[1024];
-    copy_str(path, arg, sizeof path);
+// A path typed in a command: trailing spaces and the quotes file managers copy paths with are
+// removed, and a leading ~ is the home folder.
+static void typed_path(const char *in, char *path, size_t cap) {
+    while (*in == ' ') in++;
+    copy_str(path, in, cap);
     size_t pl = strlen(path);
     while (pl > 0 && path[pl - 1] == ' ') path[--pl] = '\0';
-    // Strip quotes from a pasted path (file managers copy them that way).
     if (pl >= 2 && (path[0] == '"' || path[0] == '\'') && path[pl - 1] == path[0]) { memmove(path, path + 1, pl - 2); path[pl - 2] = '\0'; }
-    if (!path[0]) { ui_print(c, "* usage: :send PATH - offers a file to everyone here; nobody gets it unless they fetch it"); return CMD_OK; }
     if (path[0] == '~' && (path[1] == '/' || path[1] == '\0')) {
         const char *home = platform_home_dir();
         char full[1024];
-        if (home) { snprintf(full, sizeof full, "%s%s", home, path + 1); copy_str(path, full, sizeof path); }
+        if (home) { snprintf(full, sizeof full, "%s%s", home, path + 1); copy_str(path, full, cap); }
     }
+}
+
+static cmd_result_t cmd_send(void *ctx, const char *arg) {
+    chat_t *c = ctx;
+    char path[1024];
+    typed_path(arg, path, sizeof path);
+    if (!path[0]) { ui_print(c, "* usage: :send PATH - offers a file to everyone here; nobody gets it unless they fetch it"); return CMD_OK; }
     chat_send_file(c, path);
     return CMD_OK;
 }
@@ -2387,17 +2421,119 @@ static void file_request(chat_t *c, file_entry_t *e, peer_t *p, double now) {
     e->retry_at = now + 6.0 * iv + 4.0;
 }
 
-// The folder downloads go to, and the name to save as there: name, otherwise "name (2).ext" and so on.
-static int file_save_as(file_entry_t *e, char *saved, size_t cap) {
+// The folder file e is saved in: the one asked for, else Downloads.
+static int file_dir(const file_entry_t *e, char *dir, size_t cap) {
+    if (e->save_dir[0]) { copy_str(dir, e->save_dir, cap); return 0; }
+    return platform_downloads_dir(dir, cap);
+}
+
+// The same folder, as messages name it.
+static void file_dir_name(const file_entry_t *e, char *out, size_t cap) {
+    copy_str(out, e->save_dir[0] ? e->save_dir : "Downloads", cap);
+}
+
+// A new hidden file in e's folder to write it to, under a name nothing else will use. file_save_as
+// gives it its real name once its hash matches.
+static FILE *file_open_part(file_entry_t *e) {
     char dir[600];
-    if (platform_downloads_dir(dir, sizeof dir) != 0) return -1;
+    if (file_dir(e, dir, sizeof dir) != 0) return NULL;
+    uint8_t r[6]; gen_random(r, sizeof r);
+    char rh[13]; hex_encode(r, sizeof r, rh);
+    snprintf(e->part_path, sizeof e->part_path, "%s/.chat-%s.part", dir, rh);
+    FILE *f = platform_create_new(e->part_path);
+    if (!f) e->part_path[0] = '\0';
+    return f;
+}
+
+// Renames the part file to e's name in its folder: name, otherwise "name (2).ext" and so on.
+// Sets e->saved.
+static int file_save_as(file_entry_t *e) {
+    char dir[600], saved[sizeof e->saved];
+    if (file_dir(e, dir, sizeof dir) != 0) return -1;
     const char *dot = strrchr(e->name, '.');
     size_t stem = dot && dot != e->name ? (size_t)(dot - e->name) : strlen(e->name);
     for (int k = 1; k < 100; k++) {
-        if (k == 1) snprintf(saved, cap, "%s/%s", dir, e->name);
-        else snprintf(saved, cap, "%s/%.*s (%d)%s", dir, (int)stem, e->name, k, e->name + stem);
-        if (platform_move_new(e->part_path, saved) == 0) return 0;
+        if (k == 1) snprintf(saved, sizeof saved, "%s/%s", dir, e->name);
+        else snprintf(saved, sizeof saved, "%s/%.*s (%d)%s", dir, (int)stem, e->name, k, e->name + stem);
+        if (platform_move_new(e->part_path, saved) == 0) {
+            e->part_path[0] = '\0';
+            copy_str(e->saved, saved, sizeof e->saved);
+            return 0;
+        }
     }
+    return -1;
+}
+
+// Reads f to the end, hashing it, and writing it to out and mem if given. Returns 1 if it's
+// exactly e's size and matches its hash, 0 if not, -1 if out couldn't be written.
+static int file_copy_checked(const file_entry_t *e, FILE *f, FILE *out, uint8_t *mem) {
+    sha256_ctx_t h;
+    sha256_init(&h);
+    uint8_t buf[65536];
+    uint64_t total = 0;
+    size_t n;
+    int match = 1, ok = 1;
+    while (ok && (n = fread(buf, 1, sizeof buf, f)) > 0) {
+        if (n > e->size - total) { match = 0; break; }
+        sha256_update(&h, buf, n);
+        if (mem) memcpy(mem + total, buf, n);
+        if (out) ok = fwrite(buf, 1, n, out) == n;
+        total += n;
+    }
+    crypto_wipe(buf, sizeof buf);
+    uint8_t got[32];
+    sha256_final(&h, got);
+    if (ferror(f) || total != e->size || crypto_equal(got, e->sha, 32) != 0) match = 0;
+    return !ok ? -1 : match;
+}
+
+// Whether the file e was saved as is still there and still matches the offer. With mem, its
+// bytes are put in *mem (for one up to FILE_VIEW_MAX). Returns 0 if it matches.
+static int file_check_saved(const file_entry_t *e, uint8_t **mem) {
+    if (mem) *mem = NULL;
+    if (!e->saved[0] || (mem && e->size > FILE_VIEW_MAX)) return -1;
+    uint64_t size = 0;
+    FILE *f = platform_open_regular(e->saved, &size);
+    if (!f) return -1;
+    uint8_t *m = NULL;
+    if (size != e->size || (mem && !(m = malloc(size ? (size_t)size : 1)))) { fclose(f); return -1; }
+    int match = file_copy_checked(e, f, NULL, m);
+    fclose(f);
+    if (match != 1) {
+        if (m) { crypto_wipe(m, size ? (size_t)size : 1); free(m); }
+        return -1;
+    }
+    if (mem) *mem = m;
+    return 0;
+}
+
+// Saves file e in its folder without fetching it: from mem (its bytes, already checked), or as a
+// copy of where it was saved before, checked as it's read. Returns 0 once saved, 1 if there's no
+// copy that still matches, -1 if it couldn't be written (after saying why).
+static int file_save_local(chat_t *c, file_entry_t *e, const uint8_t *mem) {
+    FILE *src = NULL;
+    uint64_t size = 0;
+    if (!mem) {
+        if (!e->saved[0] || !(src = platform_open_regular(e->saved, &size))) { e->saved[0] = '\0'; return 1; }
+        if (size != e->size) { fclose(src); e->saved[0] = '\0'; return 1; }
+    }
+    char where[600]; file_dir_name(e, where, sizeof where);
+    FILE *out = file_open_part(e);
+    if (!out) {
+        if (src) fclose(src);
+        ui_print(c, "* can't write a file in %s", where);
+        return -1;
+    }
+    int r = 1;
+    if (mem) r = fwrite(mem, 1, (size_t)e->size, out) == (size_t)e->size ? 1 : -1;
+    else { r = file_copy_checked(e, src, out, NULL); fclose(src); }
+    if (fflush(out) != 0) r = -1;
+    if (fclose(out) != 0) r = -1;
+    if (r == 1 && file_save_as(e) == 0) return 0;
+    platform_remove(e->part_path);
+    e->part_path[0] = '\0';
+    if (r == 0) { e->saved[0] = '\0'; return 1; }
+    ui_print(c, "* couldn't save file %d in %s", e->num, where);
     return -1;
 }
 
@@ -2412,66 +2548,56 @@ static void file_finish(chat_t *c, file_entry_t *e) {
     }
     if (e->view) {
         if (c->file_view) c->file_view(c->ui, e->num, e->name, e->mem, (size_t)e->size);
+        if (e->also_save && file_save_local(c, e, e->mem) == 0) ui_print(c, "* saved file %d to %s", e->num, e->saved);
+        e->also_save = 0;
+        // Kept, so :show and :download don't fetch it again.
+        file_cache_keep(c, e);
         file_stop_download(e, DL_DONE);
         return;
     }
+    char took[48]; file_format_duration(now_seconds() - e->since, took, sizeof took);
     int ok = e->out && fflush(e->out) == 0;
     if (e->out) { if (fclose(e->out) != 0) ok = 0; e->out = NULL; }
-    char saved[800];
-    if (!ok || file_save_as(e, saved, sizeof saved) != 0) {
+    if (!ok || file_save_as(e) != 0) {
+        char where[600]; file_dir_name(e, where, sizeof where);
         file_stop_download(e, DL_FAILED);
-        ui_print(c, "* file %d (%s) downloaded, but couldn't be saved in Downloads", e->num, desc);
+        ui_print(c, "* file %d (%s) downloaded, but couldn't be saved in %s", e->num, desc, where);
         return;
     }
-    e->part_path[0] = '\0';
     file_stop_download(e, DL_DONE);
-    ui_print(c, "* saved file %d to %s", e->num, saved);
+    char sz[32]; file_format_size(e->size, sz, sizeof sz);
+    ui_print(c, "* saved file %d to %s (%s, took %s)", e->num, e->saved, sz, took);
+    if (e->also_show) {
+        e->also_show = 0;
+        if (file_check_saved(e, &e->mem) != 0) { ui_print(c, "* can't show file %d: it changed after it was saved", e->num); return; }
+        if (c->file_view) c->file_view(c->ui, e->num, e->name, e->mem, (size_t)e->size);
+        file_cache_keep(c, e);
+    }
 }
 
-int chat_file_fetch(chat_t *c, int num, int view, int anyway) {
-    file_entry_t *e = file_by_num(c, num);
-    if (!e) { ui_print(c, "* there's no file %d - :files lists them", num); return -1; }
-    if (e->mine) { ui_print(c, "* file %d is yours", num); return -1; }
-    if (e->dl == DL_ACTIVE) { ui_print(c, "* file %d is already on its way (:files shows how far)", num); return -1; }
-    if (view && !e->image) { ui_print(c, "* file %d isn't offered as a picture - :download %d saves it instead", num, num); return -1; }
-    peer_t *p = file_owner(c, e);
-    if (!p) { ui_print(c, "* whoever offered file %d isn't here now - try again once they're back", num); return -1; }
-    char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
-    if (!peer_trusted(c, p)) {
-        ui_print(c, "* compare verify codes with %s first (:verify %s): until then someone in the middle could be sending it", name, name);
-        return -1;
+int chat_file_queued_after(const chat_t *c, const file_entry_t *e) {
+    if (e->dl != DL_QUEUED) return 0;
+    for (int i = 0; i < FILE_OFFERS_MAX; i++) {
+        const file_entry_t *o = &c->files[i];
+        if (o->used && o->dl == DL_ACTIVE && memcmp(o->owner, e->owner, ID_LEN) == 0) return o->num;
     }
-    if (file_downloading_from(c, p)) { ui_print(c, "* one file at a time from %s - this one can follow when that's done", name); return -1; }
-    uint64_t cap = c->file_cap ? c->file_cap : FILE_CAP_DEFAULT;
-    char sz[32], lim[32];
-    file_format_size(e->size, sz, sizeof sz);
-    file_format_size(cap, lim, sizeof lim);
-    if (e->size > cap && !anyway) {
-        ui_print(c, "* file %d is %s, over your %s limit - :%s %d anyway fetches it regardless", num, sz, lim,
-                 view ? "show" : "download", num);
-        return -1;
-    }
-    if (view && e->size > FILE_VIEW_MAX) {
-        ui_print(c, "* file %d is too big to show (%s) - :download %d saves it instead", num, sz, num);
-        return -1;
-    }
-    e->view = view;
+    return 0;
+}
+
+// Starts fetching e from p, to show or to save as e->view says. Returns 0, or -1 after saying why.
+static int file_start(chat_t *c, file_entry_t *e, peer_t *p) {
     e->done = e->win_off = 0;
     e->win_n = e->req_end = 0;
     e->retries = 0;
     e->gone_since = 0.0;
     e->win = malloc((size_t)FILE_WINDOW * FILE_CHUNK);
-    if (view) e->mem = malloc(e->size ? (size_t)e->size : 1);
-    if (!e->win || (view && !e->mem)) { file_stop_download(e, DL_FAILED); ui_print(c, "* out of memory"); return -1; }
-    if (!view) {
-        char dir[600];
-        if (platform_downloads_dir(dir, sizeof dir) != 0) { file_stop_download(e, DL_FAILED); ui_print(c, "* can't find or make your Downloads folder"); return -1; }
-        // Hidden while downloading, under a name nothing else will use. Renamed once its hash matches.
-        uint8_t r[6]; gen_random(r, sizeof r);
-        char rh[13]; hex_encode(r, sizeof r, rh);
-        snprintf(e->part_path, sizeof e->part_path, "%s/.chat-%s.part", dir, rh);
-        e->out = platform_create_new(e->part_path);
-        if (!e->out) { e->part_path[0] = '\0'; file_stop_download(e, DL_FAILED); ui_print(c, "* can't write to %s", dir); return -1; }
+    if (e->view) e->mem = malloc(e->size ? (size_t)e->size : 1);
+    if (!e->win || (e->view && !e->mem)) { file_stop_download(e, DL_FAILED); ui_print(c, "* out of memory"); return -1; }
+    if (!e->view && !(e->out = file_open_part(e))) {
+        char where[600]; file_dir_name(e, where, sizeof where);
+        file_stop_download(e, DL_FAILED);
+        ui_print(c, "* can't write a file in %s", where);
+        return -1;
     }
     sha256_init(&e->hash);
     e->dl = DL_ACTIVE;
@@ -2479,23 +2605,126 @@ int chat_file_fetch(chat_t *c, int num, int view, int anyway) {
     if (e->size == 0) { file_finish(c, e); return 0; }
     file_request(c, e, p, e->since);
     // How long it takes depends on the sender. Fast transfers only speed up what you send.
+    char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
+    char sz[32]; file_format_size(e->size, sz, sizeof sz);
     char eta[48]; file_format_duration(chat_file_eta(c, e, e->since), eta, sizeof eta);
     if (p->addr.kind == ADDR_NOSTR)
         ui_print(c, "* fetching file %d (%s) from %s through the relays: %s at chat's normal rate, up to half that if "
-                    "%s has fast transfers on", num, sz, name, eta, name);
+                    "%s has fast transfers on", e->num, sz, name, eta, name);
     else
         ui_print(c, "* fetching file %d (%s) from %s: %s at chat's normal rate, seconds if %s has fast transfers on",
-                 num, sz, name, eta, name);
+                 e->num, sz, name, eta, name);
     return 0;
 }
 
+int chat_file_fetch(chat_t *c, int num, int view, int anyway, const char *dir) {
+    file_entry_t *e = file_by_num(c, num);
+    if (!e) { ui_print(c, "* there's no file %d - :files lists them", num); return -1; }
+    if (e->mine) { ui_print(c, "* file %d is yours", num); return -1; }
+    if (view && !e->image) { ui_print(c, "* file %d isn't offered as a picture - :download %d saves it instead", num, num); return -1; }
+    char sz[32]; file_format_size(e->size, sz, sizeof sz);
+    if (view && e->size > FILE_VIEW_MAX) {
+        ui_print(c, "* file %d is too big to show (%s) - :download %d saves it instead", num, sz, num);
+        return -1;
+    }
+    int coming = e->dl == DL_ACTIVE || e->dl == DL_QUEUED;
+    if (view) {
+        // Shown before, or saved: no need to fetch it again.
+        uint8_t *m = NULL;
+        if (!e->cache && !coming && file_check_saved(e, &m) == 0) { e->mem = m; file_cache_keep(c, e); }
+        if (e->cache) {
+            if (c->file_view) c->file_view(c->ui, e->num, e->name, e->cache, (size_t)e->size);
+            return 0;
+        }
+        if (coming) {
+            if (e->view) { ui_print(c, "* file %d is already on its way (:files shows how far)", num); return -1; }
+            e->also_show = 1;
+            ui_print(c, "* file %d is on its way to be saved, and is shown too once it's here", num);
+            return 0;
+        }
+    } else {
+        char want[600] = "";
+        if (dir) copy_str(want, dir, sizeof want);
+        size_t wl = strlen(want);
+        while (wl > 1 && (want[wl - 1] == '/' || want[wl - 1] == '\\')) want[--wl] = '\0';
+        if (coming) {
+            if (!e->view) { ui_print(c, "* file %d is already on its way (:files shows how far)", num); return -1; }
+            e->also_save = 1;
+            copy_str(e->save_dir, want, sizeof e->save_dir);
+            ui_print(c, "* file %d is on its way to be shown, and is saved too once it's here", num);
+            return 0;
+        }
+        if (!want[0] && e->saved[0]) {
+            if (file_check_saved(e, NULL) == 0) {
+                ui_print(c, "* file %d is already saved at %s - :download %d FOLDER saves another copy", num, e->saved, num);
+                return 0;
+            }
+            e->saved[0] = '\0';
+        }
+        copy_str(e->save_dir, want, sizeof e->save_dir);
+        // Shown before, or saved somewhere else: copied from there instead of fetched again.
+        if (e->cache || e->saved[0]) {
+            int r = file_save_local(c, e, e->cache);
+            if (r == 0) { ui_print(c, "* saved file %d to %s, from the copy already here", num, e->saved); return 0; }
+            if (r < 0) return -1;
+        }
+    }
+    peer_t *p = file_owner(c, e);
+    if (!p) { ui_print(c, "* whoever offered file %d isn't here now - try again once they're back", num); return -1; }
+    char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
+    if (!peer_trusted(c, p)) {
+        ui_print(c, "* compare verify codes with %s first (:verify %s): until then someone in the middle could be sending it", name, name);
+        return -1;
+    }
+    uint64_t cap = c->file_cap ? c->file_cap : FILE_CAP_DEFAULT;
+    char lim[32]; file_format_size(cap, lim, sizeof lim);
+    if (e->size > cap && !anyway) {
+        ui_print(c, "* file %d is %s, over your %s limit - :%s %d anyway fetches it regardless", num, sz, lim,
+                 view ? "show" : "download", num);
+        return -1;
+    }
+    e->view = view;
+    e->also_show = e->also_save = 0;
+    // One file at a time from each sender. The others wait their turn in files_tick.
+    if (file_downloading_from(c, p)) {
+        e->dl = DL_QUEUED;
+        ui_print(c, "* file %d is queued: it starts once file %d from %s is done", num, chat_file_queued_after(c, e), name);
+        return 0;
+    }
+    return file_start(c, e, p);
+}
+
+// :download [N] [anyway] [FOLDER]. Without N, the newest file offered that isn't saved or on its way.
 static cmd_result_t cmd_download(void *ctx, const char *arg) {
     chat_t *c = ctx;
-    char *end;
-    long num = strtol(arg, &end, 10);
-    while (*end == ' ') end++;
-    if (num <= 0 || (*end && strcmp(end, "anyway") != 0)) { ui_print(c, "* usage: :download N [anyway] - N from :files"); return CMD_OK; }
-    chat_file_fetch(c, (int)num, 0, strcmp(end, "anyway") == 0);
+    while (*arg == ' ') arg++;
+    long num = 0;
+    if (*arg >= '0' && *arg <= '9') {
+        char *end;
+        num = strtol(arg, &end, 10);
+        if ((*end && *end != ' ') || num > 1000000) num = -1;
+        arg = end;
+    }
+    while (*arg == ' ') arg++;
+    int anyway = strncmp(arg, "anyway", 6) == 0 && (arg[6] == '\0' || arg[6] == ' ');
+    if (anyway) arg += 6;
+    char dir[600];
+    typed_path(arg, dir, sizeof dir);
+    if (num < 0) {
+        ui_print(c, "* usage: :download [N] [anyway] [FOLDER] - N from :files (the newest if left out), FOLDER instead of Downloads");
+        return CMD_OK;
+    }
+    if (num == 0) {
+        const file_entry_t *pick = NULL;
+        for (int i = 0; i < FILE_OFFERS_MAX; i++) {
+            const file_entry_t *e = &c->files[i];
+            if (!e->used || e->mine || e->saved[0] || e->dl == DL_ACTIVE || e->dl == DL_QUEUED) continue;
+            if (!pick || e->num > pick->num) pick = e;
+        }
+        if (!pick) { ui_print(c, "* no file to download - :files lists what's been offered"); return CMD_OK; }
+        num = pick->num;
+    }
+    chat_file_fetch(c, (int)num, 0, anyway, dir);
     return CMD_OK;
 }
 
@@ -2511,6 +2740,9 @@ static cmd_result_t cmd_cancel(void *ctx, const char *arg) {
     } else if (e->dl == DL_ACTIVE) {
         file_stop_download(e, DL_NONE);
         ui_print(c, "* stopped fetching file %d", e->num);
+    } else if (e->dl == DL_QUEUED) {
+        e->dl = DL_NONE;
+        ui_print(c, "* file %d is no longer queued", e->num);
     } else {
         ui_print(c, "* file %d isn't being fetched", e->num);
     }
@@ -2529,7 +2761,7 @@ static cmd_result_t cmd_files(void *ctx, const char *arg) {
         char who[CHAT_NAME_LEN] = "you";
         peer_t *p = e->mine ? NULL : find_peer_by_id(c, e->owner);
         if (!e->mine) { if (p) chat_peer_name(c, p, who); else copy_str(who, "someone who left", sizeof who); }
-        char state[128] = "";
+        char state[1024] = "";
         if (e->mine) copy_str(state, e->fp ? "offered" : "no longer offered", sizeof state);
         else if (e->dl == DL_ACTIVE) {
             uint64_t got = chat_file_got(e);
@@ -2538,10 +2770,18 @@ static cmd_result_t cmd_files(void *ctx, const char *arg) {
             file_format_size(got, gs, sizeof gs);
             if (s >= 0.0) { file_format_duration(s, eta, sizeof eta); strcat(eta, " left"); }
             else copy_str(eta, s < -1.0 ? "waiting until verify codes are compared" : "waiting for its sender", sizeof eta);
-            snprintf(state, sizeof state, "fetching, %d%% (%s), %s", e->size ? (int)(got * 100 / e->size) : 100, gs, eta);
+            snprintf(state, sizeof state, "fetching, %d%% (%s), %s%s", e->size ? (int)(got * 100 / e->size) : 100, gs, eta,
+                     e->also_save ? ", saved too once it's here" : e->also_show ? ", shown too once it's here" : "");
         }
-        else if (e->dl == DL_DONE) copy_str(state, e->view ? "shown" : "saved", sizeof state);
-        else if (e->dl == DL_FAILED) copy_str(state, "failed", sizeof state);
+        else if (e->dl == DL_QUEUED) {
+            int after = chat_file_queued_after(c, e);
+            if (after) snprintf(state, sizeof state, "queued, starts after file %d", after);
+            else copy_str(state, "queued, waiting for its sender", sizeof state);
+        }
+        else if (e->saved[0]) snprintf(state, sizeof state, "saved to %s", e->saved);
+        else if (e->cache) snprintf(state, sizeof state, "shown - :download %d saves it without fetching it again", e->num);
+        else if (e->dl == DL_DONE) copy_str(state, "shown", sizeof state);
+        else if (e->dl == DL_FAILED) snprintf(state, sizeof state, "failed - :%s %d tries again", e->view ? "show" : "download", e->num);
         else copy_str(state, e->image ? ":show or :download" : ":download", sizeof state);
         ui_print(c, "* file %d from %s: %s - %s", e->num, who, desc, state);
     }
@@ -2690,6 +2930,19 @@ static void file_on_record(chat_t *c, peer_t *p, char **f, int n, double now) {
 }
 
 static void files_tick(chat_t *c, double now) {
+    // Queued files start once nothing else is coming from their sender, the oldest first.
+    for (;;) {
+        file_entry_t *next = NULL;
+        for (int i = 0; i < FILE_OFFERS_MAX; i++) {
+            file_entry_t *e = &c->files[i];
+            if (!e->used || e->dl != DL_QUEUED) continue;
+            peer_t *p = file_owner(c, e);
+            if (!p || !peer_trusted(c, p) || file_downloading_from(c, p)) continue;
+            if (!next || e->num < next->num) next = e;
+        }
+        if (!next) break;
+        file_start(c, next, file_owner(c, next));
+    }
     for (int i = 0; i < FILE_OFFERS_MAX; i++) {
         file_entry_t *e = &c->files[i];
         if (!e->used || e->dl != DL_ACTIVE) continue;
@@ -2739,8 +2992,8 @@ const command_t CHAT_COMMANDS[] = {
     { "set",        NULL,     "[NAME [VALUE]]",  "show or change nick, colour, notify, preview, net", cmd_set },
     { "send",       NULL,     "[PATH]",          "offer a file; nobody gets it unless they fetch it", cmd_send },
     { "files",      NULL,     NULL,              "the files offered here, and how they're coming",   cmd_files },
-    { "download",   "dl",     "N [anyway]",      "save file N in Downloads (anyway: past your limit)", cmd_download },
-    { "cancel",     NULL,     "N",               "stop fetching file N, or stop offering yours",     cmd_cancel },
+    { "download",   "dl",     "[N] [anyway] [FOLDER]", "save file N (the newest if left out) in Downloads or FOLDER", cmd_download },
+    { "cancel",     NULL,     "N",               "stop fetching or queueing file N, or stop offering yours", cmd_cancel },
     { "quit",       "q exit", NULL,              "leave the session",                               cmd_quit },
     { NULL, NULL, NULL, NULL, NULL }
 };
