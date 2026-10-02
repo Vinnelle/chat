@@ -105,6 +105,7 @@ typedef enum {
     TUI_KEY_TOGGLE_CHAT,
     TUI_KEY_SETTINGS,
     TUI_KEY_HELP,
+    TUI_KEY_CTRL_C,
     TUI_KEY_ESCAPE,
     // Not keys: the terminal's reply to a background colour query (r, g, b in ch[0..2]), and its
     // report that it switched between a light and a dark theme.

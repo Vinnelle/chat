@@ -583,7 +583,7 @@ saved your settings, it starts on your sessions, and `Ctrl+S` opens the page.
 | `Ctrl+B` / `Ctrl+O` / `Ctrl+T` | toggle sidebar / console / chat pane (`s` / `c` / `C` in NORMAL) |
 | `Ctrl+S` | settings |
 | `F1` | list all commands and keybinds (`?` in NORMAL, and `:help`, too) |
-| `Ctrl+C` | quit (every session leaves cleanly first) |
+| `Ctrl+C` | quit, after a `y`/`n` box saying what's open and what isn't saved (every session leaves cleanly first) |
 
 The bottom row is the same on every screen: a chip for where you are (`INSERT`, `NORMAL`,
 `COMMAND`, `SETTINGS`, ...), whether you're signing, your nick, the reply to what you just did
