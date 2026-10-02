@@ -309,7 +309,9 @@ typedef struct {
 // a button after the rows if button is set (selected == n_rows selects it), and the selected row's
 // help and usage at the bottom. nav lists the sections on the left, with nav_sel highlighted.
 // Without it they come from the rows. title goes in the page's border, showing where the page is,
-// with clock at the right end. keys draws the labels as keys.
+// with clock at the right end. keys draws the labels as keys. nav_title, if set, goes in the
+// border of the list on the left in place of chat's name, and nav_w, if not 0, is its width. The
+// list scrolls to keep nav_sel in view.
 typedef struct {
     const char *title;
     const char *clock;
@@ -317,6 +319,8 @@ typedef struct {
     const char *const *nav;
     int n_nav;
     int nav_sel;
+    const char *nav_title;
+    int nav_w;
     const tui_row_t *rows;
     int n_rows;
     int selected;

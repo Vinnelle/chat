@@ -1860,12 +1860,25 @@ int tui_render_bar(int rows, int cols, const tui_view_t *view, const tui_bar_t *
 
 // ---- list pages ----
 
-static void draw_nav(wbuf_t *w, rect_t r, const char *const *nav, int n_nav, int nav_sel) {
+static void draw_nav(wbuf_t *w, rect_t r, const char *const *nav, int n_nav, int nav_sel, const char *nav_title) {
     span_t title, right;
-    brand(&title, &right, r.w);
+    if (nav_title) {
+        span_init(&right, r.w);
+        span_init(&title, title_room(r.w, 0));
+        ptext(&title.p, S_FAINT, nav_title);
+    } else {
+        brand(&title, &right, r.w);
+    }
     box(w, r, border_sgr(-1), &title, &right, NULL);
+    // Scrolled so the selected one is in the middle, when they don't all fit.
+    int shown = r.h - 3, top = 0;
+    if (n_nav > shown && nav_sel >= 0) {
+        top = nav_sel - shown / 2;
+        if (top > n_nav - shown) top = n_nav - shown;
+        if (top < 0) top = 0;
+    }
     for (int i = 0; i < r.h - 2; i++) {
-        int k = i - 1;   // a blank row above the first
+        int k = i == 0 ? -1 : i - 1 + top;   // a blank row above the first
         int on = k >= 0 && k < n_nav && k == nav_sel;
         row_select(on);
         pen_t p;
@@ -2029,10 +2042,10 @@ void tui_render_page(int rows, int cols, const tui_page_t *page, const tui_bar_t
     wbuf_t w = { g_frame, FRAME_CAP, 0 };
 
     // The sections on the left: as given, or taken from the rows, with the selected row's highlighted.
-    const char *nav[32];
+    static const char *nav[1024];
     int n_nav = 0, nav_sel = -1;
     if (page->nav) {
-        for (int i = 0; i < page->n_nav && i < 32; i++) nav[n_nav++] = page->nav[i];
+        for (int i = 0; i < page->n_nav && i < 1024; i++) nav[n_nav++] = page->nav[i];
         nav_sel = page->nav_sel;
     } else {
         for (int i = 0; i < page->n_rows && n_nav < 32; i++) {
@@ -2044,10 +2057,11 @@ void tui_render_page(int rows, int cols, const tui_page_t *page, const tui_bar_t
     int navw = cols / 5;
     if (navw < 20) navw = 20;
     if (navw > 26) navw = 26;
+    if (page->nav_w) navw = page->nav_w;
     if (!boxed || n_nav == 0 || cols - navw < 56) navw = 0;
 
     begin_frame(&w);
-    if (navw) draw_nav(&w, (rect_t){ 1, 1, rows - 1, navw }, nav, n_nav, nav_sel);
+    if (navw) draw_nav(&w, (rect_t){ 1, 1, rows - 1, navw }, nav, n_nav, nav_sel, page->nav_title);
 
     // Shares the nav's right side, like the chat shares the sidebar's.
     int x = navw > 0 ? navw : 1;

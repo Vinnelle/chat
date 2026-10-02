@@ -2467,13 +2467,67 @@ static tui_row_t g_browser_rows[TREE_MAX_LEVELS + MAX_DIR_ITEMS];
 static char g_browser_labels[MAX_DIR_ITEMS][200];
 static int g_browser_levels;   // rows above the entries
 
-// The columns a page's rows get at this width, the same as tui_render_page works them out.
-static int page_row_cols(int cols, int with_nav) {
-    int navw = cols / 5;
-    if (navw < 20) navw = 20;
-    if (navw > 26) navw = 26;
-    if (!with_nav || cols - navw < 56) navw = 0;
+// The columns a page's rows get at this width, the same as tui_render_page works them out. navw is
+// the list on the left's width if it sets one, 0 for the default, or -1 if there's no list.
+static int page_row_cols(int cols, int navw) {
+    if (navw == 0) {
+        navw = cols / 5;
+        if (navw < 20) navw = 20;
+        if (navw > 26) navw = 26;
+    }
+    if (navw < 0 || cols - navw < 56) navw = 0;
     return cols - (navw > 0 ? navw : 1) - 1 - 4;
+}
+
+// On a wide enough screen, the list on the left is the parent folder's entries, with the folder
+// shown selected. Its width, or 0 if the screen is too narrow for it.
+static int parent_column_width(int cols) {
+    int w = cols / 4;
+    if (w < 24) w = 24;
+    if (w > 40) w = 40;
+    return cols - w >= 72 ? w : 0;
+}
+
+// The parent folder's entries for that list, read again only when the folder shown changes.
+// Returns 0 at the root, which has no parent.
+static int parent_nav(const browser_t *b, int room, const char **nav, int *n, int *sel, char *title, size_t cap) {
+    static browser_t parent;
+    static char of[900], name[200];
+    static int ok;
+    if (strcmp(of, b->path) != 0) {
+        copy_str(of, b->path, sizeof of);
+        char up[900];
+        copy_str(up, b->path, sizeof up);
+        size_t len = strlen(up);
+        while (len > 1 && up[len - 1] == '/' && !path_is_root(up)) up[--len] = '\0';
+        const char *slash = strrchr(up, '/');
+        copy_str(name, slash ? slash + 1 : "", sizeof name);
+        ok = !path_is_root(up) && name[0];
+        path_parent(up);
+        ok = ok && browser_load(&parent, up) == 0;
+    }
+    if (!ok) return 0;
+    *n = 0;
+    *sel = -1;
+    for (int i = 0; i < parent.n_items && *n < MAX_DIR_ITEMS; i++) {
+        const char *e = parent.items[i].name;
+        size_t nl = strlen(name);
+        if (strncmp(e, name, nl) == 0 && e[nl] == '/' && e[nl + 1] == '\0') *sel = *n;
+        nav[(*n)++] = e;
+    }
+    // Its path, cut from the left to fit the list's border.
+    char shown[900];
+    tilde_path(parent.path, shown, sizeof shown);
+    size_t len = strlen(shown);
+    const char *tail = shown;
+    if (room > 4 && len > (size_t)room) {
+        tail = shown + len - (room - 1);
+        while ((*tail & 0xc0) == 0x80) tail++;
+        snprintf(title, cap, "\xe2\x80\xa6%s", tail);
+    } else {
+        copy_str(title, shown, cap);
+    }
+    return 1;
 }
 
 static void browser_rows(const browser_t *b, int row_cols, int list_rows, char *intro, size_t cap) {
@@ -2559,8 +2613,11 @@ static int browser_folder_help(const browser_t *b, char *out, size_t cap) {
 static void render_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar) {
     const browser_t *b = &g_app.browser;
     int age = g_app.load_kind == IDENT_AGE;
-    char intro[1000], help[700], usage[1100] = "";
-    browser_rows(b, page_row_cols(cols_n, 1), rows_n - 12, intro, sizeof intro);
+    char intro[1000], help[700], usage[1100] = "", nav_title[900];
+    static const char *nav[MAX_DIR_ITEMS];
+    int n_nav = 0, nav_sel = -1, pw = parent_column_width(cols_n);
+    int columns = pw && parent_nav(b, pw - 6, nav, &n_nav, &nav_sel, nav_title, sizeof nav_title);
+    browser_rows(b, page_row_cols(cols_n, columns ? pw : 0), rows_n - 12, intro, sizeof intro);
     if (!browser_folder_help(b, help, sizeof help)) {
         char full[1200], shown[1200];
         browser_entry_path(b, &b->items[b->selected], full, sizeof full);
@@ -2569,13 +2626,17 @@ static void render_browser(int rows_n, int cols_n, const char *clock, const tui_
                  ":install saves this file's path, not the key.", g_browser_labels[b->selected], age ? "AGE" : "PGP");
         snprintf(usage, sizeof usage, ":set sign %s:%s", age ? "age" : "pgp", shown);
     }
-    const char *nav[8];
+    if (!columns) {
+        n_nav = settings_sections(nav, 8);
+        nav_sel = settings_section_index(SET_SIGN);
+    }
     tui_page_t page = {
         .title = age ? "Settings" CRUMB "Signing identity" CRUMB "AGE key file"
                      : "Settings" CRUMB "Signing identity" CRUMB "PGP key file",
         .clock = clock,
         .intro = intro,
-        .nav = nav, .n_nav = settings_sections(nav, 8), .nav_sel = settings_section_index(SET_SIGN),
+        .nav = nav, .n_nav = n_nav, .nav_sel = nav_sel,
+        .nav_title = columns ? nav_title : NULL, .nav_w = columns ? pw : 0,
         .rows = g_browser_rows, .n_rows = g_browser_levels + b->n_items, .selected = g_browser_levels + b->selected,
         .help = help, .usage = usage[0] ? usage : NULL,
     };
@@ -2584,8 +2645,11 @@ static void render_browser(int rows_n, int cols_n, const char *clock, const tui_
 
 static void render_send_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar) {
     const browser_t *b = &g_app.browser;
-    char intro[1000], help[700];
-    browser_rows(b, page_row_cols(cols_n, 0), rows_n - 12, intro, sizeof intro);
+    char intro[1000], help[700], nav_title[900];
+    static const char *nav[MAX_DIR_ITEMS];
+    int n_nav = 0, nav_sel = -1, pw = parent_column_width(cols_n);
+    int columns = pw && parent_nav(b, pw - 6, nav, &n_nav, &nav_sel, nav_title, sizeof nav_title);
+    browser_rows(b, page_row_cols(cols_n, columns ? pw : -1), rows_n - 12, intro, sizeof intro);
     if (!browser_folder_help(b, help, sizeof help))
         snprintf(help, sizeof help, "Enter offers %s to everyone in this session. Nobody gets it unless they fetch it.",
                  g_browser_labels[b->selected]);
@@ -2593,6 +2657,8 @@ static void render_send_browser(int rows_n, int cols_n, const char *clock, const
         .title = "Send a file",
         .clock = clock,
         .intro = intro,
+        .nav = columns ? nav : NULL, .n_nav = n_nav, .nav_sel = nav_sel,
+        .nav_title = columns ? nav_title : NULL, .nav_w = columns ? pw : 0,
         .rows = g_browser_rows, .n_rows = g_browser_levels + b->n_items, .selected = g_browser_levels + b->selected,
         .help = help,
     };
