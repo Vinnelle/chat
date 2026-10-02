@@ -908,12 +908,10 @@ static void finish_onboarding(void) {
     g_app.dirty = 1;
 }
 
-// Folders first, then files. In each, ".." first and hidden ones (starting with '.') last.
+// Folders first, then files. In each, hidden ones (starting with '.') last.
 static int entry_cmp(const void *a, const void *b) {
     const dir_entry_t *ea = a, *eb = b;
     if (ea->is_dir != eb->is_dir) return eb->is_dir - ea->is_dir;
-    int ua = strcmp(ea->name, "../") == 0, ub = strcmp(eb->name, "../") == 0;
-    if (ua != ub) return ub - ua;
     int ha = ea->name[0] == '.', hb = eb->name[0] == '.';
     if (ha != hb) return ha - hb;
     return strcasecmp(ea->name, eb->name);
@@ -945,7 +943,8 @@ static void browser_add(void *ctx, const char *name, int is_dir) {
     if (b->n_items >= MAX_DIR_ITEMS) return;
     // Names are written straight to the terminal, and one containing escape sequences could control it.
     if (has_control_chars(name)) return;
-    if (strcmp(name, "..") == 0 && path_is_root(b->path)) return;
+    // The tree above the entries shows the parent folders, and h goes up.
+    if (strcmp(name, "..") == 0) return;
     dir_entry_t *item = &b->items[b->n_items++];
     snprintf(item->name, sizeof item->name, "%s%s", name, is_dir ? "/" : "");
     item->is_dir = is_dir;
@@ -957,8 +956,6 @@ static int browser_load(browser_t *b, const char *path) {
     copy_str(tmp.path, path, sizeof tmp.path);
     if (platform_list_dir(tmp.path, browser_add, &tmp) != 0) return -1;
     qsort(tmp.items, (size_t)tmp.n_items, sizeof(dir_entry_t), entry_cmp);
-    // The first entry in it, rather than "..".
-    if (tmp.n_items > 1 && strcmp(tmp.items[0].name, "../") == 0) tmp.selected = 1;
     *b = tmp;
     return 0;
 }
@@ -2255,9 +2252,7 @@ static void browser_key(const tui_key_t *key) {
         case LIST_RIGHT: {
             if (b->n_items == 0) break;
             const dir_entry_t *sel = &b->items[b->selected];
-            if (strcmp(sel->name, "../") == 0) {
-                browser_up();
-            } else if (sel->is_dir) {
+            if (sel->is_dir) {
                 char next[1200]; browser_entry_path(b, sel, next, sizeof next);
                 browser_load(b, next);
             } else if (try_load_key_from_browser() == 0) {
@@ -2294,9 +2289,7 @@ static void send_browser_key(const tui_key_t *key) {
             if (b->n_items == 0) break;
             const dir_entry_t *sel = &b->items[b->selected];
             char full[1200]; browser_entry_path(b, sel, full, sizeof full);
-            if (strcmp(sel->name, "../") == 0) {
-                browser_up();
-            } else if (sel->is_dir) {
+            if (sel->is_dir) {
                 browser_load(b, full);
             } else if (k == LIST_CHOOSE) {
                 g_app.mode = MODE_CHAT;
@@ -2397,7 +2390,7 @@ static void render_settings(int rows_n, int cols_n, const char *clock, const tui
         if (i == g_app.settings_sel) sel_row = n_rows;
         setting_value(d->id, values[n_rows], sizeof values[n_rows]);
         rows[n_rows] = (tui_row_t){ section, d->label, values[n_rows], setting_kind(d),
-                                    d->id == SET_COLOUR ? g_app.color : NULL };
+                                    d->id == SET_COLOUR ? g_app.color : NULL, NULL };
         section = NULL;
         n_rows++;
     }
@@ -2444,7 +2437,7 @@ static void render_sign_picker(int rows_n, int cols_n, const char *clock, const 
     tui_row_t rows[N_PICKS];
     int in_use = sign_row_in_use();
     for (int i = 0; i < N_PICKS; i++) {
-        rows[i] = (tui_row_t){ SIGN_PICKS[i].section, SIGN_PICKS[i].label, NULL, TUI_V_TEXT, NULL };
+        rows[i] = (tui_row_t){ SIGN_PICKS[i].section, SIGN_PICKS[i].label, NULL, TUI_V_TEXT, NULL, NULL };
         if (i == in_use) { rows[i].value = "in use"; rows[i].kind = TUI_V_ON; }
     }
     char help[600], usage[32] = "";
@@ -2463,45 +2456,103 @@ static void render_sign_picker(int rows_n, int cols_n, const char *clock, const 
     tui_render_page(rows_n, cols_n, &page, bar, g_app.color_enabled);
 }
 
-// The browser's rows: "..", the folders (drawn like rows that open a page), then the files, each
-// group under its heading. The intro says which folder it is and what's in it.
-static tui_row_t g_browser_rows[MAX_DIR_ITEMS];
+// The browser as a tree: the folder shown and the folders above it, one level per row, then its
+// folders (drawn like rows that open a page) and files one level further in. As many levels get
+// their own row as leave room for the names at this width. The levels above those are joined
+// into the top row's path. The intro says what's in the folder.
+#define TREE_MAX_LEVELS 32
+#define TREE_INDENT 3        // columns per level
+#define TREE_NAME_ROOM 14    // columns kept for the names
+static tui_row_t g_browser_rows[TREE_MAX_LEVELS + MAX_DIR_ITEMS];
 static char g_browser_labels[MAX_DIR_ITEMS][200];
+static int g_browser_levels;   // rows above the entries
 
-static void browser_rows(const browser_t *b, char *intro, size_t cap) {
+// The columns a page's rows get at this width, the same as tui_render_page works them out.
+static int page_row_cols(int cols, int with_nav) {
+    int navw = cols / 5;
+    if (navw < 20) navw = 20;
+    if (navw > 26) navw = 26;
+    if (!with_nav || cols - navw < 56) navw = 0;
+    return cols - (navw > 0 ? navw : 1) - 1 - 4;
+}
+
+static void browser_rows(const browser_t *b, int row_cols, int list_rows, char *intro, size_t cap) {
+    static char shown[900], head[900], level_pre[TREE_MAX_LEVELS][TREE_MAX_LEVELS * TREE_INDENT + 8];
+    static char mid_pre[TREE_MAX_LEVELS * TREE_INDENT + 8], last_pre[TREE_MAX_LEVELS * TREE_INDENT + 8];
+    tilde_path(b->path, shown, sizeof shown);
+    size_t len = strlen(shown);
+    while (len > 1 && shown[len - 1] == '/' && !path_is_root(shown)) shown[--len] = '\0';
+
+    // The folder's path split at each '/', where the first part is "" if it starts at the root.
+    const char *parts[256];
+    int n = 0;
+    static char split[900];
+    copy_str(split, shown, sizeof split);
+    for (char *at = split; n < 256; ) {
+        parts[n++] = at;
+        char *slash = strchr(at, '/');
+        if (!slash) break;
+        *slash = '\0';
+        at = slash + 1;
+    }
+    if (n > 1 && !parts[n - 1][0]) n--;   // "/" or "C:/": the root alone
+
+    // The names and their tree lines get half the row when there's a value column (tui_render_page).
+    int levels = (row_cols / 2 - TREE_NAME_ROOM) / TREE_INDENT;
+    if (levels < 1) levels = 1;
+    if (levels > TREE_MAX_LEVELS) levels = TREE_MAX_LEVELS;
+    if (levels > n) levels = n;
+    // And room under them for a few entries, so the top of the tree isn't scrolled away.
+    int below = b->n_items < 3 ? b->n_items : 3;
+    if (levels > list_rows - below) levels = list_rows - below > 1 ? list_rows - below : 1;
+    // The top row: every part not given a row of its own.
+    int joined = n - (levels - 1);
+    size_t p = 0;
+    head[0] = '\0';
+    for (int i = 0; i < joined && p < sizeof head - 1; i++)
+        p += (size_t)snprintf(head + p, sizeof head - p, "%s%s", i ? "/" : "", parts[i]);
+    if (!head[0] || (joined == 1 && n > 1 && !parts[0][0])) copy_str(head, "/", sizeof head);
+    // Too long for its room: its end, which says where it is, after a "\xe2\x80\xa6".
+    int room = row_cols / 2 - 3;
+    size_t hl = strlen(head);
+    if (room > 8 && hl > (size_t)room) {
+        const char *tail = head + hl - (room - 1);
+        while ((*tail & 0xc0) == 0x80) tail++;
+        char cut[900];
+        snprintf(cut, sizeof cut, "\xe2\x80\xa6%s", tail);
+        copy_str(head, cut, sizeof head);
+    }
+    g_browser_rows[0] = (tui_row_t){ NULL, head, NULL, TUI_V_TEXT, NULL, NULL };
+    for (int i = 1; i < levels; i++) {
+        snprintf(level_pre[i], sizeof level_pre[i], "%*s\xe2\x94\x94\xe2\x94\x80 ", (i - 1) * TREE_INDENT, "");
+        g_browser_rows[i] = (tui_row_t){ NULL, parts[joined + i - 1], NULL, TUI_V_TEXT, NULL, level_pre[i] };
+    }
+    g_browser_levels = levels;
+
+    snprintf(mid_pre, sizeof mid_pre, "%*s\xe2\x94\x9c\xe2\x94\x80 ", (levels - 1) * TREE_INDENT, "");
+    snprintf(last_pre, sizeof last_pre, "%*s\xe2\x94\x94\xe2\x94\x80 ", (levels - 1) * TREE_INDENT, "");
     int folders = 0, files = 0;
     for (int i = 0; i < b->n_items; i++) {
         const dir_entry_t *e = &b->items[i];
-        int up = strcmp(e->name, "../") == 0;
-        copy_str(g_browser_labels[i], up ? ".." : e->name, sizeof g_browser_labels[i]);
-        size_t n = strlen(g_browser_labels[i]);
-        if (e->is_dir && n > 1 && g_browser_labels[i][n - 1] == '/') g_browser_labels[i][n - 1] = '\0';
-        const char *section = NULL;
-        if (e->is_dir && !up && folders++ == 0) section = "Folders";
-        if (!e->is_dir && files++ == 0) section = "Files";
-        g_browser_rows[i] = (tui_row_t){ section, g_browser_labels[i], e->is_dir && !up ? "" : NULL, TUI_V_LINK, NULL };
+        copy_str(g_browser_labels[i], e->name, sizeof g_browser_labels[i]);
+        size_t ln = strlen(g_browser_labels[i]);
+        if (e->is_dir && ln > 1 && g_browser_labels[i][ln - 1] == '/') g_browser_labels[i][ln - 1] = '\0';
+        if (e->is_dir) folders++; else files++;
+        g_browser_rows[levels + i] = (tui_row_t){ NULL, g_browser_labels[i], e->is_dir ? "" : NULL, TUI_V_LINK, NULL,
+                                                  i == b->n_items - 1 ? last_pre : mid_pre };
     }
-    char where[900], f[24] = "", g[24] = "";
-    tilde_path(b->path, where, sizeof where);
-    if (folders) snprintf(f, sizeof f, " \xc2\xb7 %d folder%s", folders, folders == 1 ? "" : "s");
-    if (files) snprintf(g, sizeof g, " \xc2\xb7 %d file%s", files, files == 1 ? "" : "s");
-    snprintf(intro, cap, "%s%s%s", where, folders || files ? f : " \xc2\xb7 empty", g);
+    char f[24] = "", g[24] = "";
+    if (folders) snprintf(f, sizeof f, "%d folder%s", folders, folders == 1 ? "" : "s");
+    if (files) snprintf(g, sizeof g, "%s%d file%s", folders ? " \xc2\xb7 " : "", files, files == 1 ? "" : "s");
+    snprintf(intro, cap, "%s%s", folders || files ? f : "empty", g);
 }
 
-// The help for the selected row when it's a folder or "..". Returns 0 for a file.
+// The help for the selected entry when it's a folder, or when there's none. Returns 0 for a file.
 static int browser_folder_help(const browser_t *b, char *out, size_t cap) {
     if (b->n_items == 0) { snprintf(out, cap, "Nothing here. h goes up a folder."); return 1; }
     const dir_entry_t *e = &b->items[b->selected];
     if (!e->is_dir) return 0;
-    if (strcmp(e->name, "../") == 0) {
-        char up[900], shown[900];
-        copy_str(up, b->path, sizeof up);
-        path_parent(up);
-        tilde_path(up, shown, sizeof shown);
-        snprintf(out, cap, "Enter goes up to %s.", shown);
-    } else {
-        snprintf(out, cap, "Enter opens %s.", g_browser_labels[b->selected]);
-    }
+    snprintf(out, cap, "Enter opens %s. h goes up a folder.", g_browser_labels[b->selected]);
     return 1;
 }
 
@@ -2509,7 +2560,7 @@ static void render_browser(int rows_n, int cols_n, const char *clock, const tui_
     const browser_t *b = &g_app.browser;
     int age = g_app.load_kind == IDENT_AGE;
     char intro[1000], help[700], usage[1100] = "";
-    browser_rows(b, intro, sizeof intro);
+    browser_rows(b, page_row_cols(cols_n, 1), rows_n - 12, intro, sizeof intro);
     if (!browser_folder_help(b, help, sizeof help)) {
         char full[1200], shown[1200];
         browser_entry_path(b, &b->items[b->selected], full, sizeof full);
@@ -2525,7 +2576,7 @@ static void render_browser(int rows_n, int cols_n, const char *clock, const tui_
         .clock = clock,
         .intro = intro,
         .nav = nav, .n_nav = settings_sections(nav, 8), .nav_sel = settings_section_index(SET_SIGN),
-        .rows = g_browser_rows, .n_rows = b->n_items, .selected = b->selected,
+        .rows = g_browser_rows, .n_rows = g_browser_levels + b->n_items, .selected = g_browser_levels + b->selected,
         .help = help, .usage = usage[0] ? usage : NULL,
     };
     tui_render_page(rows_n, cols_n, &page, bar, g_app.color_enabled);
@@ -2534,7 +2585,7 @@ static void render_browser(int rows_n, int cols_n, const char *clock, const tui_
 static void render_send_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar) {
     const browser_t *b = &g_app.browser;
     char intro[1000], help[700];
-    browser_rows(b, intro, sizeof intro);
+    browser_rows(b, page_row_cols(cols_n, 0), rows_n - 12, intro, sizeof intro);
     if (!browser_folder_help(b, help, sizeof help))
         snprintf(help, sizeof help, "Enter offers %s to everyone in this session. Nobody gets it unless they fetch it.",
                  g_browser_labels[b->selected]);
@@ -2542,7 +2593,7 @@ static void render_send_browser(int rows_n, int cols_n, const char *clock, const
         .title = "Send a file",
         .clock = clock,
         .intro = intro,
-        .rows = g_browser_rows, .n_rows = b->n_items, .selected = b->selected,
+        .rows = g_browser_rows, .n_rows = g_browser_levels + b->n_items, .selected = g_browser_levels + b->selected,
         .help = help,
     };
     tui_render_page(rows_n, cols_n, &page, bar, g_app.color_enabled);
@@ -3323,14 +3374,14 @@ static int help_rows(tui_row_t *rows, const command_t **cmds) {
     static char labels[MAX_HELP_COMMANDS][CMD_WORD_MAX + 24];
     int n = 0, k = 0;
     for (int i = 0; i < N_HELP_KEYS; i++) {
-        rows[n] = (tui_row_t){ HELP_KEYS[i].section, HELP_KEYS[i].keys, HELP_KEYS[i].what, TUI_V_TEXT, NULL };
+        rows[n] = (tui_row_t){ HELP_KEYS[i].section, HELP_KEYS[i].keys, HELP_KEYS[i].what, TUI_V_TEXT, NULL, NULL };
         cmds[n++] = NULL;
     }
     for (const command_t *const *t = ALL_COMMANDS; *t; t++) {
         for (const command_t *cmd = *t; cmd->name && k < MAX_HELP_COMMANDS; cmd++) {
             if (*t != APP_COMMANDS && cmd_find(APP_COMMANDS, cmd->name)) continue;
             snprintf(labels[k], sizeof labels[k], ":%s%s%s", cmd->name, cmd->args ? " " : "", cmd->args ? cmd->args : "");
-            rows[n] = (tui_row_t){ k == 0 ? "Commands" : NULL, labels[k], cmd->help, TUI_V_TEXT, NULL };
+            rows[n] = (tui_row_t){ k == 0 ? "Commands" : NULL, labels[k], cmd->help, TUI_V_TEXT, NULL, NULL };
             cmds[n++] = cmd;
             k++;
         }
