@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.14
 
 ### Added
 - More than one save. `:install NAME` saves your settings and signing key as a save called
