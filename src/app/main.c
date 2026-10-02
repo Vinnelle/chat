@@ -236,6 +236,9 @@ typedef enum {
     MODE_INSTALL_PASS,
     MODE_INSTALL_PASS2,
     MODE_INSTALL_UNLOCK,
+    MODE_INSTALL_EXISTING,
+    MODE_INSTALL_OVERWRITE,
+    MODE_INSTALL_NAME,
     MODE_UNINSTALL,
     MODE_SAVES,
     MODE_UNLOCK,
@@ -309,6 +312,9 @@ typedef struct {
     install_save_t saves[INSTALL_SAVES_MAX];
     int n_saves, save_sel;
     char save_target[INSTALL_NAME_MAX + 1];
+    // :install for a save that's sealed: after its passphrase, save what's in use over it (1), or
+    // use what's saved there (0).
+    int install_overwrite;
     app_mode_t mode;
     char pending_session_id[MAX_SESSION_NAME + 1];
     int show_sidebar, show_console, show_chat;
@@ -3269,19 +3275,27 @@ static void reapply_options(void);
 
 // The settings, then the command line options again so they still override them, then the key
 // unless --identity chose another. 0, or the reason it stayed sealed.
+// The save just opened is the one in use from now on. Rows its settings don't have keep their value.
+static void use_opened_save(void) {
+    g_app.installed = 1;
+    g_app.locked = 0;
+    memcpy(g_saved_rows, g_setting_defaults, sizeof g_saved_rows);
+    load_saved_settings();
+    // A damaged file isn't overwritten by the keys verified this run.
+    trust_set_saved(load_saved_verified() == 0);
+    reapply_options();
+    note_settings_seen();
+    g_app.saved_key_known = 0;
+    g_app.saved_key_path[0] = '\0';
+    int rc = open_saved_key(!g_opts.identity[0]);
+    if (rc != 0 && rc != INSTALL_NO_FILE)
+        saved_note("* your saved signing key is damaged, or isn't sealed with this passphrase - it's left out");
+}
+
 static int open_saved(const char *name, const char *passphrase) {
     int rc = install_unlock(name, passphrase);
     if (rc != 0) return rc;
-    g_app.installed = 1;
-    g_app.locked = 0;
-    load_saved_settings();
-    // A damaged file isn't overwritten by the keys verified this run.
-    if (load_saved_verified() == 0) trust_set_saved(1);
-    reapply_options();
-    note_settings_seen();
-    rc = open_saved_key(!g_opts.identity[0]);
-    if (rc != 0 && rc != INSTALL_NO_FILE)
-        saved_note("* your saved signing key is damaged, or isn't sealed with this passphrase - it's left out");
+    use_opened_save();
     return 0;
 }
 
@@ -3426,7 +3440,7 @@ static void install_confirmed(void) {
         finish_install(NULL);
         return;
     }
-    g_app.mode = save_exists(g_app.save_target) ? MODE_INSTALL_UNLOCK : MODE_INSTALL_PASS;
+    g_app.mode = MODE_INSTALL_PASS;
     g_app.dirty = 1;
 }
 
@@ -3434,6 +3448,49 @@ static void cancel_install(void) {
     crypto_wipe(g_app.install_pass, sizeof g_app.install_pass);
     end_prompt();
     note("not installed - nothing was written");
+}
+
+static void to_install_mode(app_mode_t mode) {
+    crypto_wipe(g_app.input.buf, sizeof g_app.input.buf);
+    tui_input_clear(&g_app.input);
+    g_app.mode = mode;
+    g_app.dirty = 1;
+}
+
+// A save that's there but sealed: use it, which needs its passphrase, or make a new save.
+static void install_use_existing(void) { to_install_mode(MODE_INSTALL_OVERWRITE); }
+static void install_new_save(void) { to_install_mode(MODE_INSTALL_NAME); }
+static void back_to_existing(void) { to_install_mode(MODE_INSTALL_EXISTING); }
+
+// Saving what's in use over it, or using what's saved there. Only the first while another save
+// is open, so what's in use isn't a mix of two saves.
+static void install_overwrite_yes(void) { g_app.install_overwrite = 1; to_install_mode(MODE_INSTALL_UNLOCK); }
+static void install_overwrite_no(void) {
+    if (g_app.installed) { cancel_install(); return; }
+    g_app.install_overwrite = 0;
+    to_install_mode(MODE_INSTALL_UNLOCK);
+}
+
+// y, n, or Esc and q.
+static void choice_key(const tui_key_t *key, void (*yes)(void), void (*no)(void), void (*esc)(void)) {
+    char ch = key->type == TUI_KEY_CHAR && key->ch_len == 1 ? key->ch[0] : 0;
+    if (ch == 'y' || ch == 'Y') yes();
+    else if (ch == 'n' || ch == 'N') no();
+    else if (ch == 'q' || key->type == TUI_KEY_ESCAPE) esc();
+}
+
+static void commit_install_name(void) {
+    char name[64];
+    copy_str(name, g_app.input.buf, sizeof name);
+    size_t n = strlen(name);
+    while (n > 0 && name[n - 1] == ' ') name[--n] = '\0';
+    const char *p = name;
+    while (*p == ' ') p++;
+    if (!*p) { note("type a name for the new save - or Esc to go back"); return; }
+    if (install_name_ok(p) != 0) { note("a save's name is 1 to %d letters, digits, - and _", INSTALL_NAME_MAX); return; }
+    if (save_exists(p)) { note("there's a save called %s already - pick another name", install_shown_name(p)); return; }
+    copy_str(g_app.save_target, strcmp(p, "default") == 0 ? "" : p, sizeof g_app.save_target);
+    to_install_mode(MODE_INSTALL_PASS);
 }
 
 static void commit_install_pass(void) {
@@ -3468,17 +3525,29 @@ static void commit_install_unlock(void) {
     char pw[sizeof g_app.input.buf];
     copy_str(pw, g_app.input.buf, sizeof pw);
     if (!pw[0]) { note("type its passphrase - or Esc to cancel"); return; }
-    note("opening what :install saved...");
+    note("opening the save %s...", install_shown_name(g_app.save_target));
     render();
     int rc = install_unlock(g_app.save_target, pw);
     crypto_wipe(pw, sizeof pw);
     crypto_wipe(g_app.input.buf, sizeof g_app.input.buf);
     tui_input_clear(&g_app.input);
-    if (rc == PASS_WRONG || rc == PASS_NOMEM) { note("%s", open_error(rc)); return; }
+    if (rc == PASS_WRONG) { note("that passphrase doesn't open the save %s", install_shown_name(g_app.save_target)); return; }
+    if (rc == PASS_NOMEM) { note("%s", open_error(rc)); return; }
     end_prompt();
     if (rc != 0) {
         if (rc == INSTALL_NO_FILE && is_current_save(g_app.save_target)) g_app.locked = 0;
         note("not installed: %s", open_error(rc));
+        return;
+    }
+    if (!g_app.install_overwrite) {
+        use_opened_save();
+        say_saved_notes();
+        if (key_in_use_saved()) identity_chosen();
+        char where[900] = "";
+        install_where(g_app.save_target, where, sizeof where);
+        push_log("* opened the save %s in %s: its settings are in use, and changes are saved to it",
+                 install_shown_name(g_app.save_target), where);
+        note("opened the save %s", install_shown_name(g_app.save_target));
         return;
     }
     g_app.saved_key_known = 0;
@@ -3547,7 +3616,7 @@ static void commit_unlock(void) {
 
 static void skip_unlock(void) {
     end_unlock();
-    note("what :install saved stays sealed: chat starts from its defaults and saves nothing this run");
+    note("what :install saved stays sealed: chat starts from its defaults and saves nothing this run - :install can open it later");
 }
 
 // Esc on the passphrase goes back to the list, if it came from one.
@@ -3680,7 +3749,9 @@ static cmd_result_t app_install(void *ctx, const char *arg) {
     if (pick_save_target(arg) != 0) return CMD_OK;
     char where[900];
     if (install_where(g_app.save_target, where, sizeof where) != 0) { note("there's nowhere to install to - no home folder"); return CMD_OK; }
-    begin_prompt(MODE_INSTALL);
+    // A save that's there but not open: use it or make a new one, rather than saving over it unasked.
+    int open = g_app.installed && is_current_save(g_app.save_target);
+    begin_prompt(!open && save_exists(g_app.save_target) ? MODE_INSTALL_EXISTING : MODE_INSTALL);
     return CMD_OK;
 }
 
@@ -4155,7 +4226,10 @@ static void handle_key(const tui_key_t *key) {
         case MODE_INSTALL:        confirm_key(key, install_confirmed, cancel_install); return;
         case MODE_INSTALL_PASS:   field_key(key, commit_install_pass, cancel_install); return;
         case MODE_INSTALL_PASS2:  field_key(key, commit_install_pass2, cancel_install); return;
-        case MODE_INSTALL_UNLOCK: field_key(key, commit_install_unlock, cancel_install); return;
+        case MODE_INSTALL_UNLOCK: field_key(key, commit_install_unlock, back_to_existing); return;
+        case MODE_INSTALL_EXISTING:  choice_key(key, install_use_existing, install_new_save, cancel_install); return;
+        case MODE_INSTALL_OVERWRITE: choice_key(key, install_overwrite_yes, install_overwrite_no, back_to_existing); return;
+        case MODE_INSTALL_NAME:   field_key(key, commit_install_name, back_to_existing); return;
         case MODE_UNINSTALL:      confirm_key(key, uninstall_confirmed, cancel_uninstall); return;
         case MODE_SAVES:          saves_key(key); return;
         case MODE_UNLOCK:         field_key(key, commit_unlock, back_from_unlock); return;
@@ -4212,6 +4286,7 @@ static int on_chat_screen(void) {
     switch (g_app.mode) {
         case MODE_CHAT: case MODE_NEW_PASSWORD: case MODE_JOIN_ID: case MODE_JOIN_PASSWORD:
         case MODE_INSTALL: case MODE_INSTALL_PASS: case MODE_INSTALL_PASS2: case MODE_INSTALL_UNLOCK:
+        case MODE_INSTALL_EXISTING: case MODE_INSTALL_OVERWRITE: case MODE_INSTALL_NAME:
         case MODE_UNINSTALL: case MODE_SAVES: case MODE_UNLOCK: case MODE_UPDATE:
             return 1;
         default:
@@ -4520,14 +4595,56 @@ static const tui_dialog_t *current_dialog(void) {
             d.keys = first ? "enter next \xc2\xb7 esc cancel" : "enter install \xc2\xb7 esc cancel";
             break;
         }
+        case MODE_INSTALL_EXISTING:
+        case MODE_INSTALL_OVERWRITE:
         case MODE_INSTALL_UNLOCK:
-            d.title = "INSTALL \xc2\xb7 PASSPHRASE";
-            d.n_text = add_para(paras, 0, TUI_P_TEXT, "What `:install` saved here is still sealed. Its passphrase opens "
-                                "it, and what's in use now is saved over it under the same one. Forgot it? Esc, then "
-                                "`:uninstall` deletes it, and `:install` starts afresh.");
-            d.placeholder = "passphrase";
-            d.keys = "enter install \xc2\xb7 esc cancel";
+        case MODE_INSTALL_NAME: {
+            static char text[900];
+            char where[900] = "";
+            const char *shown = install_shown_name(g_app.save_target);
+            install_where(g_app.save_target, where, sizeof where);
+            if (g_app.mode == MODE_INSTALL_EXISTING) {
+                snprintf(text, sizeof text, "There's a save here already: `%s`, in `%s`, sealed with its own passphrase "
+                         "and not open in this run. Use it? Yes asks for its passphrase. No makes a new save, with a "
+                         "name and a passphrase of its own.", shown, where);
+                d.title = "INSTALL";
+                d.input = NULL;
+                d.keys = "y use it \xc2\xb7 n new save \xc2\xb7 esc cancel";
+            } else if (g_app.mode == MODE_INSTALL_OVERWRITE) {
+                if (g_app.installed)
+                    snprintf(text, sizeof text, "Save what's in use now over `%s`? That's your settings, your signing "
+                             "key if signing is on, and the keys you verified, which are added to the ones saved there. "
+                             "From then on `%s` is the save in use. Its passphrase is asked for next. To use what's "
+                             "saved there as it is, start chat with `--save %s`.", shown, shown, shown);
+                else
+                    snprintf(text, sizeof text, "Save what's in use now over `%s`? Yes saves your settings, your signing "
+                             "key if signing is on, and the keys you verified, which are added to the ones saved there. "
+                             "No uses what's saved there instead, as if you'd opened it when chat started. Either way, "
+                             "its passphrase is asked for next, and changes are saved to it from then on.", shown);
+                d.title = "INSTALL";
+                d.input = NULL;
+                d.keys = g_app.installed ? "y overwrite \xc2\xb7 n cancel \xc2\xb7 esc back"
+                                         : "y overwrite \xc2\xb7 n use what's saved \xc2\xb7 esc back";
+            } else if (g_app.mode == MODE_INSTALL_UNLOCK) {
+                snprintf(text, sizeof text, "Its passphrase opens `%s`, %s Forgot it? Esc goes back, where n makes "
+                         "a new save instead, and `:uninstall %s` deletes this one.", shown, g_app.install_overwrite
+                         ? "and what's in use now is saved over it under the same one."
+                         : "and what's saved there is used from now on.", shown);
+                d.title = "INSTALL \xc2\xb7 PASSPHRASE";
+                d.placeholder = "passphrase";
+                d.keys = g_app.install_overwrite ? "enter install \xc2\xb7 esc back" : "enter open \xc2\xb7 esc back";
+            } else {
+                snprintf(text, sizeof text, "A name for the new save: 1 to %d letters, digits, - and _. It goes in "
+                         "`saves/NAME` next to the save that's there, and anyone who can read the disk can see the "
+                         "folder's name.", INSTALL_NAME_MAX);
+                d.title = "INSTALL \xc2\xb7 NEW SAVE";
+                d.mask = 0;
+                d.placeholder = "name";
+                d.keys = "enter next \xc2\xb7 esc back";
+            }
+            d.n_text = add_para(paras, 0, TUI_P_TEXT, text);
             break;
+        }
         case MODE_UNINSTALL:
             d.title = "UNINSTALL";
             d.n_text = uninstall_paras(paras);
@@ -4643,6 +4760,9 @@ static tui_bar_t current_bar(void) {
         case MODE_INSTALL_PASS:
         case MODE_INSTALL_PASS2:
         case MODE_INSTALL_UNLOCK:
+        case MODE_INSTALL_EXISTING:
+        case MODE_INSTALL_OVERWRITE:
+        case MODE_INSTALL_NAME:
         case MODE_UNINSTALL:
         case MODE_UPDATE:
             chat_input(&b, &g_app.saved_input);
