@@ -96,6 +96,9 @@ int platform_move_new(const char *from, const char *to);
 // $XDG_CONFIG_HOME/chat, otherwise ~/.config/chat, or %LOCALAPPDATA%\chat on Windows. With create,
 // it's created if it doesn't exist, and only this user can open it.
 int platform_config_dir(char *out, size_t cap, int create);
+// Creates a folder only this user can open, if it doesn't exist. -1 if it can't, or if what's
+// there is a link or isn't this user's folder.
+int platform_private_dir(const char *utf8_path);
 // Written to a private file next to path, flushed, then renamed over it, so a crash leaves either
 // the old file or the new one.
 int platform_write_private(const char *utf8_path, const void *data, size_t len);
