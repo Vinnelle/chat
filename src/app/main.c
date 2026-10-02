@@ -108,9 +108,9 @@ static const char *USAGE =
     "Settings and the signing key last until chat exits. :install saves them, after saying\n"
     "what that leaves on disk. Both go in ~/.config/chat (%LOCALAPPDATA%\\chat on Windows),\n"
     "sealed with one passphrase that chat asks for on startup (or reads from\n"
-    "CHAT_INSTALL_PASSWORD), and settings are saved again whenever one changes, unless\n"
-    ":set autosave off (then :save saves them). Options given here override what's saved,\n"
-    "for that run only. :uninstall deletes it.\n"
+    "CHAT_INSTALL_PASSWORD). What you change after that waits for :save, unless :set autosave\n"
+    "on (then it's saved as it changes). Options given here override what's saved, for that\n"
+    "run only. :uninstall deletes it.\n"
     ":install NAME makes another save, in ~/.config/chat/saves/NAME, with its own passphrase.\n"
     "With more than one save, chat lists them on startup to pick the one to open.\n"
     "\n"
@@ -1520,7 +1520,7 @@ static int settings_text(char *out, size_t cap) {
 }
 
 // Checked before every frame, so any change to a row (from the page or :set) is picked up. The
-// autosave row itself is always saved, so turning it off lasts.
+// autosave row itself is always saved, so turning it on or off lasts.
 static void keep_settings_saved(void) {
     if (!g_app.installed) return;
     int changed = 0, held = 0;
@@ -4386,7 +4386,8 @@ static int arg_trusted(arg_menu_t *m, const char *rest) {
         const char *nick = trust_at(i)->nick;
         int keys = 0, seen = 0;
         for (int j = 0; j < n; j++) {
-            if (strcmp(trust_at(j)->nick, nick) != 0) continue;
+            const trust_entry_t *t = trust_at(j);
+            if (!t || strcmp(t->nick, nick) != 0) continue;
             keys++;
             seen |= j < i;
         }
@@ -5882,7 +5883,6 @@ int main(int argc, char **argv) {
     g_app.nostr_flag = -1;
     g_app.notify_mode = NOTIFY_MENTIONS;
     g_app.verify_optional = 1;
-    g_app.autosave = 1;
     g_app.show_sidebar = g_app.show_console = g_app.show_chat = 1;
     note_setting_defaults();
     trust_on_change(save_verified);
