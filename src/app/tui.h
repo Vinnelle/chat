@@ -68,7 +68,8 @@ typedef struct {
     uint8_t color[3];
     int you;
     int verify;        // 0 unverified, 1 verified, 2 signature invalid
-    int code;          // its verify code: 0 nothing to do, 1 to be compared, 2 compared, 3 different
+    int code;          // its verify code: 0 nothing to do, 1 to be compared, 2 compared, 3 different,
+                       // 4 to be compared: another key than the one verified for its nick
     int modified;      // runs a modified client
 } tui_peer_row_t;
 

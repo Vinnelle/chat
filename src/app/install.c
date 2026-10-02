@@ -10,11 +10,14 @@
 
 #define SETTINGS_NAME "settings"
 #define KEY_NAME "key"
+#define VERIFIED_NAME "verified"
 #define SETTINGS_FILE_MAX (INSTALL_SETTINGS_MAX + PASS_SEAL_OVERHEAD)
 #define KEY_FILE_MAX (INSTALL_KEY_MAX + PASS_SEAL_OVERHEAD)
+#define VERIFIED_FILE_MAX (INSTALL_VERIFIED_MAX + PASS_SEAL_OVERHEAD)
 
 // Also removes any .new files left by a crash while writing.
-static const char *const FILES[] = { SETTINGS_NAME, KEY_NAME, SETTINGS_NAME ".new", KEY_NAME ".new" };
+static const char *const FILES[] = { SETTINGS_NAME, KEY_NAME, VERIFIED_NAME, SETTINGS_NAME ".new", KEY_NAME ".new",
+                                     VERIFIED_NAME ".new" };
 #define N_FILES (sizeof FILES / sizeof FILES[0])
 
 #define SAVES_DIR "saves"
@@ -183,20 +186,23 @@ void install_forget(void) {
     g_open = 0;
 }
 
-long install_read_settings(char *buf, size_t cap) {
-    uint8_t sealed[SETTINGS_FILE_MAX + 1];
+static long read_text(const char *file, size_t max, char *buf, size_t cap) {
+    static uint8_t sealed[VERIFIED_FILE_MAX + 1];
     size_t n = 0, len = 0;
     if (cap < 1) return PASS_FORMAT;
-    int rc = read_sealed(g_name, SETTINGS_NAME, sealed, SETTINGS_FILE_MAX, &n);
+    int rc = read_sealed(g_name, file, sealed, max, &n);
     if (rc == 0) rc = g_open ? pass_unseal(&g_lock, sealed, n, buf, cap - 1, &len) : PASS_WRONG;
     if (rc != 0) return rc;
     buf[len] = '\0';
     return (long)len;
 }
 
+long install_read_settings(char *buf, size_t cap) { return read_text(SETTINGS_NAME, SETTINGS_FILE_MAX, buf, cap); }
+long install_read_verified(char *buf, size_t cap) { return read_text(VERIFIED_NAME, VERIFIED_FILE_MAX, buf, cap); }
+
 static int write_sealed(const char *file, const void *plain, size_t len) {
     char path[1000];
-    uint8_t sealed[SETTINGS_FILE_MAX];
+    static uint8_t sealed[VERIFIED_FILE_MAX];
     size_t n;
     if (!g_open || save_path(g_name, file, path, sizeof path, 1) != 0) return -1;
     if (pass_seal(&g_lock, plain, len, sealed, sizeof sealed, &n) != 0) return -1;
@@ -204,6 +210,11 @@ static int write_sealed(const char *file, const void *plain, size_t len) {
 }
 
 int install_write_settings(const char *text) { return write_sealed(SETTINGS_NAME, text, strlen(text)); }
+
+int install_write_verified(const char *text) {
+    size_t len = strlen(text);
+    return len > INSTALL_VERIFIED_MAX ? -1 : write_sealed(VERIFIED_NAME, text, len);
+}
 
 int install_write_key(const void *secret, size_t len) {
     return len > INSTALL_KEY_MAX ? -1 : write_sealed(KEY_NAME, secret, len);

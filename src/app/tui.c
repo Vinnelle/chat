@@ -971,7 +971,7 @@ static void draw_name(pen_t *p, const char *name, const uint8_t *rgb) {
 
 // Lines from the bottom of nrows grid rows upwards, newest last, skipping the skip newest. Chat
 // lines are laid out in columns (time, name, text), and a run from one person in the same minute
-// shows the time and name once. The console's lines are faint, and its warnings yellow.
+// shows the time and name once. The console's lines are faint, and its warnings yellow (bold in the chat).
 // A picture's rows at width cols: each is two of its pixel rows, the upper one as the colour of a
 // half block and the lower one as the colour behind it, scaled to the width by nearest pixel.
 static int image_rows(const tui_image_t *im, int cols) {
@@ -1138,8 +1138,8 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
 
         int head = stacked && !grouped;
 
-        int warn = console && strncmp(body, "warning:", 8) == 0;
-        style_t body_style = l->mention ? S_BOLD : warn ? S_YELLOW : console ? S_FAINT : S_PLAIN;
+        int warn = !chat && strncmp(body, "warning:", 8) == 0;
+        style_t body_style = l->mention ? S_BOLD : warn ? (console ? S_YELLOW : S_YELLOW_BOLD) : console ? S_FAINT : S_PLAIN;
         int body_rgb = !chat && l->has_color && !warn;
 
         int hrow = bottom - under - nch;
@@ -1403,9 +1403,11 @@ static void session_line(pen_t *p, const tui_session_row_t *s, int sel) {
 static void peer_line(pen_t *p, const tui_peer_row_t *pr) {
     const char *word, *glyph;
     style_t st;
-    // Most urgent first: codes that differ, a bad signature, a code still to compare.
+    // Most urgent first: codes that differ, a key that isn't the one verified for the nick, a bad
+    // signature, a code still to compare.
     if (pr->you) { word = glyph = "you"; st = S_FAINT; }
     else if (pr->code == 3) { word = G_CROSS " codes differ"; glyph = G_CROSS; st = S_RED_BOLD; }
+    else if (pr->code == 4) { word = G_CROSS " key changed"; glyph = G_CROSS; st = S_RED_BOLD; }
     else if (pr->verify == 2) { word = G_CROSS " invalid"; glyph = G_CROSS; st = S_RED_BOLD; }
     else if (pr->code == 1) { word = "? compare code"; glyph = "?"; st = S_YELLOW_BOLD; }
     else if (pr->code == 2) { word = G_CHECK " compared"; glyph = G_CHECK; st = S_GREEN; }

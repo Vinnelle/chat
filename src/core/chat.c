@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
 #include "core/chat.h"
+#include "core/trust.h"
 #include "common/util.h"
 #include "platform/platform.h"
 #include "common/image.h"
@@ -15,6 +16,8 @@
 #define SECRETS_LEN (offsetof(chat_t, identity) + sizeof(identity_keypair_t) - offsetof(chat_t, keys))
 
 static void ui_print(chat_t *c, const char *fmt, ...);
+static void ui_warn(chat_t *c, const char *fmt, ...);
+static int check_trust(chat_t *c, peer_t *p);
 static void net_report(chat_t *c);
 static void module_log(void *ctx, int verbose_only, const char *msg);
 static void knock_room_slots(chat_t *c);
@@ -180,6 +183,8 @@ static void nick_skeleton(const char *nick, char *out, size_t cap) {
     }
     out[o] = '\0';
 }
+
+void chat_nick_skeleton(const char *nick, char *out, size_t cap) { nick_skeleton(nick, out, cap); }
 
 void chat_clean_nick(const char *in, char out[MAX_NICK + 1]) {
     char tmp[MAX_NICK + 1], kept[MAX_NICK + 1];
@@ -772,6 +777,7 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
         slot->serve_end = carry.serve_end;
         // The same peer, as the rk it announced proves, so a compared code stays compared.
         slot->code_ok = carry.code_ok;
+        slot->trust = carry.trust;
         slot->next_rehello = carry.next_rehello;
     }
 
@@ -1052,8 +1058,14 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         } else {
             p->identity_source = IDENT_NONE; p->identity_state = VERIFY_UNVERIFIED;
         }
+        // A peer that joined before its k came is checked now, and one whose nick or key changed again.
+        int warned = 0, was_ok = p->code_ok;
+        if (p->announced) {
+            warned = check_trust(c, p);
+            if (was_ok != 1 && p->code_ok == 1) file_offer_all(c, p);
+        }
         // A re-handshake (rekey, rejoin) sends k again. Say so if the identity behind it changes.
-        if (had_source != IDENT_NONE) {
+        if (had_source != IDENT_NONE && !warned) {
             char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
             if (p->identity_source == IDENT_NONE) {
                 ui_print(c, "* warning: %s no longer presents a signing identity", name);
@@ -1078,6 +1090,12 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         if (parse_color(f[1], rgb) == 0) memcpy(p->color, rgb, 3);
     } else if (n == 2 && strcmp(f[0], "n") == 0) {
         set_peer_nick(p, f[1]);
+        if (p->announced) {
+            int was_ok = p->code_ok;
+            if (p->trust == 2) p->trust = 0;
+            check_trust(c, p);
+            if (was_ok != 1 && p->code_ok == 1) file_offer_all(c, p);
+        }
     } else if (n == 2 && strcmp(f[0], "px") == 0) {
         char *item = f[1];
         for (int cnt = 0; item && *item && cnt < 12; cnt++) {
@@ -1365,6 +1383,46 @@ static int peer_try_unseal(peer_t *p, const uint8_t *data, size_t len, uint32_t 
     return 1;
 }
 
+// Compares p's nick and signing key with the verified keys (core/trust.h), once "k" has brought
+// them. A key verified before, in this run or one before it, signed this handshake's keys, so
+// nobody in the middle could have made it: the code doesn't need comparing again. A peer with the
+// nick of a verified key that signs with another key, or none, is warned about once. Returns 1 if
+// it warned.
+static int check_trust(chat_t *c, peer_t *p) {
+    char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
+    const trust_entry_t *t = p->identity_state == VERIFY_VERIFIED ? trust_by_key(p->identity_pub) : NULL;
+    if (t) {
+        char was[MAX_NICK + 1]; copy_str(was, t->nick, sizeof was);
+        int renamed = strcmp(t->nick, p->nick) != 0;
+        // The entry follows the nick, so the next peer with the old nick isn't taken for this one.
+        if (renamed) trust_add(p->identity_source, p->identity_pub, p->nick);
+        if (p->trust == 1) return 0;
+        p->trust = 1;
+        if (p->code_ok != 0) return 0;
+        p->code_ok = 1;
+        if (renamed) ui_print(c, "* %s signs with the key you verified for %s - no need to compare codes again", name, was);
+        else ui_print(c, "* %s signs with the key you verified before - no need to compare codes again", name);
+        return 0;
+    }
+    int i = trust_find_nick(p->nick_skel, 0);
+    if (i < 0) { p->trust = 0; return 0; }
+    if (p->trust == 2) return 0;
+    p->trust = 2;
+    t = trust_at(i);
+    char was[HEX_GROUPS_LEN(ID_FP_LEN)], now_fp[HEX_GROUPS_LEN(ID_FP_LEN) + 16];
+    uint8_t fp[ID_FP_LEN];
+    identity_fingerprint(t->pub, fp);
+    hex_groups(fp, ID_FP_LEN, was);
+    if (p->identity_source == IDENT_NONE) copy_str(now_fp, "no signing key", sizeof now_fp);
+    else if (p->identity_state == VERIFY_FAILED) copy_str(now_fp, "a key with an invalid signature", sizeof now_fp);
+    else { hex_groups(p->identity_fp, ID_FP_LEN, now_fp); }
+    ui_warn(c, "* warning: %s does not sign with the key you verified for %s (fingerprint %s); it signs with %s. "
+               "Their key changed, or someone else uses this nick. Treat them as unverified until you compare "
+               "verify codes again: :verify %s",
+            name, t->nick, was, now_fp, name);
+    return 1;
+}
+
 // "* NICK (verified) joined": shown once p's nick and identity are known, which "k" carries. It's
 // the first frame p sends, but it can be lost or overtaken, and another frame opening first would
 // otherwise announce "anon (unverified)".
@@ -1391,14 +1449,7 @@ static void announce_join(chat_t *c, peer_t *p) {
         ui_print(c, "* %s reconnected with a new verify code (was %s, now %s) - if you had compared "
                     "codes with them, compare the new one", name, was, now_hex);
     }
-    // The signing identity of a peer whose code was compared earlier in this session: its
-    // signature covers this handshake's keys, so nobody in the middle could have made it.
-    if (p->code_ok == 0 && p->identity_state == VERIFY_VERIFIED)
-        for (int i = 0; i < c->n_pinned; i++)
-            if (memcmp(c->pinned[i], p->identity_pub, ID_SIGN_PUB_LEN) == 0) {
-                p->code_ok = 1;
-                ui_print(c, "* %s signs with the identity whose code you compared earlier - no need to compare again", name);
-            }
+    check_trust(c, p);
     if (p->code_ok == 0) {
         char code[HEX_GROUPS_LEN(VERIFY_LEN)]; hex_groups(p->vfy, VERIFY_LEN, code);
         // The room's password only proves someone is a member, and any member could sit between two
@@ -1417,6 +1468,7 @@ static void announce_join(chat_t *c, peer_t *p) {
 int chat_code_state(const chat_t *c, const peer_t *p) {
     if (p->code_ok < 0) return 3;
     if (p->code_ok > 0) return 2;
+    if (p->trust == 2) return 4;
     return c->verify_required ? 1 : 0;
 }
 
@@ -1955,7 +2007,7 @@ static cmd_result_t cmd_peers(void *ctx, const char *arg) {
         char idhex[9]; hex_encode(p->id, 4, idhex);
         char vfyhex[HEX_GROUPS_LEN(VERIFY_LEN)]; hex_groups(p->vfy, VERIFY_LEN, vfyhex);
         char build[64]; chat_build_label(p, build, sizeof build);
-        static const char *const CODE[] = { "", ", code not compared", ", code compared", ", CODES DIFFER" };
+        static const char *const CODE[] = { "", ", code not compared", ", code compared", ", CODES DIFFER", ", KEY CHANGED" };
         ui_print(c, "*   %s#%s (verify %s%s, %s, %s%s)", p->nick, idhex, vfyhex, CODE[chat_code_state(c, p)],
                  chat_verify_label(p->identity_state), build, p->persists ? ", logging" : "");
     }
@@ -1984,11 +2036,16 @@ static peer_t *peer_by_name(chat_t *c, const char *arg, int *ambiguous) {
     return found;
 }
 
-static void pin_identity(chat_t *c, const peer_t *p) {
+// Adds p's signing key to the verified keys. If p was warned about for having the nick of another
+// verified key, the entries with that nick are replaced: the user compared codes with this key.
+static void pin_identity(chat_t *c, peer_t *p) {
+    (void)c;
     if (p->identity_state != VERIFY_VERIFIED) return;
-    for (int i = 0; i < c->n_pinned; i++) if (memcmp(c->pinned[i], p->identity_pub, ID_SIGN_PUB_LEN) == 0) return;
-    int slot = c->n_pinned < (int)(sizeof c->pinned / sizeof c->pinned[0]) ? c->n_pinned++ : 0;
-    memcpy(c->pinned[slot], p->identity_pub, ID_SIGN_PUB_LEN);
+    if (p->trust == 2)
+        for (int i = trust_find_nick(p->nick_skel, 0); i >= 0; i = trust_find_nick(p->nick_skel, i))
+            trust_remove(i);
+    trust_add(p->identity_source, p->identity_pub, p->nick);
+    p->trust = 1;
 }
 
 static cmd_result_t cmd_verify(void *ctx, const char *arg) {
@@ -2022,14 +2079,19 @@ static cmd_result_t cmd_verify(void *ctx, const char *arg) {
                     "to them now. Leave this session and start a new one, with a new password shared over a channel you trust",
                  name);
     } else if (verdict[0]) {
-        int was = p->code_ok;
+        int was = p->code_ok, replaced = p->trust == 2;
         p->code_ok = 1;
         pin_identity(c, p);
         if (was != 1) file_offer_all(c, p);
-        ui_print(c, "* %s: verify code confirmed - what you send reaches them%s", name,
-                 p->identity_state == VERIFY_VERIFIED ? ", and their signing identity is trusted for the rest of this session" : "");
+        const char *kept = p->identity_state != VERIFY_VERIFIED
+            ? ". They have no valid signing key, so this lasts for this session only"
+            : trust_saved() ? ". Their signing key is saved as verified (:verified lists them)"
+            : ". Their signing key counts as verified until chat exits; :install saves it";
+        ui_print(c, "* %s: verify code confirmed - what you send reaches them%s%s", name, kept,
+                 replaced && p->identity_state == VERIFY_VERIFIED ? ". It replaces the key verified for this nick before" : "");
     } else {
-        static const char *const STATE[] = { "", " - not compared yet", " - compared", " - you said it differs" };
+        static const char *const STATE[] = { "", " - not compared yet", " - compared", " - you said it differs",
+                                             " - not compared, and they sign with another key than the one verified for this nick" };
         ui_print(c, "* %s: verify code %s%s", name, code, STATE[chat_code_state(c, p)]);
         if (p->identity_source != IDENT_NONE) {
             char fphex[HEX_GROUPS_LEN(ID_FP_LEN)]; hex_groups(p->identity_fp, ID_FP_LEN, fphex);
@@ -2037,6 +2099,52 @@ static cmd_result_t cmd_verify(void *ctx, const char *arg) {
         }
         ui_print(c, "* read the code out to them over another channel (in person, a call); if theirs is the same, "
                     ":verify %s ok - if not, :verify %s no", name, name);
+    }
+    return CMD_OK;
+}
+
+// ":verified" lists the verified keys, ":verified forget NICK" removes the ones with that nick,
+// ":verified forget all" removes every one.
+static cmd_result_t cmd_verified(void *ctx, const char *arg) {
+    chat_t *c = ctx;
+    char word[CMD_WORD_MAX];
+    const char *rest = cmd_parse(arg, word);
+    if (strcmp(word, "forget") == 0) {
+        char who[MAX_TEXT + 1];
+        copy_str(who, rest, sizeof who);
+        size_t wl = strlen(who);
+        while (wl > 0 && who[wl - 1] == ' ') who[--wl] = '\0';
+        if (!who[0]) { ui_print(c, "* usage: :verified forget NICK, or :verified forget all"); return CMD_OK; }
+        int removed = 0;
+        if (strcmp(who, "all") == 0) {
+            while (trust_count() > 0) { trust_remove(trust_count() - 1); removed++; }
+        } else {
+            char nick[MAX_NICK + 1], skel[NICK_SKEL_LEN];
+            chat_clean_nick(who, nick);
+            nick_skeleton(nick, skel, sizeof skel);
+            for (int i = trust_find_nick(skel, 0); i >= 0; i = trust_find_nick(skel, i)) { trust_remove(i); removed++; }
+        }
+        if (!removed) { ui_print(c, "* no verified key has the nick %s - :verified lists them", who); return CMD_OK; }
+        // Peers here keep what was compared in this session, but are checked against the list again.
+        for (int i = 0; i < c->peer_hi; i++) if (c->peers[i].used && c->peers[i].trust == 1) c->peers[i].trust = 0;
+        ui_print(c, "* removed %d verified key%s%s", removed, removed == 1 ? "" : "s",
+                 trust_saved() ? " from what :install saved" : "");
+        return CMD_OK;
+    }
+    if (word[0]) { ui_print(c, "* usage: :verified lists the verified keys; :verified forget NICK removes one"); return CMD_OK; }
+    int n = trust_count();
+    if (n == 0) {
+        ui_print(c, "* no verified keys yet. :verify NICK ok adds the signing key of a peer whose code you compared");
+        return CMD_OK;
+    }
+    ui_print(c, "* %d verified key%s%s:", n, n == 1 ? "" : "s",
+             trust_saved() ? ", saved with what :install saved" : ", kept until chat exits (:install saves them)");
+    for (int i = 0; i < n; i++) {
+        const trust_entry_t *t = trust_at(i);
+        uint8_t fp[ID_FP_LEN]; identity_fingerprint(t->pub, fp);
+        char fphex[HEX_GROUPS_LEN(ID_FP_LEN)]; hex_groups(fp, ID_FP_LEN, fphex);
+        static const char *const SRC[] = { "", "key", "AGE", "PGP" };
+        ui_print(c, "*   %s  %s (%s)", t->nick, fphex, SRC[t->source >= IDENT_NATIVE && t->source <= IDENT_PGP ? t->source : 0]);
     }
     return CMD_OK;
 }
@@ -2987,6 +3095,7 @@ const command_t CHAT_COMMANDS[] = {
     { "help",       NULL,     NULL,              "list commands",                                   cmd_help },
     { "peers",      NULL,     NULL,              "who is online, with verify codes and builds",     cmd_peers },
     { "verify",     NULL,     "NICK [ok|no]",    "compare a peer's verify code; ok once it matches", cmd_verify },
+    { "verified",   NULL,     "[forget NICK]",   "list the signing keys you verified, or remove one", cmd_verified },
     { "net",        NULL,     NULL,              "network report and diagnosis",                    cmd_net },
     { "port",       NULL,     "[N]",             "show or change this session's udp port",          cmd_port },
     { "set",        NULL,     "[NAME [VALUE]]",  "show or change nick, colour, notify, preview, net", cmd_set },
@@ -3318,6 +3427,16 @@ static void ui_print(chat_t *c, const char *fmt, ...) {
     va_end(ap);
     char hhmm[6]; current_hhmm(hhmm);
     emit_line(c, hhmm, msg, NULL, 0, 0);
+}
+
+static void ui_warn(chat_t *c, const char *fmt, ...) {
+    char msg[2200];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof msg, fmt, ap);
+    va_end(ap);
+    char hhmm[6]; current_hhmm(hhmm);
+    emit_line(c, hhmm, msg, NULL, LINE_WARN, 0);
 }
 
 static void ui_chat(chat_t *c, const uint8_t rgb[3], int mention, const char *name, const char *text) {

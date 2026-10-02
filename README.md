@@ -38,9 +38,19 @@ else whether you've compared or not. **Compare verify codes** on the settings pa
 (`:set verify required`, `--verify-required`) holds it back instead: nothing you send goes to
 a peer until you've marked it `ok`. Until then, their messages show `(code not compared)`, the
 sidebar says `compare code`, and the input box tells you your messages aren't going to them
-(`:verify NICK` shows the code). If the peer signs with an identity (below), you only compare
-once per session. If they come back with a fresh handshake signed by the same key, they're
-trusted again.
+(`:verify NICK` shows the code).
+
+**Verified keys.** If the peer signs with an identity (below), `:verify NICK ok` also keeps
+its signing key, with its nick, as verified. When a peer signs a handshake with a verified key,
+in this session, another one or (after `:install`) a later run, the code doesn't need comparing
+again: the signature covers that handshake's keys. When a peer has the nick of a verified key
+but signs with another key, or with none, chat prints a warning in the chat and the console,
+and the sidebar shows `key changed`. Their key changed, or someone else is using the nick.
+They count as not compared until you compare codes again, and with **Compare verify codes**
+set to required nothing you send goes to them. `:verify NICK ok` then replaces the key kept
+for that nick. `:verified` lists the keys, with their nicks and fingerprints, and `:verified
+forget NICK` (or `all`) removes them. A peer with no signing key has nothing to keep, so its
+code is compared again each session.
 
 **Identity signing** is optional, and lets peers check who they're talking to. Pick it under
 **Signing identity** on the settings page (or `:set sign`), or with `--identity`:
@@ -327,13 +337,13 @@ you're saving it. It would be off unless you turn it on.
 
 ### Installing
 
-`:install`, in the full screen UI, saves your settings and signing key so they're there next
-time chat starts. For a key from a file it saves the file's path instead of the key, and reads
-the file again each time chat starts. If the file is gone or holds a different key, the console
-says so. It asks first, and tells you what it leaves on disk. The files tell anyone who can read the
+`:install`, in the full screen UI, saves your settings, your signing key and the verified keys
+of peers (see [Security](#security)) so they're there next time chat starts. For a key from a
+file it saves the file's path instead of the key, and reads the file again each time chat
+starts. If the file is gone or holds a different key, the console says so. It asks first, and tells you what it leaves on disk. The files tell anyone who can read the
 disk (an admin, malware, a backup, forensics) that chat is used there.
 
-Both files are sealed with one passphrase you pick, typed twice, even if there's no signing
+The files are sealed with one passphrase you pick, typed twice, even if there's no signing
 key to save. Argon2id (512 MiB, same as for a session) makes a key from it with a salt, and
 XChaCha20-Poly1305 seals each file with that key. Each file starts with what Argon2id needs
 (its limits and the salt), and nothing else is readable: not your nick, routing or relays, and
@@ -467,7 +477,7 @@ another machine still tells you which build it is.
 ### Tests
 
 `tests/` runs real sessions against each other over an in-memory network. It covers the
-handshake, the verify code gate, message delivery with a dropped packet, rekeys (and a message
+handshake, the verify code gate, verified keys and the warning when one changes, message delivery with a dropped packet, rekeys (and a message
 lost right as the peer rekeys), replayed hellos and junk from outside the room, a third peer
 joining, that nothing goes over UDP unmasked, that every datagram is one cell sent in a slot no
 matter how many messages are sent, and that the DHT queries as a read only node and stops using
@@ -593,6 +603,7 @@ puts it on the command line.
 | `:quitall` (`:qa`) | leave every session and quit |
 | `:set [NAME [VALUE]]` | change a setting (see below); on its own, opens the settings page (`Ctrl+S`) |
 | `:verify NICK [ok\|no]` | show a peer's verify code and identity fingerprint; `ok` once the code matches theirs, `no` if it doesn't |
+| `:verified [forget NICK\|all]` | list the signing keys you verified, with nicks and fingerprints, or remove them |
 | `:peers` | who's online, with verify codes and builds |
 | `:net` | network report and diagnosis |
 | `:port [N]` | show or change this session's UDP port (`0` picks a free one) |

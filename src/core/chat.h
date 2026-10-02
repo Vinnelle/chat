@@ -303,6 +303,9 @@ typedef struct {
     // The result of the user comparing the verify code with this peer over another channel: 0 not
     // yet, 1 the same, -1 different. When comparing is required, only 1 gets what's sent.
     int code_ok;
+    // Its signing key against the verified keys (core/trust.h): 0 no entry has its nick or key, 1 its
+    // key is one of them, 2 an entry has its nick but another key (warned once).
+    int trust;
 
     ratchet_t old_send, old_recv;
     double old_until;
@@ -403,6 +406,9 @@ typedef void (*chat_print_fn)(void *ui, const char *hhmm, const char *text, cons
 
 #define LINE_CHAT 1u
 #define LINE_MENTION 2u
+// A warning the user must see, such as a verified peer's key changing: shown in the chat as well
+// as the console.
+#define LINE_WARN 4u
 
 // A file fetched to be shown has arrived, complete and matching the offer. Its bytes are only
 // valid during the call.
@@ -447,10 +453,6 @@ typedef struct {
 
     // Nothing that's sent goes to a peer until the user has compared its verify code (code_ok).
     int verify_required;
-    // Signing identities whose peers' codes the user compared in this session. If that peer comes
-    // back with a new handshake signed by the same key, it doesn't need comparing again.
-    uint8_t pinned[16][ID_SIGN_PUB_LEN];
-    int n_pinned;
 
     sock_t sock, lan_sock;
     uint16_t port, lan_port;
@@ -591,6 +593,9 @@ void chat_set_colour(chat_t *c, const uint8_t rgb[3]);
 // including lookalikes such as fullwidth brackets, and invisible characters, so no nick can fake
 // them. Never empty: uses "anon" if nothing is left.
 void chat_clean_nick(const char *in, char out[MAX_NICK + 1]);
+// A nick normalised for comparing (lookalikes, case and invisible characters ignored), as used to
+// tell nicks apart. out holds NICK_SKEL_LEN.
+void chat_nick_skeleton(const char *nick, char *out, size_t cap);
 
 // A peer's nick as shown, with "#" and its id prefix added when another peer's nick, or ours,
 // looks the same (case and common lookalike letters ignored).
@@ -619,7 +624,7 @@ int chat_candidate_count(const chat_t *c);
 int chat_ready(const chat_t *c);
 const char *chat_verify_label(verify_state_t s);
 // A peer's verify code as the sidebar shows it: 0 nothing to do, 1 to be compared, 2 compared,
-// 3 different.
+// 3 different, 4 to be compared because it signs with another key than the one verified for its nick.
 int chat_code_state(const chat_t *c, const peer_t *p);
 // What p runs, for :peers: "says official v0.1.9", "modified client (says v0.1.9)" and so on.
 void chat_build_label(const peer_t *p, char *out, size_t cap);
