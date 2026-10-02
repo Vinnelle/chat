@@ -337,6 +337,21 @@ int platform_list_dir(const char *path, dir_entry_cb cb, void *ctx) {
     return 0;
 }
 
+int platform_file_info(const char *utf8_path, file_info_t *out) {
+    struct stat st, lst;
+    if (lstat(utf8_path, &lst) != 0) return -1;
+    if (stat(utf8_path, &st) != 0) st = lst;   // a broken link: the link itself
+    out->is_dir = S_ISDIR(st.st_mode);
+    out->is_link = S_ISLNK(lst.st_mode);
+    out->size = st.st_size > 0 ? (uint64_t)st.st_size : 0;
+    struct tm tmv;
+    time_t t = st.st_mtime;
+    if (localtime_r(&t, &tmv)) strftime(out->modified, sizeof out->modified, "%Y-%m-%d %H:%M", &tmv);
+    else out->modified[0] = '\0';
+    out->mode = (int)(st.st_mode & 07777);
+    return 0;
+}
+
 const char *platform_home_dir(void) {
     const char *h = getenv("HOME");
     return (h && h[0]) ? h : NULL;

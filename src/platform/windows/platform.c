@@ -473,6 +473,23 @@ int platform_list_dir(const char *path, dir_entry_cb cb, void *ctx) {
     return 0;
 }
 
+int platform_file_info(const char *utf8_path, file_info_t *out) {
+    wchar_t wp[1400];
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (!to_wide(utf8_path, wp, 1400) || !GetFileAttributesExW(wp, GetFileExInfoStandard, &fa)) return -1;
+    out->is_dir = (fa.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    out->is_link = (fa.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+    out->size = (uint64_t)fa.nFileSizeHigh << 32 | fa.nFileSizeLow;
+    // FILETIME counts 100 ns steps from 1601.
+    uint64_t t = (uint64_t)fa.ftLastWriteTime.dwHighDateTime << 32 | fa.ftLastWriteTime.dwLowDateTime;
+    time_t secs = (time_t)((int64_t)(t / 10000000ULL) - 11644473600LL);
+    struct tm tmv;
+    if (localtime_s(&tmv, &secs) == 0) strftime(out->modified, sizeof out->modified, "%Y-%m-%d %H:%M", &tmv);
+    else out->modified[0] = '\0';
+    out->mode = -1;
+    return 0;
+}
+
 const char *platform_home_dir(void) {
     static char home[900];
     wchar_t *w = _wgetenv(L"USERPROFILE");

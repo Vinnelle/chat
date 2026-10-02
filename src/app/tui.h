@@ -309,9 +309,9 @@ typedef struct {
 // a button after the rows if button is set (selected == n_rows selects it), and the selected row's
 // help and usage at the bottom. nav lists the sections on the left, with nav_sel highlighted.
 // Without it they come from the rows. title goes in the page's border, showing where the page is,
-// with clock at the right end. keys draws the labels as keys. nav_title, if set, goes in the
-// border of the list on the left in place of chat's name, and nav_w, if not 0, is its width. The
-// list scrolls to keep nav_sel in view.
+// with clock at the right end. keys draws the labels as keys. side, if set, is a list in a column
+// left of the rows, inside the page (a file browser's parent folder): n_side entries, side_sel
+// highlighted, under side_title. It's left out when the page is too narrow for it (tui_side_width).
 typedef struct {
     const char *title;
     const char *clock;
@@ -319,8 +319,10 @@ typedef struct {
     const char *const *nav;
     int n_nav;
     int nav_sel;
-    const char *nav_title;
-    int nav_w;
+    const char *const *side;
+    int n_side;
+    int side_sel;
+    const char *side_title;
     const tui_row_t *rows;
     int n_rows;
     int selected;
@@ -331,6 +333,11 @@ typedef struct {
 } tui_page_t;
 
 void tui_render_page(int rows, int cols, const tui_page_t *page, const tui_bar_t *bar, int color_enabled);
+
+// The columns a page's rows get at this width (with_nav: it has the list of sections on the left),
+// before any side column, and the width that column gets, or 0 if it doesn't fit.
+int tui_page_row_cols(int cols, int with_nav);
+int tui_side_width(int cols, int with_nav);
 
 // A page of Markdown to read (the changelog): paragraphs wrapped to the page's width, with
 // **bold**, *italic*, `code` and [links](url) inside them, headings, bullets and numbered items

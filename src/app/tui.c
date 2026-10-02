@@ -1860,15 +1860,9 @@ int tui_render_bar(int rows, int cols, const tui_view_t *view, const tui_bar_t *
 
 // ---- list pages ----
 
-static void draw_nav(wbuf_t *w, rect_t r, const char *const *nav, int n_nav, int nav_sel, const char *nav_title) {
+static void draw_nav(wbuf_t *w, rect_t r, const char *const *nav, int n_nav, int nav_sel) {
     span_t title, right;
-    if (nav_title) {
-        span_init(&right, r.w);
-        span_init(&title, title_room(r.w, 0));
-        ptext(&title.p, S_FAINT, nav_title);
-    } else {
-        brand(&title, &right, r.w);
-    }
+    brand(&title, &right, r.w);
     box(w, r, border_sgr(-1), &title, &right, NULL);
     // Scrolled so the selected one is in the middle, when they don't all fit.
     int shown = r.h - 3, top = 0;
@@ -2034,6 +2028,56 @@ static void draw_list(wbuf_t *w, int top, int left, int iw, int view, int nrows,
     }
 }
 
+// The side column's width for rows iw columns wide, its rule included, or 0 if it doesn't fit.
+static int side_width(int iw) {
+    int w = iw / 3;
+    if (w < 20) w = 20;
+    if (w > 36) w = 36;
+    return iw - w >= 60 ? w : 0;
+}
+
+// The page's width inside its border, as tui_render_page works it out.
+static int page_inner_width(int cols, int with_nav) {
+    int navw = cols / 5;
+    if (navw < 20) navw = 20;
+    if (navw > 26) navw = 26;
+    if (!with_nav || cols - navw < 56) navw = 0;
+    return cols - (navw > 0 ? navw : 1) - 1;
+}
+
+int tui_page_row_cols(int cols, int with_nav) { return page_inner_width(cols, with_nav) - 4; }
+
+int tui_side_width(int cols, int with_nav) { return side_width(page_inner_width(cols, with_nav)); }
+
+// The side column: its title, a blank row, then its entries, scrolled so the selected one is in
+// the middle when they don't all fit, with a rule on its right.
+static void draw_side(wbuf_t *w, int top, int left, int width, int nrows, const tui_page_t *pg) {
+    int shown = nrows - 2, first = 0;
+    if (pg->n_side > shown && pg->side_sel >= 0) {
+        first = pg->side_sel - shown / 2;
+        if (first > pg->n_side - shown) first = pg->n_side - shown;
+        if (first < 0) first = 0;
+    }
+    for (int i = 0; i < nrows; i++) {
+        int k = i < 2 ? -1 : first + i - 2;
+        int on = k >= 0 && k < pg->n_side && k == pg->side_sel;
+        pen_t p;
+        inner_begin(w, &p, top + i, left, width - 1);
+        if (i == 0 && pg->side_title) {
+            pell(&p, S_FAINT, pg->side_title, p.room);
+        } else if (k >= 0 && k < pg->n_side) {
+            ptext(&p, on ? S_ACCENT_BOLD : S_PLAIN, on ? G_PTR " " : "  ");
+            pell(&p, on ? S_ACCENT_BOLD : S_FAINT, pg->side[k], p.room - p.used);
+        }
+        pspace(&p, p.room);
+        sty(w, S_PLAIN);
+        wapp(w, " ");
+        sty(w, S_FAINT);
+        wapp(w, G_V);
+        wapp(w, "\x1b[0m");
+    }
+}
+
 void tui_render_page(int rows, int cols, const tui_page_t *page, const tui_bar_t *bar, int color_enabled) {
     clamp_size(&rows, &cols);
     g_color = color_enabled;
@@ -2057,11 +2101,10 @@ void tui_render_page(int rows, int cols, const tui_page_t *page, const tui_bar_t
     int navw = cols / 5;
     if (navw < 20) navw = 20;
     if (navw > 26) navw = 26;
-    if (page->nav_w) navw = page->nav_w;
     if (!boxed || n_nav == 0 || cols - navw < 56) navw = 0;
 
     begin_frame(&w);
-    if (navw) draw_nav(&w, (rect_t){ 1, 1, rows - 1, navw }, nav, n_nav, nav_sel, page->nav_title);
+    if (navw) draw_nav(&w, (rect_t){ 1, 1, rows - 1, navw }, nav, n_nav, nav_sel);
 
     // Shares the nav's right side, like the chat shares the sidebar's.
     int x = navw > 0 ? navw : 1;
@@ -2115,7 +2158,9 @@ void tui_render_page(int rows, int cols, const tui_page_t *page, const tui_bar_t
     if (list > end - row) list = end - row;
     int shown = list - (hl + ul ? hl + ul + 1 : 0);
     if (shown < 0) shown = 0;
-    draw_list(&w, row, left, iw, view, shown, page);
+    int sidew = page->side ? side_width(iw) : 0;
+    if (sidew) draw_side(&w, row, left, sidew, shown, page);
+    draw_list(&w, row, left + sidew, iw - sidew, view, shown, page);
     row += shown;
     if (hl + ul && row < end) {
         span_t about;
