@@ -108,8 +108,9 @@ static const char *USAGE =
     "Settings and the signing key last until chat exits. :install saves them, after saying\n"
     "what that leaves on disk. Both go in ~/.config/chat (%LOCALAPPDATA%\\chat on Windows),\n"
     "sealed with one passphrase that chat asks for on startup (or reads from\n"
-    "CHAT_INSTALL_PASSWORD), and settings are saved again whenever one changes. Options\n"
-    "given here override what's saved, for that run only. :uninstall deletes it.\n"
+    "CHAT_INSTALL_PASSWORD), and settings are saved again whenever one changes, unless\n"
+    ":set autosave off (then :save saves them). Options given here override what's saved,\n"
+    "for that run only. :uninstall deletes it.\n"
     ":install NAME makes another save, in ~/.config/chat/saves/NAME, with its own passphrase.\n"
     "With more than one save, chat lists them on startup to pick the one to open.\n"
     "\n"
@@ -297,6 +298,7 @@ typedef struct {
     char tor_path[512];
     uint64_t file_cap;   // 0: the default
     int fast_files;
+    int autosave;   // what's changed is saved as it changes, while installed
     uint8_t color[3];
     identity_source_t identity_source;
     identity_keypair_t identity;
@@ -1142,7 +1144,7 @@ typedef enum {
     SET_ROUTING, SET_DHT4, SET_DHT6, SET_PORTMAP, SET_LAN,
     SET_TOR_LAUNCH, SET_TOR_PATH, SET_TOR_SOCKS, SET_TOR_CONTROL, SET_TOR_PASSWORD,
     SET_NOSTR, SET_RELAYS,
-    SET_NICK, SET_COLOUR, SET_SIGN, SET_AGE_RECIPIENT, SET_PGP_PUBKEY,
+    SET_NICK, SET_COLOUR, SET_SIGN, SET_AGE_RECIPIENT, SET_PGP_PUBKEY, SET_AUTOSAVE,
     SET_VERIFY, SET_FILE_LIMIT, SET_FAST_FILES, SET_NOTIFY, SET_PREVIEW, SET_NET, SET_PORT
 } setting_id_t;
 
@@ -1210,6 +1212,10 @@ static const setting_def_t SETTINGS[] = {
     { SET_PGP_PUBKEY, NULL, "pgpkey", "PGP public key", K_ACTION, NULL,
       "The public half of the PGP key made here, shown by its fingerprint, for others to gpg --import. Enter "
       "copies it to the clipboard. It's in the console too." },
+    { SET_AUTOSAVE, NULL, "autosave", "Autosave", K_TOGGLE, "on|off",
+      "Once chat is installed: on saves a setting you change, and a key you verify or forget, as you change it. "
+      "off keeps changes until chat exits, unless :save saves them. The signing key is only saved by :save or "
+      ":install either way, so a key you're trying out isn't kept by accident." },
     { SET_VERIFY, "Chat", "verify", "Compare verify codes", K_CHOICE, "required|optional",
       "Anyone with a session's id and password could sit between two members and read what they say. When a peer "
       "joins, chat shows a code to compare with them over another channel. It only matches on both ends if "
@@ -1306,6 +1312,7 @@ static int setting_options(setting_id_t id, const char *const **names, int *n) {
         case SET_NOSTR:      *names = NOSTR_NAMES; *n = 3; return r->nostr;
         case SET_VERIFY:     *names = VERIFY_NAMES; return g_app.verify_optional != 0;
         case SET_FAST_FILES: return g_app.fast_files != 0;
+        case SET_AUTOSAVE:   return g_app.autosave != 0;
         case SET_TOR_LAUNCH: *names = TOR_LAUNCH_NAMES; *n = 3; return g_app.tor_launch;
         case SET_NOTIFY:     *names = NOTIFY_NAMES; *n = 3; return (int)g_app.notify_mode;
         case SET_PREVIEW:    *names = PREVIEW_NAMES; *n = 3; return (int)g_app.notify_preview;
@@ -1437,10 +1444,11 @@ static int setting_text(setting_id_t id, char *out, size_t cap) {
 
 // A row is only saved while it isn't the default, so if a later version changes a default you
 // still get it. Once installed, a row changed in chat is saved, but one set by a command line
-// option isn't.
+// option isn't. With autosave off, a changed row waits in g_unsaved_rows for autosave or :save.
 static char g_setting_defaults[N_SETTINGS][ROW_TEXT_MAX];
 static char g_saved_rows[N_SETTINGS][ROW_TEXT_MAX];
 static char g_seen_rows[N_SETTINGS][ROW_TEXT_MAX];
+static int g_unsaved_rows[N_SETTINGS];
 
 static void note_setting_defaults(void) {
     for (int i = 0; i < N_SETTINGS; i++)
@@ -1451,6 +1459,7 @@ static void note_setting_defaults(void) {
 static void note_settings_seen(void) {
     for (int i = 0; i < N_SETTINGS; i++)
         if (!setting_text(SETTINGS[i].id, g_seen_rows[i], sizeof g_seen_rows[i])) g_seen_rows[i][0] = '\0';
+    memset(g_unsaved_rows, 0, sizeof g_unsaved_rows);
 }
 
 static void row_table(int i, char *out, size_t cap) {
@@ -1505,18 +1514,27 @@ static int settings_text(char *out, size_t cap) {
     return p < cap ? 0 : -1;
 }
 
-// Checked before every frame, so any change to a row (from the page or :set) is picked up.
+// Checked before every frame, so any change to a row (from the page or :set) is picked up. The
+// autosave row itself is always saved, so turning it off lasts.
 static void keep_settings_saved(void) {
     if (!g_app.installed) return;
-    int changed = 0;
+    int changed = 0, held = 0;
     for (int i = 0; i < N_SETTINGS; i++) {
         char v[ROW_TEXT_MAX];
-        if (!setting_text(SETTINGS[i].id, v, sizeof v) || strcmp(v, g_seen_rows[i]) == 0) continue;
-        copy_str(g_seen_rows[i], v, sizeof g_seen_rows[i]);
-        if (strcmp(v, g_saved_rows[i]) == 0) continue;
+        if (!setting_text(SETTINGS[i].id, v, sizeof v)) continue;
+        int fresh = strcmp(v, g_seen_rows[i]) != 0;
+        if (fresh) {
+            copy_str(g_seen_rows[i], v, sizeof g_seen_rows[i]);
+            g_unsaved_rows[i] = strcmp(v, g_saved_rows[i]) != 0;
+        }
+        if (!g_unsaved_rows[i]) continue;
+        if (!g_app.autosave && SETTINGS[i].id != SET_AUTOSAVE) { held |= fresh; continue; }
         copy_str(g_saved_rows[i], v, sizeof g_saved_rows[i]);
+        g_unsaved_rows[i] = 0;
         changed = 1;
     }
+    size_t n = strlen(g_app.message);
+    if (held && n > 0) snprintf(g_app.message + n, sizeof g_app.message - n, " \xc2\xb7 not saved (autosave is off)");
     if (!changed) return;
     static char text[INSTALL_SETTINGS_MAX];
     if (settings_text(text, sizeof text) != 0 || install_write_settings(text) != 0) {
@@ -1525,8 +1543,8 @@ static void keep_settings_saved(void) {
         note("couldn't save that in %s/settings - it lasts until chat exits", where);
         return;
     }
-    size_t n = strlen(g_app.message);
-    if (n > 0) snprintf(g_app.message + n, sizeof g_app.message - n, " \xc2\xb7 saved");
+    n = strlen(g_app.message);
+    if (n > 0 && !held) snprintf(g_app.message + n, sizeof g_app.message - n, " \xc2\xb7 saved");
 }
 
 // Pushes the routing settings to the open sessions, where the toggles take effect immediately. On
@@ -1579,6 +1597,8 @@ static void set_colour_all(void) {
 }
 
 // Sets a toggle or choice row to its i-th value, wherever it applies.
+static void autosave_changed(void);
+
 static void setting_choose(setting_id_t id, int i) {
     routing_t *r = &g_app.route;
     switch (id) {
@@ -1617,6 +1637,10 @@ static void setting_choose(setting_id_t id, int i) {
             g_app.fast_files = i;
             for (int s = 0; s < MAX_SESSIONS; s++)
                 if (takes_settings(s)) chat_set_file_options(&g_app.sessions[s].engine, g_app.file_cap, i);
+            break;
+        case SET_AUTOSAVE:
+            g_app.autosave = i;
+            autosave_changed();
             break;
         default: return;
     }
@@ -1961,7 +1985,7 @@ static void identity_chosen(void) {
 // Whether the key in use is the one saved, once a save is open.
 static void say_key_saved_state(void) {
     if (g_app.installed && g_app.identity_source != IDENT_NONE && !key_in_use_saved())
-        push_log("* this signing key isn't saved: :install %s with your settings' passphrase%s",
+        push_log("* this signing key isn't saved: :save %s with your settings' passphrase%s",
                  g_app.key_origin == KEY_FILE && g_app.key_path[0] ? "saves its file's path, sealed" : "seals it",
                  install_has_key(install_current()) ? ", in place of the saved one" : "");
     else if (g_app.installed && g_app.identity_source == IDENT_NONE && install_has_key(install_current()))
@@ -2520,13 +2544,14 @@ static void render_settings(int rows_n, int cols_n, const char *clock, const tui
     if (!d) {
         if (g_app.onboarding)
             snprintf(help, sizeof help, "Go on to your sessions: Ctrl+N creates one, Ctrl+J joins one. Everything here "
-                     "applies at once%s", g_app.installed
+                     "applies at once%s", g_app.installed && g_app.autosave
                      ? ", and what you change is saved where :install put it."
+                     : g_app.installed ? ", and with autosave off, lasts until chat exits unless you :save."
                      : g_app.locked ? " and isn't saved: what :install saved stays sealed until :install opens it."
                      : " and lasts until chat exits. It's only written to disk if you :install.");
         else
             snprintf(help, sizeof help, "Back to your sessions. Everything here already applies%s",
-                     g_app.installed ? ", and is saved." : ".");
+                     !g_app.installed ? "." : g_app.autosave ? ", and is saved." : ". Autosave is off: :save saves it.");
         copy_str(usage, "ctrl+s or :set brings this page back", sizeof usage);
     } else {
         // The row cuts off a recipient on a narrow screen, and not every terminal supports OSC 52.
@@ -3282,7 +3307,14 @@ static const char *open_error(int rc) {
 }
 
 // The verified keys (core/trust.h) are saved each time they change, while what :install saved is
-// open and its verified file could be read.
+// open, its verified file could be read and autosave is on. trust_saved() says whether they are.
+static int g_verified_ok;
+
+static void verified_saving(int ok) {
+    g_verified_ok = ok;
+    trust_set_saved(ok && g_app.autosave);
+}
+
 static void save_verified(void) {
     if (!trust_saved() || !g_app.installed || g_app.locked) return;
     static char text[TRUST_TEXT_MAX];
@@ -3290,6 +3322,12 @@ static void save_verified(void) {
     char where[900] = "";
     install_where(install_current(), where, sizeof where);
     push_log("* couldn't save the verified keys in %s/verified - they last until chat exits", where);
+}
+
+// Turned on, it saves the keys verified or forgotten meanwhile. The rows are keep_settings_saved's.
+static void autosave_changed(void) {
+    verified_saving(g_verified_ok);
+    if (g_app.autosave) save_verified();
 }
 
 // Adds the saved verified keys to the ones in use. 0, or a PASS_ code.
@@ -3323,7 +3361,7 @@ static void use_opened_save(char (*loaded)[ROW_TEXT_MAX]) {
     for (int i = 0; loaded && i < N_SETTINGS; i++)
         if (!setting_text(SETTINGS[i].id, loaded[i], ROW_TEXT_MAX)) loaded[i][0] = '\0';
     // A damaged file isn't overwritten by the keys verified this run.
-    trust_set_saved(load_saved_verified() == 0);
+    verified_saving(load_saved_verified() == 0);
     reapply_options();
     note_settings_seen();
     g_app.saved_key_known = 0;
@@ -3426,10 +3464,13 @@ static int key_in_use_saved(void) {
 static uint8_t g_uninstalled_keys[TRUST_MAX][ID_SIGN_PUB_LEN];
 static int g_n_uninstalled_keys;
 
+static int is_current_save(const char *name);
+
 // A new passphrase first, since Argon2id is the slow part and can fail if there isn't enough
 // memory. Then the settings, which are always there, then a key not saved yet, sealed under the
 // same passphrase.
 static void finish_install(const char *passphrase) {
+    int resave = !passphrase && g_app.installed && is_current_save(g_app.save_target);
     char where[900] = "";
     install_where(g_app.save_target, where, sizeof where);
     if (passphrase) {
@@ -3455,7 +3496,7 @@ static void finish_install(const char *passphrase) {
     g_n_uninstalled_keys = 0;
     static char vtext[TRUST_TEXT_MAX];
     int verified = trust_text(vtext, sizeof vtext) == 0 && install_write_verified(vtext) == 0;
-    trust_set_saved(verified);
+    verified_saving(verified);
     if (!verified) push_log("* couldn't write the verified keys to %s - they last until chat exits", where);
     int key = g_app.identity_source != IDENT_NONE && !key_in_use_saved();
     int path = key && key_saved_as_path();
@@ -3469,9 +3510,9 @@ static void finish_install(const char *passphrase) {
         copy_str(g_app.saved_key_path, path ? g_app.key_path : "", sizeof g_app.saved_key_path);
         g_app.saved_key_known = 1;
     }
-    push_log("* installed: your settings%s are in %s, sealed, for next time. :uninstall deletes them",
-             path ? " and your signing key's path" : key ? " and signing key" : "", where);
-    note("installed in %s", where);
+    push_log("* %s: your settings%s are in %s, sealed, for next time. :uninstall deletes them",
+             resave ? "saved" : "installed", path ? " and your signing key's path" : key ? " and signing key" : "", where);
+    note("%s in %s", resave ? "saved" : "installed", where);
 }
 
 // If installed, it saves under the passphrase it has. Otherwise existing files need their own
@@ -3483,8 +3524,11 @@ static int is_current_save(const char *name) {
 
 static int save_exists(const char *name) { return install_has_settings(name) || install_has_key(name); }
 
+// :install for the save that's open and installed already only saves what's in use to it.
+static int install_resaves(void) { return g_app.installed && is_current_save(g_app.save_target); }
+
 static void install_confirmed(void) {
-    if (g_app.installed && is_current_save(g_app.save_target)) {
+    if (install_resaves()) {
         end_prompt();
         finish_install(NULL);
         return;
@@ -3496,7 +3540,7 @@ static void install_confirmed(void) {
 static void cancel_install(void) {
     crypto_wipe(g_app.install_pass, sizeof g_app.install_pass);
     end_prompt();
-    note("not installed - nothing was written");
+    note(install_resaves() ? "not saved - nothing was written" : "not installed - nothing was written");
 }
 
 static void to_install_mode(app_mode_t mode) {
@@ -3678,8 +3722,9 @@ static void use_save_now(void) {
                  "(:verified lists them)", dropped, dropped == 1 ? "" : "s", dropped == 1 ? "is" : "are");
     if (g_app.identity_source != src || crypto_equal(pub, g_app.identity.pub, ID_SIGN_PUB_LEN) != 0) identity_chosen();
     else say_key_saved_state();
-    push_log("* opened the save %s in %s: its settings are in use%s, and changes are saved to it", shown, where,
-             keep ? ", with the ones changed this run that it doesn't have" : "");
+    push_log("* opened the save %s in %s: its settings are in use%s, and %s", shown, where,
+             keep ? ", with the ones changed this run that it doesn't have" : "",
+             g_app.autosave ? "changes are saved to it" : "autosave is off, so :save saves changes to it");
     note("opened the save %s", shown);
 }
 
@@ -3723,7 +3768,7 @@ static void uninstall_confirmed(void) {
         return;
     }
     g_app.installed = g_app.locked = 0;
-    trust_set_saved(0);
+    verified_saving(0);
     g_n_uninstalled_keys = 0;
     for (int i = 0; i < trust_count(); i++)
         memcpy(g_uninstalled_keys[g_n_uninstalled_keys++], trust_at(i)->pub, ID_SIGN_PUB_LEN);
@@ -3928,6 +3973,12 @@ static cmd_result_t app_install(void *ctx, const char *arg) {
     return CMD_OK;
 }
 
+// The same as :install, for the save in use.
+static cmd_result_t app_save(void *ctx, const char *arg) {
+    (void)arg;
+    return app_install(ctx, NULL);
+}
+
 static cmd_result_t app_uninstall(void *ctx, const char *arg) {
     (void)ctx;
     if (pick_save_target(arg) != 0) return CMD_OK;
@@ -3951,6 +4002,7 @@ static const command_t APP_COMMANDS[] = {
     { "copyid",  NULL,                  NULL,     "copy this session's id to the clipboard",         app_copyid },
     { "update",  NULL,                  NULL,     "install the latest release from GitHub",          app_update },
     { "install", NULL,                  "[NAME]", "save your settings and signing key on this computer (NAME: as a save of that name)", app_install },
+    { "save",    NULL,                  NULL,     "save what's in use now to the open save, after asking (or :install it)", app_save },
     { "uninstall", NULL,                "[NAME]", "delete what :install saved (NAME: that save)",    app_uninstall },
     { "changelog", "news",              NULL,     "show changelog",                    app_changelog },
     { "show",    NULL,                  "N [anyway]", "show picture N in the chat, where it was offered", app_show },
@@ -4138,17 +4190,62 @@ static const char *complete_mention(const char *typed) {
     return NULL;
 }
 
-// Whether word is a command whose argument is a peer's nick (its args start with NICK).
-static int takes_nick(const char *word) {
+static const command_t *find_command(const char *word) {
     const command_t *c = cmd_find(APP_COMMANDS, word);
-    if (!c) c = cmd_find(CHAT_COMMANDS, word);
-    return c && c->args && strncmp(c->args, "NICK", 4) == 0;
+    return c ? c : cmd_find(CHAT_COMMANDS, word);
 }
 
-// The nth online peer whose nick starts with typed, ignoring case. An exact match comes first, so
+// What commands' arguments can be, in order, for the menu over the COMMAND line.
+enum { A_NICK = 1, A_WORD, A_FILE, A_PATH, A_FOLDER, A_SAVE, A_TRUSTED, A_KIND = 0xf };
+#define A_TYPED 0x10  // Enter fills it in only once some of it is typed
+#define A_SKIP  0x20  // A_TYPED, and it can be left out with the next one in its place, so that's listed too
+#define A_PICK  0x40  // Enter never fills it in: it's typed in full or picked in the menu
+
+static const struct { const char *cmd; int args[4]; } COMMAND_ARGS[] = {
+    { "verify",    { A_NICK, A_WORD | A_TYPED } },
+    { "verified",  { A_WORD | A_TYPED, A_TRUSTED | A_PICK } },
+    { "send",      { A_PATH | A_PICK } },
+    { "download",  { A_FILE | A_SKIP, A_WORD | A_SKIP, A_FOLDER | A_PICK } },
+    { "cancel",    { A_FILE | A_TYPED } },
+    { "show",      { A_FILE, A_WORD | A_TYPED } },
+    { "hide",      { A_FILE } },
+    { "saveto",    { A_FILE, A_WORD | A_TYPED } },
+    { "install",   { A_SAVE | A_TYPED } },
+    { "uninstall", { A_SAVE | A_TYPED } },
+};
+
+static const struct { const char *cmd, *word, *help; } ARG_WORDS[] = {
+    { "verify",   "ok",     "their code is the same - what you send reaches them" },
+    { "verify",   "no",     "their code differs - nothing you send reaches them" },
+    { "verified", "forget", "remove a verified key" },
+    { "show",     "anyway", "even if it's over your file size limit" },
+    { "saveto",   "anyway", "even if it's over your file size limit" },
+    { "download", "anyway", "even if it's over your file size limit" },
+};
+
+// Bumped when the menu is listed from the start, so the folders and saves it reads are read again.
+static unsigned g_menu_gen;
+
+typedef struct {
+    const command_t *c;
+    const char *typed;
+    int *nth;
+    tui_suggestion_t *out;
+} arg_menu_t;
+
+// The next item in the menu: the line up to at, then text. 1 if it's the one asked for, with out
+// filled in but for help. One the line can't hold isn't listed.
+static int arg_item(arg_menu_t *m, const char *at, const char *text, const char *name, const char *group) {
+    int n = snprintf(m->out->line, sizeof m->out->line, "%.*s%s", (int)(at - m->typed), m->typed, text);
+    if (n < 0 || (size_t)n >= sizeof m->out->line || (*m->nth)-- > 0) return 0;
+    copy_str(m->out->name, name, sizeof m->out->name);
+    copy_str(m->out->group, group, sizeof m->out->group);
+    return 1;
+}
+
+// The online peers whose nick starts with typed, ignoring case. An exact match comes first, so
 // Enter on "id" doesn't run it as "ida". The rest are sorted by nick.
-static const peer_t *nth_peer(const chat_t *e, const char *typed, int nth) {
-    const peer_t *m[MAX_PEERS + MAX_PENDING_PEERS];
+static int match_peers(const chat_t *e, const char *typed, const peer_t **m) {
     size_t tn = strlen(typed);
     int n = 0;
     for (int i = 0; i < MAX_PEERS + MAX_PENDING_PEERS; i++) {
@@ -4162,30 +4259,192 @@ static const peer_t *nth_peer(const chat_t *e, const char *typed, int nth) {
         }
         m[j] = p;
     }
-    return nth < n ? m[nth] : NULL;
+    return n;
+}
+
+static int arg_nicks(arg_menu_t *m, const char *rest) {
+    chat_t *e = peer_engine();
+    const peer_t *p[MAX_PEERS + MAX_PENDING_PEERS];
+    int n = e ? match_peers(e, rest, p) : 0;
+    for (int i = 0; i < n; i++) {
+        char name[CHAT_NAME_LEN]; chat_peer_name(e, p[i], name);
+        if (!arg_item(m, rest, p[i]->nick, name, "peers")) continue;
+        snprintf(m->out->help, sizeof m->out->help, "%s%s",
+                 p[i]->identity_source == IDENT_NONE ? "unsigned" : chat_verify_label(p[i]->identity_state),
+                 p[i]->build_state == BUILD_MODIFIED ? " \xc2\xb7 modified client" : "");
+        return 1;
+    }
+    return 0;
+}
+
+static int arg_words(arg_menu_t *m, const char *rest) {
+    for (size_t i = 0; i < sizeof ARG_WORDS / sizeof *ARG_WORDS; i++) {
+        const char *w = ARG_WORDS[i].word;
+        if (strcmp(ARG_WORDS[i].cmd, m->c->name) != 0 || strncmp(w, rest, strlen(rest)) != 0) continue;
+        if (!arg_item(m, rest, w, w, m->c->name)) continue;
+        copy_str(m->out->help, ARG_WORDS[i].help, sizeof m->out->help);
+        return 1;
+    }
+    return 0;
+}
+
+// Whether file f is one the command can take.
+static int file_fits(const command_t *c, const file_entry_t *f) {
+    pic_t *p = pic_find(g_app.selected, f->num);
+    if (strcmp(c->name, "show") == 0) return f->image && !f->mine && !(p && p->shown);
+    if (strcmp(c->name, "hide") == 0) return p && p->shown;
+    if (strcmp(c->name, "cancel") == 0) return f->mine ? f->fp != NULL : f->dl == DL_ACTIVE || f->dl == DL_QUEUED;
+    return !f->mine;
+}
+
+// Files by number: the one with the number typed first, then the newest.
+static int arg_files(arg_menu_t *m, const char *rest) {
+    chat_t *e = peer_engine();
+    const file_entry_t *l[FILE_OFFERS_MAX];
+    size_t rn = strlen(rest);
+    int n = 0, exact = e && rn ? atoi(rest) : 0;
+    for (int i = 0; e && i < FILE_OFFERS_MAX; i++) {
+        const file_entry_t *f = &e->files[i];
+        char ns[12]; snprintf(ns, sizeof ns, "%d", f->num);
+        if (!f->used || strncmp(ns, rest, rn) != 0 || !file_fits(m->c, f)) continue;
+        int j = n++;
+        for (; j > 0 && l[j - 1]->num != exact && (f->num == exact || l[j - 1]->num < f->num); j--) l[j] = l[j - 1];
+        l[j] = f;
+    }
+    for (int i = 0; i < n; i++) {
+        const file_entry_t *f = l[i];
+        char ns[12]; snprintf(ns, sizeof ns, "%d", f->num);
+        if (!arg_item(m, rest, ns, ns, "files")) continue;
+        char sz[32]; file_format_size(f->size, sz, sizeof sz);
+        snprintf(m->out->help, sizeof m->out->help, "%s \xc2\xb7 %s%s", f->name, sz,
+                 f->mine ? " \xc2\xb7 yours" : f->dl == DL_ACTIVE ? " \xc2\xb7 fetching" : f->dl == DL_QUEUED ? " \xc2\xb7 queued"
+                 : f->saved[0] ? " \xc2\xb7 saved" : "");
+        return 1;
+    }
+    return 0;
+}
+
+// The files and folders (or only folders) in the folder typed so far, as typed_path reads it.
+// Hidden ones once a '.' is typed.
+static int arg_paths(arg_menu_t *m, const char *rest, int folders) {
+    static browser_t dir;
+    static unsigned gen;
+    const char *base = strrchr(rest, '/');
+    base = base ? base + 1 : rest;
+    char path[sizeof dir.path];
+    const char *home = platform_home_dir();
+    if (base == rest) copy_str(path, ".", sizeof path);
+    else if (rest[0] == '~' && rest[1] == '/' && home) snprintf(path, sizeof path, "%s%.*s", home, (int)(base - rest - 1), rest + 1);
+    else snprintf(path, sizeof path, "%.*s", (int)(base - rest), rest);
+    if (gen != g_menu_gen || strcmp(dir.path, path) != 0) {
+        gen = g_menu_gen;
+        if (browser_load(&dir, path) != 0) { dir.n_items = 0; copy_str(dir.path, path, sizeof dir.path); }
+    }
+    size_t bn = strlen(base);
+    for (int i = 0; i < dir.n_items; i++) {
+        const dir_entry_t *d = &dir.items[i];
+        if ((folders && !d->is_dir) || (d->name[0] == '.' && base[0] != '.') || strncmp(d->name, base, bn) != 0) continue;
+        if (!arg_item(m, base, d->name, d->name, folders ? "folders" : "your files")) continue;
+        copy_str(m->out->help, d->is_dir ? "folder" : "", sizeof m->out->help);
+        return 1;
+    }
+    return 0;
+}
+
+static int arg_saves(arg_menu_t *m, const char *rest) {
+    static install_save_t saves[INSTALL_SAVES_MAX];
+    static int n;
+    static unsigned gen;
+    if (gen != g_menu_gen) { gen = g_menu_gen; n = install_list(saves, INSTALL_SAVES_MAX); }
+    for (int i = 0; i < n; i++) {
+        const char *name = install_shown_name(saves[i].name);
+        if (strncmp(name, rest, strlen(rest)) != 0 || !arg_item(m, rest, name, name, "saves")) continue;
+        snprintf(m->out->help, sizeof m->out->help, "saved %s%s", saves[i].modified,
+                 g_app.installed && is_current_save(saves[i].name) ? " \xc2\xb7 open" : "");
+        return 1;
+    }
+    return 0;
+}
+
+// The nicks of the verified keys, each once, then "all".
+static int arg_trusted(arg_menu_t *m, const char *rest) {
+    int n = trust_count();
+    for (int i = 0; i < n; i++) {
+        const char *nick = trust_at(i)->nick;
+        int keys = 0, seen = 0;
+        for (int j = 0; j < n; j++) {
+            if (strcmp(trust_at(j)->nick, nick) != 0) continue;
+            keys++;
+            seen |= j < i;
+        }
+        if (seen || !nick_has_prefix(nick, rest) || !arg_item(m, rest, nick, nick, "verified")) continue;
+        snprintf(m->out->help, sizeof m->out->help, "%d verified key%s", keys, keys == 1 ? "" : "s");
+        return 1;
+    }
+    if (n == 0 || strncmp("all", rest, strlen(rest)) != 0 || !arg_item(m, rest, "all", "all", "verified")) return 0;
+    copy_str(m->out->help, "every verified key", sizeof m->out->help);
+    return 1;
+}
+
+// Where the argument after a whole one of this kind at the start of rest begins, past its space, or
+// NULL. Nicks can have spaces, so it's after the longest online one there. Paths, saves and
+// verified nicks take the rest of the line.
+static const char *arg_end(const command_t *c, int kind, const char *rest) {
+    size_t n = 0;
+    if (kind == A_FILE) n = strspn(rest, "0123456789");
+    else if (kind == A_WORD) {
+        for (size_t i = 0; i < sizeof ARG_WORDS / sizeof *ARG_WORDS; i++) {
+            size_t wl = strlen(ARG_WORDS[i].word);
+            if (strcmp(ARG_WORDS[i].cmd, c->name) == 0 && strncmp(rest, ARG_WORDS[i].word, wl) == 0) n = wl;
+        }
+    } else if (kind == A_NICK) {
+        chat_t *e = peer_engine();
+        for (int i = 0; e && i < MAX_PEERS + MAX_PENDING_PEERS; i++) {
+            const peer_t *p = &e->peers[i];
+            size_t pl = strlen(p->nick);
+            if (p->used && p->ok && pl > n && nick_has_prefix(rest, p->nick) && rest[pl] == ' ') n = pl;
+        }
+    }
+    return n > 0 && rest[n] == ' ' ? rest + n + 1 : NULL;
+}
+
+// The menu for args[0], with rest typed for it: what it can be, then what can follow once rest
+// holds a whole one, then (if it can be left out) what can come in its place.
+static int arg_suggest(arg_menu_t *m, const int *args, const char *rest) {
+    int a = args[0], k = a & A_KIND, found = 0;
+    if (!a) return 0;
+    switch (k) {
+        case A_NICK: found = arg_nicks(m, rest); break;
+        case A_WORD: found = arg_words(m, rest); break;
+        case A_FILE: found = arg_files(m, rest); break;
+        case A_PATH: case A_FOLDER: found = arg_paths(m, rest, k == A_FOLDER); break;
+        case A_SAVE: found = arg_saves(m, rest); break;
+        case A_TRUSTED: found = arg_trusted(m, rest); break;
+    }
+    if (found) {
+        m->out->no_default = (a & A_PICK) || ((a & (A_TYPED | A_SKIP)) && !*rest);
+        return 1;
+    }
+    const char *next = arg_end(m->c, k, rest);
+    if (next && arg_suggest(m, args + 1, next)) return 1;
+    return (a & A_SKIP) && arg_suggest(m, args + 1, rest);
 }
 
 // The menu above the COMMAND line: commands by name. After "set ", the settings with their current
-// values. After "set NAME ", the values it takes. After a command that takes a NICK, the online peers.
+// values. After "set NAME ", the values it takes. After other commands, what their arguments can be.
 static int suggest_command(const char *typed, int nth, tui_suggestion_t *out) {
     memset(out, 0, sizeof *out);
+    if (nth == 0) g_menu_gen++;
     size_t wn = strcspn(typed, " ");
     char word[CMD_WORD_MAX];
     if (typed[wn] == ' ' && wn < sizeof word) {
         memcpy(word, typed, wn);
         word[wn] = '\0';
-        chat_t *e = takes_nick(word) ? peer_engine() : NULL;
-        if (e) {
-            const peer_t *p = nth_peer(e, typed + wn + 1, nth);
-            if (!p) return 0;
-            snprintf(out->line, sizeof out->line, "%s %s", word, p->nick);
-            char name[CHAT_NAME_LEN]; chat_peer_name(e, p, name);
-            copy_str(out->name, name, sizeof out->name);
-            snprintf(out->help, sizeof out->help, "%s%s",
-                     p->identity_source == IDENT_NONE ? "unsigned" : chat_verify_label(p->identity_state),
-                     p->build_state == BUILD_MODIFIED ? " \xc2\xb7 modified client" : "");
-            copy_str(out->group, "peers", sizeof out->group);
-            return 1;
+        const command_t *c = find_command(word);
+        for (size_t i = 0; c && i < sizeof COMMAND_ARGS / sizeof *COMMAND_ARGS; i++) {
+            if (strcmp(COMMAND_ARGS[i].cmd, c->name) != 0) continue;
+            arg_menu_t m = { c, typed, &nth, out };
+            return arg_suggest(&m, COMMAND_ARGS[i].args, typed + wn + 1);
         }
     }
     if (strncmp(typed, "set ", 4) == 0) {
@@ -4303,9 +4562,7 @@ static void submit_chat_line(void) {
         // as the menu shows.
         tui_suggestion_t s;
         size_t n = strlen(line);
-        if ((n > 0 || input->menu_sel > 0) && tui_input_suggestion(input, &s) && strlen(s.line) > n
-            && strncmp(s.line, line, n) == 0)
-            copy_str(line, s.line, sizeof line);
+        if ((n > 0 || input->menu_sel > 0) && tui_input_completion(input, &s)) copy_str(line, s.line, sizeof line);
         // If opened by typing '/', a line that turns out not to be a command is the start of a message.
         // It goes back in the input as text, for Enter to send.
         char word[CMD_WORD_MAX];
@@ -4593,7 +4850,7 @@ static int add_para(tui_para_t *p, int n, tui_para_kind_t kind, const char *text
 }
 
 static int install_paras(tui_para_t *p) {
-    static char settings[1200], key[1400], intro[600], verified[1200];
+    static char settings[1200], key[1400], intro[600], verified[1200], outro[400];
     char where[900] = "";
     const char *target = g_app.save_target;
     install_where(target, where, sizeof where);
@@ -4621,7 +4878,10 @@ static int install_paras(tui_para_t *p) {
         snprintf(key, sizeof key, "`%s/key`: your signing key.%s", where, saved ? " It replaces the key saved there now." : "");
     int others = 0;
     for (int i = 0; i < g_app.n_saves; i++) others += !exists || strcmp(g_app.saves[i].name, target) != 0;
-    if (exists || open)
+    if (open)
+        snprintf(intro, sizeof intro, "`%s` is already installed, in `%s`, and open. Save what's in use now to it, in "
+                 "place of what's saved there:", install_shown_name(target), where);
+    else if (exists)
         snprintf(intro, sizeof intro, "chat is installed here%s%s%s: this saves what's in use now in place of what's "
                  "saved. **The files are a trail**: they tell anyone who can read this disk (an admin, malware, a "
                  "backup, forensics) that chat is used here.", target[0] ? " as `" : "", target, target[0] ? "`" : "");
@@ -4648,10 +4908,13 @@ static int install_paras(tui_para_t *p) {
         : "It's all sealed (Argon2id, XChaCha20-Poly1305) with one passphrase you choose next, which chat asks for "
           "when it starts.");
     n = add_para(p, n, TUI_P_BLANK, "");
-    return add_para(p, n, TUI_P_TEXT,
-        "Settings you change from then on are saved as you change them. Never saved: sessions, their passwords, "
-        "messages or files. `:uninstall` deletes it all - but a disk and its backups can keep traces of "
-        "deleted files.");
+    snprintf(outro, sizeof outro, "%s Never saved: sessions, their passwords, messages or files. `:uninstall` deletes "
+             "it all - but a disk and its backups can keep traces of deleted files.", g_app.autosave
+             ? "Settings and verified keys you change from then on are saved as you change them (`:set autosave off` "
+               "stops that)."
+             : "Autosave is off: what you change from then on lasts until you `:save` again (`:set autosave on` saves "
+               "it as you go).");
+    return add_para(p, n, TUI_P_TEXT, outro);
 }
 
 static int uninstall_paras(tui_para_t *p) {
@@ -4749,10 +5012,10 @@ static const tui_dialog_t *current_dialog(void) {
             break;
         }
         case MODE_INSTALL:
-            d.title = "INSTALL";
+            d.title = install_resaves() ? "SAVE" : "INSTALL";
             d.n_text = install_paras(paras);
             d.input = NULL;
-            d.keys = "y install \xc2\xb7 n cancel";
+            d.keys = install_resaves() ? "y save \xc2\xb7 n cancel" : "y install \xc2\xb7 n cancel";
             break;
         case MODE_INSTALL_PASS:
         case MODE_INSTALL_PASS2: {
@@ -4970,7 +5233,8 @@ static tui_bar_t current_bar(void) {
                    : g_app.mode == MODE_JOIN_ID || g_app.mode == MODE_JOIN_PASSWORD ? "JOIN"
                    : g_app.mode == MODE_UNLOCK || g_app.mode == MODE_SAVES ? "UNLOCK"
                    : g_app.mode == MODE_UNINSTALL ? "UNINSTALL"
-                   : g_app.mode == MODE_UPDATE ? "UPDATE" : "INSTALL";
+                   : g_app.mode == MODE_UPDATE ? "UPDATE"
+                   : g_app.mode == MODE_INSTALL && install_resaves() ? "SAVE" : "INSTALL";
             b.tone = TUI_TONE_PROMPT;
             break;
         default:
@@ -5535,6 +5799,7 @@ int main(int argc, char **argv) {
     g_app.nostr_flag = -1;
     g_app.notify_mode = NOTIFY_MENTIONS;
     g_app.verify_optional = 1;
+    g_app.autosave = 1;
     g_app.show_sidebar = g_app.show_console = g_app.show_chat = 1;
     note_setting_defaults();
     trust_on_change(save_verified);

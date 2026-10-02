@@ -237,8 +237,8 @@ anywhere directly, and never looks up an `.onion` name or a relay's name through
 Connecting takes a minute or two while the onion services get published and found.
 
 Settings only last until chat exits. Like everything else, they aren't written to disk unless
-you ask. `:install` saves them, and after that every change is saved (see
-[Installing](#installing)).
+you ask. `:install` saves them, and after that every change is saved, unless you turn
+`autosave` off (see [Installing](#installing)).
 
 ## Files and pictures
 
@@ -397,14 +397,18 @@ chat won't guess. If what's saved is still sealed, there's no terminal to ask on
 `--routing`, it won't start, and `--update` won't download.
 
 After that, any setting you change is saved straight away, on the settings page or with `:set`,
-and the reply on the bottom row ends in `· saved`. chat keeps the key Argon2id made, locked in
-memory, until it exits, so saving doesn't need the passphrase or another Argon2id run. Command
-line options aren't saved. They last for that run, and what's saved comes back next time. The
-signing key is only saved by `:install`, so a key you're just trying out isn't kept by
-accident. If you pick a key later, the console says so, and `:install` seals it under the same
-passphrase without asking for it again. Running `:install` again saves everything in use,
-command line options included. It keeps the saved key unless a different one is in use, in
-which case it replaces it (and tells you first). With signing off, the saved key stays.
+and the reply on the bottom row ends in `· saved`. So is a key you verify or forget. chat keeps
+the key Argon2id made, locked in memory, until it exits, so saving doesn't need the passphrase
+or another Argon2id run. Command line options aren't saved. They last for that run, and what's
+saved comes back next time. With `:set autosave off` (saved itself, so it lasts), changes are
+kept until chat exits and the reply ends in `· not saved (autosave is off)` instead; `:save`
+saves them, and turning autosave back on saves the ones made meanwhile. The signing key is
+only saved by `:save` or `:install`, with autosave on or off, so a key you're just trying out
+isn't kept by accident. If you pick a key later, the console says so, and `:save` seals it under
+the same passphrase without asking for it again. `:save`, or `:install` while a save is open,
+says the save is already installed and offers to save everything in use to it, command line
+options included. It keeps the saved key unless a different one is in use, in which case it
+replaces it (and tells you first). With signing off, the saved key stays.
 
 If you pressed `Esc` at the start, so nothing saved is open, `:install` first asks whether to use
 what's saved. `y` asks for its passphrase (with more than one save, after you pick one from a
@@ -623,6 +627,7 @@ puts it on the command line.
 | `:copyid` | copy the session id to the clipboard |
 | `:update` | install the latest release |
 | `:install [NAME]` | save your settings and signing key on this computer, after telling you what that leaves on disk; with NAME, as a save of that name (see [Installing](#installing)) |
+| `:save` | save what's in use now to the save that's open, after asking (`:install` if none is) |
 | `:uninstall [NAME]` | delete what `:install` saved (the save in use, or the one called NAME) |
 | `:changelog` | show changelog (`:news`); built in, so it works offline |
 | `:send [PATH]` | offer a file, or pick one in a file browser without PATH (see [Files and pictures](#files-and-pictures)) |
@@ -650,6 +655,7 @@ after a name. Under each row's help, the page shows the `:set` command that does
 | `torpassword` | only on the page, where it's hidden |
 | `nick`, `colour` | a name; a colour name or `#RRGGBB` |
 | `sign` | `off`, an `age` or `pgp` key made from a password typed on the page, or `age:PATH` / `pgp:PATH` for a key file; a pasted key is picked on the page |
+| `autosave` | `on` (once installed, a setting or verified key you change is saved straight away), `off` (it's kept until `:save`) |
 | `verify` | `required` (nothing goes to a peer until you've compared its code), `optional` |
 | `filelimit` | the biggest file fetched without `anyway`: `8M`, `500K`, `1G` |
 | `fastfiles` | `on` (what you send goes in quick bursts; through the relays, as fast as they allow), `off` (chat's regular slots) |
