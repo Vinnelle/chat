@@ -29,10 +29,13 @@
   Hidden ones come last, and there's no `..` row (`h` goes up). How many levels get their own row
   depends on the terminal's width. The levels above those are joined into the top row's path,
   cut from the left with `…` if it's still too long. The top line says how many folders and files
-  there are. On a wide terminal, a column on the left lists the parent folder, with the folder
-  you're in selected and the parent's path in its border. Going up selects the folder you came
-  from, and `~` goes to the home folder. The key file browser opens in the folder of the key file
-  in use.
+  there are. On a wide terminal, a column left of the tree lists the parent folder, with the
+  folder you're in selected and the parent's path above it. The sidebar shows the selected
+  entry: whether it's a file, folder or link, its size or number of entries, when it was changed
+  and its permissions. In the key file browser it also says whether a small file holds an AGE or
+  PGP secret key, and if one does but others can read the file, says to `chmod 600` it. Going up
+  selects the folder you came from, and `~` goes to the home folder. The key file browser opens
+  in the folder of the key file in use.
 
 ### Fixed
 - `:install` could keep the old signing key after you picked a different one, and said a key that

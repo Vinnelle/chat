@@ -49,6 +49,16 @@ void platform_wait(const sock_t *socks, int n, int *ready, int *stdin_ready, int
 typedef void (*dir_entry_cb)(void *ctx, const char *name, int is_dir);
 int platform_list_dir(const char *path, dir_entry_cb cb, void *ctx);
 
+// What the file browser shows about an entry. A link is followed, and is_link says it was one.
+// mode is the POSIX permission bits, or -1 on Windows. Returns -1 if there's nothing at path.
+typedef struct {
+    int is_dir, is_link;
+    uint64_t size;
+    char modified[17];   // when it was last changed, local time: "YYYY-MM-DD HH:MM"
+    int mode;
+} file_info_t;
+int platform_file_info(const char *utf8_path, file_info_t *out);
+
 const char *platform_home_dir(void);
 
 // This OS install's machine id, as text: /etc/machine-id on Linux, MachineGuid on Windows. The

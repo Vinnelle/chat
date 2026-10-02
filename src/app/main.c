@@ -2467,28 +2467,8 @@ static tui_row_t g_browser_rows[TREE_MAX_LEVELS + MAX_DIR_ITEMS];
 static char g_browser_labels[MAX_DIR_ITEMS][200];
 static int g_browser_levels;   // rows above the entries
 
-// The columns a page's rows get at this width, the same as tui_render_page works them out. navw is
-// the list on the left's width if it sets one, 0 for the default, or -1 if there's no list.
-static int page_row_cols(int cols, int navw) {
-    if (navw == 0) {
-        navw = cols / 5;
-        if (navw < 20) navw = 20;
-        if (navw > 26) navw = 26;
-    }
-    if (navw < 0 || cols - navw < 56) navw = 0;
-    return cols - (navw > 0 ? navw : 1) - 1 - 4;
-}
-
-// On a wide enough screen, the list on the left is the parent folder's entries, with the folder
-// shown selected. Its width, or 0 if the screen is too narrow for it.
-static int parent_column_width(int cols) {
-    int w = cols / 4;
-    if (w < 24) w = 24;
-    if (w > 40) w = 40;
-    return cols - w >= 72 ? w : 0;
-}
-
-// The parent folder's entries for that list, read again only when the folder shown changes.
+// The parent folder's entries for the column left of the tree, read again only when the folder
+// shown changes. room: the columns its path gets.
 // Returns 0 at the root, which has no parent.
 static int parent_nav(const browser_t *b, int room, const char **nav, int *n, int *sel, char *title, size_t cap) {
     static browser_t parent;
@@ -2515,7 +2495,7 @@ static int parent_nav(const browser_t *b, int room, const char **nav, int *n, in
         if (strncmp(e, name, nl) == 0 && e[nl] == '/' && e[nl + 1] == '\0') *sel = *n;
         nav[(*n)++] = e;
     }
-    // Its path, cut from the left to fit the list's border.
+    // Its path, cut from the left to fit.
     char shown[900];
     tilde_path(parent.path, shown, sizeof shown);
     size_t len = strlen(shown);
@@ -2610,14 +2590,95 @@ static int browser_folder_help(const browser_t *b, char *out, size_t cap) {
     return 1;
 }
 
+// What the sidebar says about the selected entry: its name, then what it is, its size (or for a
+// folder, how many entries it has), when it was changed and who can read it. In the key browser
+// (kind AGE or PGP), a small file is also read to say whether it holds a secret key. Worked out
+// again only when the selection changes.
+static void count_cb(void *ctx, const char *name, int is_dir) {
+    (void)is_dir;
+    if (strcmp(name, ".") != 0 && strcmp(name, "..") != 0) (*(int *)ctx)++;
+}
+
+#define INFO_LINES 16
+static int browser_info(const browser_t *b, identity_source_t kind, const char **lines) {
+    static char of[1200], text[INFO_LINES][120];
+    static identity_source_t of_kind;
+    static int n;
+    if (b->n_items == 0) return 0;
+    char full[1200];
+    browser_entry_path(b, &b->items[b->selected], full, sizeof full);
+    if (strcmp(full, of) == 0 && kind == of_kind) goto done;
+    copy_str(of, full, sizeof of);
+    of_kind = kind;
+    n = 0;
+    copy_str(text[n++], g_browser_labels[b->selected], sizeof text[0]);
+    text[n++][0] = '\0';
+    file_info_t fi;
+    if (platform_file_info(full, &fi) != 0) {
+        copy_str(text[n++], "can't be read", sizeof text[0]);
+        goto done;
+    }
+    if (fi.is_dir) {
+        int count = 0;
+        copy_str(text[n++], fi.is_link ? "link to a folder" : "folder", sizeof text[0]);
+        if (platform_list_dir(full, count_cb, &count) == 0)
+            snprintf(text[n++], sizeof text[0], "%d entr%s", count, count == 1 ? "y" : "ies");
+        else
+            copy_str(text[n++], "can't be opened", sizeof text[0]);
+    } else {
+        copy_str(text[n++], fi.is_link ? "link to a file" : "file", sizeof text[0]);
+        file_format_size(fi.size, text[n++], sizeof text[0]);
+    }
+    if (fi.modified[0]) {
+        // "YYYY-MM-DD HH:MM" on two rows, to fit the sidebar.
+        text[n++][0] = '\0';
+        copy_str(text[n++], "changed", sizeof text[0]);
+        snprintf(text[n++], sizeof text[0], "%.10s", fi.modified);
+        copy_str(text[n++], fi.modified + 11, sizeof text[0]);
+    }
+    if (fi.mode >= 0) {
+        static const char RWX[] = "rwxrwxrwx";
+        char perm[10];
+        for (int i = 0; i < 9; i++) perm[i] = fi.mode & (0400 >> i) ? RWX[i] : '-';
+        perm[9] = '\0';
+        snprintf(text[n++], sizeof text[0], "%s %03o", perm, fi.mode & 0777);
+    }
+    if (kind != IDENT_NONE && !fi.is_dir) {
+        text[n++][0] = '\0';
+        static char head[16384];
+        long got = fi.size <= 65536 ? platform_read_file(full, head, sizeof head - 1) : -1;
+        int found = 0;
+        if (got >= 0) {
+            head[got] = '\0';
+            if (strstr(head, "AGE-SECRET-KEY-1")) found = IDENT_AGE;
+            else if (strstr(head, "-----BEGIN PGP PRIVATE KEY BLOCK-----")) found = IDENT_PGP;
+            crypto_wipe(head, sizeof head);
+        }
+        if (fi.size > 65536) copy_str(text[n++], "too big for a key", sizeof text[0]);
+        else if (got < 0) copy_str(text[n++], "can't be read", sizeof text[0]);
+        else if (!found) copy_str(text[n++], "no secret key", sizeof text[0]);
+        else snprintf(text[n++], sizeof text[0], "%s secret key", found == IDENT_AGE ? "AGE" : "PGP");
+        if (found && found != (int)kind)
+            snprintf(text[n++], sizeof text[0], "but this is %s", kind == IDENT_AGE ? "AGE" : "PGP");
+        // Readable by more than its owner.
+        if (found && fi.mode >= 0 && (fi.mode & 077)) {
+            copy_str(text[n++], "not private:", sizeof text[0]);
+            copy_str(text[n++], "chmod 600 it", sizeof text[0]);
+        }
+    }
+done:
+    for (int i = 0; i < n; i++) lines[i] = text[i];
+    return n;
+}
+
 static void render_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar) {
     const browser_t *b = &g_app.browser;
     int age = g_app.load_kind == IDENT_AGE;
-    char intro[1000], help[700], usage[1100] = "", nav_title[900];
-    static const char *nav[MAX_DIR_ITEMS];
-    int n_nav = 0, nav_sel = -1, pw = parent_column_width(cols_n);
-    int columns = pw && parent_nav(b, pw - 6, nav, &n_nav, &nav_sel, nav_title, sizeof nav_title);
-    browser_rows(b, page_row_cols(cols_n, columns ? pw : 0), rows_n - 12, intro, sizeof intro);
+    char intro[1000], help[700], usage[1100] = "", side_title[900];
+    static const char *side[MAX_DIR_ITEMS];
+    int n_side = 0, side_sel = -1, sw = tui_side_width(cols_n, 1);
+    int columns = sw && parent_nav(b, sw - 4, side, &n_side, &side_sel, side_title, sizeof side_title);
+    browser_rows(b, tui_page_row_cols(cols_n, 1) - (columns ? sw : 0), rows_n - 12, intro, sizeof intro);
     if (!browser_folder_help(b, help, sizeof help)) {
         char full[1200], shown[1200];
         browser_entry_path(b, &b->items[b->selected], full, sizeof full);
@@ -2626,17 +2687,15 @@ static void render_browser(int rows_n, int cols_n, const char *clock, const tui_
                  ":install saves this file's path, not the key.", g_browser_labels[b->selected], age ? "AGE" : "PGP");
         snprintf(usage, sizeof usage, ":set sign %s:%s", age ? "age" : "pgp", shown);
     }
-    if (!columns) {
-        n_nav = settings_sections(nav, 8);
-        nav_sel = settings_section_index(SET_SIGN);
-    }
+    const char *nav[INFO_LINES];
+    int n_nav = browser_info(b, g_app.load_kind, nav);
     tui_page_t page = {
         .title = age ? "Settings" CRUMB "Signing identity" CRUMB "AGE key file"
                      : "Settings" CRUMB "Signing identity" CRUMB "PGP key file",
         .clock = clock,
         .intro = intro,
-        .nav = nav, .n_nav = n_nav, .nav_sel = nav_sel,
-        .nav_title = columns ? nav_title : NULL, .nav_w = columns ? pw : 0,
+        .nav = nav, .n_nav = n_nav, .nav_sel = 0,
+        .side = columns ? side : NULL, .n_side = n_side, .side_sel = side_sel, .side_title = side_title,
         .rows = g_browser_rows, .n_rows = g_browser_levels + b->n_items, .selected = g_browser_levels + b->selected,
         .help = help, .usage = usage[0] ? usage : NULL,
     };
@@ -2645,11 +2704,13 @@ static void render_browser(int rows_n, int cols_n, const char *clock, const tui_
 
 static void render_send_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar) {
     const browser_t *b = &g_app.browser;
-    char intro[1000], help[700], nav_title[900];
-    static const char *nav[MAX_DIR_ITEMS];
-    int n_nav = 0, nav_sel = -1, pw = parent_column_width(cols_n);
-    int columns = pw && parent_nav(b, pw - 6, nav, &n_nav, &nav_sel, nav_title, sizeof nav_title);
-    browser_rows(b, page_row_cols(cols_n, columns ? pw : -1), rows_n - 12, intro, sizeof intro);
+    char intro[1000], help[700], side_title[900];
+    const char *info[INFO_LINES];
+    static const char *side[MAX_DIR_ITEMS];
+    int n_side = 0, side_sel = -1, sw = tui_side_width(cols_n, 1);
+    int columns = sw && parent_nav(b, sw - 4, side, &n_side, &side_sel, side_title, sizeof side_title);
+    browser_rows(b, tui_page_row_cols(cols_n, 1) - (columns ? sw : 0), rows_n - 12, intro, sizeof intro);
+    int n_info = browser_info(b, IDENT_NONE, info);
     if (!browser_folder_help(b, help, sizeof help))
         snprintf(help, sizeof help, "Enter offers %s to everyone in this session. Nobody gets it unless they fetch it.",
                  g_browser_labels[b->selected]);
@@ -2657,8 +2718,8 @@ static void render_send_browser(int rows_n, int cols_n, const char *clock, const
         .title = "Send a file",
         .clock = clock,
         .intro = intro,
-        .nav = columns ? nav : NULL, .n_nav = n_nav, .nav_sel = nav_sel,
-        .nav_title = columns ? nav_title : NULL, .nav_w = columns ? pw : 0,
+        .nav = info, .n_nav = n_info, .nav_sel = 0,
+        .side = columns ? side : NULL, .n_side = n_side, .side_sel = side_sel, .side_title = side_title,
         .rows = g_browser_rows, .n_rows = g_browser_levels + b->n_items, .selected = g_browser_levels + b->selected,
         .help = help,
     };
