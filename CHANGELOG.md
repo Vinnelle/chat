@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.13
 
 ### Changed
 - For a signing key from a file, `:install` now saves the file's path instead of the key, and
