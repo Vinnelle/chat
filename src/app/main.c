@@ -62,7 +62,7 @@ static const char *USAGE =
     "  Ctrl+T     hide/show the chat (hide two of the three and the last one fills the screen)\n"
     "  Ctrl+S     settings: routing, identity, files, notifications (also :set)\n"
     "  F1         list all commands and keybinds (also ? in NORMAL, and :help)\n"
-    "  Ctrl+C     quit chat (every open session leaves cleanly first)\n"
+    "  Ctrl+C     quit chat, after asking (every open session leaves cleanly first)\n"
     "\n"
     "Each session has two parts: the conversation, and a console above it for everything\n"
     "else, such as people joining and leaving, network lookups and command output. A session\n"
@@ -180,6 +180,7 @@ static const char *USAGE =
     "              \"[HH:MM] ...\" lines for one session and reads lines from stdin. A line\n"
     "              starting with : is a command (:help lists them). For scripts and basic\n"
     "              terminals. This is also used automatically when stdout isn't a tty.\n"
+    "              Typed in a terminal, Ctrl+C quits on a second press within 3 seconds.\n"
     "  --session   join this session at startup (needs --port; \"chat --session ID\" alone\n"
     "              still opens the TUI so you can join yourself)\n"
     "  --update    install the latest release from GitHub and exit, without opening chat\n"
@@ -320,6 +321,7 @@ typedef struct {
     // picked from the list of saves. save_named: :install or :uninstall was given a NAME.
     int install_overwrite, install_pick, save_named;
     app_mode_t mode;
+    int asking_quit;   // Ctrl+C's QUIT box, over whatever mode is showing
     char pending_session_id[MAX_SESSION_NAME + 1];
     int show_sidebar, show_console, show_chat;
     int dirty;
@@ -363,29 +365,32 @@ static options_t g_opts;
 static int g_argc;
 static char **g_argv;
 
+// g_interrupted ends the main loop. SIGINT only sets g_ctrl_c, and the loop asks before quitting,
+// since Ctrl+C is easy to press by accident (to copy, say). In the full-screen UI on Linux, Ctrl+C
+// is a key instead (term_raw_enable), so SIGINT there is a kill -INT.
 static volatile sig_atomic_t g_interrupted = 0;
-static void on_sigint(int sig) {
-    g_interrupted = 1;
+static volatile sig_atomic_t g_ctrl_c = 0;
+static void on_quit_signal(int sig) {
+    if (sig == SIGINT) g_ctrl_c = 1;
+    else g_interrupted = 1;
 #ifdef _WIN32
     // The Windows C runtime puts the default back before calling a handler.
-    signal(sig, on_sigint);
-#else
-    (void)sig;
+    signal(sig, on_quit_signal);
 #endif
 }
 
-// Ctrl+C, a kill or a closed terminal all end the main loop, so sessions say bye, keys are wiped,
-// the terminal is restored and chat's own tor is stopped, instead of the process just dying. The
-// handler has to stay in place for a second signal too. With plain signal() and _POSIX_C_SOURCE,
-// glibc resets it after the first, and a second Ctrl+C or kill skipped all of that.
+// A kill, a closed terminal or a confirmed Ctrl+C all end the main loop, so sessions say bye, keys
+// are wiped, the terminal is restored and chat's own tor is stopped, instead of the process just
+// dying. The handler has to stay in place for a second signal too. With plain signal() and
+// _POSIX_C_SOURCE, glibc resets it after the first, and a second Ctrl+C or kill skipped all of that.
 static void catch_quit_signals(void) {
 #ifdef _WIN32
-    signal(SIGINT, on_sigint);
-    signal(SIGTERM, on_sigint);
+    signal(SIGINT, on_quit_signal);
+    signal(SIGTERM, on_quit_signal);
 #else
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
-    sa.sa_handler = on_sigint;
+    sa.sa_handler = on_quit_signal;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESTART;
     sigaction(SIGINT, &sa, NULL);
@@ -2911,7 +2916,7 @@ static const struct { const char *section, *keys, *what; } HELP_KEYS[] = {
     { NULL,          "ctrl+j",          "join a session by its id and password" },
     { NULL,          "tab  shift+tab",  "next / previous session" },
     { NULL,          "ctrl+s",          "settings" },
-    { NULL,          "ctrl+c",          "quit - every session leaves cleanly first" },
+    { NULL,          "ctrl+c",          "quit, after asking - every session leaves cleanly first" },
     { "Screen",      "ctrl+b",          "show or hide the sidebar" },
     { NULL,          "ctrl+o",          "show or hide the console" },
     { NULL,          "ctrl+t",          "show or hide the chat" },
@@ -3859,6 +3864,14 @@ static void confirm_key(const tui_key_t *key, void (*yes)(void), void (*no)(void
     else if (ch == 'n' || ch == 'N' || ch == 'q' || key->type == TUI_KEY_ESCAPE) no();
 }
 
+// Only y quits: not a second Ctrl+C, the easy mistake, nor q, which closes boxes elsewhere. Staying
+// leaves whatever the box was over as it was.
+static void quit_key(const tui_key_t *key) {
+    char ch = key->type == TUI_KEY_CHAR && key->ch_len == 1 ? key->ch[0] : 0;
+    if (ch == 'y' || ch == 'Y') g_interrupted = 1;
+    else if (ch == 'n' || ch == 'N' || key->type == TUI_KEY_ESCAPE) { g_app.asking_quit = 0; g_app.dirty = 1; }
+}
+
 static void field_key(const tui_key_t *key, void (*enter)(void), void (*esc)(void)) {
     if (key->type == TUI_KEY_ESCAPE) esc();
     else if (key->type == TUI_KEY_ENTER) enter();
@@ -4637,6 +4650,9 @@ static void handle_key(const tui_key_t *key) {
     // A message is the result of the previous key, so this key resets the bar.
     if (g_app.message[0]) { g_app.message[0] = '\0'; g_app.dirty = 1; }
 
+    if (key->type == TUI_KEY_CTRL_C) { g_app.asking_quit = 1; g_app.dirty = 1; return; }
+    if (g_app.asking_quit) { quit_key(key); return; }
+
     // The pages draw their fields in their rows, so a key there redraws the page.
     switch (g_app.mode) {
         case MODE_HELP:            help_key(key); return;
@@ -4941,6 +4957,58 @@ static int uninstall_paras(tui_para_t *p) {
                                       "traces of the files.");
 }
 
+static const tui_dialog_t *quit_dialog(void) {
+    static tui_dialog_t d;
+    static tui_para_t paras[MAX_DIALOG_PARAS];
+    static char what[240], files[120], unsaved[200];
+    int n_sessions = 0, online = 0, downloads = 0;
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        if (!g_app.used[i]) continue;
+        n_sessions++;
+        if (g_app.sessions[i].initialising) continue;
+        const chat_t *e = &g_app.sessions[i].engine;
+        online += chat_online_count(e);
+        for (int f = 0; f < FILE_OFFERS_MAX; f++)
+            downloads += e->files[f].used && (e->files[f].dl == DL_ACTIVE || e->files[f].dl == DL_QUEUED);
+    }
+    const char *tor = g_tor.proc ? " Chat's own tor stops too." : "";
+    if (n_sessions == 0)
+        snprintf(what, sizeof what, "No sessions are open.%s", tor);
+    else
+        snprintf(what, sizeof what, "Quitting leaves %d session%s, with %d peer%s online: each says bye, then closes, "
+                 "and its keys are wiped from memory.%s", n_sessions, n_sessions == 1 ? "" : "s",
+                 online, online == 1 ? "" : "s", tor);
+    int n = add_para(paras, 0, TUI_P_TEXT, what);
+
+    const char *lost[3];
+    int n_lost = 0;
+    if (downloads == 1) lost[n_lost++] = "A file that's still downloading stops, and what's come of it is deleted.";
+    else if (downloads) {
+        snprintf(files, sizeof files, "%d files that are still downloading stop, and what's come of them is deleted.", downloads);
+        lost[n_lost++] = files;
+    }
+    int rows = 0;
+    if (g_app.installed && !g_app.autosave)
+        for (int i = 0; i < N_SETTINGS; i++) rows += g_unsaved_rows[i] != 0;
+    int key = g_app.installed && g_app.identity_source != IDENT_NONE && !key_in_use_saved();
+    if (rows || key) {
+        char settings[64];
+        snprintf(settings, sizeof settings, "%d changed setting%s", rows, rows == 1 ? "" : "s");
+        snprintf(unsaved, sizeof unsaved, "%s%s%s %s saved: n, then `:save`, keeps %s.",
+                 rows ? settings : "", rows && key ? " and " : "", key ? (rows ? "the signing key in use" : "The signing key in use") : "",
+                 rows + key > 1 ? "aren't" : "isn't", rows + key > 1 ? "them" : "it");
+        lost[n_lost++] = unsaved;
+    }
+    update_view_t v;
+    update_view(&v);
+    if (v.running) lost[n_lost++] = "An update is still running, and won't be installed.";
+    if (n_lost) n = add_para(paras, n, TUI_P_BLANK, "");
+    for (int i = 0; i < n_lost; i++) n = add_para(paras, n, TUI_P_BULLET, lost[i]);
+
+    d = (tui_dialog_t){ .title = "QUIT", .text = paras, .n_text = n, .keys = "y quit \xc2\xb7 n stay" };
+    return &d;
+}
+
 // Its field is the input line, saved meanwhile by begin_prompt and similar.
 static const tui_dialog_t *current_dialog(void) {
     static tui_dialog_t d;
@@ -5241,6 +5309,11 @@ static tui_bar_t current_bar(void) {
             break;
     }
     b.dialog = current_dialog();
+    if (g_app.asking_quit) {
+        b.dialog = quit_dialog();
+        b.chip = "QUIT";
+        b.tone = TUI_TONE_PROMPT;
+    }
     if (b.dialog) b.hint = b.dialog->keys;
     return b;
 }
@@ -5434,6 +5507,8 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
         }
         int stdin_ready = 0;
         platform_wait(socks, n, ready, &stdin_ready, 200);
+
+        if (g_ctrl_c) { g_ctrl_c = 0; g_app.asking_quit = 1; g_app.dirty = 1; }
 
         if (stdin_ready) {
             uint8_t buf[512];
@@ -5645,11 +5720,19 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
     catch_quit_signals();
     stdin_reader_t *reader = stdin_reader_start();
     int alive = 1;
+    double ctrl_c_at = -10.0;
     while (alive && !g_interrupted) {
         sock_t socks[CHAT_MAX_SOCKS]; int ns = chat_sockets(&c, socks);
         int ready[CHAT_MAX_SOCKS] = {0};
         net_wait(socks, ready, ns, 200);
         double now = now_seconds();
+        // No box to ask in here, so a second press confirms. From a script, Ctrl+C still quits at once.
+        if (g_ctrl_c) {
+            g_ctrl_c = 0;
+            if (!term_is_tty() || now - ctrl_c_at < 3.0) break;
+            ctrl_c_at = now;
+            push_log("* Ctrl+C again within 3 seconds leaves the session and quits (so does :quit)");
+        }
         for (int i = 0; i < ns; i++) if (ready[i]) chat_on_socket_readable(&c, socks[i], now);
         char line[MAX_TEXT + 1];
         int rc = stdin_reader_poll(reader, line, sizeof line);

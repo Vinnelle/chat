@@ -186,6 +186,7 @@ size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out) {
     if (b0 == 0x0f) { out->type = TUI_KEY_TOGGLE_CONSOLE; return 1; }
     if (b0 == 0x14) { out->type = TUI_KEY_TOGGLE_CHAT; return 1; }
     if (b0 == 0x13) { out->type = TUI_KEY_SETTINGS; return 1; }
+    if (b0 == 0x03) { out->type = TUI_KEY_CTRL_C; return 1; }
     if (b0 < 0x20) { out->type = TUI_KEY_UNKNOWN; return 1; }
 
     // Only complete, valid characters reach the input line. A stray byte (including a C1 control)
