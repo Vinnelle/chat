@@ -141,6 +141,7 @@ typedef struct {
     char args[40];    // dim after the name
     char help[120];
     char group[16];   // what the menu lists, for its title: "commands", "settings", "peers"
+    int no_default;   // Enter takes it only once it's picked in the menu, not as the first one
 } tui_suggestion_t;
 
 // Fills out with the nth suggestion for the text on the COMMAND line. Returns 0 once there are no more.
@@ -191,6 +192,9 @@ void tui_input_command_to_text(tui_input_t *in);
 
 // The suggestion selected in the COMMAND line's menu: 1 with it in out, or 0 if there is none.
 int tui_input_suggestion(const tui_input_t *in, tui_suggestion_t *out);
+
+// The selected suggestion if it carries on from the COMMAND line, for Enter to run in its place.
+int tui_input_completion(const tui_input_t *in, tui_suggestion_t *out);
 
 // "INSERT", "NORMAL" or "COMMAND".
 const char *tui_mode_name(tui_input_mode_t mode);

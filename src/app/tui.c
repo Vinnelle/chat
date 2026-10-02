@@ -415,6 +415,13 @@ int tui_input_suggestion(const tui_input_t *in, tui_suggestion_t *out) {
     return in->suggest(in->cmd, sel, out);
 }
 
+int tui_input_completion(const tui_input_t *in, tui_suggestion_t *out) {
+    int n = in->cmd_len;
+    if (!tui_input_suggestion(in, out) || (int)strlen(out->line) <= n || strncmp(out->line, in->cmd, (size_t)n) != 0)
+        return 0;
+    return !out->no_default || in->menu_sel > 0;
+}
+
 // Whether the COMMAND line could still be a command: its first word starts a command's name or
 // alias, or, once a space follows it, is one.
 static int could_be_command(const tui_input_t *in) {
@@ -1729,8 +1736,7 @@ static void draw_input(wbuf_t *w, rect_t r, int boxed, const tui_bar_t *bar, con
         ptext(&p, S_PLAIN, in->cmd);
         cursor = p.used;
         tui_suggestion_t s;
-        if (tui_input_suggestion(in, &s) && strncmp(s.line, in->cmd, (size_t)in->cmd_len) == 0)
-            ptext(&p, S_FAINT, s.line + in->cmd_len);
+        if (tui_input_completion(in, &s)) ptext(&p, S_FAINT, s.line + in->cmd_len);
     } else {
         cursor = draw_field(&p, in, bar->mask_input, bar->placeholder);
     }
