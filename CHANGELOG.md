@@ -2,12 +2,28 @@
 
 ## Unreleased
 
+### Added
+- `:save` saves what's in use now to the save that's open, after asking, command line options
+  included. With no save open, it does what `:install` does.
+- An `autosave` setting, off by default. On, a setting you change, and a key you verify or
+  forget, is saved as you change it. Off, they last until chat exits, and the reply to a
+  setting you change ends in `· not saved (autosave is off)`. `:save` saves them, and turning
+  autosave on saves the ones changed meanwhile. The `autosave` row is always saved itself, so
+  turning it on lasts. Either way, the signing key is only saved by `:save` or `:install`.
+
 ### Changed
 - The Windows exe has version information and a manifest (Properties, Details shows them).
   Antivirus heuristics count an exe without them against it, and Malwarebytes flagged
   0.4.0-beta.2 as Malware.Heuristic.2062.
 - On Windows, tor starts inside the job that ends it with chat, instead of being started
   suspended, added to the job, then resumed. This needs Windows 10 1607 or later.
+- After `:install`, a setting you change or a key you verify or forget isn't saved straight
+  away any more: `:save` saves it, or `:set autosave on` saves each change as before. A save
+  from an earlier version has no `autosave` row, so it opens with autosave off.
+- `Ctrl+C` asks before quitting, in a box that says how many sessions and peers are open, and
+  what quitting loses: files still downloading, settings or a signing key that aren't saved,
+  and an update that's still running. `y` quits, and `n` or `Esc` stays. In `--simple`, a
+  second `Ctrl+C` within 3 seconds quits, and from a script it still quits at once.
 
 ## 0.4.0-beta.2
 
