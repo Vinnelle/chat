@@ -960,6 +960,16 @@ static int dl_over(chat_t *c, int n) {
     return !e || e->dl == DL_DONE || e->dl == DL_FAILED;
 }
 
+// Changes a byte of the file at path.
+static void f_flip(const char *path) {
+    FILE *f = fopen(path, "r+b");
+    if (!f) return;
+    int ch = fgetc(f);
+    fseek(f, 0, SEEK_SET);
+    fputc(ch ^ 1, f);
+    fclose(f);
+}
+
 static int part_files_left(const char *dir) {
     char cmd[700];
     snprintf(cmd, sizeof cmd, "ls -a '%s' | grep -c '^\\.chat-' > /dev/null", dir);
@@ -986,25 +996,36 @@ static void test_files(double *t) {
     int n = offer_named(&B, "notes.txt");
     CHECK(n > 0 && log_count(&log_b, "offers notes.txt (5 KB) - :download") == 1, "bob didn't see the offer");
     CHECK(n > 0 && chat_file(&B, n)->size == 5000 && chat_file(&B, n)->dl == DL_NONE, "the offer came wrong, or started by itself");
-    CHECK(chat_file_fetch(&B, n, 1, 0) != 0, "a file not offered as a picture was fetched to show");
+    CHECK(chat_file_fetch(&B, n, 1, 0, NULL) != 0, "a file not offered as a picture was fetched to show");
 
-    // Saved, whole, under its name; again, under the next one; no partial file left either time.
-    CHECK(chat_file_fetch(&B, n, 0, 0) == 0, "bob couldn't fetch notes.txt");
+    // Saved, whole, under its name. Asked for again, it's already there and isn't fetched. Into
+    // another folder, it's copied from there. Once the saved one changes, it's fetched again, under
+    // the next name. No partial file is left at any point.
+    CHECK(chat_file_fetch(&B, n, 0, 0, NULL) == 0, "bob couldn't fetch notes.txt");
     RUN_UNTIL(t, 120, dl_over(&B, n));
     snprintf(want, sizeof want, "%s/notes.txt", dl);
     CHECK(dl_state(&B, n) == DL_DONE && same_file(want, data, 5000), "notes.txt didn't arrive whole");
-    CHECK(chat_file_fetch(&B, n, 0, 0) == 0, "bob couldn't fetch notes.txt again");
+    CHECK(chat_file_fetch(&B, n, 0, 0, NULL) == 0 && dl_state(&B, n) == DL_DONE, "notes.txt was fetched again while saved");
+    char other[400];
+    snprintf(other, sizeof other, "%s/other", home);
+    mkdir(other, 0700);
+    CHECK(chat_file_fetch(&B, n, 0, 0, other) == 0 && dl_state(&B, n) == DL_DONE, "notes.txt wasn't copied to another folder");
+    snprintf(path, sizeof path, "%s/notes.txt", other);
+    CHECK(same_file(path, data, 5000) && strcmp(chat_file(&B, n)->saved, path) == 0, "the copy in another folder is wrong");
+    f_flip(path);
+    CHECK(chat_file_fetch(&B, n, 0, 0, NULL) == 0 && dl_state(&B, n) == DL_ACTIVE, "a changed copy wasn't fetched again");
     RUN_UNTIL(t, 120, dl_over(&B, n));
     snprintf(want, sizeof want, "%s/notes (2).txt", dl);
     CHECK(same_file(want, data, 5000), "the second copy wasn't saved beside the first");
-    CHECK(!part_files_left(dl), "a partial file was left in Downloads");
+    CHECK(!part_files_left(dl) && !part_files_left(other), "a partial file was left behind");
+    platform_remove(want);
 
     // Past bob's limit only with "anyway".
     chat_set_file_options(&B, 1000, 0);
-    CHECK(chat_file_fetch(&B, n, 0, 0) != 0, "a file over the limit was fetched");
-    CHECK(chat_file_fetch(&B, n, 0, 1) == 0, "anyway didn't fetch past the limit");
+    CHECK(chat_file_fetch(&B, n, 0, 0, NULL) != 0, "a file over the limit was fetched");
+    CHECK(chat_file_fetch(&B, n, 0, 1, NULL) == 0, "anyway didn't fetch past the limit");
     RUN_UNTIL(t, 120, dl_over(&B, n));
-    snprintf(want, sizeof want, "%s/notes (3).txt", dl);
+    snprintf(want, sizeof want, "%s/notes (2).txt", dl);
     CHECK(same_file(want, data, 5000), "the file fetched anyway didn't arrive");
     chat_set_file_options(&B, 0, 0);
 
@@ -1017,12 +1038,54 @@ static void test_files(double *t) {
     n = offer_named(&B, "pic.png");
     CHECK(n > 0 && chat_file(&B, n)->image && log_count(&log_b, ":show") >= 1, "the picture wasn't offered as one");
     g_viewed.calls = 0;
-    CHECK(chat_file_fetch(&B, n, 1, 0) == 0, "bob couldn't fetch the picture to show");
+    CHECK(chat_file_fetch(&B, n, 1, 0, NULL) == 0, "bob couldn't fetch the picture to show");
     RUN_UNTIL(t, 60, g_viewed.calls > 0);
     CHECK(g_viewed.calls == 1 && g_viewed.num == n && g_viewed.len == sizeof PNG_4X2
           && memcmp(g_viewed.data, PNG_4X2, sizeof PNG_4X2) == 0, "the picture wasn't handed over whole");
     snprintf(want, sizeof want, "%s/pic.png", dl);
     CHECK(platform_read_file(want, data + 199000, 10) < 0, "a picture fetched to show was saved");
+
+    // Shown again, and then saved, from the copy kept in memory: nothing is fetched again.
+    CHECK(chat_file(&B, n)->cache != NULL, "the picture shown wasn't kept");
+    CHECK(chat_file_fetch(&B, n, 1, 0, NULL) == 0 && g_viewed.calls == 2 && dl_state(&B, n) == DL_DONE,
+          "the picture wasn't shown again from memory");
+    CHECK(chat_file_fetch(&B, n, 0, 0, NULL) == 0 && dl_state(&B, n) == DL_DONE && same_file(want, PNG_4X2, sizeof PNG_4X2),
+          "the picture shown wasn't saved from memory");
+    CHECK(!part_files_left(dl), "saving from memory left a partial file");
+
+    // Shown and saved in one fetch: :download while it's coming to be shown.
+    snprintf(path, sizeof path, "%s/pic2.png", home);
+    write_file(path, PNG_4X2, sizeof PNG_4X2);
+    snprintf(cmd, sizeof cmd, "send %s", path);
+    chat_run_command(&A, cmd);
+    RUN_UNTIL(t, 20, offer_named(&B, "pic2.png") > 0);
+    n = offer_named(&B, "pic2.png");
+    g_viewed.calls = 0;
+    CHECK(chat_file_fetch(&B, n, 1, 0, NULL) == 0 && chat_file_fetch(&B, n, 0, 0, NULL) == 0, "bob couldn't ask for pic2.png");
+    RUN_UNTIL(t, 60, dl_over(&B, n));
+    snprintf(want, sizeof want, "%s/pic2.png", dl);
+    CHECK(g_viewed.calls == 1 && same_file(want, PNG_4X2, sizeof PNG_4X2), "pic2.png wasn't both shown and saved");
+
+    // Two files from the same sender: the second waits for the first, then starts by itself.
+    // :download without a number takes the newest.
+    snprintf(path, sizeof path, "%s/one.bin", home);
+    write_file(path, data, 4000);
+    snprintf(cmd, sizeof cmd, "send %s", path);
+    chat_run_command(&A, cmd);
+    snprintf(path, sizeof path, "%s/two.bin", home);
+    write_file(path, data + 4000, 3000);
+    snprintf(cmd, sizeof cmd, "send %s", path);
+    chat_run_command(&A, cmd);
+    RUN_UNTIL(t, 20, offer_named(&B, "one.bin") > 0 && offer_named(&B, "two.bin") > 0);
+    int one = offer_named(&B, "one.bin"), two = offer_named(&B, "two.bin");
+    chat_run_command(&B, "download");
+    CHECK(dl_state(&B, two) == DL_ACTIVE, ":download alone didn't take the newest file");
+    CHECK(chat_file_fetch(&B, one, 0, 0, NULL) == 0 && dl_state(&B, one) == DL_QUEUED, "one.bin wasn't queued");
+    RUN_UNTIL(t, 200, dl_over(&B, one));
+    snprintf(want, sizeof want, "%s/two.bin", dl);
+    char got1[700];
+    snprintf(got1, sizeof got1, "%s/one.bin", dl);
+    CHECK(same_file(want, data + 4000, 3000) && same_file(got1, data, 4000), "the queued file didn't follow the first");
 
     // Changed after it was offered: thrown away, not saved.
     snprintf(path, sizeof path, "%s/changing.bin", home);
@@ -1033,7 +1096,7 @@ static void test_files(double *t) {
     n = offer_named(&B, "changing.bin");
     FILE *f = fopen(path, "r+b");
     if (f) { fputc(data[0] ^ 1, f); fclose(f); }
-    CHECK(chat_file_fetch(&B, n, 0, 0) == 0, "bob couldn't fetch changing.bin");
+    CHECK(chat_file_fetch(&B, n, 0, 0, NULL) == 0, "bob couldn't fetch changing.bin");
     RUN_UNTIL(t, 120, dl_over(&B, n));
     snprintf(want, sizeof want, "%s/changing.bin", dl);
     CHECK(dl_state(&B, n) == DL_FAILED && log_b.mismatched == 1
@@ -1053,7 +1116,7 @@ static void test_files(double *t) {
     // No rekeys meanwhile: this is about chunks, and re-handshakes are the rekey tests'. After it,
     // they come at their usual spacing again, not all at once.
     for (int k = 0; k < 3; k++) ALL[k]->next_rekey = *t + 1000.0;
-    CHECK(chat_file_fetch(&B, n, 0, 0) == 0, "bob couldn't fetch lossy.bin");
+    CHECK(chat_file_fetch(&B, n, 0, 0, NULL) == 0, "bob couldn't fetch lossy.bin");
     RUN_UNTIL(t, 300, dl_over(&B, n));
     for (int k = 0; k < 3; k++) ALL[k]->next_rekey = *t + REKEY_INTERVAL * (0.5 + 0.2 * k);
     fake_net_filter = NULL;
@@ -1071,7 +1134,7 @@ static void test_files(double *t) {
     RUN_UNTIL(t, 20, offer_named(&B, "big.bin") > 0);
     n = offer_named(&B, "big.bin");
     double began = *t;
-    CHECK(chat_file_fetch(&B, n, 0, 0) == 0, "bob couldn't fetch big.bin");
+    CHECK(chat_file_fetch(&B, n, 0, 0, NULL) == 0, "bob couldn't fetch big.bin");
     RUN_UNTIL(t, 120, dl_over(&B, n));
     snprintf(want, sizeof want, "%s/big.bin", dl);
     CHECK(same_file(want, data, 40000) && *t - began < 15.0, "40 KB took %.1f s with fast transfers", *t - began);
@@ -1079,7 +1142,8 @@ static void test_files(double *t) {
     chat_set_file_options(&B, 0, 0);
 
     // Stopped part way: nothing left behind.
-    CHECK(chat_file_fetch(&B, n, 0, 0) == 0, "bob couldn't fetch big.bin again");
+    platform_remove(want);
+    CHECK(chat_file_fetch(&B, n, 0, 0, NULL) == 0, "bob couldn't fetch big.bin again");
     RUN_FOR(t, 4);
     snprintf(cmd, sizeof cmd, "cancel %d", n);
     chat_run_command(&B, cmd);
@@ -1090,7 +1154,7 @@ static void test_files(double *t) {
     for (int k = 1; k <= A.file_seq; k++) if (chat_file(&A, k) && chat_file(&A, k)->mine && strcmp(chat_file(&A, k)->name, "big.bin") == 0) mine = k;
     snprintf(cmd, sizeof cmd, "cancel %d", mine);
     chat_run_command(&A, cmd);
-    CHECK(chat_file_fetch(&B, n, 0, 0) == 0, "bob couldn't ask for big.bin");
+    CHECK(chat_file_fetch(&B, n, 0, 0, NULL) == 0, "bob couldn't ask for big.bin");
     RUN_UNTIL(t, 60, dl_over(&B, n));
     CHECK(dl_state(&B, n) == DL_FAILED && log_b.withdrawn == 1, "a withdrawn file wasn't refused");
 

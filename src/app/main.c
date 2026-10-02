@@ -219,6 +219,7 @@ typedef enum {
     MODE_SIGN_CHOICE,
     MODE_SIGN_BROWSE,
     MODE_SEND_BROWSE,
+    MODE_SAVE_BROWSE,
     MODE_SIGN_PASTE,
     MODE_SIGN_PASSWORD,
     MODE_SIGN_PATH,
@@ -314,6 +315,8 @@ typedef struct {
     tui_input_t saved_input;
     browser_t browser;
     char send_dir[900];   // the folder :send's browser last offered a file from
+    char save_dir[900];   // the folder :saveto's browser last saved a file in
+    int save_num, save_anyway;   // what :saveto's browser saves
     char paste_buf[16384];
     size_t paste_len;
     char paste_status[80];
@@ -438,7 +441,14 @@ static const tui_progress_t *progress_for(const void *ctx, int file) {
     static tui_progress_t pg;
     const session_slot_t *s = ctx;
     const file_entry_t *f = chat_file(&s->engine, file);
-    if (!f || f->mine || f->dl != DL_ACTIVE) return NULL;
+    if (!f || f->mine || (f->dl != DL_ACTIVE && f->dl != DL_QUEUED)) return NULL;
+    if (f->dl == DL_QUEUED) {
+        int after = chat_file_queued_after(&s->engine, f);
+        pg.permille = 0;
+        if (after) snprintf(pg.text, sizeof pg.text, "queued \xc2\xb7 starts after file %d", after);
+        else copy_str(pg.text, "queued \xc2\xb7 waiting for its sender", sizeof pg.text);
+        return &pg;
+    }
     uint64_t got = chat_file_got(f);
     pg.permille = f->size ? (int)(got * 1000 / f->size) : 1000;
     char gs[32], all[32], eta[64];
@@ -1068,6 +1078,7 @@ static cmd_result_t app_help(void *ctx, const char *arg);
 static cmd_result_t app_changelog(void *ctx, const char *arg);
 static cmd_result_t app_show(void *ctx, const char *arg);
 static cmd_result_t app_hide(void *ctx, const char *arg);
+static cmd_result_t app_saveto(void *ctx, const char *arg);
 
 // ---- routing: asked at the start of --simple; the full-screen UI opens on the settings page ----
 
@@ -2322,6 +2333,53 @@ static void send_browser_key(const tui_key_t *key) {
     g_app.dirty = 1;
 }
 
+// :saveto N: the folder to save file N in is picked here, starting where the last one went, or in
+// Downloads.
+static void begin_save_browse(int num, int anyway) {
+    if (g_app.mode != MODE_CHAT) return;
+    char dl[600];
+    const char *home = platform_home_dir();
+    if ((!g_app.save_dir[0] || browser_load(&g_app.browser, g_app.save_dir) != 0)
+        && (platform_downloads_dir(dl, sizeof dl) != 0 || browser_load(&g_app.browser, dl) != 0)
+        && (!home || browser_load(&g_app.browser, home) != 0))
+        browser_load(&g_app.browser, "/");
+    g_app.save_num = num;
+    g_app.save_anyway = anyway;
+    g_app.mode = MODE_SAVE_BROWSE;
+    g_app.dirty = 1;
+}
+
+// Enter opens the selected folder and s saves in the one shown.
+static void save_browser_key(const tui_key_t *key) {
+    browser_t *b = &g_app.browser;
+    if (key->type == TUI_KEY_CHAR && key->ch_len == 1 && key->ch[0] == '~') { browser_home(); g_app.dirty = 1; return; }
+    if (key->type == TUI_KEY_CHAR && key->ch_len == 1 && key->ch[0] == 's') {
+        g_app.mode = MODE_CHAT;
+        g_app.dirty = 1;
+        if (!g_app.selected || g_app.selected->initialising) { note("no session to save file %d from", g_app.save_num); return; }
+        copy_str(g_app.save_dir, b->path, sizeof g_app.save_dir);
+        chat_file_fetch(&g_app.selected->engine, g_app.save_num, 0, g_app.save_anyway, b->path);
+        return;
+    }
+    list_key_t k = list_key(key);
+    switch (k) {
+        case LIST_LEFT: browser_up(); break;
+        case LIST_CHOOSE:
+        case LIST_RIGHT: {
+            if (b->n_items == 0) break;
+            const dir_entry_t *sel = &b->items[b->selected];
+            if (!sel->is_dir) break;
+            char full[1200]; browser_entry_path(b, sel, full, sizeof full);
+            browser_load(b, full);
+            break;
+        }
+        case LIST_BACK:
+        case LIST_CLOSE: g_app.mode = MODE_CHAT; break;
+        default: list_move(k, &b->selected, b->n_items); break;
+    }
+    g_app.dirty = 1;
+}
+
 // Everything except Esc is the paste arriving, one key at a time.
 static void paste_key(const tui_key_t *key) {
     if (key->type == TUI_KEY_ESCAPE) {
@@ -2729,6 +2787,39 @@ static void render_send_browser(int rows_n, int cols_n, const char *clock, const
                  g_browser_labels[b->selected]);
     tui_page_t page = {
         .title = "Send a file",
+        .clock = clock,
+        .intro = intro,
+        .nav = info, .n_nav = n_info, .nav_sel = 0,
+        .side = columns ? side : NULL, .n_side = n_side, .side_sel = side_sel, .side_title = side_title,
+        .rows = g_browser_rows, .n_rows = g_browser_levels + b->n_items, .selected = g_browser_levels + b->selected,
+        .help = help,
+    };
+    tui_render_page(rows_n, cols_n, &page, bar, g_app.color_enabled);
+}
+
+static void render_save_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar) {
+    const browser_t *b = &g_app.browser;
+    char intro[1000], help[1400], title[160], side_title[900];
+    const char *info[INFO_LINES];
+    static const char *side[MAX_DIR_ITEMS];
+    int n_side = 0, side_sel = -1, sw = tui_side_width(cols_n, 1);
+    int columns = sw && parent_nav(b, sw - 4, side, &n_side, &side_sel, side_title, sizeof side_title);
+    browser_rows(b, tui_page_row_cols(cols_n, 1) - (columns ? sw : 0), rows_n - 12, intro, sizeof intro);
+    int n_info = browser_info(b, IDENT_NONE, info);
+    const file_entry_t *f = g_app.selected ? chat_file(&g_app.selected->engine, g_app.save_num) : NULL;
+    char what[FILE_NAME_MAX + 48];
+    if (f) {
+        char sz[32]; file_format_size(f->size, sz, sizeof sz);
+        snprintf(what, sizeof what, "%s (%s)", f->name, sz);
+    } else {
+        snprintf(what, sizeof what, "file %d", g_app.save_num);
+    }
+    snprintf(title, sizeof title, "Save file %d", g_app.save_num);
+    char open_help[700] = "";
+    if (b->n_items > 0 && b->items[b->selected].is_dir) browser_folder_help(b, open_help, sizeof open_help);
+    snprintf(help, sizeof help, "s saves %s in %s.%s%s", what, b->path, open_help[0] ? " " : "", open_help);
+    tui_page_t page = {
+        .title = title,
         .clock = clock,
         .intro = intro,
         .nav = info, .n_nav = n_info, .nav_sel = 0,
@@ -3571,6 +3662,7 @@ static const command_t APP_COMMANDS[] = {
     { "changelog", "news",              NULL,     "what changed in each version",                    app_changelog },
     { "show",    NULL,                  "N [anyway]", "show picture N in the chat, where it was offered", app_show },
     { "hide",    NULL,                  "N",      "tuck picture N away again",                       app_hide },
+    { "saveto",  NULL,                  "N [anyway]", "pick a folder in a file browser and save file N there", app_saveto },
     { NULL, NULL, NULL, NULL, NULL }
 };
 
@@ -3606,7 +3698,20 @@ static cmd_result_t app_show(void *ctx, const char *arg) {
     if (!n) { note("usage: :show N [anyway] - N is the number in the offer"); return CMD_OK; }
     pic_t *p = pic_find(s, n);
     if (p) { p->shown = 1; g_app.dirty = 1; return CMD_OK; }
-    chat_file_fetch(&s->engine, n, 1, anyway);
+    chat_file_fetch(&s->engine, n, 1, anyway, NULL);
+    return CMD_OK;
+}
+
+static cmd_result_t app_saveto(void *ctx, const char *arg) {
+    (void)ctx;
+    session_slot_t *s = g_app.selected;
+    int anyway, n = file_arg(arg, &anyway);
+    if (!s || s->initialising) { note("open a session first"); return CMD_OK; }
+    if (!n) { note("usage: :saveto N [anyway] - N is the number in the offer"); return CMD_OK; }
+    const file_entry_t *f = chat_file(&s->engine, n);
+    if (!f) { note("there's no file %d - :files lists them", n); return CMD_OK; }
+    if (f->mine) { note("file %d is yours", n); return CMD_OK; }
+    begin_save_browse(n, anyway);
     return CMD_OK;
 }
 
@@ -3990,6 +4095,7 @@ static void handle_key(const tui_key_t *key) {
         case MODE_SIGN_CHOICE:     sign_picker_key(key); return;
         case MODE_SIGN_BROWSE: browser_key(key); return;
         case MODE_SEND_BROWSE: send_browser_key(key); return;
+        case MODE_SAVE_BROWSE: save_browser_key(key); return;
         case MODE_SIGN_PASTE:  paste_key(key); return;
         case MODE_SIGN_PASSWORD:  field_key(key, commit_sign_password, end_sign_password); return;
         case MODE_SIGN_PATH:      field_key(key, commit_key_path, end_key_path); return;
@@ -4466,6 +4572,10 @@ static tui_bar_t current_bar(void) {
             b.chip = "SEND";
             b.hint = "enter send \xc2\xb7 h up \xc2\xb7 ~ home \xc2\xb7 j/k move \xc2\xb7 esc close";
             break;
+        case MODE_SAVE_BROWSE:
+            b.chip = "SAVE";
+            b.hint = "s save here \xc2\xb7 enter open \xc2\xb7 h up \xc2\xb7 ~ home \xc2\xb7 j/k move \xc2\xb7 esc close";
+            break;
         case MODE_CHAT:
             chat_input(&b, &g_app.input);
             break;
@@ -4576,6 +4686,7 @@ static void render(void) {
             return;
         case MODE_SIGN_BROWSE:     render_browser(rows_n, cols_n, hhmm, &bar); return;
         case MODE_SEND_BROWSE:     render_send_browser(rows_n, cols_n, hhmm, &bar); return;
+        case MODE_SAVE_BROWSE:     render_save_browser(rows_n, cols_n, hhmm, &bar); return;
         default: break;
     }
 
@@ -4904,7 +5015,7 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
         int rc = stdin_reader_poll(reader, line, sizeof line);
         int show_anyway, show_n = rc == 1 && strncmp(line, ":show ", 6) == 0 ? file_arg(line + 6, &show_anyway) : 0;
         if (rc == 1 && (strcmp(line, ":changelog") == 0 || strcmp(line, ":news") == 0)) { fputs(CHANGELOG_TEXT, stdout); fflush(stdout); }
-        else if (show_n) chat_file_fetch(&c, show_n, 1, show_anyway);
+        else if (show_n) chat_file_fetch(&c, show_n, 1, show_anyway, NULL);
         else if (rc == 1) alive = chat_submit_line(&c, line, now);
         else if (rc == -1) alive = 0;
         tor_link_ensure(now);

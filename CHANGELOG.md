@@ -14,6 +14,25 @@
   `:install` makes it. Without `--save`, `CHAT_INSTALL_PASSWORD` opens the first save it fits.
   With only one save, chat asks for its passphrase straight away, as before.
 
+### Changed
+- A picture that was shown is kept in memory (up to 128 MB in all, the oldest dropped first)
+  and wiped when the session closes. `:download N` saves it from there straight away, and
+  `:show N` draws it again, without fetching it a second time.
+- `:download N` for a file that's already saved says where it is instead of fetching it again,
+  as long as the saved file still matches the offer. `:show N` of a picture saved earlier draws
+  it from the saved file.
+- `:download N FOLDER` saves in a folder other than Downloads, copying from an earlier save or a
+  shown picture when there is one. `:saveto N` picks the folder in a file browser: Enter opens a
+  folder and `s` saves in the one shown.
+- `:download` without a number takes the newest file that isn't saved yet.
+- Asking for a second file from a sender while one is coming queues it, and it starts by itself
+  once the first is done, instead of being refused. The row under its offer and `:files` say
+  what it's waiting for, and `:cancel N` takes it off the queue.
+- `:download N` while a picture is coming to be shown, or `:show N` while it's coming to be
+  saved, does both once it's here.
+- `:files` says where each file was saved, and the message when a file is saved gives its size
+  and how long it took.
+
 ## 0.1.13
 
 ### Changed
