@@ -578,7 +578,7 @@ saved your settings, it starts on your sessions, and `Ctrl+S` opens the page.
 | `PgUp` / `PgDn` | scroll the chat back / forward (`Ctrl+U` / `Ctrl+D` in NORMAL, `G` the newest) |
 | `Ctrl+B` / `Ctrl+O` / `Ctrl+T` | toggle sidebar / console / chat pane (`s` / `c` / `C` in NORMAL) |
 | `Ctrl+S` | settings |
-| `F1` | every key and command on one page (`?` in NORMAL, and `:help`, too) |
+| `F1` | list all commands and keybinds (`?` in NORMAL, and `:help`, too) |
 | `Ctrl+C` | quit (every session leaves cleanly first) |
 
 The bottom row is the same on every screen: a chip for where you are (`INSERT`, `NORMAL`,
@@ -624,7 +624,7 @@ puts it on the command line.
 | `:update` | install the latest release |
 | `:install [NAME]` | save your settings and signing key on this computer, after telling you what that leaves on disk; with NAME, as a save of that name (see [Installing](#installing)) |
 | `:uninstall [NAME]` | delete what `:install` saved (the save in use, or the one called NAME) |
-| `:changelog` | what changed in each version (`:news`); built in, so it works offline |
+| `:changelog` | show changelog (`:news`); built in, so it works offline |
 | `:send [PATH]` | offer a file, or pick one in a file browser without PATH (see [Files and pictures](#files-and-pictures)) |
 | `:files` | the files offered here, and how each fetch is going |
 | `:download [N] [anyway] [FOLDER]` | save file N in `~/Downloads` or FOLDER (`:dl`); the newest file without N; `anyway` if it's over your size limit |

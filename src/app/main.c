@@ -61,7 +61,7 @@ static const char *USAGE =
     "  Ctrl+B     hide/show the sidebar   Ctrl+O   hide/show the console\n"
     "  Ctrl+T     hide/show the chat (hide two of the three and the last one fills the screen)\n"
     "  Ctrl+S     settings: routing, identity, files, notifications (also :set)\n"
-    "  F1         every key and command on one page (also ? in NORMAL, and :help)\n"
+    "  F1         list all commands and keybinds (also ? in NORMAL, and :help)\n"
     "  Ctrl+C     quit chat (every open session leaves cleanly first)\n"
     "\n"
     "Each session has two parts: the conversation, and a console above it for everything\n"
@@ -3942,17 +3942,17 @@ static cmd_result_t app_uninstall(void *ctx, const char *arg) {
 
 // Checked before CHAT_COMMANDS, so entries here shadow the per-session ones of the same name.
 static const command_t APP_COMMANDS[] = {
-    { "help",    NULL,                  NULL,     "every key and command on one page (F1)",          app_help },
+    { "help",    NULL,                  NULL,     "list all commands and keybinds (F1)",          app_help },
     { "new",     NULL,                  NULL,     "create a session (Ctrl+N)",                       app_new },
     { "join",    NULL,                  NULL,     "join a session by id (Ctrl+J)",                   app_join },
-    { "quit",    "q exit close bd bw",  NULL,     "leave this session; quits if none is open",       app_quit },
+    { "quit",    "q exit close bd bw",  NULL,     "leave this session; quits if none are open",       app_quit },
     { "quitall", "qa qall",             NULL,     "leave every session and quit (Ctrl+C)",           app_quitall },
     { "set",     NULL,        "[NAME [VALUE]]",   "change a setting; alone, opens them all (Ctrl+S)", app_set },
     { "copyid",  NULL,                  NULL,     "copy this session's id to the clipboard",         app_copyid },
     { "update",  NULL,                  NULL,     "install the latest release from GitHub",          app_update },
     { "install", NULL,                  "[NAME]", "save your settings and signing key on this computer (NAME: as a save of that name)", app_install },
     { "uninstall", NULL,                "[NAME]", "delete what :install saved (NAME: that save)",    app_uninstall },
-    { "changelog", "news",              NULL,     "what changed in each version",                    app_changelog },
+    { "changelog", "news",              NULL,     "show changelog",                    app_changelog },
     { "show",    NULL,                  "N [anyway]", "show picture N in the chat, where it was offered", app_show },
     { "hide",    NULL,                  "N",      "tuck picture N away again",                       app_hide },
     { "saveto",  NULL,                  "N [anyway]", "pick a folder in a file browser and save file N there", app_saveto },
