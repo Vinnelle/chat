@@ -33,7 +33,7 @@ void tui_scrollback_clear(tui_scrollback_t *sb);
 // Marks the newest line as the one offering file.
 void tui_scrollback_mark_file(tui_scrollback_t *sb, int file);
 
-// A picture shown under the line that offers it: w by h pixels, rgb, drawn two pixels to a row.
+// A picture shown under the line that offers it: w by h pixels, rgb, drawn two pixels per row.
 #define TUI_IMAGE_MAX_W 64
 #define TUI_IMAGE_MAX_H 48
 typedef struct {
@@ -41,8 +41,8 @@ typedef struct {
     const uint8_t *rgb;
 } tui_image_t;
 
-// A file on its way, on a row under the line offering it: a bar for how much has come (in
-// thousandths), and text after it ("34% · 50 KB of 146 KB · about 6 min left").
+// A file being downloaded, on a row under the line offering it: a progress bar (in thousandths),
+// and text after it ("34% · 50 KB of 146 KB · about 6 min left").
 typedef struct {
     int permille;
     char text[112];
@@ -60,7 +60,7 @@ typedef struct {
     tui_session_state_t state;
 } tui_session_row_t;
 
-// Someone in the selected session. The nick is cut to fit the sidebar; the tag and the verify state
+// Someone in the selected session. The nick is cut to fit the sidebar. The tag and the verify state
 // never are, so a long or lookalike nick can't push them out of view.
 typedef struct {
     char nick[TUI_ROW_LABEL_MAX];
@@ -105,8 +105,8 @@ typedef enum {
     TUI_KEY_SETTINGS,
     TUI_KEY_HELP,
     TUI_KEY_ESCAPE,
-    // Not keys: the terminal's answer to "what's your background?" (its r, g, b in ch[0..2]), and
-    // its word that it switched between a light and a dark theme.
+    // Not keys: the terminal's reply to a background colour query (r, g, b in ch[0..2]), and its
+    // report that it switched between a light and a dark theme.
     TUI_KEY_BG_REPORT,
     TUI_KEY_THEME_CHANGED,
     TUI_KEY_UNKNOWN
@@ -120,14 +120,14 @@ typedef struct {
 
 size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out);
 
-// Asks the terminal for its background colour (answered with TUI_KEY_BG_REPORT), and to say when
-// its theme changes (TUI_KEY_THEME_CHANGED); TUI_THEME_UNWATCH stops the latter.
+// Asks the terminal for its background colour (answered with TUI_KEY_BG_REPORT), and to report
+// when its theme changes (TUI_KEY_THEME_CHANGED). TUI_THEME_UNWATCH stops the theme reports.
 #define TUI_THEME_WATCH "\x1b]11;?\x1b\\\x1b[?2031h"
 #define TUI_THEME_QUERY "\x1b]11;?\x1b\\"
 #define TUI_THEME_UNWATCH "\x1b[?2031l"
 
 // Everything is drawn in the terminal's own colours, so it follows the terminal's theme. Peers'
-// colours are exact, though: once the terminal has told its background, they're eased toward
+// colours are exact, but once the terminal has reported its background they're adjusted to be
 // readable on it.
 void tui_set_background(const uint8_t rgb[3]);
 
@@ -142,8 +142,7 @@ typedef struct {
     char group[16];   // what the menu lists, for its title: "commands", "settings", "peers"
 } tui_suggestion_t;
 
-// Fills out with the nth suggestion for what's typed on the COMMAND line, and returns 0 once there
-// are no more.
+// Fills out with the nth suggestion for the text on the COMMAND line. Returns 0 once there are no more.
 typedef int (*tui_suggest_fn)(const char *typed, int nth, tui_suggestion_t *out);
 typedef const char *(*tui_complete_fn)(const char *typed);
 // Whether a command's name or alias starts with word (or, with whole, is word).
@@ -156,15 +155,15 @@ typedef struct {
     tui_input_mode_t mode;
     char cmd[64];
     int cmd_len;
-    // ':' from NORMAL or '/' on an empty line opens the COMMAND line; leaving it goes back to
-    // whichever mode it came from. cmd_as_text: opened with '/' on an empty line, it may yet turn
-    // back into text (see is_command), and then it's typed on in INSERT.
+    // ':' from NORMAL or '/' on an empty line opens the COMMAND line. Leaving it goes back to the mode
+    // it came from. cmd_as_text: opened with '/' on an empty line, so it can still turn back into text
+    // (see is_command), and typing then continues in INSERT.
     char cmd_prefix;
     int cmd_from_insert;
     int cmd_as_text;
     int menu_sel;    // the suggestion selected in the menu
-    // modal: Esc enters NORMAL and ':' (or '/') opens COMMAND. Off for one-shot prompts, where Esc
-    // is left to the caller (cancel). suggest: the COMMAND line's menu and Tab completion.
+    // modal: Esc enters NORMAL and ':' (or '/') opens COMMAND. Off for one-off prompts, where the
+    // caller handles Esc (cancel). suggest: the COMMAND line's menu and Tab completion.
     // is_command: a COMMAND line opened with '/' on an empty line goes back to being the text of
     // a message as soon as it can't be a command ("/shrug", "/usr/bin"), so a message can start
     // with '/'. mention: given the text after an '@' being typed, returns the full nick or NULL.
@@ -200,10 +199,10 @@ typedef enum { TUI_ID_NONE = 0, TUI_ID_NATIVE, TUI_ID_AGE, TUI_ID_PGP } tui_iden
 // The colour of the mode chip, and of the border around where the keys go.
 typedef enum { TUI_TONE_INSERT = 0, TUI_TONE_NORMAL, TUI_TONE_COMMAND, TUI_TONE_PROMPT, TUI_TONE_PAGE } tui_tone_t;
 
-// The chat screen. title is the session's name, set into the chat pane's border with its state and
-// subtitle after it; without one the pane shows the welcome card. empty is what the pane says while
-// the session has no messages (lines split by '\n'), and scroll how many of the newest are hidden
-// below it.
+// The chat screen. title is the session's name, drawn in the chat pane's border followed by its
+// state and subtitle. Without one the pane shows the welcome card. empty is the text the pane shows
+// while the session has no messages (lines split by '\n'), and scroll is how many of the newest are
+// hidden below.
 typedef struct {
     int sidebar, console, chat;
     const char *title;
@@ -215,16 +214,16 @@ typedef struct {
     // The picture shown under the line offering file, or NULL while it's hidden.
     const tui_image_t *(*image)(const void *ctx, int file);
     const void *image_ctx;
-    // Your nick, lit where a message says @nick. new_lines: how many of the newest messages came
-    // while the session wasn't on screen, ruled off from the rest (0 for none). elsewhere: messages
-    // unread in the other sessions, told in the chat's title while the sidebar isn't there to show
-    // them, and elsewhere_mention if one of them mentions you.
+    // Your nick, highlighted where a message says @nick. new_lines: how many of the newest messages
+    // came while the session wasn't on screen, separated from the rest by a line (0 for none).
+    // elsewhere: unread messages in other sessions, shown in the chat title while the sidebar is
+    // hidden, and elsewhere_mention if one of them mentions you.
     const char *self;
     int new_lines;
     int elsewhere;
     int elsewhere_mention;
-    // How far a file being fetched has got, for the row under the line offering it (given
-    // image_ctx too), or NULL while it isn't on its way.
+    // The progress of a file being fetched, for the row under the line offering it (also given
+    // image_ctx), or NULL while it isn't being fetched.
     const tui_progress_t *(*progress)(const void *ctx, int file);
     const char *build_label;   // a test build's, right of the console's title
 } tui_view_t;
@@ -232,10 +231,10 @@ typedef struct {
 // A line in a dialog's console, styled by kind: a detail faint, then plain, good green, bad red.
 typedef enum { TUI_LOG_DETAIL = 0, TUI_LOG_INFO, TUI_LOG_GOOD, TUI_LOG_BAD } tui_log_kind_t;
 
-// A question or a field, in a box over the middle of the screen. status stands in for input when
-// what comes isn't typed (a paste). A dialog with a console (n_log may be 0) is a wider box of what
-// something is doing instead: the console's last lines, a bar under it for progress, and under that
-// step, what it's doing put plainly, in step_kind's style.
+// A question or a field, in a box over the middle of the screen. status is shown instead of input
+// when the input isn't typed (a paste). A dialog with a console (n_log may be 0) is instead a wider
+// box showing what something is doing: the console's last lines, a progress bar under it, and under
+// that step, a short description of the current step, in step_kind's style.
 typedef struct tui_para tui_para_t;
 typedef struct {
     const char *title;
@@ -256,12 +255,12 @@ typedef struct {
     const char *keys;
 } tui_dialog_t;
 
-// The bottom row and the input. The chip says where you are, then your identity and nick, then
-// message (the reply to the last thing done, until the next key) and hint ("key action · key
-// action") at the right. On the chat screen input is in the box over it, with placeholder while
-// it's empty and a count against limit (if not 0); on a page it's the field being typed in. The box
-// grows a row at a time, up to a few, as what's typed wraps. warn titles it, yellow, for as long as
-// it stands ("what · what to do"). With a dialog up, input is the box drawn under it.
+// The bottom row and the input. The chip shows where you are, then your identity and nick, then
+// message (the result of the last action, until the next key) and hint ("key action · key action")
+// on the right. On the chat screen, input is in the box above it, with placeholder while it's empty
+// and a count against limit (if not 0). On a page it's the field being edited. The box grows one
+// row at a time, up to a few, as the text wraps. warn is shown as its title in yellow while it's
+// set ("what · what to do"). With a dialog open, input is the box drawn under it.
 typedef struct {
     const char *chip;
     tui_tone_t tone;
@@ -284,13 +283,13 @@ void tui_render(int rows, int cols,
                 const tui_scrollback_t *sb, const tui_scrollback_t *console,
                 const tui_view_t *view, const tui_bar_t *bar, int color_enabled);
 
-// Redraws only the input box and the bottom row: 0, or -1, drawing nothing, when the box is to be
-// a different height from the last whole frame's, or a dialog is up, and the frame has to be drawn
-// again.
+// Redraws only the input box and the bottom row. Returns 0, or -1 without drawing anything if the
+// box needs a different height from the last full frame, or a dialog is open, so the whole frame
+// has to be drawn again.
 int tui_render_bar(int rows, int cols, const tui_view_t *view, const tui_bar_t *bar, int color_enabled);
 
-// A whole frame the same as the last one drawn isn't sent again. After anything that may have
-// changed the screen behind chat's back (a resize), this makes the next one go out regardless.
+// A frame that's the same as the last one isn't sent again. After anything that may have changed
+// the screen without chat knowing (a resize), this forces the next one to be sent.
 void tui_invalidate(void);
 
 // How a row's value is drawn: as it is, as a switch, as a choice h/l steps through, as a way into
@@ -305,11 +304,11 @@ typedef struct {
     const uint8_t *swatch; // a sample of this colour before the value, or NULL
 } tui_row_t;
 
-// A list page (settings, the pages under it, and help): rows by section with one selected, a
-// button after the rows if button is set (selected == n_rows selects it), and the selected row's
-// help and usage over the bottom of them. nav lists the sections on the left, nav_sel lit; without it they
-// come from the rows. title goes in the page's border, as its place among the pages; clock at its
-// right end. keys draws the labels as keys.
+// A list page (settings, the pages under it, and help): rows grouped by section with one selected,
+// a button after the rows if button is set (selected == n_rows selects it), and the selected row's
+// help and usage at the bottom. nav lists the sections on the left, with nav_sel highlighted.
+// Without it they come from the rows. title goes in the page's border, showing where the page is,
+// with clock at the right end. keys draws the labels as keys.
 typedef struct {
     const char *title;
     const char *clock;
@@ -330,8 +329,9 @@ void tui_render_page(int rows, int cols, const tui_page_t *page, const tui_bar_t
 
 // A page of Markdown to read (the changelog): paragraphs wrapped to the page's width, with
 // **bold**, *italic*, `code` and [links](url) inside them, headings, bullets and numbered items
-// (level deep, their lines hanging), quotes, code lines (cut, never wrapped) and rules. *scroll is
-// how many rows down from the top it starts, clamped to what the page can scroll; returns that most.
+// (indented by level, with hanging lines), quotes, code lines (cut off, never wrapped) and rules.
+// *scroll is how many rows down from the top it starts, clamped to what the page can scroll.
+// Returns the most it can scroll.
 typedef enum {
     TUI_P_TEXT = 0, TUI_P_HEADING, TUI_P_SUBHEADING, TUI_P_BULLET, TUI_P_NUMBERED, TUI_P_QUOTE, TUI_P_CODE,
     TUI_P_RULE, TUI_P_BLANK

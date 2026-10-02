@@ -23,7 +23,7 @@ const char *torproc_socks(const torproc_t *p);
 const char *torproc_control(const torproc_t *p);
 // Bootstrap progress in percent from tor's log, or -1 before the first report.
 int torproc_bootstrap(torproc_t *p);
-// tor's own version line, "" until it has logged one; the last warning or error it logged.
+// tor's version line ("" until it has logged one), and the last warning or error it logged.
 const char *torproc_version(torproc_t *p);
 void torproc_problem(torproc_t *p, char *out, size_t cap);
 // Stops tor and deletes its folder.

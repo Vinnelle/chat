@@ -142,7 +142,7 @@ static js_value *parse_num(js_ctx *c) {
 
 static js_value *parse_value(js_ctx *c, int depth);
 
-// As in bencode.c: children land where their own parse left them, so each container copies
+// As in bencode.c: children end up wherever their own parse put them, so each container copies
 // its direct children into one run afterwards.
 #define JS_MAX_ITEMS 256
 

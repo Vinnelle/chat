@@ -52,8 +52,8 @@ int platform_list_dir(const char *path, dir_entry_cb cb, void *ctx);
 const char *platform_home_dir(void);
 
 // This OS install's machine id, as text: /etc/machine-id on Linux, MachineGuid on Windows. The
-// OS makes it when it's installed and keeps it until it's reinstalled. It isn't secret: any
-// program here can read it. Returns -1 if there's none.
+// OS creates it on install and keeps it until it's reinstalled. It isn't secret, since any
+// program on the machine can read it. Returns -1 if there isn't one.
 int platform_machine_id(char *out, size_t cap);
 
 int platform_spawn_thread(void (*fn)(void *), void *arg);
@@ -63,26 +63,27 @@ FILE *platform_fopen(const char *utf8_path, const char *mode);
 
 FILE *platform_fopen_private(const char *utf8_path, const char *mode);
 
-// Up to cap bytes of a regular file, read without blocking: a FIFO, a device or a folder is
-// refused, since a path picked in the key browser or named by a Tor control port could be one
+// Reads up to cap bytes of a regular file without blocking. A FIFO, a device or a folder is
+// refused, since a path picked in the key browser or given by a Tor control port could be one
 // (and a FIFO would hang chat). Returns the bytes read, or -1.
 long platform_read_file(const char *utf8_path, void *buf, size_t cap);
 
 int platform_remove(const char *utf8_path);
 
-// For sending a file: opened to read only if it's a regular file (never a FIFO, device or folder,
-// which could hang chat or never end), its size in *size. NULL if not.
+// For sending a file. Opens it for reading only if it's a regular file (never a FIFO, device or
+// folder, which could hang chat or never end), with its size in *size. NULL if not.
 FILE *platform_open_regular(const char *utf8_path, uint64_t *size);
-// The user's Downloads folder, made (only this user can open it) if there's none yet.
+// The user's Downloads folder. Created if it doesn't exist, and then only this user can open it.
 int platform_downloads_dir(char *out, size_t cap);
-// A new file only this user can read, and only if nothing (not even a link) has the name already.
+// Creates a new file only this user can read, and only if nothing (not even a link) has that name.
 FILE *platform_create_new(const char *utf8_path);
-// Moves a finished download to its name, only if nothing has that name: never replaces a file.
+// Renames a finished download to its real name, only if nothing has that name. Never replaces a file.
 int platform_move_new(const char *from, const char *to);
-// $XDG_CONFIG_HOME/chat, else ~/.config/chat, or %LOCALAPPDATA%\chat on Windows. With create, it's
-// made if there's none yet, and only this user can open it.
+// $XDG_CONFIG_HOME/chat, otherwise ~/.config/chat, or %LOCALAPPDATA%\chat on Windows. With create,
+// it's created if it doesn't exist, and only this user can open it.
 int platform_config_dir(char *out, size_t cap, int create);
-// Written to a private file beside path, flushed, then renamed over it: a crash leaves one or the other.
+// Written to a private file next to path, flushed, then renamed over it, so a crash leaves either
+// the old file or the new one.
 int platform_write_private(const char *utf8_path, const void *data, size_t len);
 
 int platform_exe_path(char *out, size_t cap);
@@ -91,28 +92,28 @@ int platform_run_quiet(const char *const argv[]);
 
 int platform_replace_exe(const char *new_path, const char *exe_path);
 
-// Finds a program: path itself when given (not empty), else name on PATH (absolute entries
-// only) and the usual install folders. It has to be a regular executable that nobody but its
-// owner (root or this user) can change. Writes the full path; returns -1 if there's none.
+// Finds a program: path itself if given (not empty), otherwise name on PATH (absolute entries
+// only) and the usual install folders. It has to be a regular executable that only its owner
+// (root or this user) can change. Writes the full path, or returns -1 if there isn't one.
 int platform_find_program(const char *name, const char *path, char *out, size_t cap);
 
-// A new folder only this user can open, under the per-user runtime folder (memory-backed on
-// most Linux systems) or the temporary folder. Writes its path.
+// Creates a new folder only this user can open, in the per-user runtime folder (kept in memory on
+// most Linux systems) or the temp folder. Writes its path.
 int platform_private_tempdir(const char *prefix, char *out, size_t cap);
 // Deletes a folder and everything in it, never following links out of it.
 int platform_remove_tree(const char *path);
-// Deletes this user's folders from platform_private_tempdir(prefix) that a crash left behind:
-// older than a minute, with lock_rel inside them not held by a running program.
+// Deletes this user's platform_private_tempdir(prefix) folders left behind by a crash: those older
+// than a minute, where lock_rel inside isn't held by a running program.
 void platform_remove_stale_tempdirs(const char *prefix, const char *lock_rel);
 
-// A background process: argv[0] is a full path, never searched for. It gets no terminal and no
-// handles of ours, and on Windows dies with this process. Its output goes to out_path (a new
-// file only this user can read), or nowhere if that's NULL.
+// Starts a background process. argv[0] is a full path and is never searched for. It gets no
+// terminal and none of our handles, and on Windows it ends with this process. Its output goes to
+// out_path (a new file only this user can read), or nowhere if that's NULL.
 typedef struct platform_proc platform_proc_t;
 platform_proc_t *platform_spawn(const char *const argv[], const char *out_path);
 // 1 once it has exited (its code in *code), 0 while it runs.
 int platform_proc_exited(platform_proc_t *p, int *code);
-// Asks it to stop, waits up to wait_ms, then kills it; frees p.
+// Asks it to stop, waits up to wait_ms, then kills it, and frees p.
 void platform_proc_stop(platform_proc_t *p, int wait_ms);
 long platform_pid(void);
 void platform_sleep_ms(int ms);
@@ -120,7 +121,7 @@ void platform_sleep_ms(int ms);
 // The IPv4 default gateway. Returns -1 when there is none.
 int platform_default_gateway(uint8_t ip[4]);
 
-// Hands the system's trusted root certificates to one of the callbacks: add_der for each
+// Passes the system's trusted root certificates to one of the callbacks: add_der for each
 // certificate in a store, add_file for a PEM bundle (it returns 0 once one loads).
 void platform_ca_roots(void (*add_der)(void *ctx, const uint8_t *der, size_t len),
                        int (*add_file)(void *ctx, const char *path), void *ctx);

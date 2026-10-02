@@ -6,7 +6,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// A file's name as it's shown and saved: at most this many bytes.
+// The longest file name shown and saved, in bytes.
 #define FILE_NAME_MAX 100
 
 // A name from a peer, made safe to show and to save under: no folders, nothing the terminal or

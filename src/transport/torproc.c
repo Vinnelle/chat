@@ -22,8 +22,8 @@ struct torproc {
     double next_read;
 };
 
-// Two free ports on 127.0.0.1, held open together so they differ. Another program could take
-// one before tor does; tor then exits and the caller starts it again.
+// Two free ports on 127.0.0.1, held open together so they're different. Another program could
+// take one before tor does. tor then exits and the caller starts it again.
 static int free_ports(uint16_t *a, uint16_t *b) {
     sock_t s1 = net_tcp_listen_loopback(a);
     sock_t s2 = net_tcp_listen_loopback(b);
@@ -42,7 +42,8 @@ torproc_t *torproc_start(const char *program, char *err, size_t cap) {
     torproc_t *p = calloc(1, sizeof *p);
     if (!p) { copy_str(err, "out of memory", cap); return NULL; }
     p->boot = -1;
-    // What a crashed chat left: its tor has quit by now (it watches chat's process), the folder stays.
+    // Left by a crashed chat. Its tor has quit by now (it watches chat's process) but the folder is
+// still there.
     platform_remove_stale_tempdirs("chat-tor", "data/lock");
     if (platform_private_tempdir("chat-tor", p->dir, sizeof p->dir) != 0) {
         copy_str(err, "can't make a private folder for tor", cap);
@@ -57,8 +58,8 @@ torproc_t *torproc_start(const char *program, char *err, size_t cap) {
         torproc_stop(p);
         return NULL;
     }
-    // An empty configuration of our own for both the torrc and the defaults, so the system's
-    // /etc/tor/torrc (hidden services, other ports, whatever it holds) plays no part.
+    // An empty config file for both the torrc and the defaults, so nothing in the system's
+    // /etc/tor/torrc (hidden services, other ports) applies.
     FILE *f = platform_fopen_private(p->torrc, "w");
     if (!f) { copy_str(err, "can't write tor's configuration", cap); torproc_stop(p); return NULL; }
     fclose(f);
@@ -86,7 +87,7 @@ torproc_t *torproc_start(const char *program, char *err, size_t cap) {
         "--__OwningControllerProcess", owner,
         "--Log", "notice stdout",
         "--AvoidDiskWrites", "1",
-        // Refuse SOCKS requests that carry an IP address a DNS lookup elsewhere must have made.
+        // Refuse SOCKS requests with an IP address, since that means a DNS lookup happened outside Tor.
         "--SafeSocks", "1",
         "--RunAsDaemon", "0",
         NULL
@@ -130,7 +131,7 @@ static void read_log(torproc_t *p) {
             const char *m = strstr(line, "] ");
             clean_text(m ? m + 2 : line, p->problem, sizeof p->problem - 1);
         }
-        // Whatever tor printed last: a program that dies before it logs (a missing library) says why there.
+        // The last thing tor printed. If it dies before logging (a missing library, say), this has why.
         if (line[0]) clean_text(line, p->last_line, sizeof p->last_line - 1);
         line = eol ? eol + 1 : NULL;
     }

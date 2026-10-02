@@ -12,12 +12,12 @@
 //
 // Each session publishes an onion service of its own, and one of the room's onion services. The
 // room has TOR_ROOM_SLOTS of them, their keys derived from the session id and password. The
-// creator takes slot 0; a joiner takes a slot where nobody answered. Everyone keeps knocking on
-// the slots they don't publish, learns the members' own onion addresses from whoever answers, and
-// connects to those. One shared slot wouldn't do: Tor hands out whichever publisher's descriptor
-// is newest, so two members publishing it could only ever reach themselves.
-// All the services go when the session ends. Datagrams travel over Tor streams as 2-byte
-// length-prefixed frames.
+// creator takes slot 0, and a joiner takes a slot where nobody answered. Everyone keeps trying
+// the slots they don't publish, gets the members' own onion addresses from whoever answers, and
+// connects to those. One shared slot wouldn't work: Tor hands out the newest descriptor, so two
+// members publishing the same one could only ever reach themselves.
+// All the services are removed when the session ends. Datagrams are sent over Tor streams as
+// 2-byte length-prefixed frames.
 
 #define TOR_VPORT 7474
 #define TOR_ROOM_SLOTS 6
@@ -64,8 +64,8 @@ int tor_target(tor_t *t, const char *onion, addr_t *out);
 addr_t tor_room_target(const tor_t *t, int slot);
 
 // Publishes one of the room's onion services (once): slot, or -1 for one where nobody answered.
-// tor_republish_room publishes it afresh, so its descriptor points here again after someone else
-// who published the same slot left.
+// tor_republish_room publishes it again, so its descriptor points here again after someone else
+// who published the same slot has left.
 void tor_host_room(tor_t *t, int slot);
 int tor_hosted_slot(const tor_t *t);
 void tor_republish_room(tor_t *t);

@@ -31,15 +31,15 @@
 #define PING_EVERY 30.0
 #define BACKOFF_MAX 300.0
 #define RESUB_DELAY 30.0
-// Relays rate-limit writes, some hard (a ban for a while after a few refusals). A handshake is a
-// short burst; steady traffic is one event per peer every few seconds.
+// Relays rate limit writes, some strictly (a temporary ban after a few refusals). A handshake is
+// a short burst, and normal traffic is one event per peer every few seconds.
 #define SEND_RATE 0.5
 #define SEND_BURST 8.0
 #define PAUSE_MIN 30.0
 #define PAUSE_MAX 900.0
-// The next ten minutes' connection opens this long before they start (at random between the
-// half and the whole of it), and the last ten minutes' closes as long after (likewise): members'
-// clocks can differ by the half. Through Tor a connection takes longer to come up.
+// The connection for the next ten minutes opens this long before they start (a random time
+// between half and all of it), and the one for the last ten minutes closes the same amount after,
+// since members' clocks can differ by half of it. Through Tor a connection takes longer to open.
 #define LEAD 120.0
 #define LEAD_PROXY 240.0
 #define TAIL 120.0
@@ -49,8 +49,8 @@ enum { R_IDLE, R_RESOLVING, R_CONNECTING, R_SOCKS, R_TLS, R_UPGRADE, R_OPEN };
 #define SOCKS_TIMEOUT 90.0
 enum { JOB_RUNNING, JOB_DONE, JOB_ABANDONED };
 
-// A relay's name is looked up on a thread, like the DHT's bootstrap servers. The relay may be
-// dropped first, so whichever side finishes last frees the job.
+// A relay's name is looked up on a thread, like the DHT bootstrap servers. The relay may be
+// dropped before it finishes, so whichever side finishes last frees the job.
 #if defined(__STDC_NO_ATOMICS__)
 typedef volatile int job_state_t;
 #define JOB_ATOMIC 0
@@ -70,7 +70,7 @@ typedef struct {
 
 typedef struct relay relay_t;
 
-// One connection to a relay, asking for one ten minutes' tag.
+// One connection to a relay, asking for one ten minute tag.
 typedef struct {
     int used;
     relay_t *relay;
@@ -92,13 +92,13 @@ typedef struct {
     int msg_op, in_msg;
     double deadline, opened_at, last_rx, next_ping, resub_at;
     int subscribed;
-    // A new one for each connection: the same id at several relays, or on one relay from one
-    // connection to the next, would tie those connections to one member (and, through Tor, the
-    // circuits it gives each relay).
+    // A new one for each connection. The same id at several relays, or on one relay across
+    // connections, would link those connections to one member (and through Tor, the circuits it uses
+    // for each relay).
     char subid[17];
     char challenge[160];
-    // Through Tor: the SOCKS exchange so far, and this connection's own SOCKS login, so each gets
-    // a circuit (and exit) of its own.
+    // Through Tor: the SOCKS exchange so far, and this connection's own SOCKS login, so each one gets
+    // its own circuit (and exit).
     int via_proxy, socks_stage;
     char socks_user[17];
 } conn_t;
@@ -113,10 +113,10 @@ struct relay {
     int fails;
     int warned, refusals;
     double tokens, tokens_at;
-    // Writes held back after the relay refused one for rate or policy; reading goes on.
+    // Writes paused after the relay refused one for rate or policy. Reading continues.
     double paused_until, pause;
     int read_only, odd_refusals;
-    // When the next ten minutes' connection opens, and the last one's closes, this time round.
+    // When the connection for the next ten minutes opens, and the one for the last ten closes, this time.
     long long plan_epoch;
     double open_next_at, close_last_at;
 };
@@ -125,8 +125,8 @@ struct nostr {
     relay_t relays[NOSTR_MAX_RELAYS];
     int n_relays;
     int active;
-    // Tor mode: every relay connection goes through this SOCKS proxy, and none goes anywhere
-    // until it's known.
+    // Tor mode: every relay connection goes through this SOCKS proxy, and none connects until it's
+    // known.
     int must_proxy;
     char proxy[64];
     uint8_t tag_key[NOSTR_KEY_LEN];
@@ -137,7 +137,7 @@ struct nostr {
     nostr_deliver_fn deliver;
     nostr_log_fn log;
     void *ctx;
-    // The connection whose message is being handled: a send mustn't flush (and maybe drop) it then.
+    // The connection whose message is being handled. A send mustn't flush (and maybe drop) it meanwhile.
     conn_t *busy;
     js_arena arena;
     char ev[EVENT_CAP];
@@ -247,7 +247,7 @@ static void drop_job(conn_t *c) {
     if (atomic_exchange(&c->job->state, JOB_ABANDONED) == JOB_DONE) free(c->job);
 #else
     if (c->job->state == JOB_DONE) free(c->job);
-    else c->job->state = JOB_ABANDONED;   // left for good: without atomics, never freed
+    else c->job->state = JOB_ABANDONED;   // abandoned: without atomics, never freed
 #endif
     c->job = NULL;
 }
@@ -271,7 +271,7 @@ static void conn_fail(nostr_t *n, conn_t *c, double now, const char *why) {
     char reason[160];
     copy_str(reason, why, sizeof reason);
     close_conn(c);
-    // A connection that held for a minute was fine: start the backoff over.
+    // A connection that lasted a minute was fine, so reset the backoff.
     if (was_open && now - opened_at > 60.0) r->fails = 0;
     int shift = r->fails < 6 ? r->fails : 6;
     double delay = 5.0 * (double)(1u << shift);
@@ -348,7 +348,7 @@ static uint32_t rand_below(uint32_t n) {
     return r % n;
 }
 
-// Builds an event signed with a key made for it alone, and returns its JSON length in n->ev, or 0.
+// Builds an event signed with a key made just for it, and returns its JSON length in n->ev, or 0.
 static size_t build_event(nostr_t *n, int kind, const char *tags, const char *content, size_t clen) {
     secp256k1_keypair kp;
     uint8_t sk[32], pk[32];
@@ -362,7 +362,7 @@ static size_t build_event(nostr_t *n, int kind, const char *tags, const char *co
     secp256k1_keypair_xonly_pub(secp(), &xpk, NULL, &kp);
     secp256k1_xonly_pubkey_serialize(secp(), pk, &xpk);
     hex_encode(pk, 32, pk_hex);
-    // A little off the real time, so the timestamp doesn't pin down when it was written.
+    // Slightly off the real time, so the timestamp doesn't show exactly when it was written.
     long created = (long)time(NULL) - (long)rand_below(30);
     size_t p = (size_t)snprintf(n->ser, EVENT_CAP, "[0,\"%s\",%ld,%d,%s,", pk_hex, created, kind, tags);
     if (p >= EVENT_CAP) return 0;
@@ -425,8 +425,8 @@ static int seen_before(nostr_t *n, const uint8_t id[8]) {
     return 0;
 }
 
-// Kinds 20000-29999 are ephemeral. A few have a meaning relays may act on; the rest are ours to
-// pick from at random, so the kind says nothing about who sent an event.
+// Kinds 20000-29999 are ephemeral. A few have a meaning relays may act on. The rest are picked
+// from at random, so the kind says nothing about who sent an event.
 static int kind_reserved(int k) {
     return k == 22242 || k == 23194 || k == 23195 || k == 24133 || k == 27235 || (k >= 21000 && k < 21100);
 }
@@ -454,19 +454,19 @@ static void on_event(nostr_t *n, conn_t *c, const js_value *ev, double now) {
     }
     if (!ours) return;
 
-    // The relay's signature check is enough for the relay; ours is the wrap, which only room
-    // members can seal. Signatures by throwaway keys would prove nothing more.
+    // The relay checks the signature for itself. Our check is the wrap, which only room members can
+    // seal. Signatures by throwaway keys wouldn't prove anything more.
     uint8_t wrapped[NOSTR_WRAP_LEN + 3];
     long wlen = base64_decode_strict(content->s, content->slen, wrapped, sizeof wrapped);
     if (wlen != NOSTR_WRAP_LEN) return;
-    // Every relay we use sends its copy: the first one wins. The nonce is random per event.
+    // Every relay we use sends its own copy, and the first one is used. The nonce is random per event.
     if (seen_before(n, wrapped)) return;
     uint8_t plain[NOSTR_WRAP_PLAIN];
     if (nostr_unwrap(n->wrap_key, wrapped, (size_t)wlen, plain) != 0) return;
     static const uint8_t everyone[ID_LEN];
     const uint8_t *from_id = plain, *to_id = plain + ID_LEN;
     size_t dlen = ((size_t)plain[ID_LEN * 2] << 8) | plain[ID_LEN * 2 + 1];
-    // Our own events come back to us too, and the others' go to everyone.
+    // Our own events come back to us too, and other members' go to everyone.
     if (memcmp(from_id, n->my_id, ID_LEN) == 0 || memcmp(from_id, everyone, ID_LEN) == 0) return;
     if (memcmp(to_id, n->my_id, ID_LEN) != 0 && memcmp(to_id, everyone, ID_LEN) != 0) return;
     if (dlen == 0 || dlen > DGRAM_MAX) return;
@@ -488,8 +488,7 @@ static void on_message(nostr_t *n, conn_t *c, const char *msg, size_t len, doubl
             const char *why = js_str(&v->items[3]);
             char clean[120];
             clean_text(why ? why : "", clean, sizeof clean - 1);
-            // NIP-01 prefixes: back off on rate limits, stop writing on policy. The other relays
-            // carry on meanwhile.
+            // NIP-01 prefixes: back off on rate limits, stop writing on policy. The other relays keep going.
             const char *action = "";
             if (strncmp(clean, "rate-limited", 12) == 0 || strncmp(clean, "banned", 6) == 0) {
                 r->pause = r->pause > 0 ? r->pause * 2 : PAUSE_MIN;
@@ -504,7 +503,7 @@ static void on_message(nostr_t *n, conn_t *c, const char *msg, size_t len, doubl
                 r->read_only = 1;
                 action = " - only reading from it now";
             }
-            // The first refusal says why relaying may not work through this relay; the rest are noise.
+            // The first refusal explains why this relay may not work. The rest are noise.
             logf_(n, r->refusals++ > 0, "* nostr: %s refused an event: %s%s", r->host, clean[0] ? clean : "no reason given", action);
         } else if (v->items[2].type == JS_BOOL && v->items[2].b && r->pause > PAUSE_MIN && now > r->paused_until) {
             r->pause /= 2;
@@ -582,7 +581,7 @@ static int check_upgrade(conn_t *c, char *why, size_t cap) {
     }
     size_t head_len = (size_t)(end - c->in) + 4;
     char head[8200];
-    // One read can bring a long head all at once, past the check above.
+    // One read can return a long head all at once, past the check above.
     if (head_len > sizeof head) { copy_str(why, "oversized handshake reply", cap); return -1; }
     memcpy(head, c->in, head_len - 2);
     head[head_len - 2] = '\0';
@@ -612,7 +611,7 @@ static int check_upgrade(conn_t *c, char *why, size_t cap) {
     return 1;
 }
 
-// Handles whole frames in the input buffer. Returns -1 if the connection has to go.
+// Handles complete frames in the input buffer. Returns -1 if the connection has to be dropped.
 static int read_frames(nostr_t *n, conn_t *c, double now) {
     for (;;) {
         if (c->in_len < 2) return 0;
@@ -686,8 +685,8 @@ static void start_tls(nostr_t *n, conn_t *c, double now) {
     c->deadline = now + STEP_TIMEOUT;
 }
 
-// Through Tor: connect to its SOCKS port. The relay's name goes to Tor as it is, so Tor looks it
-// up at the exit; nothing here ever asks local DNS.
+// Through Tor: connect to its SOCKS port. The relay's name is passed to Tor as is, so Tor looks it
+// up at the exit. Local DNS is never used.
 static void begin_proxy_connect(nostr_t *n, conn_t *c, double now) {
     addr_t pa;
     if (addr_parse_hostport(n->proxy, &pa) != 0) { conn_fail(n, c, now, "Tor's SOCKS address isn't host:port"); return; }
@@ -720,8 +719,8 @@ static const char *socks_reply(int rep) {
     }
 }
 
-// Moves the SOCKS exchange on with what has arrived. 1 once connected through Tor, 0 waiting,
-// -1 failed (the connection has been dropped).
+// Moves the SOCKS exchange forward with what has arrived. Returns 1 once connected through Tor, 0
+// while waiting, -1 on failure (the connection has been dropped).
 static int socks_advance(nostr_t *n, conn_t *c, double now) {
     relay_t *r = c->relay;
     for (;;) {
@@ -780,7 +779,7 @@ static void conn_open(nostr_t *n, relay_t *r, conn_t *c, long long epoch, double
     c->epoch = epoch;
     epoch_tag(n, epoch, c->tag);
     if (n->must_proxy) {
-        // No tor yet: wait for one rather than ever connect directly.
+        // No tor yet, so wait for one instead of connecting directly.
         if (n->proxy[0]) begin_proxy_connect(n, c, now);
         return;
     }
@@ -799,7 +798,7 @@ static void conn_step(nostr_t *n, conn_t *c, double now) {
     relay_t *r = c->relay;
     switch (c->state) {
         case R_IDLE:
-            // A Tor-mode connection that had no tor to go through: now it has.
+            // A Tor mode connection that had no tor to go through now has one.
             if (n->must_proxy && n->proxy[0] && c->s == SOCK_INVALID) begin_proxy_connect(n, c, now);
             return;
         case R_RESOLVING: {
@@ -854,7 +853,7 @@ static void conn_step(nostr_t *n, conn_t *c, double now) {
             int rc = socks_advance(n, c, now);
             if (rc < 0) return;
             if (rc == 0) { if (now > c->deadline) conn_fail(n, c, now, "Tor didn't reach the relay in time"); return; }
-            // Anything past the SOCKS reply would be the relay's TLS, which only starts once we speak.
+            // Anything after the SOCKS reply would be the relay's TLS, which only starts once we send.
             c->in_len = 0;
             start_tls(n, c, now);
             return;
@@ -914,8 +913,8 @@ static conn_t *conn_for(relay_t *r, long long epoch) {
     return NULL;
 }
 
-// Which connections a relay should have now: this ten minutes', the next one's from a little
-// before it starts, and the last one's until a little after it ended. Nothing else.
+// Which connections a relay should have now: the one for these ten minutes, the next one from a
+// little before it starts, and the last one until a little after it ended. Nothing else.
 static void relay_plan(nostr_t *n, relay_t *r, double now) {
     double wall = (double)time(NULL);
     long long e = (long long)wall / NOSTR_EPOCH;
@@ -941,7 +940,7 @@ static void relay_plan(nostr_t *n, relay_t *r, double now) {
         if (want[i] < 0 || conn_for(r, want[i])) continue;
         conn_t *slot = !r->conns[0].used ? &r->conns[0] : !r->conns[1].used ? &r->conns[1] : NULL;
         if (!slot) {
-            // Both taken: the oldest makes way for the one needed now.
+            // Both taken, so the oldest is replaced by the one needed now.
             slot = r->conns[0].epoch < r->conns[1].epoch ? &r->conns[0] : &r->conns[1];
             if (slot->epoch >= want[i]) continue;
         }
@@ -969,8 +968,8 @@ int nostr_sockets(const nostr_t *n, sock_t *out, int max) {
     return k;
 }
 
-// The connection to publish on: this ten minutes', else the last one's while it lasts, else the
-// next one's. An event carries the tag its connection asks for, never another.
+// The connection to publish on: the one for these ten minutes, otherwise the last one while it's
+// open, otherwise the next one. An event only carries the tag its connection asks for.
 static conn_t *publish_conn(relay_t *r) {
     long long e = (long long)time(NULL) / NOSTR_EPOCH;
     const long long order[3] = { e, e - 1, e + 1 };
@@ -1002,13 +1001,12 @@ int nostr_send(nostr_t *n, addr_t to, const uint8_t *data, size_t len, double no
     gen_random(plain + WRAP_HDR + len, NOSTR_WRAP_PLAIN - WRAP_HDR - len);
     nostr_wrap(n->wrap_key, plain, wrapped);
     crypto_wipe(plain, sizeof plain);
-    // Seen already, so the relays' copies of our own event are dropped before unwrapping.
+    // Already seen, so the relays' copies of our own event are dropped before unwrapping.
     seen_before(n, wrapped);
     char content[CONTENT_LEN + 1];
     size_t clen = base64_encode(wrapped, sizeof wrapped, content);
     int kind = random_kind(), sent = 0;
-    // One event per tag: every relay publishing on its connection for the same ten minutes gets
-    // the same event, as before.
+    // One event per tag. Every relay with a connection for the same ten minutes gets the same event.
     char built_tag[65] = "";
     size_t total = 0;
     static const char head[] = "[\"EVENT\",";
@@ -1042,7 +1040,7 @@ int nostr_send(nostr_t *n, addr_t to, const uint8_t *data, size_t len, double no
 void nostr_set_proxy(nostr_t *n, const char *socks) {
     if (!n->must_proxy || strcmp(n->proxy, socks) == 0) return;
     copy_str(n->proxy, socks, sizeof n->proxy);
-    // Whatever went through the old tor is gone with it: start over through the new one.
+    // Everything that went through the old tor is gone, so start again through the new one.
     for (int i = 0; i < n->n_relays; i++) {
         relay_t *r = &n->relays[i];
         for (int k = 0; k < 2; k++) close_conn(&r->conns[k]);

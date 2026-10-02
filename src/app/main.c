@@ -193,12 +193,12 @@ typedef struct {
     pic_t pics[MAX_PICS];
     int unread;      // messages that came while another session was on screen
     int mentioned;   // and one of them mentions you
-    // On screen, the messages from new_at (in sb.total's count) on came while it wasn't, and are
-    // ruled off from the rest until it's left or you send.
+    // While on screen, the messages from new_at (in sb.total's count) onwards arrived while it wasn't,
+    // and a line separates them from the rest until you leave it or send something.
     int has_new;
     unsigned new_at;
     int initialising;
-    int scroll;   // the newest messages hidden below the chat, scrolled back past
+    int scroll;   // the newest messages hidden below the chat after scrolling back
     char name[MAX_SESSION_NAME + 1];
 } session_slot_t;
 
@@ -263,8 +263,8 @@ typedef struct {
     int settings_sel;
     int help_sel;
     int changelog_scroll, changelog_most;
-    char message[200];   // the bottom bar's reply to the last thing done, until the next key
-    int onboarding;   // the settings page chat opens on: its Done starts chat proper
+    char message[200];   // the bottom bar's result of the last action, until the next key
+    int onboarding;   // the settings page chat opens on: its Done button starts chat
     int sign_sel;
     key_origin_t key_origin;       // where the identity in use came from
     uint32_t pgp_created;          // a PGP key made here: its creation time, which its fingerprint covers
@@ -276,8 +276,8 @@ typedef struct {
     uint8_t color[3];
     identity_source_t identity_source;
     identity_keypair_t identity;
-    // installed: what :install saved is open, and kept up to date. locked: it's there, still sealed.
-    // install_pass holds the passphrase while it's typed the second time.
+    // installed: what :install saved is open and kept up to date. locked: it exists but is still
+    // sealed. install_pass holds the passphrase while it's typed the second time.
     int installed, locked;
     int saved_key_known;
     uint8_t saved_key_pub[ID_SIGN_PUB_LEN];
@@ -301,14 +301,14 @@ typedef struct {
     char pending_auto_session[MAX_SESSION_NAME + 1];
     char pending_auto_password[256];
     uint16_t pending_auto_port;
-    // As given: a name in them is only looked up once the settings page chat opens on is done.
+    // As given. A name in them is only looked up once the startup settings page is done.
     char pending_auto_peer_args[MAX_PEER_ARGS][PEER_ARG_LEN];
     int pending_auto_n_peers;
 } app_t;
 
 static app_t g_app;
 
-// The command line, read again once what :install saved is open, so its options still win.
+// The command line, read again once what :install saved is open, so its options still override it.
 typedef struct {
     char nick[MAX_NICK + 1];
     char identity[520];   // age or pgp, then :KEYFILE for a key of your own
@@ -335,10 +335,10 @@ static void on_sigint(int sig) {
 #endif
 }
 
-// Ctrl+C, a kill or a closed terminal all end the main loop, so sessions say bye, keys are
-// wiped, the terminal is restored and chat's own tor is stopped, instead of the process just
-// dying. The handler has to stay in place for a second signal too: with plain signal() and
-// _POSIX_C_SOURCE, glibc resets it after the first, and a second Ctrl+C or kill skipped all that.
+// Ctrl+C, a kill or a closed terminal all end the main loop, so sessions say bye, keys are wiped,
+// the terminal is restored and chat's own tor is stopped, instead of the process just dying. The
+// handler has to stay in place for a second signal too. With plain signal() and _POSIX_C_SOURCE,
+// glibc resets it after the first, and a second Ctrl+C or kill skipped all of that.
 static void catch_quit_signals(void) {
 #ifdef _WIN32
     signal(SIGINT, on_sigint);
@@ -355,7 +355,7 @@ static void catch_quit_signals(void) {
 #endif
 }
 
-// App-level notes go wherever the user is looking: the selected session's console, else the startup log.
+// App level notes go wherever the user is looking: the selected session's console, otherwise the startup log.
 static int g_plain;   // --simple (or no terminal): app notes go to stdout
 
 static void push_log(const char *fmt, ...) {
@@ -377,7 +377,7 @@ static void session_print(void *ui, const char *hhmm, const char *text, const ui
             s->unread++;
             if (flags & LINE_MENTION) s->mentioned = 1;
         }
-        // Scrolled back, the chat stays on the messages in view.
+        // When scrolled back, the chat stays on the messages in view.
         if (s->scroll > 0 && s->scroll < s->sb.count - 1) s->scroll++;
     } else {
         tui_scrollback_push(&s->console, hhmm, text, rgb, 0, 0);
@@ -411,8 +411,8 @@ static const tui_image_t *pic_for(const void *ctx, int file) {
     return NULL;
 }
 
-// A file of someone else's being fetched, for the row under the line that offered it: through the
-// relays one can take a long while, and nothing else shows it coming.
+// Someone else's file being fetched, for the row under the line that offered it. Through the
+// relays it can take a long time, and nothing else shows its progress.
 static const tui_progress_t *progress_for(const void *ctx, int file) {
     static tui_progress_t pg;
     const session_slot_t *s = ctx;
@@ -430,7 +430,7 @@ static const tui_progress_t *progress_for(const void *ctx, int file) {
     return &pg;
 }
 
-// A picture fetched to show has come: decoded into a thumbnail here, then the bytes are gone.
+// A picture fetched to show has arrived. It's decoded into a thumbnail here, then the bytes are discarded.
 static void session_file_view(void *ui, int num, const char *name, const uint8_t *data, size_t len) {
     session_slot_t *s = ui;
     (void)name;
@@ -457,10 +457,10 @@ static void session_file_view(void *ui, int num, const char *name, const uint8_t
     g_app.dirty = 1;
 }
 
-// That something came, and who sent it and what it says only if the preview setting let the
-// engine pass them on (nick, text NULL otherwise). Never the session: desktops keep a history of
-// notifications (Windows writes it to disk), and with a blank password a session's id is all it
-// takes to join it.
+// That a message came in, plus who sent it and what it says only if the preview setting let the
+// engine pass them on (otherwise nick and text are NULL). Never the session, since desktops keep a
+// history of notifications (Windows writes it to disk), and with a blank password a session's id
+// is all someone needs to join it.
 static void send_notification(const char *nick, const char *text, int mentioned) {
     char title[CHAT_NAME_LEN * 2 + 48], body[MAX_TEXT + CHAT_NAME_LEN * 2 + 48];
     if (nick && text) {
@@ -489,8 +489,8 @@ static session_slot_t *find_free_slot(void) {
     return NULL;
 }
 
-// The conversation and console as shown are kept out of swap, as the keys are. Best effort: past
-// RLIMIT_MEMLOCK they're only kept in memory as usual.
+// The conversation and console on screen are kept out of swap, like the keys. Best effort: beyond
+// RLIMIT_MEMLOCK they're just kept in memory as normal.
 static void lock_scrollbacks(session_slot_t *s) {
     crypto_lock(&s->sb, sizeof s->sb);
     crypto_lock(&s->console, sizeof s->console);
@@ -502,8 +502,8 @@ static void release_scrollbacks(session_slot_t *s) {
     crypto_unlock(&s->console, sizeof s->console);
 }
 
-// Puts s on screen (or none). The session left loses its rule over what was new, and s gets one
-// over what came while it was away, which is then read.
+// Puts s on screen (or none). The session being left loses its new messages line, and s gets one
+// above what arrived while it was away, which then counts as read.
 static void select_session(session_slot_t *s) {
     if (g_app.selected && g_app.selected != s) g_app.selected->has_new = 0;
     g_app.selected = s;
@@ -556,8 +556,8 @@ static void console_note(session_slot_t *s, const char *fmt, ...) {
     g_app.dirty = 1;
 }
 
-// A reply to what the user just did, on the bottom bar until their next key. Reports and anything
-// that happens on its own go to the console instead.
+// The result of the user's last action, on the bottom bar until their next key. Reports and
+// anything that happens by itself go to the console instead.
 static void note(const char *fmt, ...) {
     va_list ap; va_start(ap, fmt);
     vsnprintf(g_app.message, sizeof g_app.message, fmt, ap);
@@ -565,7 +565,7 @@ static void note(const char *fmt, ...) {
     g_app.dirty = 1;
 }
 
-// Asks the terminal to put text (up to 255 bytes) on the clipboard; one that doesn't allow OSC 52 ignores it.
+// Asks the terminal to put text (up to 255 bytes) on the clipboard. A terminal that doesn't allow OSC 52 ignores it.
 #define OSC52_MAX 1024   // a PGP public key fits
 
 static void osc52_copy(const char *text) {
@@ -587,10 +587,10 @@ static void copy_session_id(session_slot_t *s) {
 
 // ---- which tor Tor mode uses ----
 //
-// A tor that's already running is the better one to use when chat can: it keeps its entry guards
-// from run to run, and any bridges its torrc sets up. Chat can use it only if its control port
-// answers and lets chat log in, since publishing onion services needs that. Otherwise chat starts
-// a tor of its own (torproc.c).
+// A tor that's already running is better when chat can use it, since it keeps its entry guards
+// between runs and any bridges its torrc sets up. Chat can only use it if its control port answers
+// and lets chat log in, since publishing onion services needs that. Otherwise chat starts its own
+// tor (torproc.c).
 
 typedef enum { TOR_LAUNCH_AUTO = 0, TOR_LAUNCH_ALWAYS = 1, TOR_LAUNCH_NEVER = 2 } tor_launch_t;
 static const char *const TOR_LAUNCH_NAMES[] = { "auto", "always", "never" };
@@ -609,8 +609,8 @@ static struct {
     double retry_at;
 } g_tor;
 
-// Downloads (:update) go through Tor whenever Tor mode is on: to the tor in use once there is
-// one, and to a port nothing listens on until then, so they fail instead of going direct.
+// Downloads (:update) go through Tor whenever Tor mode is on: to the tor in use once there is one,
+// and until then to a port nothing listens on, so they fail instead of going direct.
 static void sync_update_proxy(void) {
     if (g_app.route.mode == ROUTE_DHT) update_set_proxy(NULL);
     else update_set_proxy(g_tor.state == TL_READY ? g_tor.socks : "127.0.0.1:1");
@@ -626,8 +626,8 @@ static void tor_link_apply(void) {
     sync_update_proxy();
 }
 
-// Relays tried while tor was still connecting failed and backed off, for up to five minutes:
-// once it's on the network they go again at once.
+// Relays tried while tor was still connecting failed and backed off for up to five minutes, so
+// once it's connected they're retried straight away.
 static void tor_link_connected(void) {
     for (int i = 0; i < MAX_SESSIONS; i++) {
         if (!g_app.used[i] || g_app.sessions[i].initialising) continue;
@@ -661,7 +661,7 @@ static void tor_link_start_own(double now) {
     }
     g_tor.state = TL_STARTING;
     g_tor.boot_told = -1;
-    push_log("* tor: starting chat's own tor (%s) - its data lives in a private temporary folder, deleted when chat exits",
+    push_log("* tor: starting chat's own tor (%s) - its data is kept in a private temporary folder, deleted when chat exits",
              program);
 }
 
@@ -712,7 +712,7 @@ static void tor_link_step(double now) {
                 push_log("* tor: chat's tor stopped%s%s", problem[0] ? ": " : "", problem);
                 torproc_stop(g_tor.proc);
                 g_tor.proc = NULL;
-                // Most likely a port another program took first: new ones, a couple of times.
+                // Most likely another program took a port first, so try new ones a couple of times.
                 if (++g_tor.starts < 3) { g_tor.state = TL_OFF; tor_link_start_own(now); }
                 else tor_link_fail(now, 60.0);
                 return;
@@ -759,10 +759,10 @@ static void tor_link_line(char *out, size_t cap) {
     }
 }
 
-// This build as peers are told it, read at startup before :update can replace the file.
+// This build as reported to peers, read at startup before :update can replace the file.
 static chat_build_t g_self_build;
 
-// What peers are told about this build ("v"), and the key the builds they tell of are checked with.
+// What peers are told about this build ("v"), and the key used to check the builds they report.
 static void set_build_opts(chat_opts_t *o) {
     o->build = g_self_build;
     copy_str(o->release_key, update_release_key(), sizeof o->release_key);
@@ -796,7 +796,7 @@ static session_slot_t *start_session(const char *session_name, const char *passw
     if (n_peers > 0) { memcpy(o.peers, peers, sizeof(addr_t) * (size_t)n_peers); o.n_peers = n_peers; }
     o.route = g_app.route;
     if (o.route.mode == ROUTE_TOR) {
-        // The tor found or started for Tor mode; until there is one, the session waits for it.
+        // The tor found or started for Tor mode. Until there is one, the session waits for it.
         tor_link_ensure(now_seconds());
         copy_str(o.route.tor.socks, g_tor.state == TL_READY ? g_tor.socks : "", sizeof o.route.tor.socks);
         copy_str(o.route.tor.control, g_tor.state == TL_READY ? g_tor.control : "", sizeof o.route.tor.control);
@@ -857,7 +857,7 @@ static void show_identity_result(void) {
     if (g_app.identity_source == IDENT_NONE) return;
     uint8_t fp[ID_FP_LEN]; identity_fingerprint(g_app.identity.pub, fp);
     char fphex[HEX_GROUPS_LEN(ID_FP_LEN)]; hex_groups(fp, ID_FP_LEN, fphex);
-    push_log("your identity fingerprint: %s - read it out to peers to verify you independently", fphex);
+    push_log("your identity fingerprint: %s - compare it with peers over another channel", fphex);
     if (g_app.identity_source == IDENT_AGE) {
         char recipient[AGE_RECIPIENT_STRLEN + 1];
         age_export_recipient(&g_app.identity, recipient);
@@ -867,7 +867,7 @@ static void show_identity_result(void) {
         char armor[PGP_ARMOR_MAX]; uint8_t pgp_fp[PGP_FP_LEN];
         pgp_public_key(armor, pgp_fp);
         push_log("PGP public key (others can `gpg --import` it; Enter on it in the settings copies it):");
-        // Line by line, the blank one after BEGIN included: gpg wants it.
+        // Line by line, including the blank one after BEGIN, which gpg needs.
         for (char *line = armor, *nl; *line; line = nl + 1) {
             nl = strchr(line, '\n');
             if (!nl) { push_log("%s", line); break; }
@@ -930,7 +930,7 @@ static void path_parent(char *p) {
 static void browser_add(void *ctx, const char *name, int is_dir) {
     browser_t *b = ctx;
     if (b->n_items >= MAX_DIR_ITEMS) return;
-    // Names go straight to the terminal; one carrying escape sequences could drive it.
+    // Names are written straight to the terminal, and one containing escape sequences could control it.
     if (has_control_chars(name)) return;
     if (strcmp(name, "..") == 0 && path_is_root(b->path)) return;
     dir_entry_t *item = &b->items[b->n_items++];
@@ -957,7 +957,7 @@ static void browser_entry_path(const browser_t *b, const dir_entry_t *e, char *o
     path_join(out, cap, b->path, name);
 }
 
-// New/join prompts borrow the input line: the draft is stashed and comes back when the prompt ends.
+// New/join prompts use the input line. The draft is saved and restored when the prompt ends.
 static void begin_prompt(app_mode_t mode) {
     g_app.saved_input = g_app.input;
     tui_input_clear(&g_app.input);
@@ -1012,21 +1012,21 @@ static cmd_result_t app_update(void *ctx, const char *arg) {
         push_log("* update: Tor mode downloads through Tor, and there's no tor yet - try again once it's connected");
         return CMD_OK;
     }
-    // Already under way, it's the same run's box that comes back.
+    // If an update is already running, its box is shown again.
     if (update_start() == 0) push_log("* update: checking GitHub for a newer release (v" CHAT_VERSION " here)...");
     begin_prompt(MODE_UPDATE);
     return CMD_OK;
 }
 
-// The box only shows the update: closing it leaves the update running, and what it came to is in
-// the console either way.
+// The box only shows the update. Closing it leaves the update running, and the result goes to the
+// console either way.
 static void update_key(const tui_key_t *key) {
     char ch = key->type == TUI_KEY_CHAR && key->ch_len == 1 ? key->ch[0] : 0;
     if (key->type != TUI_KEY_ESCAPE && key->type != TUI_KEY_ENTER && ch != 'q') return;
     update_view_t v;
     update_view(&v);
     end_prompt();
-    if (v.running) note("the update carries on - :update shows it again");
+    if (v.running) note("the update keeps running - :update shows it again");
 }
 
 static cmd_result_t app_help(void *ctx, const char *arg);
@@ -1048,8 +1048,8 @@ static const char *const ROUTE_CHOICE_LINES[] = {
      "its own; connecting takes longer"),
 };
 
-// A routing choice doesn't undo --nonostr or --nostr-always: DHT + Nostr uses the relays as
-// they say, and only DHT alone turns the relays off.
+// A routing choice doesn't override --nonostr or --nostr-always. DHT + Nostr uses the relays as
+// those options say, and only DHT alone turns the relays off.
 static void apply_route_choice(int choice) {
     if (choice == 3) {
         g_app.route.mode = ROUTE_TOR;
@@ -1069,7 +1069,7 @@ static const char *route_label(void) {
 // ---- the settings page ----
 //
 // Every setting is a row on this page, and :set NAME VALUE sets a row without opening it. Either
-// way the change applies at once, to the open sessions and to the ones opened after.
+// way the change applies immediately, to open sessions and to ones opened later.
 
 enum { K_TOGGLE, K_CHOICE, K_TEXT, K_SECRET, K_ACTION };
 
@@ -1204,8 +1204,8 @@ static int tor_only_setting(setting_id_t id) {
 }
 
 // Settings that don't apply right now aren't listed: the DHT ones in Tor mode, the Tor ones in
-// DHT mode, the relay list with relays off, the AGE
-// recipient without an AGE identity, and the PGP public key without a PGP key made here.
+// DHT mode, the relay list with relays off, the AGE recipient without an AGE identity, and the
+// PGP public key without a PGP key made here.
 static int setting_shown(setting_id_t id) {
     route_mode_t m = g_app.route.mode;
     if (m != ROUTE_DHT && dht_routing_only_setting(id)) return 0;
@@ -1226,8 +1226,8 @@ static const char *setting_hidden_why(setting_id_t id) {
     return "it needs an AGE signing identity";
 }
 
-// A toggle or choice row's values, in the order h/l steps through them, and the index of the one
-// in force. The other rows have none, and get -1.
+// A toggle or choice row's values, in the order h/l steps through them, and the index of the
+// current one. Other rows have none, and get -1.
 static int setting_options(setting_id_t id, const char *const **names, int *n) {
     const routing_t *r = &g_app.route;
     *names = ON_OFF;
@@ -1340,7 +1340,7 @@ static void setting_value(setting_id_t id, char *out, size_t cap) {
     }
 }
 
-// A row's value as :set takes it. 0 for a secret, or one that comes from the signing key.
+// A row's value in the form :set takes. 0 for a secret, or a value that comes from the signing key.
 static int setting_text(setting_id_t id, char *out, size_t cap) {
     const setting_def_t *d = setting_def(id);
     if (d->kind == K_SECRET || d->kind == K_ACTION) return 0;
@@ -1369,8 +1369,9 @@ static int setting_text(setting_id_t id, char *out, size_t cap) {
 
 #define ROW_TEXT_MAX (NOSTR_MAX_RELAYS * NOSTR_URL_MAX)
 
-// A row is saved only while it isn't its default, so a default a later version changes still
-// reaches you. Once installed, a row changed in chat is saved; one a command-line option set isn't.
+// A row is only saved while it isn't the default, so if a later version changes a default you
+// still get it. Once installed, a row changed in chat is saved, but one set by a command line
+// option isn't.
 static char g_setting_defaults[N_SETTINGS][ROW_TEXT_MAX];
 static char g_saved_rows[N_SETTINGS][ROW_TEXT_MAX];
 static char g_seen_rows[N_SETTINGS][ROW_TEXT_MAX];
@@ -1438,7 +1439,7 @@ static int settings_text(char *out, size_t cap) {
     return p < cap ? 0 : -1;
 }
 
-// Looked at before every frame, so whatever changed a row (the page, :set) is caught.
+// Checked before every frame, so any change to a row (from the page or :set) is picked up.
 static void keep_settings_saved(void) {
     if (!g_app.installed) return;
     int changed = 0;
@@ -1462,8 +1463,8 @@ static void keep_settings_saved(void) {
     if (n > 0) snprintf(g_app.message + n, sizeof g_app.message - n, " \xc2\xb7 saved");
 }
 
-// Pushes the routing settings to the open sessions. The toggles take effect there at once. On
-// the page chat opens on, nothing reaches the network before Done: settings_done does this then.
+// Pushes the routing settings to the open sessions, where the toggles take effect immediately. On
+// the startup settings page nothing goes on the network before Done, so settings_done does it then.
 static void routing_changed(setting_id_t id) {
     int later = 0, any = 0;
     if (!g_app.onboarding) {
@@ -1488,7 +1489,7 @@ static void set_colour_all(void) {
         if (g_app.used[i] && !g_app.sessions[i].initialising) chat_set_colour(&g_app.sessions[i].engine, g_app.color);
 }
 
-// Puts a toggle or choice row on its i-th value, wherever it applies.
+// Sets a toggle or choice row to its i-th value, wherever it applies.
 static void setting_choose(setting_id_t id, int i) {
     routing_t *r = &g_app.route;
     switch (id) {
@@ -1534,7 +1535,7 @@ static void setting_choose(setting_id_t id, int i) {
     note("%s: %s", setting_def(id)->label, v);
 }
 
-// h/l on a row: the next or previous value, round the end. The colour steps through the palette.
+// h/l on a row: the next or previous value, wrapping around. The colour steps through the palette.
 static void setting_step(setting_id_t id, int dir) {
     if (id == SET_COLOUR) {
         int cur = -1;
@@ -1556,7 +1557,7 @@ static void begin_setting_edit(setting_id_t id) {
     tui_input_clear(&g_app.input);
     g_app.input.modal = 0;
     g_edit_id = id;
-    // A secret starts empty: what's typed replaces it.
+    // A secret starts empty, and what's typed replaces it.
     char v[1024];
     if (setting_text(id, v, sizeof v)) {
         copy_str(g_app.input.buf, v, sizeof g_app.input.buf);
@@ -1673,8 +1674,8 @@ static void commit_setting_edit(void) {
 
 #define SETTINGS_DONE N_SETTINGS   // settings_sel of the Done button, after the last setting
 
-// The next listed row from the selected one in direction dir: the Done button after the last,
-// and the same row again before the first.
+// The next listed row from the selected one in direction dir: the Done button after the last, and
+// the same row again before the first.
 static int settings_step_sel(int dir) {
     for (int i = g_app.settings_sel + dir; i >= 0 && i < N_SETTINGS; i += dir)
         if (setting_shown(SETTINGS[i].id)) return i;
@@ -1699,8 +1700,8 @@ static int section_start(int i) {
     return i;
 }
 
-// Tab: the next section's first row, the Done button after the last. Shift+Tab: this section's
-// first row, or from there the one before's.
+// Tab: the next section's first row, or the Done button after the last. Shift+Tab: this section's
+// first row, or if already there, the previous section's.
 static int settings_section_step(int dir) {
     int sel = g_app.settings_sel;
     if (dir > 0) {
@@ -1727,8 +1728,8 @@ static void settings_open_at(setting_id_t id) {
     else note("%s isn't on the page right now: %s", setting_def(id)->label, setting_hidden_why(id));
 }
 
-// The Done button; Esc, q and Ctrl+S do the same. On the page chat opens on, it's where chat starts:
-// until then nothing reaches the network, not even a tor or a --peer name lookup.
+// The Done button. Esc, q and Ctrl+S do the same. On the startup settings page, this is where chat
+// starts. Until then nothing goes on the network, not even a tor or a --peer name lookup.
 static void settings_done(void) {
     g_app.mode = MODE_CHAT;
     if (g_app.onboarding) {
@@ -1741,7 +1742,7 @@ static void settings_done(void) {
     g_app.dirty = 1;
 }
 
-// What the keys do on the selected row, the one that acts on it first.
+// What the keys do on the selected row, with the main action first.
 static const char *settings_hint(void) {
     const setting_def_t *d = g_app.settings_sel < N_SETTINGS ? &SETTINGS[g_app.settings_sel] : NULL;
     const char *act;
@@ -1819,7 +1820,7 @@ static void begin_sign(void) {
 
 static int key_in_use_saved(void);
 
-// Hands the identity just chosen to every open session.
+// Passes the identity just chosen to every open session.
 static void identity_chosen(void) {
     int any = 0;
     for (int i = 0; i < MAX_SESSIONS; i++) {
@@ -1838,8 +1839,8 @@ static void identity_chosen(void) {
 }
 
 // A key of kind (AGE or PGP) made here: from password and this device's id, the same every time,
-// or a new random one when password is empty. NULL once it's the identity in use, else why not;
-// the identity in use stays then.
+// or a new random one if password is empty. Returns NULL once it's the identity in use, otherwise
+// the reason it isn't, and the current identity stays.
 static const char *make_identity(identity_source_t kind, const char *password) {
     if (!password[0]) {
         gen_identity_keypair(&g_app.identity);
@@ -1881,7 +1882,7 @@ static void commit_sign_password(void) {
     copy_str(pw, g_app.input.buf, sizeof pw);
     end_sign_password();
     if (pw[0]) {
-        // Argon2id takes a few seconds: say so before the screen stops.
+        // Argon2id takes a few seconds, so say so before the screen freezes.
         note("making your key from the password...");
         render();
     }
@@ -1892,7 +1893,7 @@ static void commit_sign_password(void) {
     g_app.mode = MODE_SETTINGS;
 }
 
-// kind's key (AGE or PGP) from the file at path: 0 once it's the identity in use.
+// kind's key (AGE or PGP) from the file at path. Returns 0 once it's the identity in use.
 static int load_key_file(identity_source_t kind, const char *path) {
     int rc = kind == IDENT_AGE ? age_import_secret_key(path, &g_app.identity)
                                : pgp_import_secret_key(path, &g_app.identity);
@@ -1923,7 +1924,7 @@ static void begin_key_paste(identity_source_t kind) {
     g_app.dirty = 1;
 }
 
-// Loads the key file picked in the browser: 0 once it's the identity in use.
+// Loads the key file picked in the browser. Returns 0 once it's the identity in use.
 static int try_load_key_from_browser(void) {
     const dir_entry_t *sel = &g_app.browser.items[g_app.browser.selected];
     char full[1200]; browser_entry_path(&g_app.browser, sel, full, sizeof full);
@@ -1936,8 +1937,8 @@ static int try_load_key_from_browser(void) {
     return 0;
 }
 
-// Off takes effect at once; a key made here asks for its password first, and a key file or paste
-// goes on to a page of its own.
+// Off takes effect immediately. A key made here asks for its password first, and a key file or
+// paste opens its own page.
 static void sign_pick(int pick) {
     switch (pick) {
         case PICK_OFF:
@@ -1978,9 +1979,9 @@ typedef enum {
     LIST_NEXT_SECTION, LIST_PREV_SECTION
 } list_key_t;
 
-// The keys every list page takes alike: j/k or up/down move, g/G or Home/End go to the ends,
-// Tab/Shift+Tab to the next or previous section, Enter or space chooses, h/l or left/right go
-// sideways (Backspace too, as vim's h), Esc goes back a level, and q or Ctrl+S closes the page.
+// The keys every list page shares: j/k or up/down move, g/G or Home/End go to the ends,
+// Tab/Shift+Tab go to the next or previous section, Enter or space chooses, h/l or left/right go
+// sideways (Backspace too, like vim's h), Esc goes back a level, and q or Ctrl+S closes the page.
 static list_key_t list_key(const tui_key_t *key) {
     switch (key->type) {
         case TUI_KEY_UP:        return LIST_UP;
@@ -2019,7 +2020,7 @@ static void list_move(list_key_t k, int *sel, int n) {
     else if (k == LIST_LAST) *sel = n > 0 ? n - 1 : 0;
 }
 
-// Sideways on a row changes its value; on the Signing identity row, right goes in to the picker.
+// Left/right on a row changes its value. On the Signing identity row, right opens the picker.
 static void settings_key(const tui_key_t *key) {
     const setting_def_t *d = g_app.settings_sel < N_SETTINGS ? &SETTINGS[g_app.settings_sel] : NULL;
     const char *const *names;
@@ -2144,7 +2145,7 @@ static void send_browser_key(const tui_key_t *key) {
     g_app.dirty = 1;
 }
 
-// Everything but Esc is the paste arriving, one key at a time.
+// Everything except Esc is the paste arriving, one key at a time.
 static void paste_key(const tui_key_t *key) {
     if (key->type == TUI_KEY_ESCAPE) {
         paste_clear();
@@ -2168,12 +2169,12 @@ static void paste_key(const tui_key_t *key) {
     g_app.dirty = 1;
     int age = g_app.load_kind == IDENT_AGE;
     if (age) {
-        // Read when the key line ends, so a pasted file's own newline doesn't land on the settings page.
+        // Read when the key's last line ends, so a pasted file's own newline doesn't end up on the settings page.
         const char *at = strstr(g_app.paste_buf, "AGE-SECRET-KEY-1");
         if (!at || g_app.paste_buf[g_app.paste_len - 1] != '\n'
             || g_app.paste_len - 1 - (size_t)(at - g_app.paste_buf) < AGE_SECRET_KEY_STRLEN) return;
     } else {
-        // Look only at the end, where the END line lands.
+        // Only look at the end, where the END line will be.
         static const char end_line[] = "-----END PGP PRIVATE KEY BLOCK-----";
         size_t el = sizeof end_line - 1;
         if (g_app.paste_len < el || memcmp(g_app.paste_buf + g_app.paste_len - el, end_line, el) != 0) return;
@@ -2244,7 +2245,7 @@ static void render_settings(int rows_n, int cols_n, const char *clock, const tui
                      g_app.installed ? ", and is saved." : ".");
         copy_str(usage, "ctrl+s or :set brings this page back", sizeof usage);
     } else {
-        // The row cuts a recipient off on a narrow screen, and not every terminal takes OSC 52.
+        // The row cuts off a recipient on a narrow screen, and not every terminal supports OSC 52.
         char recipient[AGE_RECIPIENT_STRLEN + 3] = "";
         if (d->id == SET_AGE_RECIPIENT && g_app.identity_source == IDENT_AGE) {
             age_export_recipient(&g_app.identity, recipient);
@@ -2291,7 +2292,7 @@ static void render_sign_picker(int rows_n, int cols_n, const char *clock, const 
     tui_render_page(rows_n, cols_n, &page, bar, g_app.color_enabled);
 }
 
-// A folder's row leads on, like a row that opens a page.
+// A folder's row is drawn like a row that opens a page.
 static void render_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar) {
     static tui_row_t rows[MAX_DIR_ITEMS];
     const browser_t *b = &g_app.browser;
@@ -2371,7 +2372,7 @@ static void begin_help(void) {
 
 // The changelog built into this binary, as paragraphs of Markdown for the page to lay out:
 // headings, list items (nested by their indent), numbered items, quotes, fenced code and rules,
-// with the lines that carry a paragraph on run together. The inline marks stay in the text.
+// with a paragraph's continuation lines joined. The inline marks stay in the text.
 static int changelog_paras(const tui_para_t **out) {
     static tui_para_t paras[1024];
     static char *text;
@@ -2413,7 +2414,7 @@ static int changelog_paras(const tui_para_t **out) {
         while (t[hashes] == '#') hashes++;
         if (hashes > 0 && hashes <= 6 && t[hashes] == ' ') {
             para = NULL;
-            if (hashes == 1) continue;   // the file's own title: the page has one
+            if (hashes == 1) continue;   // the file's own title: the page has its own
             paras[n++] = (tui_para_t){ .kind = hashes == 2 ? TUI_P_HEADING : TUI_P_SUBHEADING, .text = t + hashes + 1 };
             continue;
         }
@@ -2448,7 +2449,7 @@ static int changelog_paras(const tui_para_t **out) {
         }
         int quote = *t == '>';
         if (quote) { t++; while (*t == ' ') t++; }
-        // A line under a paragraph carries it on (a quote's only under a quote): the NUL that
+        // A line under a paragraph continues it (a quote only continues under a quote). The NUL that
         // ended the paragraph becomes a space.
         if (para && *t && (!quote || paras[n - 1].kind == TUI_P_QUOTE)) {
             size_t pl = strlen(para);
@@ -2514,7 +2515,7 @@ static void changelog_key(const tui_key_t *key) {
     g_app.dirty = 1;
 }
 
-// Tab and Shift+Tab: the first row of the next section, or of this one (then the one before).
+// Tab and Shift+Tab: the first row of the next section, or of this one (then the previous one).
 static int page_section_step(const tui_row_t *rows, int n, int sel, int dir) {
     if (dir > 0) {
         for (int i = sel + 1; i < n; i++) if (rows[i].section) return i;
@@ -2529,7 +2530,7 @@ static int page_section_step(const tui_row_t *rows, int n, int sel, int dir) {
 
 // ---- :install, and what it saved ----
 
-// Said once the screen is up.
+// Shown once the screen is up.
 #define MAX_SAVED_NOTES 8
 static char g_saved_notes[MAX_SAVED_NOTES][240];
 static int g_n_saved_notes;
@@ -2546,7 +2547,7 @@ static void say_saved_notes(void) {
     g_n_saved_notes = 0;
 }
 
-// A row's value from the settings file as :set takes it; else what it should have been.
+// A row's value from the settings file in the form :set takes, otherwise what it should have been.
 static const char *row_from_toml(const setting_def_t *d, const toml_value *v, char *out, size_t cap) {
     if (d->kind == K_TOGGLE) {
         if (v->type != TOML_BOOL) return "true or false";
@@ -2597,7 +2598,7 @@ static void load_setting(void *ctx, const char *table, const char *key, const to
     } else {
         setting_apply_text(d->id, value);
     }
-    // One that didn't take stays saved all the same: a tor that's gone now may be back next time.
+    // One that didn't apply stays saved anyway, since a tor that's gone now may be back next time.
     setting_text(d->id, now, sizeof now);
     int took = strcmp(now, value) == 0 || strcmp(now, before) != 0;
     if (!took) saved_note("* %s: %s %.60s wasn't used - %s", l->where, d->key, value, g_app.message);
@@ -2614,7 +2615,7 @@ static void load_saved_settings(void) {
     long n = install_read_settings(text, sizeof text);
     if (n == INSTALL_NO_FILE) return;
     if (n < 0) { saved_note("* %s is damaged, or isn't sealed with this passphrase - left out", l.where); return; }
-    // As on the page chat opens on, nothing reaches the network meanwhile.
+    // Like the startup settings page, nothing goes on the network meanwhile.
     int was = g_app.onboarding, bad_line = 0;
     g_app.onboarding = 1;
     int bad = toml_parse(text, load_setting, &l, &bad_line);
@@ -2639,7 +2640,7 @@ static void identity_pack(uint8_t out[KEY_BLOB_LEN]) {
     memcpy(out + 8 + ID_SIGN_PUB_LEN, g_app.identity.priv, ID_SIGN_PRIV_LEN);
 }
 
-// The saved key's public half is noted even when it isn't used, to tell whether the key in use is it.
+// The saved key's public half is kept even when it isn't used, to tell whether the key in use is the same one.
 static int identity_unpack(const uint8_t *in, size_t len, int use) {
     if (len != KEY_BLOB_LEN || in[0] != 1 || (in[1] != IDENT_AGE && in[1] != IDENT_PGP) || in[2] > KEY_PASTED || in[3] > 1)
         return -1;
@@ -2655,7 +2656,7 @@ static int identity_unpack(const uint8_t *in, size_t len, int use) {
     return 0;
 }
 
-// 0, a PASS_ code or INSTALL_NO_FILE. The identity in use changes only on success.
+// 0, a PASS_ code or INSTALL_NO_FILE. The identity in use is only changed on success.
 static int open_saved_key(int use) {
     uint8_t blob[INSTALL_KEY_MAX];
     size_t len = 0;
@@ -2676,8 +2677,8 @@ static const char *open_error(int rc) {
 
 static void reapply_options(void);
 
-// The settings, then the command line's options again so they still win, then the key unless
-// --identity chose another. 0, or what kept it sealed.
+// The settings, then the command line options again so they still override them, then the key
+// unless --identity chose another. 0, or the reason it stayed sealed.
 static int open_saved(const char *passphrase) {
     int rc = install_unlock(passphrase);
     if (rc != 0) return rc;
@@ -2692,7 +2693,7 @@ static int open_saved(const char *passphrase) {
     return 0;
 }
 
-// From CHAT_INSTALL_PASSWORD, else asked for: in a box once the screen is up, or on the terminal.
+// From CHAT_INSTALL_PASSWORD, otherwise asked for in a box once the screen is up, or in the terminal.
 static void unlock_at_start(int in_box) {
     g_app.locked = 1;
     char pw[256] = "";
@@ -2723,8 +2724,9 @@ static int key_in_use_saved(void) {
         && crypto_equal(g_app.saved_key_pub, g_app.identity.pub, ID_SIGN_PUB_LEN);
 }
 
-// A new passphrase first: Argon2id is what's slow, and what can fail for want of memory. Then the
-// settings, which are always there, then a key not saved yet, sealed under the same passphrase.
+// A new passphrase first, since Argon2id is the slow part and can fail if there isn't enough
+// memory. Then the settings, which are always there, then a key not saved yet, sealed under the
+// same passphrase.
 static void finish_install(const char *passphrase) {
     char where[900] = "";
     install_where(where, sizeof where);
@@ -2733,7 +2735,7 @@ static void finish_install(const char *passphrase) {
         render();
         if (install_lock_new(passphrase) != 0) { note("not installed: sealing needs 512 MiB of free memory for a moment"); return; }
     }
-    // Everything in use, the options too.
+    // Everything in use, including the options.
     note_settings_seen();
     memcpy(g_saved_rows, g_seen_rows, sizeof g_saved_rows);
     static char text[INSTALL_SETTINGS_MAX];
@@ -2759,8 +2761,8 @@ static void finish_install(const char *passphrase) {
     note("installed in %s", where);
 }
 
-// Installed, it saves under the passphrase it has. Else what's there takes its own passphrase, and
-// nothing there takes a new one, key or no key.
+// If installed, it saves under the passphrase it has. Otherwise existing files need their own
+// passphrase, and if there's nothing there it needs a new one, with or without a key.
 static void install_confirmed(void) {
     if (g_app.installed) {
         end_prompt();
@@ -2804,7 +2806,7 @@ static void commit_install_pass2(void) {
     crypto_wipe(pw, sizeof pw);
 }
 
-// What's in use stays in use: the passphrase only opens what's saved, to save over it.
+// What's in use stays in use. The passphrase only opens what's saved, so it can be overwritten.
 static void commit_install_unlock(void) {
     char pw[sizeof g_app.input.buf];
     copy_str(pw, g_app.input.buf, sizeof pw);
@@ -2837,7 +2839,7 @@ static void uninstall_confirmed(void) {
     note("uninstalled");
 }
 
-// What the run starts with (the options, what's saved, a random nick) isn't a change to save.
+// What the run starts with (the options, what's saved, a random nick) doesn't count as a change to save.
 static void settle_start(void) {
     if (!g_app.nick[0]) {
         random_nickname(g_app.nick, sizeof g_app.nick);
@@ -2848,7 +2850,7 @@ static void settle_start(void) {
     say_saved_notes();
 }
 
-// Opened, chat starts on its saved settings at once; else it opens on the settings page.
+// Once opened, chat starts with its saved settings straight away. Otherwise it opens on the settings page.
 static void end_unlock(void) {
     end_prompt();
     settle_start();
@@ -2860,7 +2862,7 @@ static void commit_unlock(void) {
     char pw[sizeof g_app.input.buf];
     copy_str(pw, g_app.input.buf, sizeof pw);
     if (!pw[0]) { note("type its passphrase - or Esc to start without it"); return; }
-    // Argon2id takes a few seconds: say so before the screen stops.
+    // Argon2id takes a few seconds, so say so before the screen freezes.
     note("opening what :install saved...");
     render();
     int rc = open_saved(pw);
@@ -2884,7 +2886,7 @@ static void cancel_uninstall(void) {
     note("nothing was deleted");
 }
 
-// Enter doesn't answer: a question takes y or n.
+// Enter doesn't answer. A question takes y or n.
 static void confirm_key(const tui_key_t *key, void (*yes)(void), void (*no)(void)) {
     char ch = key->type == TUI_KEY_CHAR && key->ch_len == 1 ? key->ch[0] : 0;
     if (ch == 'y' || ch == 'Y') yes();
@@ -2899,8 +2901,8 @@ static void field_key(const tui_key_t *key, void (*enter)(void), void (*esc)(voi
 
 // ---- commands ----
 
-// :set opens the settings page and :set NAME opens it on that row; :set NAME VALUE sets the row
-// without opening it, just as the page would.
+// :set opens the settings page and :set NAME opens it on that row. :set NAME VALUE sets the row
+// without opening it, the same as the page would.
 static cmd_result_t app_set(void *ctx, const char *arg) {
     (void)ctx;
     char key[CMD_WORD_MAX];
@@ -2923,7 +2925,7 @@ static cmd_result_t app_set(void *ctx, const char *arg) {
             setting_apply_text(d->id, value);
             return CMD_OK;
         case K_SECRET:
-            // On the command line it stands there in the clear; the page's field hides it.
+            // On the command line it would be visible. The page's field hides it.
             settings_open_at(d->id);
             if (!setting_shown(d->id)) return CMD_OK;   // settings_open_at said why it isn't there
             begin_setting_edit(d->id);
@@ -3000,7 +3002,7 @@ static cmd_result_t app_changelog(void *ctx, const char *arg) {
     return CMD_OK;
 }
 
-// "N" or "N anyway": the number, and whether anyway was said. 0 if it's neither.
+// "N" or "N anyway": the number, and whether anyway was given. 0 if it's neither.
 static int file_arg(const char *arg, int *anyway) {
     char *end;
     long n = strtol(arg, &end, 10);
@@ -3009,7 +3011,7 @@ static int file_arg(const char *arg, int *anyway) {
     return n > 0 && n < 1000000 && (!*end || *anyway) ? (int)n : 0;
 }
 
-// Pictures are fetched only when asked to show, and drawn where they were offered.
+// Pictures are only fetched when you ask to show them, and drawn where they were offered.
 static cmd_result_t app_show(void *ctx, const char *arg) {
     (void)ctx;
     session_slot_t *s = g_app.selected;
@@ -3082,8 +3084,8 @@ static void render_help(int rows_n, int cols_n, const char *clock, const tui_bar
     tui_render_page(rows_n, cols_n, &page, bar, g_app.color_enabled);
 }
 
-// Enter on a command puts it on the command line, to be finished and run. F1 and ? close the page
-// as they opened it.
+// Enter on a command puts it on the command line, to be completed and run. F1 and ? close the page
+// as well as open it.
 static void help_key(const tui_key_t *key) {
     tui_row_t rows[MAX_HELP_ROWS];
     const command_t *cmds[MAX_HELP_ROWS];
@@ -3111,8 +3113,8 @@ static void help_key(const tui_key_t *key) {
     g_app.dirty = 1;
 }
 
-// Whether a command's name or one of its aliases starts with word (or, whole, is word): a line
-// opened with '/' that can't be one stays text, for a message that starts with '/'.
+// Whether a command's name or one of its aliases starts with word (or, with whole, is word). A line
+// opened with '/' that can't be a command stays as text, for a message that starts with '/'.
 static int command_word(const char *word, int whole) {
     size_t n = strlen(word);
     for (const command_t *const *t = ALL_COMMANDS; *t; t++) {
@@ -3159,8 +3161,8 @@ static int takes_nick(const char *word) {
     return c && c->args && strncmp(c->args, "NICK", 4) == 0;
 }
 
-// The nth online peer whose nick starts with typed, ignoring case. One that is exactly typed comes
-// first, so Enter on "id" doesn't run it as "ida"; the rest by nick.
+// The nth online peer whose nick starts with typed, ignoring case. An exact match comes first, so
+// Enter on "id" doesn't run it as "ida". The rest are sorted by nick.
 static const peer_t *nth_peer(const chat_t *e, const char *typed, int nth) {
     const peer_t *m[MAX_PEERS + MAX_PENDING_PEERS];
     size_t tn = strlen(typed);
@@ -3179,8 +3181,8 @@ static const peer_t *nth_peer(const chat_t *e, const char *typed, int nth) {
     return nth < n ? m[nth] : NULL;
 }
 
-// The menu over the COMMAND line: commands by name; after "set ", the settings with their values
-// now; after "set NAME ", the values it takes; after a command that takes a NICK, the peers online.
+// The menu above the COMMAND line: commands by name. After "set ", the settings with their current
+// values. After "set NAME ", the values it takes. After a command that takes a NICK, the online peers.
 static int suggest_command(const char *typed, int nth, tui_suggestion_t *out) {
     memset(out, 0, sizeof *out);
     size_t wn = strcspn(typed, " ");
@@ -3313,15 +3315,15 @@ static void submit_chat_line(void) {
     if (input->mode == TUI_IMODE_COMMAND) {
         char line[sizeof input->cmd];
         copy_str(line, input->cmd, sizeof line);
-        // Enter on a line the menu would finish runs what the menu has selected: ":se" runs
-        // ":set", as the menu shows.
+        // Enter on a line the menu would complete runs what the menu has selected, so ":se" runs ":set",
+        // as the menu shows.
         tui_suggestion_t s;
         size_t n = strlen(line);
         if ((n > 0 || input->menu_sel > 0) && tui_input_suggestion(input, &s) && strlen(s.line) > n
             && strncmp(s.line, line, n) == 0)
             copy_str(line, s.line, sizeof line);
-        // Opened by typing '/', a line that isn't a command after all is the start of a message:
-        // it goes back in the input as text, for Enter to send.
+        // If opened by typing '/', a line that turns out not to be a command is the start of a message.
+        // It goes back in the input as text, for Enter to send.
         char word[CMD_WORD_MAX];
         cmd_parse(line, word);
         if (input->cmd_as_text && line[0] && !command_word(word, 1)) {
@@ -3348,8 +3350,8 @@ static void submit_chat_line(void) {
                                           : "not connected yet - your text is kept until someone answers");
         return;
     }
-    // Past the limit the end would be cut off on the way out: the count under the box is red, and
-    // this says why Enter didn't send.
+    // Over the limit the end would be cut off when sent. The count under the box is red, and this
+    // explains why Enter didn't send.
     if (input->len > MAX_TEXT) {
         note("too long to send by %d - a message holds %d bytes", input->len - MAX_TEXT, MAX_TEXT);
         return;
@@ -3357,12 +3359,12 @@ static void submit_chat_line(void) {
     chat_send_text(&g_app.selected->engine, input->buf, now_seconds());
     tui_input_clear(input);
     g_app.selected->scroll = 0;
-    // Answering is reading: the rule over what was new goes.
+    // Sending a reply counts as reading, so the new messages line is removed.
     g_app.selected->has_new = 0;
 }
 
-// PgUp and PgDn (Ctrl+U and Ctrl+D in NORMAL) move the chat a third of the screen's rows of
-// messages; G goes back to the newest.
+// PgUp and PgDn (Ctrl+U and Ctrl+D in NORMAL) scroll the chat by a third of the screen's rows. G
+// goes back to the newest.
 static void scroll_chat(int dir) {
     session_slot_t *s = g_app.selected;
     if (!s) return;
@@ -3379,7 +3381,7 @@ static void scroll_chat(int dir) {
 static void handle_key(const tui_key_t *key) {
     tui_input_t *input = &g_app.input;
 
-    // The terminal's reports aren't keys: they leave the bar's message be.
+    // The terminal's reports aren't keys, so they don't clear the bar's message.
     if (key->type == TUI_KEY_BG_REPORT) {
         tui_set_background((const uint8_t *)key->ch);
         g_app.dirty = 1;
@@ -3391,7 +3393,7 @@ static void handle_key(const tui_key_t *key) {
         return;
     }
 
-    // A message answers the key before this one; this key puts the bar back.
+    // A message is the result of the previous key, so this key resets the bar.
     if (g_app.message[0]) { g_app.message[0] = '\0'; g_app.dirty = 1; }
 
     // The pages draw their fields in their rows, so a key there redraws the page.
@@ -3421,15 +3423,15 @@ static void handle_key(const tui_key_t *key) {
 
     tui_input_mode_t was = input->mode;
     if (tui_input_feed(input, key)) {
-        // The menu over the COMMAND line covers part of the chat, so it takes a whole frame.
+        // The menu above the COMMAND line covers part of the chat, so it needs a full frame.
         if (was == TUI_IMODE_COMMAND || input->mode == TUI_IMODE_COMMAND) g_app.dirty = 1;
         else g_app.input_dirty = 1;
         return;
     }
 
-    // NORMAL leaves these to the app: j and k step through the sessions, as they step through a
-    // list, G goes back to the newest message, ? opens the help, and c, C and s show or hide the
-    // console, the chat and the sidebar.
+    // NORMAL leaves these to the app: j and k switch sessions, like moving through a list, G goes back
+    // to the newest message, ? opens the help, and c, C and s show or hide the console, the chat and
+    // the sidebar.
     if (key->type == TUI_KEY_CHAR && input->mode == TUI_IMODE_NORMAL) {
         switch (key->ch[0]) {
             case 'j': select_step(1); break;
@@ -3485,7 +3487,7 @@ static tui_session_state_t session_state(const session_slot_t *s) {
     return chat_ready(&s->engine) ? TUI_SESSION_LIVE : TUI_SESSION_CONNECTING;
 }
 
-// What the chat says while a session has no messages: how it's getting on, and what to do next.
+// What the chat shows while a session has no messages: its progress, and what to do next.
 static const char *session_empty_text(const session_slot_t *s) {
     static char text[400];
     const chat_t *e = &s->engine;
@@ -3502,8 +3504,8 @@ static const char *session_empty_text(const session_slot_t *s) {
     return text;
 }
 
-// The chat pane: the selected session's name, how it's connected, what to show while it's quiet,
-// where what came while it was away starts, and what's unread in the others.
+// The chat pane: the selected session's name, how it's connected, what to show while it's empty,
+// where the messages that arrived while it was away start, and unread counts for other sessions.
 static tui_view_t current_view(char *sub, size_t cap) {
     tui_view_t v = { g_app.show_sidebar, g_app.show_console, g_app.show_chat, NULL, NULL, TUI_SESSION_LIVE,
                      NULL, NULL, 0, NULL, NULL, NULL, 0, 0, 0, NULL, TEST_BUILD ? TEST_LABEL : NULL };
@@ -3532,9 +3534,9 @@ static tui_view_t current_view(char *sub, size_t cap) {
     return v;
 }
 
-// Who in s gets nothing you send until their verify code is compared, for the input box's title for
-// as long as it lasts: the console's note that a message went to nobody is easily missed. NULL when
-// everyone gets it, or the setting sends to everyone anyway.
+// Who in s doesn't get what you send until their verify code is compared, for the input box's title
+// while that's the case, since the console's note that a message went to nobody is easy to miss.
+// NULL when everyone gets it, or the setting sends to everyone anyway.
 static const char *held_warning(const session_slot_t *s) {
     static char warn[64 + CHAT_NAME_LEN * 2];
     if (!s || !session_ready(s) || !s->engine.verify_required) return NULL;
@@ -3654,7 +3656,7 @@ static int uninstall_paras(tui_para_t *p) {
                                       "traces of the files.");
 }
 
-// Its field is the input line, stashed meanwhile by begin_prompt and the like.
+// Its field is the input line, saved meanwhile by begin_prompt and similar.
 static const tui_dialog_t *current_dialog(void) {
     static tui_dialog_t d;
     static tui_para_t paras[MAX_DIALOG_PARAS];
@@ -3777,7 +3779,7 @@ static const tui_dialog_t *current_dialog(void) {
     return &d;
 }
 
-// The bottom row for wherever the user is: the chip names it, and the hint says what keys do there.
+// The bottom row for the current screen: the chip names it, and the hint says what the keys do there.
 static tui_bar_t current_bar(void) {
     tui_bar_t b = {
         .chip = "SETTINGS",
@@ -3839,7 +3841,7 @@ static void render_bar(void) {
     int rows_n, cols_n; term_get_size(&rows_n, &cols_n);
     char sub[64]; tui_view_t view = current_view(sub, sizeof sub);
     tui_bar_t bar = current_bar();
-    // What's typed wrapped onto a row more or less: the chat above it moves too.
+    // The text wrapped onto one row more or fewer, so the chat above it moves too.
     if (tui_render_bar(rows_n, cols_n, &view, &bar, g_app.color_enabled) != 0) render();
 }
 
@@ -3927,8 +3929,8 @@ static void render(void) {
             if (!p->used || !p->ok) continue;
             tui_peer_row_t *r = &peer_rows[n_peers++];
             memset(r, 0, sizeof *r);
-            // Nicks can't hold '#': one here is the id added to tell lookalikes apart, which the sidebar
-            // never cuts.
+            // Nicks can't contain '#', so one here is the id added to tell lookalikes apart, which the sidebar
+            // never cuts off.
             char name[CHAT_NAME_LEN]; chat_peer_name(e, p, name);
             char *tag = strchr(name, '#');
             if (tag) { copy_str(r->tag, tag, sizeof r->tag); *tag = '\0'; }
@@ -3965,7 +3967,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
         return run_plain(explicit_session, explicit_password, explicit_port, peer_args, n_peer_args);
     }
 
-    // The terminal's background, and word of its theme changing, come back as keys.
+    // The terminal's background colour, and reports of its theme changing, arrive as keys.
     fputs("\x1b[22;0t\x1b]0;chat\x07\x1b[?1049h\x1b[2J\x1b[H" TUI_THEME_WATCH, stdout);
     fflush(stdout);
     catch_quit_signals();
@@ -3989,8 +3991,8 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
         crypto_wipe(explicit_password, strlen(explicit_password));
     }
 
-    // Everything is set up on the settings page first; its button starts chat proper. Installed,
-    // the saved settings are the ones chosen, so chat starts at once.
+    // Everything is set up on the settings page first, and its button starts chat. If installed, the
+    // saved settings are used, so chat starts straight away.
     g_app.onboarding = 1;
     g_app.settings_sel = 0;
     g_app.mode = MODE_SETTINGS;
@@ -4013,7 +4015,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
             if (!g_app.used[i] || g_app.sessions[i].initialising) continue;
             sock_t mine[CHAT_MAX_SOCKS];
             int ns = chat_sockets(&g_app.sessions[i].engine, mine);
-            // Past the limit a socket only waits for the next tick, 200 ms at most.
+            // Beyond the limit a socket just waits for the next tick, 200 ms at most.
             for (int j = 0; j < ns && n < PLATFORM_WAIT_MAX; j++) { socks[n] = mine[j]; owner[n] = &g_app.sessions[i]; n++; }
         }
         int stdin_ready = 0;
@@ -4048,14 +4050,14 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
 
         char update_msg[UPDATE_MSG_MAX];
         if (update_poll(update_msg, sizeof update_msg)) { push_log("%s", update_msg); g_app.dirty = 1; }
-        // Its box redraws with each wait while the update runs, so the bar moves as the file comes.
+        // Its box redraws on each wait while the update runs, so the bar moves as the file downloads.
         if (g_app.mode == MODE_UPDATE) {
             update_view_t v;
             update_view(&v);
             if (v.running) g_app.dirty = 1;
         }
 
-        // The terminal may have redrawn or reflowed the screen: the next frame goes out whole.
+        // The terminal may have redrawn or reflowed the screen, so the next frame is sent in full.
         if (term_resized()) { g_app.dirty = 1; tui_invalidate(); }
         if (now >= next_ui_tick) { next_ui_tick = now + 1.0; g_app.dirty = 1; }
         if (g_app.dirty) { keep_settings_saved(); render(); g_app.dirty = 0; g_app.input_dirty = 0; }
@@ -4063,7 +4065,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
     }
 
     for (int i = 0; i < MAX_SESSIONS; i++) if (g_app.used[i]) close_session(&g_app.sessions[i]);
-    // After the sessions: their onion services go with their control connections first.
+    // After the sessions, so their onion services are removed with their control connections first.
     tor_link_stop();
     crypto_wipe(&g_app.input, sizeof g_app.input);
     crypto_wipe(&g_app.saved_input, sizeof g_app.saved_input);
@@ -4084,8 +4086,8 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
     _exit(0);
 }
 
-// --simple: a picture asked for with :show is printed where the conversation has got to, two of
-// its pixel rows to a line of half blocks.
+// --simple: a picture requested with :show is printed at the current point in the conversation,
+// two pixel rows per line of half blocks.
 static void plain_file_view(void *ui, int num, const char *name, const uint8_t *data, size_t len) {
     (void)ui; (void)name;
     static const uint8_t bg[3] = { 0, 0, 0 };
@@ -4149,7 +4151,7 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
         if (line[0]) copy_str(o.session_name, line, sizeof o.session_name);
         else { random_session_id(o.session_name, 10); o.created = 1; printf("new session id: %s  (share this and the password)\n", o.session_name); }
     } else {
-        // No fixed default: a well-known id with a blank password would be a room anyone can join.
+        // No fixed default, since a well known id with a blank password would be a room anyone can join.
         random_session_id(o.session_name, 10);
         o.created = 1;
         printf("new session id: %s  (share this and the password)\n", o.session_name);
@@ -4172,8 +4174,8 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
         }
         apply_route_choice(choice);
     }
-    // --peer names are looked up only once the routing is settled, and never for Tor, where the
-    // lookup would go around it.
+    // --peer names are only looked up once the routing is decided, and never for Tor, where the lookup
+    // would bypass it.
     if (n_peer_args > 0 && g_app.route.mode == ROUTE_TOR) {
         fprintf(stderr, "chat: --peer can't be used with Tor routing\n");
         crypto_wipe(&o, sizeof o);
@@ -4306,7 +4308,7 @@ static int read_options(int argc, char **argv, options_t *o) {
             g_app.verify_optional = 0;
         } else if (strcmp(key, "routing") == 0 && i + 1 < argc) {
             const char *v = argv[++i];
-            // direct+nostr and direct: the modes' old names, still taken.
+            // direct+nostr and direct: the modes' old names, still accepted.
             if (strcmp(v, "dht+nostr") == 0 || strcmp(v, "nostr") == 0 || strcmp(v, "direct+nostr") == 0) apply_route_choice(1);
             else if (strcmp(v, "dht") == 0 || strcmp(v, "direct") == 0) apply_route_choice(2);
             else if (strcmp(v, "tor") == 0) apply_route_choice(3);
@@ -4389,8 +4391,8 @@ int main(int argc, char **argv) {
 
     crypto_setup();
     update_self_build(&g_self_build);
-    // The signing key, a pasted key block and typed passwords pass through these for the whole
-    // run. Best effort, as in chat_init.
+    // The signing key, a pasted key block and typed passwords pass through these for the whole run.
+    // Best effort, as in chat_init.
     crypto_lock(&g_app.identity, sizeof g_app.identity);
     crypto_lock(g_app.paste_buf, sizeof g_app.paste_buf);
     crypto_lock(&g_app.input, sizeof g_app.input);
@@ -4400,14 +4402,14 @@ int main(int argc, char **argv) {
 
     int saved = install_has_settings() || install_has_key();
     if (o->update) {
-        // What :install saved may send the download through Tor, so it isn't passed over quietly.
+        // What :install saved may route the download through Tor, so it isn't skipped silently.
         if (saved) unlock_at_start(0);
         if (g_app.locked && !g_app.route_chosen) {
             fprintf(stderr, "chat: not updating - what :install saved stays sealed, and with it the routing to "
                             "download by: CHAT_INSTALL_PASSWORD opens it, or --routing chooses one\n");
             return 1;
         }
-        // With --routing tor the download goes through Tor, never direct: find or start a tor first.
+        // With --routing tor the download goes through Tor, never direct, so find or start a tor first.
         int over_tor = g_app.route_chosen && g_app.route.mode == ROUTE_TOR;
         if (over_tor) {
             net_startup();
@@ -4438,7 +4440,7 @@ int main(int argc, char **argv) {
     net_startup();
 
     int interactive = !o->simple && term_is_tty() && term_stdout_is_tty() && term_ansi_ok();
-    // NO_COLOR (no-color.org) keeps the UI to bold, faint and reverse.
+    // NO_COLOR (no-color.org) limits the UI to bold, faint and reverse.
     const char *no_color = getenv("NO_COLOR");
     g_app.color_enabled = interactive && !(no_color && no_color[0]);
     if (o->has_color) memcpy(g_app.color, o->color, 3);
@@ -4449,8 +4451,8 @@ int main(int argc, char **argv) {
     }
     if (o->nick[0]) chat_clean_nick(o->nick, g_app.nick);
 
-    // Only the form here: nothing reaches the network before the routing is settled, so a name is
-    // looked up when the session starts.
+    // Only the format is checked here. Nothing goes on the network before the routing is decided, so
+    // a name is looked up when the session starts.
     for (int i = 0; i < o->n_peers; i++) {
         if (addr_check_hostport(o->peers[i]) != 0) {
             fprintf(stderr, "chat: bad --peer %s\n", o->peers[i]);
@@ -4463,7 +4465,7 @@ int main(int argc, char **argv) {
         identity_source_t kind = o->identity[0] == 'a' ? IDENT_AGE : IDENT_PGP;
         const char *path = o->identity[3] == ':' ? o->identity + 4 : NULL;
         if (!path) {
-            // As for a session's password: from the environment, else asked for, else blank.
+            // Like a session's password: from the environment, otherwise asked for, otherwise blank.
             char pw[256] = "";
             if (platform_env_take("CHAT_SIGN_PASSWORD", pw, sizeof pw) != 0 && term_is_tty())
                 term_read_password("signing key password (always the same one keeps the same key; blank for a "
@@ -4477,7 +4479,7 @@ int main(int argc, char **argv) {
     }
 
     if (saved) unlock_at_start(interactive);
-    // What stays sealed could have chosen Tor: with no one to ask, chat doesn't guess.
+    // What's still sealed could have chosen Tor, and with nobody to ask, chat doesn't guess.
     if (g_app.locked && !g_app.route_chosen && !interactive && !term_is_tty()) {
         fprintf(stderr, "chat: what :install saved stays sealed, and with it your routing: CHAT_INSTALL_PASSWORD "
                         "opens it, or --routing chooses one\n");

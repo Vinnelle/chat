@@ -32,7 +32,7 @@ void image_thumb_free(image_thumb_t *t) {
     memset(t, 0, sizeof *t);
 }
 
-// ---- the thumbnail: each source pixel added into the average for its place ----
+// ---- the thumbnail: each source pixel is added to the average for the pixel it falls in ----
 
 typedef struct {
     int sw, sh, tw, th;
@@ -44,7 +44,7 @@ static int acc_init(thumb_acc_t *a, int sw, int sh, int max_w, int max_h) {
     if (sw < 1 || sh < 1 || max_w < 1 || max_h < 1) return -1;
     a->sw = sw;
     a->sh = sh;
-    // As wide as allowed (never wider than the source), then shorter if it's too tall.
+    // As wide as allowed (never wider than the source), then scaled down to fit if that's too tall.
     int tw = sw < max_w ? sw : max_w;
     int th = (int)(((int64_t)sh * tw + sw / 2) / sw);
     if (th < 1) th = 1;
@@ -268,7 +268,7 @@ static uint32_t adler32(const uint8_t *p, size_t n) {
     return (b << 16) | a;
 }
 
-// A zlib stream that inflates to exactly outlen bytes: anything more or less is damage.
+// A zlib stream that inflates to exactly outlen bytes. Anything more or less means it's damaged.
 static int zlib_inflate(const uint8_t *in, size_t inlen, uint8_t *out, size_t outlen) {
     if (inlen < 6) return -1;
     unsigned cmf = in[0], flg = in[1];
@@ -358,7 +358,7 @@ static void put_pixel(thumb_acc_t *a, const png_info_t *pi, const uint8_t *row, 
         }
         case 3: {
             unsigned idx = sample(row, x, d);
-            // An index past the palette is damage: shown as black, never read past it.
+            // An index past the end of the palette means damage. It's shown as black and never read past.
             if ((int)idx >= pi->npal) { r = g = b = 0; break; }
             r = pi->pal[idx][0]; g = pi->pal[idx][1]; b = pi->pal[idx][2]; alpha = pi->pal[idx][3];
             break;
@@ -543,7 +543,7 @@ typedef struct {
     uint32_t bitbuf;
     int bitcnt;
     int marker_hit;         // a marker turned up where entropy-coded data was; zeros from here
-    int overrun;            // bits asked for past that, in bytes: a little is normal, a lot is damage
+    int overrun;            // bits read past that, in bytes: a little is normal, a lot means damage
     uint16_t qt[4][64];
     int qt_set[4];
     jhuff_t dc[4], ac[4];
@@ -567,7 +567,7 @@ static int jhuff_build(jhuff_t *t) {
         code += t->bits[l];
         k += t->bits[l];
         t->maxcode[l] = t->bits[l] ? code - 1 : -1;
-        // A code longer than its length allows is no code at all.
+        // A code longer than the maximum length isn't valid.
         if (code > (1 << l)) return -1;
         code <<= 1;
     }
@@ -654,7 +654,7 @@ static int decode_block(jpeg_t *j, jcomp_t *c, int bx, int by) {
     const uint16_t *q = j->qt[c->tq];
     coef[0] = c->dc_pred * q[0];
     if (j->dc_only) {
-        // The AC coefficients are still read, to get past them.
+        // The AC coefficients are still read, to skip over them.
         for (int k = 1; k < 64; ) {
             int rs = jdecode(j, ac);
             if (rs < 0) return -1;
@@ -815,8 +815,8 @@ static int jpeg_thumb(const uint8_t *p, size_t len, int max_w, int max_h, image_
             }
             j->mcux = (j->w + 8 * j->hmax - 1) / (8 * j->hmax);
             j->mcuy = (j->h + 8 * j->vmax - 1) / (8 * j->vmax);
-            // Big images at an eighth of their size: a thumbnail needs no more, and the memory stays
-            // small whatever the image claims.
+            // Big images are read at an eighth of their size. A thumbnail doesn't need more, and memory use
+            // stays small whatever size the image claims.
             j->dc_only = (int64_t)j->w * j->h > 4000000;
             int px = j->dc_only ? 1 : 8;
             for (int i = 0; i < j->ncomp; i++) {
@@ -859,7 +859,7 @@ static int jpeg_thumb(const uint8_t *p, size_t len, int max_w, int max_h, image_
             }
             if (decode_scan(j, sc, ns) != 0) { msg = "the JPEG's image data is damaged"; goto done; }
             scans++;
-            // On past the scan's data to the marker after it.
+            // Skip past the scan's data to the next marker.
             j->bitcnt = 0;
         } else if (m == 0xD8) {
             msg = "the JPEG is damaged";

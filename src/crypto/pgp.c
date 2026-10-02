@@ -364,7 +364,7 @@ static int parse_secret_key_packet(const uint8_t *body, size_t blen, identity_ke
     return rc;
 }
 
-// idkp changes only on success: a key that fails to load leaves the current identity whole.
+// idkp is only changed on success, so a key that fails to load leaves the current identity as it was.
 int pgp_import_secret_key_text(const char *text, identity_keypair_t *idkp) {
     static const char begin_marker[] = "-----BEGIN PGP PRIVATE KEY BLOCK-----";
     static const char end_marker[] = "-----END PGP PRIVATE KEY BLOCK-----";

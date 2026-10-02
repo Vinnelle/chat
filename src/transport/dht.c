@@ -61,7 +61,7 @@ static int known_count(const dht_state_t *d, int fam) {
     return n;
 }
 
-// A node that answered: kept, in place of the one that answered longest ago when the list is full.
+// Keeps a node that answered. When the list is full it replaces the one that answered longest ago.
 static void known_add(dht_state_t *d, addr_t a, const uint8_t id[20], double now) {
     dht_known_t *list = d->known[a.is_v6 ? DHT_V6 : DHT_V4], *slot = NULL;
     for (int i = 0; i < DHT_KNOWN_MAX && !slot; i++) if (list[i].used && addr_equal(list[i].addr, a)) slot = &list[i];
@@ -81,7 +81,7 @@ static void known_drop(dht_state_t *d, addr_t a) {
     for (int i = 0; i < DHT_KNOWN_MAX; i++) if (list[i].used && addr_equal(list[i].addr, a)) list[i].used = 0;
 }
 
-// This hour's node id: made the first time the hour's key is looked up.
+// This hour's node id, made the first time the hour's key is looked up.
 static void use_node_id(dht_state_t *d, long long epoch) {
     for (int i = 0; i < 2; i++)
         if (d->ids[i].set && d->ids[i].epoch == epoch) { memcpy(d->node_id, d->ids[i].id, 20); return; }
@@ -100,7 +100,7 @@ static void resolve_thread(void *arg) {
         int k = addr_resolve_all(BOOTSTRAP[i].host, BOOTSTRAP[i].port, found, ADDR_RESOLVE_MAX);
         for (int j = 0; j < k && n < DHT_BOOT_MAX; j++) {
             int fam = found[j].is_v6 ? DHT_V6 : DHT_V4;
-            // Half the slots each, so one family's many addresses can't crowd out the other's.
+            // Half the slots for each family, so one family's addresses can't fill the whole list.
             if (!job->want[fam] || per_fam[fam] >= DHT_BOOT_MAX / 2) continue;
             int dup = 0;
             for (int m = 0; m < n; m++) if (addr_equal(job->out[m], found[j])) { dup = 1; break; }
@@ -121,7 +121,7 @@ static void drop_job(dht_state_t *d) {
     if (atomic_exchange(&d->job->state, JOB_ABANDONED) == JOB_DONE) free(d->job);
 #else
     if (d->job->state == JOB_DONE) free(d->job);
-    else d->job->state = JOB_ABANDONED;   // left for good: without atomics, never freed
+    else d->job->state = JOB_ABANDONED;   // abandoned: without atomics, never freed
 #endif
     d->job = NULL;
 }
@@ -166,8 +166,8 @@ void dht_rebootstrap(dht_state_t *d) {
     d->next_lookup = 0;
 }
 
-// This round's lookup key: this hour's, or the other hour's in a round straight after while the
-// hour's change is near.
+// This round's lookup key: this hour's, or near the change of hour, the other hour's in a round
+// straight after.
 static void pick_infohash(dht_state_t *d) {
     long long wall = (long long)time(NULL);
     long long epoch = wall / DHT_EPOCH, into = wall % DHT_EPOCH, use = epoch;
@@ -269,8 +269,8 @@ static size_t append_want(dht_state_t *d, uint8_t *buf, size_t p) {
     return p;
 }
 
-// Every query says "ro" (BEP 43): chat is a read-only node, which answers no queries, so other
-// nodes don't put it in their routing tables or ping it, and its silence is what they expect.
+// Every query sets "ro" (BEP 43). chat is a read only node and doesn't answer queries, so other
+// nodes don't add it to their routing tables or ping it, and don't expect an answer.
 static void send_get_peers(dht_state_t *d, const dht_cand_t *to, const uint8_t tid[2]) {
     uint8_t buf[160];
     size_t p = 0;
@@ -303,8 +303,8 @@ static void send_announce(dht_state_t *d, const dht_cand_t *to, const uint8_t ti
     dht_send(d, to, buf, p);
 }
 
-// Starts from the nodes that answered lately, which the bootstrap servers join only while there
-// are too few: those four see every lookup that starts with them.
+// Starts from nodes that answered recently. The bootstrap servers are only added while there are
+// too few, since those four see every lookup that starts with them.
 static void start_lookup(dht_state_t *d, dht_lookup_t *lk, int fam, double now) {
     memset(lk, 0, sizeof *lk);
     lk->t0 = now;
@@ -318,7 +318,7 @@ static void start_lookup(dht_state_t *d, dht_lookup_t *lk, int fam, double now) 
     }
     if (known_count(d, fam) >= DHT_KNOWN_ENOUGH) return;
     if (d->names_remote) {
-        // The proxy looks the names up, in whatever family it has; IPv6 fills from the replies.
+        // The proxy looks the names up in whatever family it has. IPv6 fills from the replies.
         if (fam == DHT_V4 || !d->want[DHT_V4])
             for (int i = 0; i < 4; i++) add_named_cand(lk, i);
         return;
@@ -352,7 +352,7 @@ static int lookup_step(dht_state_t *d, dht_lookup_t *lk, double now) {
     for (int i = 0; i < DHT_MAX_INFLIGHT; i++) {
         dht_inflight_t *f = &lk->inflight[i];
         if (!f->used || now - f->sent_at <= 3.0) continue;
-        // No answer: a node known from before isn't started from again.
+        // No answer, so a previously known node isn't used as a starting point again.
         if (!f->named) known_drop(d, f->addr);
         f->used = 0;
     }
@@ -489,7 +489,7 @@ void dht_on_packet(dht_state_t *d, const uint8_t *data, size_t len, addr_t from,
     if (!r || r->type != BE_DICT) return;
     dht_cand_t *c = find_or_add_cand(lk, from);
     if (!c) return;
-    // A server asked by name answers from an address: that one has been asked already.
+    // A server asked by name answers from an address, so that address has already been asked.
     c->queried = 1;
     const be_value *id = be_dict_get(r, "id");
     if (id && id->type == BE_STR && id->slen == 20) {

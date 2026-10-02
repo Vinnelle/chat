@@ -66,7 +66,7 @@ void age_export_recipient(const identity_keypair_t *idkp, char out[AGE_RECIPIENT
     out[o] = '\0';
 }
 
-// A character's 5-bit value, or -1. Upper case only: age-keygen writes the key that way, and
+// A character's 5-bit value, or -1. Upper case only, since age-keygen writes the key that way and
 // bech32 never mixes cases.
 static int bech32_upper_value(char c) {
     if (c == '\0' || (c >= 'a' && c <= 'z')) return -1;

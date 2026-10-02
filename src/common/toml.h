@@ -25,11 +25,11 @@ typedef struct {
 
 typedef void (*toml_fn)(void *ctx, const char *table, const char *key, const toml_value *v);
 
-// Calls fn for each key, with its table ("" before the first). Lines it can't read are skipped:
-// returns how many, the first one's number in *bad_line.
+// Calls fn for each key, with its table ("" before the first table). Lines it can't read are
+// skipped. Returns how many were skipped, with the first one's line number in *bad_line.
 int toml_parse(const char *text, toml_fn fn, void *ctx, int *bad_line);
 
-// Appends s as a basic string, quotes included: the new length, or cap if it didn't fit.
+// Appends s as a basic string, quotes included. Returns the new length, or cap if it didn't fit.
 size_t toml_put_str(char *out, size_t pos, size_t cap, const char *s);
 
 #endif

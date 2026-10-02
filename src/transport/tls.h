@@ -11,8 +11,8 @@
 
 typedef struct tls_conn tls_conn_t;
 
-// Byte I/O as net_tcp_send and net_tcp_recv do it: bytes moved, 0 when it would block, -1 on an
-// error or (recv) a closed connection.
+// Byte I/O like net_tcp_send and net_tcp_recv: returns bytes moved, 0 when it would block, -1 on
+// an error or (recv) a closed connection.
 typedef struct {
     int (*send)(void *ctx, const void *data, size_t len);
     int (*recv)(void *ctx, void *buf, size_t cap);

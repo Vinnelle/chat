@@ -24,18 +24,18 @@ size_t base64_encode(const uint8_t *in, size_t n, char *out);
 // Strict: padded standard alphabet only. Returns the decoded length, or -1.
 long base64_decode_strict(const char *in, size_t inlen, uint8_t *out, size_t cap);
 
-// Code point at s[i] (n = length of s); *adv gets its byte length. A malformed byte comes back as itself.
+// Code point at s[i] (n = length of s). *adv gets its length in bytes. A malformed byte is returned as is.
 uint32_t utf8_decode(const char *s, size_t n, size_t i, size_t *adv);
 // Writes cp as UTF-8 (1-4 bytes) and returns the length.
 size_t utf8_put(uint32_t cp, char *out);
 
 // Terminal columns the character at s[i] takes (0 for combining marks and zero-width characters,
-// 2 for East Asian wide ones and emoji); *adv gets its byte length. A locale-free approximation of
-// wcwidth: a malformed byte or a control character counts as one column, for the replacement
-// character the UI shows in its place.
+// 2 for East Asian wide ones and emoji). *adv gets its length in bytes. A locale free version of
+// wcwidth. A malformed byte or a control character counts as one column, since the UI shows a
+// replacement character in its place.
 int utf8_char_cols(const char *s, size_t n, size_t i, size_t *adv);
-// How many bytes of s (at most len) fit in max_cols columns, stopping on a character boundary;
-// *cols (if not NULL) gets the columns they take.
+// How many bytes of s (at most len) fit in max_cols columns, stopping on a character boundary.
+// *cols (if not NULL) gets the number of columns they take.
 size_t utf8_fit_cols(const char *s, size_t len, int max_cols, int *cols);
 int utf8_str_cols(const char *s);
 
