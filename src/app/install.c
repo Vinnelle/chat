@@ -236,9 +236,20 @@ static void count_others(void *ctx, const char *name, int is_dir) {
     (*(int *)ctx)++;
 }
 
+static void count_all(void *ctx, const char *name, int is_dir) {
+    (void)is_dir;
+    if (strcmp(name, ".") != 0 && strcmp(name, "..") != 0) (*(int *)ctx)++;
+}
+
 static int is_empty(const char *dir) {
     int others = 0;
     return platform_list_dir(dir, count_others, &others) == 0 && others == 0;
+}
+
+// Nothing at all in it: the default save's files count too.
+static int is_bare(const char *dir) {
+    int n = 0;
+    return platform_list_dir(dir, count_all, &n) == 0 && n == 0;
 }
 
 int install_remove(const char *name) {
@@ -258,8 +269,8 @@ int install_remove(const char *name) {
         char top[900], saves[960];
         if (platform_config_dir(top, sizeof top, 0) != 0) return 0;
         snprintf(saves, sizeof saves, "%s/" SAVES_DIR, top);
-        if (is_empty(saves)) platform_remove_tree(saves);
-        if (is_empty(top)) platform_remove_tree(top);
+        if (is_bare(saves)) platform_remove_tree(saves);
+        if (is_bare(top)) platform_remove_tree(top);
     }
     return 0;
 }
