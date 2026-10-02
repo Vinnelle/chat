@@ -69,6 +69,15 @@
   the list, and if there's no save called NAME yet, chat starts from its defaults and
   `:install` makes it. Without `--save`, `CHAT_INSTALL_PASSWORD` opens the first save it fits.
   With only one save, chat asks for its passphrase straight away, as before.
+- Verified keys. For a peer that signs with an identity, `:verify NICK ok` keeps its signing
+  key and nick as verified, for every session in the run. A peer that signs a later handshake
+  with a verified key needs no code comparing. `:install` saves the keys in a `verified` file,
+  sealed with the settings of the save in use, and each change after that is saved. `:verified` lists them with
+  their fingerprints, and `:verified forget NICK` (or `all`) removes them.
+- When a peer has the nick of a verified key but signs with another key, or none, chat prints
+  a warning in the chat (bold yellow, and in yellow in `--simple`) as well as the console, and
+  the sidebar shows `key changed`. The peer counts as not compared until you compare codes
+  again. `:verify NICK ok` then replaces the key kept for that nick.
 
 ## 0.4.0-beta.1
 

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
 #include "core/chat.h"
+#include "core/trust.h"
 #include "crypto/crypto.h"
 #include "crypto/age.h"
 #include "crypto/pgp.h"
@@ -86,13 +87,17 @@ static const char *USAGE =
     "Commands run from the command line (/ on an empty line, or : in NORMAL). Anything else\n"
     "you type is sent:\n"
     "  :new :join :quit (:q) :quitall (:qa) :copyid :update :peers :verify NICK [ok|no] :net\n"
-    "  :port [N] :set [NAME [VALUE]] :install :uninstall :help   (:help opens a page of keys\n"
-    "  and commands)\n"
+    "  :verified [forget NICK] :port [N] :set [NAME [VALUE]] :install :uninstall :help\n"
+    "  (:help opens a page of keys and commands)\n"
     "\n"
     "Anyone with a session's id and password can sit between two other members. When a peer\n"
     "joins, chat shows a verify code to compare with them over another channel (a call, in\n"
     "person), and :verify NICK ok marks it as matching. --verify-required (:set verify\n"
-    "required) sends nothing to a peer until then.\n"
+    "required) sends nothing to a peer until then. For a peer that signs with an identity,\n"
+    ":verify NICK ok also keeps its signing key as verified: next time it signs with that key,\n"
+    "the code needs no comparing. If a peer with that nick signs with another key, or none,\n"
+    "chat shows a warning and the sidebar says key changed. :verified lists the keys, and\n"
+    ":install saves them.\n"
     "\n"
     "Each setting is a row on the settings page. :set NAME VALUE changes it without opening\n"
     "the page (:set nick bob, :set net verbose, :set routing tor). :set alone opens the page,\n"
@@ -394,6 +399,12 @@ static void push_log(const char *fmt, ...) {
 static void session_print(void *ui, const char *hhmm, const char *text, const uint8_t *rgb,
                           unsigned flags, int color_len, int file) {
     session_slot_t *s = (session_slot_t *)ui;
+    // A warning goes in the chat too, since the console can be hidden.
+    if (flags & LINE_WARN) {
+        tui_scrollback_push(&s->sb, hhmm, text, NULL, 0, 0);
+        if (s != g_app.selected) { s->unread++; s->mentioned = 1; }
+        if (s->scroll > 0 && s->scroll < s->sb.count - 1) s->scroll++;
+    }
     if (flags & LINE_CHAT) {
         tui_scrollback_push(&s->sb, hhmm, text, rgb, (flags & LINE_MENTION) != 0, color_len);
         if (file) tui_scrollback_mark_file(&s->sb, file);
@@ -3226,6 +3237,34 @@ static const char *open_error(int rc) {
     }
 }
 
+// The verified keys (core/trust.h) are saved each time they change, while what :install saved is
+// open and its verified file could be read.
+static void save_verified(void) {
+    if (!trust_saved() || !g_app.installed || g_app.locked) return;
+    static char text[TRUST_TEXT_MAX];
+    if (trust_text(text, sizeof text) == 0 && install_write_verified(text) == 0) return;
+    char where[900] = "";
+    install_where(install_current(), where, sizeof where);
+    push_log("* couldn't save the verified keys in %s/verified - they last until chat exits", where);
+}
+
+// Adds the saved verified keys to the ones in use. 0, or a PASS_ code.
+static int load_saved_verified(void) {
+    static char text[INSTALL_VERIFIED_MAX + 1];
+    char where[900] = "";
+    install_where(install_current(), where, sizeof where);
+    long n = install_read_verified(text, sizeof text);
+    if (n == INSTALL_NO_FILE) return 0;
+    if (n < 0) {
+        saved_note("* %s/verified is damaged, or isn't sealed with this passphrase - left out", where);
+        return (int)n;
+    }
+    int bad = trust_load(text);
+    crypto_wipe(text, sizeof text);
+    if (bad) saved_note("* %s/verified: %d line%s it can't read - left out", where, bad, bad == 1 ? "" : "s");
+    return 0;
+}
+
 static void reapply_options(void);
 
 // The settings, then the command line options again so they still override them, then the key
@@ -3236,6 +3275,8 @@ static int open_saved(const char *name, const char *passphrase) {
     g_app.installed = 1;
     g_app.locked = 0;
     load_saved_settings();
+    // A damaged file isn't overwritten by the keys verified this run.
+    if (load_saved_verified() == 0) trust_set_saved(1);
     reapply_options();
     note_settings_seen();
     rc = open_saved_key(!g_opts.identity[0]);
@@ -3349,6 +3390,10 @@ static void finish_install(const char *passphrase) {
     }
     g_app.installed = 1;
     g_app.locked = 0;
+    static char vtext[TRUST_TEXT_MAX];
+    int verified = trust_text(vtext, sizeof vtext) == 0 && install_write_verified(vtext) == 0;
+    trust_set_saved(verified);
+    if (!verified) push_log("* couldn't write the verified keys to %s - they last until chat exits", where);
     int key = g_app.identity_source != IDENT_NONE && !key_in_use_saved();
     int path = key && key_saved_as_path();
     if (key) {
@@ -3439,6 +3484,9 @@ static void commit_install_unlock(void) {
     g_app.saved_key_known = 0;
     g_app.saved_key_path[0] = '\0';
     open_saved_key(0);
+    // The keys verified in an earlier run are kept, with the ones verified in this one added.
+    load_saved_verified();
+    say_saved_notes();
     finish_install(NULL);
 }
 
@@ -3453,6 +3501,7 @@ static void uninstall_confirmed(void) {
         return;
     }
     g_app.installed = g_app.locked = 0;
+    trust_set_saved(0);
     g_app.saved_key_known = 0;
     g_app.saved_key_path[0] = '\0';
     push_log("* uninstalled: chat's files in %s are deleted. What's in use now lasts until chat exits", where);
@@ -4239,7 +4288,8 @@ static const char *held_warning(const session_slot_t *s) {
     char first[CHAT_NAME_LEN] = "";
     for (int i = 0; i < MAX_PEERS + MAX_PENDING_PEERS; i++) {
         const peer_t *p = &e->peers[i];
-        if (!p->used || !p->ok || chat_code_state(e, p) != 1) continue;
+        int code = chat_code_state(e, p);
+        if (!p->used || !p->ok || (code != 1 && !(code == 4 && e->verify_required))) continue;
         if (held++ == 0) chat_peer_name(e, p, first);
     }
     if (held == 0) return NULL;
@@ -4286,7 +4336,7 @@ static void chat_input(tui_bar_t *b, const tui_input_t *in) {
 
 // ---- the dialogs ----
 
-#define MAX_DIALOG_PARAS 8
+#define MAX_DIALOG_PARAS 12
 
 static int add_para(tui_para_t *p, int n, tui_para_kind_t kind, const char *text) {
     p[n] = (tui_para_t){ .kind = kind, .text = text };
@@ -4294,13 +4344,16 @@ static int add_para(tui_para_t *p, int n, tui_para_kind_t kind, const char *text
 }
 
 static int install_paras(tui_para_t *p) {
-    static char settings[1200], key[1400], intro[600];
+    static char settings[1200], key[1400], intro[600], verified[1200];
     char where[900] = "";
     const char *target = g_app.save_target;
     install_where(target, where, sizeof where);
     snprintf(settings, sizeof settings, "`%s/settings`: the settings you've changed - your nickname, colour, routing, "
              "relays and the like. Never the Tor control password.", where);
     int same = is_current_save(target), exists = save_exists(target), open = g_app.installed && same;
+    snprintf(verified, sizeof verified, "`%s/verified`: the signing keys of peers whose verify code you compared "
+             "(`:verify NICK ok`), with their nicks, so they don't need comparing again (%d now). `:verified` lists "
+             "them.", where, trust_count());
     int saved = install_has_key(target);
     if (g_app.identity_source == IDENT_NONE && saved)
         snprintf(key, sizeof key, "`%s/key`: the signing key saved there stays as it is, though signing is off now.", where);
@@ -4336,6 +4389,7 @@ static int install_paras(tui_para_t *p) {
     n = add_para(p, n, TUI_P_BLANK, "");
     n = add_para(p, n, TUI_P_BULLET, settings);
     n = add_para(p, n, TUI_P_BULLET, key);
+    n = add_para(p, n, TUI_P_BULLET, verified);
     n = add_para(p, n, TUI_P_BLANK, "");
     n = add_para(p, n, TUI_P_TEXT, open
         ? "It's all sealed (Argon2id, XChaCha20-Poly1305) with the passphrase it's sealed with now: there's "
@@ -4347,7 +4401,7 @@ static int install_paras(tui_para_t *p) {
     n = add_para(p, n, TUI_P_BLANK, "");
     return add_para(p, n, TUI_P_TEXT,
         "Settings you change from then on are saved as you change them. Never saved: sessions, their passwords, "
-        "messages, peers or files. `:uninstall` deletes it all - but a disk and its backups can keep traces of "
+        "messages or files. `:uninstall` deletes it all - but a disk and its backups can keep traces of "
         "deleted files.");
 }
 
@@ -4357,7 +4411,8 @@ static int uninstall_paras(tui_para_t *p) {
     const char *target = g_app.save_target;
     install_where(target, where, sizeof where);
     int settings = install_has_settings(target), key = install_has_key(target), same = is_current_save(target);
-    snprintf(what, sizeof what, "This deletes what `:install` saved in `%s`: your %s.%s", where,
+    snprintf(what, sizeof what, "This deletes what `:install` saved in `%s`: your %s, and the signing keys of peers "
+             "you verified.%s", where,
              settings && key ? "sealed settings and signing key" : settings ? "sealed settings" : "sealed signing key",
              same ? " What's in use now lasts until chat exits." : "");
     int n = add_para(p, 0, TUI_P_TEXT, what);
@@ -4899,6 +4954,7 @@ static void plain_print(void *ui, const char *hhmm, const char *text, const uint
     int mention = (flags & LINE_MENTION) != 0;
     int ansi = term_ansi_ok();
     if (ansi && mention) printf("[%s] \x1b[1m\x1b[48;2;110;70;10m%s\x1b[0m\n", hhmm, text);
+    else if (ansi && (flags & LINE_WARN)) printf("[%s] \x1b[1;33m%s\x1b[0m\n", hhmm, text);
     else if (ansi && rgb && color_len > 0 && (size_t)color_len < strlen(text))
         printf("[%s] \x1b[38;2;%d;%d;%dm%.*s\x1b[0m%s\n", hhmm, rgb[0], rgb[1], rgb[2], color_len, text, text + color_len);
     else if (ansi && rgb) printf("[%s] \x1b[38;2;%d;%d;%dm%s\x1b[0m\n", hhmm, rgb[0], rgb[1], rgb[2], text);
@@ -5161,6 +5217,7 @@ int main(int argc, char **argv) {
     g_app.verify_optional = 1;
     g_app.show_sidebar = g_app.show_console = g_app.show_chat = 1;
     note_setting_defaults();
+    trust_on_change(save_verified);
     g_argc = argc;
     g_argv = argv;
     int exit_code = read_options(argc, argv, &g_opts);

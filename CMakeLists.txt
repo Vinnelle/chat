@@ -164,6 +164,7 @@ add_executable(chat
     src/core/chat.c
     src/core/cmd.c
     src/core/files.c
+    src/core/trust.c
     src/crypto/crypto.c
     src/crypto/age.c
     src/crypto/pgp.c

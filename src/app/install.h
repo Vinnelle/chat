@@ -5,13 +5,15 @@
 
 #include <stddef.h>
 
-// What :install keeps in platform_config_dir: the settings and the signing key, both sealed under
-// one passphrase. Nothing is written there before :install. There can be more than one save: the
-// one in that folder itself, named "" here and default to the user, and named ones in saves/NAME
-// under it, each with its own passphrase. One of them is in use at a time.
+// What :install keeps in platform_config_dir: the settings, the signing key and the verified
+// signing keys of peers, all sealed under one passphrase. Nothing is written there before :install.
+// There can be more than one save: the one in that folder itself, named "" here and default to the
+// user, and named ones in saves/NAME under it, each with its own passphrase. One of them is in use
+// at a time.
 
 #define INSTALL_SETTINGS_MAX 8192
 #define INSTALL_KEY_MAX 1280
+#define INSTALL_VERIFIED_MAX 24576
 #define INSTALL_NO_FILE -4
 #define INSTALL_NAME_MAX 32
 #define INSTALL_SAVES_MAX 32
@@ -55,6 +57,9 @@ int install_write_settings(const char *text);
 int install_write_key(const void *secret, size_t len);
 // 0, INSTALL_NO_FILE, or a PASS_ code.
 int install_read_key(void *secret, size_t cap, size_t *len);
+// The verified keys (core/trust.h trust_text). The same as for the settings.
+long install_read_verified(char *buf, size_t cap);
+int install_write_verified(const char *text);
 
 // Deletes a save's files, then its folder and the folders above it that nothing else is in. If
 // it's the save in use, its passphrase is forgotten.

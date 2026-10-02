@@ -3,6 +3,7 @@
 // Sessions talking over fake_net: handshake, verify codes, delivery, loss, rekey, the traffic's
 // shape on the wire, junk and a third peer.
 #include "core/chat.h"
+#include "core/trust.h"
 #include "fake_net.h"
 #include "common/json.h"
 #include "common/toml.h"
@@ -32,6 +33,8 @@ typedef struct {
     int held;              // "not sent to ...: compare verify codes first"
     int mismatched;        // "file N ... didn't match what was offered"
     int withdrawn;         // "NICK no longer offers file N"
+    int key_warnings;      // a peer with a verified nick signs with another key
+    int known_keys;        // a peer signs with a key verified before
 } log_t;
 
 static chat_t A, B, C;
@@ -59,6 +62,8 @@ static void on_print(void *ui, const char *hhmm, const char *text, const uint8_t
         if (strncmp(text, "* not sent to ", 14) == 0) l->held++;
         if (strstr(text, "didn't match what was offered")) l->mismatched++;
         if (strstr(text, " no longer offers file ")) l->withdrawn++;
+        if ((flags & LINE_WARN) && strstr(text, "does not sign with the key you verified for")) l->key_warnings++;
+        if (strstr(text, "signs with the key you verified")) l->known_keys++;
         if (strncmp(text, "* joining: peer ", 16) == 0) l->joining++;
         else if (strstr(text, " joined (")) { if (l->joining > 0) l->joining--; else l->unheralded_joins++; }
         return;
@@ -1304,6 +1309,69 @@ static void test_parsers(double *t) {
     CHECK(nostr_unwrap(key, sealed, sizeof sealed, back) != 0, "a tampered event opened");
 }
 
+static peer_t *peer_with_id(chat_t *c, const uint8_t id[ID_LEN]) {
+    for (int i = 0; i < c->peer_hi; i++)
+        if (c->peers[i].used && c->peers[i].ok && memcmp(c->peers[i].id, id, ID_LEN) == 0) return &c->peers[i];
+    return NULL;
+}
+
+// Verified signing keys: saved by :verify NICK ok, written and read back as text, a peer with a
+// verified nick but another key warned about, a new key replacing the old one once compared, and
+// a known key that needs no comparing.
+static void test_trust(double *t) {
+    trust_clear();
+    identity_keypair_t id_bob, id_new;
+    gen_identity_keypair(&id_bob);
+    gen_identity_keypair(&id_new);
+    chat_set_identity(&B, IDENT_AGE, &id_bob);
+    peer_t *pb = peer_with_id(&A, B.my_id), *pc = peer_with_id(&A, C.my_id);
+    RUN_UNTIL(t, 10, pb && pb->identity_state == VERIFY_VERIFIED && memcmp(pb->identity_pub, id_bob.pub, ID_SIGN_PUB_LEN) == 0);
+    CHECK(pb && pb->identity_state == VERIFY_VERIFIED, "alice didn't see bob's signing key");
+    CHECK(pc != NULL, "alice has no carol");
+    if (!pb || !pc) return;
+    chat_run_command(&A, "verify bob ok");
+    const trust_entry_t *e = trust_by_key(id_bob.pub);
+    CHECK(trust_count() == 1 && e && strcmp(e->nick, "bob") == 0, "verifying bob didn't save his key");
+
+    static char text[TRUST_TEXT_MAX];
+    CHECK(trust_text(text, sizeof text) == 0, "the verified keys didn't fit as text");
+    trust_clear();
+    CHECK(trust_load(text) == 0 && trust_count() == 1 && trust_by_key(id_bob.pub), "the verified keys didn't read back");
+    CHECK(trust_load("pgp 00zz bob\nkey\n\n") == 2 && trust_count() == 1, "bad lines weren't counted, or were added");
+
+    // Carol takes bob's nick, with no signing key.
+    int warned = log_a.key_warnings;
+    chat_set_nick(&C, "b0b");
+    RUN_UNTIL(t, 10, log_a.key_warnings > warned);
+    CHECK(log_a.key_warnings == warned + 1 && pc->trust == 2, "carol with bob's nick wasn't warned about (%d)", log_a.key_warnings - warned);
+    chat_set_nick(&C, "carol");
+    RUN_UNTIL(t, 10, strcmp(pc->nick, "carol") == 0);
+    CHECK(pc->trust == 0, "carol is still taken for bob");
+
+    // Bob's key changes: one warning, and comparing codes again replaces the saved key.
+    warned = log_a.key_warnings;
+    chat_set_identity(&B, IDENT_AGE, &id_new);
+    RUN_UNTIL(t, 10, memcmp(pb->identity_pub, id_new.pub, ID_SIGN_PUB_LEN) == 0 && log_a.key_warnings > warned);
+    CHECK(log_a.key_warnings == warned + 1 && pb->trust == 2, "bob's new key wasn't warned about once (%d)", log_a.key_warnings - warned);
+    pb->code_ok = 0;
+    CHECK(chat_code_state(&A, pb) == 4, "bob's new key doesn't show as changed");
+    chat_run_command(&A, "verify bob ok");
+    CHECK(trust_count() == 1 && trust_by_key(id_new.pub) && !trust_by_key(id_bob.pub), "bob's new key didn't replace the old one");
+
+    // A known key needs no comparing.
+    pb->code_ok = 0;
+    pb->trust = 0;
+    int known = log_a.known_keys;
+    chat_set_identity(&B, IDENT_AGE, &id_new);
+    RUN_UNTIL(t, 10, log_a.known_keys > known);
+    CHECK(pb->code_ok == 1 && pb->trust == 1, "bob's verified key still needed comparing");
+
+    chat_run_command(&A, "verified forget bob");
+    CHECK(trust_count() == 0, "forgetting bob left %d keys", trust_count());
+    chat_set_identity(&B, IDENT_NONE, NULL);
+    RUN_FOR(t, 2);
+}
+
 int main(int argc, char **argv) {
     verbose = argc > 1 && (strcmp(argv[1], "-v") == 0 || strcmp(argv[1], "--verbose") == 0);
     double t_start = now_seconds();
@@ -1325,6 +1393,7 @@ int main(int argc, char **argv) {
         { "third peer", test_third_peer }, { "candidates settle", test_candidates_settle }, { "builds", test_builds },
         { "parsers", test_parsers }, { "toml", test_toml }, { "dht keys", test_dht_keys }, { "dht", test_dht }, { "read file", test_read_file },
         { "identity keys", test_identity_keys }, { "passphrase seal", test_passphrase_seal }, { "images", test_images }, { "file names", test_file_names }, { "files", test_files },
+        { "verified keys", test_trust },
     };
     size_t n_tests = sizeof tests / sizeof tests[0];
     int failed[sizeof tests / sizeof tests[0]], n_failed = 0;
