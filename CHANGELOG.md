@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- The Windows exe has version information and a manifest (Properties, Details shows them).
+  Antivirus heuristics count an exe without them against it, and Malwarebytes flagged
+  0.4.0-beta.2 as Malware.Heuristic.2062.
+- On Windows, tor starts inside the job that ends it with chat, instead of being started
+  suspended, added to the job, then resumed. This needs Windows 10 1607 or later.
+
 ## 0.4.0-beta.2
 
 ### Changed

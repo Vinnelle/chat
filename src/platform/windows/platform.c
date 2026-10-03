@@ -28,6 +28,9 @@
 #ifndef ENABLE_VIRTUAL_TERMINAL_INPUT
 #define ENABLE_VIRTUAL_TERMINAL_INPUT 0x0200
 #endif
+#ifndef PROC_THREAD_ATTRIBUTE_JOB_LIST
+#define PROC_THREAD_ATTRIBUTE_JOB_LIST 0x0002000D
+#endif
 
 #ifndef PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY_DEFINED
 typedef struct { DWORD Flags; } chat_extension_point_policy_t;
@@ -922,12 +925,16 @@ platform_proc_t *platform_spawn(const char *const argv[], const char *out_path) 
     }
     HANDLE inherit[2] = { nul, out };
     SIZE_T attr_size = 0;
-    InitializeProcThreadAttributeList(NULL, 1, 0, &attr_size);
+    InitializeProcThreadAttributeList(NULL, 2, 0, &attr_size);
     LPPROC_THREAD_ATTRIBUTE_LIST attrs = attr_size ? malloc(attr_size) : NULL;
     BOOL ok = nul != INVALID_HANDLE_VALUE && out != INVALID_HANDLE_VALUE && attrs
-              && InitializeProcThreadAttributeList(attrs, 1, 0, &attr_size);
+              && InitializeProcThreadAttributeList(attrs, 2, 0, &attr_size);
     if (ok) ok = UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit,
                                            out == nul ? sizeof nul : sizeof inherit, NULL, NULL);
+    // The child starts in the job (Windows 10 1607 and later), so it doesn't have to be created
+    // suspended and resumed once it's been assigned.
+    if (ok) ok = UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, &p->job, sizeof p->job,
+                                           NULL, NULL);
     STARTUPINFOEXW si;
     memset(&si, 0, sizeof si);
     si.StartupInfo.cb = sizeof si;
@@ -936,20 +943,12 @@ platform_proc_t *platform_spawn(const char *const argv[], const char *out_path) 
     si.StartupInfo.hStdOutput = si.StartupInfo.hStdError = out;
     si.lpAttributeList = attrs;
     PROCESS_INFORMATION pi;
-    if (ok) ok = CreateProcessW(app, cmd, NULL, NULL, TRUE,
-                                CREATE_NO_WINDOW | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT,
+    if (ok) ok = CreateProcessW(app, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
                                 NULL, NULL, &si.StartupInfo, &pi);
     if (attrs) { DeleteProcThreadAttributeList(attrs); free(attrs); }
     if (out != nul && out != INVALID_HANDLE_VALUE) CloseHandle(out);
     if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
     if (!ok) { CloseHandle(p->job); free(p); return NULL; }
-    if (!AssignProcessToJobObject(p->job, pi.hProcess)) {
-        TerminateProcess(pi.hProcess, 1);
-        CloseHandle(pi.hThread); CloseHandle(pi.hProcess); CloseHandle(p->job);
-        free(p);
-        return NULL;
-    }
-    ResumeThread(pi.hThread);
     CloseHandle(pi.hThread);
     p->process = pi.hProcess;
     return p;
