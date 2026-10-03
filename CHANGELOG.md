@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.15
 
 ### Added
 - `:save` saves what's in use now to the save that's open, after asking, command line options
