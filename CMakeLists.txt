@@ -217,6 +217,20 @@ target_include_directories(chat PRIVATE src src/platform/${CHAT_OS} ${CMAKE_BINA
 target_link_libraries(chat PRIVATE ${SODIUM_STATIC_LIB} ${OQS_STATIC_LIB} ${MBEDTLS_STATIC_LIBS} ${SECP256K1_STATIC_LIB})
 
 if(WIN32)
+    # Version information and a manifest (src/platform/windows/chat.rc). Antivirus heuristics
+    # count an exe without them against it. They're a target of their own, so chat's C compiler
+    # options don't reach the resource compiler. cmake/zig-rc writes a COFF object, which zig
+    # only links under an object's name.
+    enable_language(RC)
+    if(CMAKE_RC_COMPILER MATCHES "zig-rc$")
+        set(CMAKE_RC_OUTPUT_EXTENSION .obj)
+    endif()
+    add_library(chat_rc OBJECT src/platform/windows/chat.rc)
+    string(REPLACE "." "," CHAT_VERSION_N "${PROJECT_VERSION}")
+    target_compile_definitions(chat_rc PRIVATE CHAT_VERSION="${PROJECT_VERSION}" CHAT_VERSION_N=${CHAT_VERSION_N})
+    set_source_files_properties(src/platform/windows/chat.rc PROPERTIES
+        OBJECT_DEPENDS ${CMAKE_SOURCE_DIR}/src/platform/windows/chat.manifest)
+    target_sources(chat PRIVATE $<TARGET_OBJECTS:chat_rc>)
     target_compile_definitions(chat PRIVATE SODIUM_STATIC=1 SECP256K1_STATIC=1 WIN32_LEAN_AND_MEAN)
     target_link_libraries(chat PRIVATE ws2_32 bcrypt advapi32 shell32 user32 crypt32 iphlpapi)
     target_link_options(chat PRIVATE -static)

@@ -1,0 +1,7 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 finlay@tuta.com
+# Resource compiler for Windows using zig's own, which takes rc.exe's options. It writes a COFF
+# object rather than a .res file, since zig doesn't take a .res file from the response file CMake
+# links with (CMakeLists.txt names it .obj). Set ZIG to the zig binary if it isn't on PATH.
+exec "${ZIG:-zig}" rc /:output-format coff /:target x86_64 "$@"
