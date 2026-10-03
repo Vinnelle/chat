@@ -152,6 +152,14 @@
 // A fetch waits up to this long for its sender to come back (a Tor circuit or a relay can stall a
 // peer), and continues from where it was if they do.
 #define FILE_OWNER_GRACE 120.0
+// One of ours counts as being fetched by a peer until it has gone this long without asking for
+// more, since its requests come a window at a time.
+#define FILE_SENDING_QUIET 30.0
+// The peers one of ours went to in full that are named, beyond those it's only counted.
+#define FILE_SENT_MAX 4
+
+// A peer's nick as shown (chat_peer_name).
+#define CHAT_NAME_LEN (MAX_NICK + 10)
 
 typedef enum { ROUTE_DHT = 0, ROUTE_TOR = 1 } route_mode_t;
 
@@ -310,10 +318,12 @@ typedef struct {
     ratchet_t old_send, old_recv;
     double old_until;
 
-    // Chunks of one of our files this peer asked for, sent in slots that would carry a nop.
+    // Chunks of one of our files this peer asked for, sent in slots that would carry a nop, and when
+    // it last asked or was sent one.
     int serving;
     uint8_t serve_fid[FILE_ID_LEN];
     uint64_t serve_next, serve_end;
+    double serve_at;
 } peer_t;
 
 // A record waiting for its peer's next slot. old_chain: sealed on the chain the peer still reads
@@ -342,7 +352,7 @@ typedef struct {
     uint64_t size;
     uint8_t sha[32];
     char name[FILE_NAME_MAX + 1];
-    int image;                   // offered as a PNG or JPEG (only decoding it says it is one)
+    int image;                   // offered as a PNG, JPEG or GIF (only decoding it says it is one)
     FILE *fp;                    // ours: open for its chunks, so the file offered is the one sent
 
     dl_state_t dl;
@@ -365,6 +375,12 @@ typedef struct {
     int retries;
     double since;                // when the fetch started
     double gone_since;           // when its sender left, while it's away
+    char at[6];                  // when it was offered, HH:MM
+    char why[64];                // why the last fetch failed
+    // Ours: who it went to in full.
+    int n_sent;
+    uint8_t sent_id[FILE_SENT_MAX][ID_LEN];
+    char sent_name[FILE_SENT_MAX][CHAT_NAME_LEN];
 } file_entry_t;
 
 typedef struct {
@@ -586,6 +602,14 @@ int chat_file_queued_after(const chat_t *c, const file_entry_t *e);
 // again (they came back with a new one).
 uint64_t chat_file_got(const file_entry_t *e);
 double chat_file_eta(const chat_t *c, const file_entry_t *e, double now);
+// A picture's bytes, checked against its offer: kept from when it was shown, a saved copy, or ours.
+// NULL if there's none here. Only valid until the next call into the session.
+const uint8_t *chat_file_bytes(chat_t *c, int num);
+// One of ours: how many peers are fetching it now, the one furthest along (into name) and how far
+// they've got, in thousandths.
+int chat_file_sending(const chat_t *c, const file_entry_t *e, double now, char name[CHAT_NAME_LEN], int *permille);
+// Who one of ours went to in full: "bob", "bob and carol", "bob and 2 others", or "".
+void chat_file_sent_to(const file_entry_t *e, char *out, size_t cap);
 void chat_set_file_options(chat_t *c, uint64_t cap, int fast);
 void chat_set_colour(chat_t *c, const uint8_t rgb[3]);
 
@@ -599,7 +623,6 @@ void chat_nick_skeleton(const char *nick, char *out, size_t cap);
 
 // A peer's nick as shown, with "#" and its id prefix added when another peer's nick, or ours,
 // looks the same (case and common lookalike letters ignored).
-#define CHAT_NAME_LEN (MAX_NICK + 10)
 void chat_peer_name(const chat_t *c, const peer_t *p, char out[CHAT_NAME_LEN]);
 
 void chat_set_identity(chat_t *c, identity_source_t source, const identity_keypair_t *idkp);

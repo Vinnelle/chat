@@ -131,6 +131,7 @@ static void fuzz_render(const char *s, const uint8_t *data, size_t size) {
     char self[MAX_NICK + 1];
     copy_str(self, s, size > 9 ? 1 + data[9] % MAX_NICK : sizeof self);
     g_progress.permille = size > 11 ? (int)data[11] * 5 - 100 : 0;   // a little out of range either side too
+    g_progress.kind = (tui_progress_kind_t)(size > 11 ? data[11] % 4 : 0);
     copy_str(g_progress.text, (flags & 1) ? s : "", sizeof g_progress.text);
     tui_view_t view = { (flags & 4) != 0, (flags & 8) != 0, (flags & 16) != 0, (flags & 2) ? s : NULL, s,
                         (tui_session_state_t)(flags % 3), s, (flags & 4) ? s : NULL, flags % 5, fuzz_image, NULL,
@@ -159,7 +160,8 @@ static void fuzz_render(const char *s, const uint8_t *data, size_t size) {
                       .limit = flags % 300, .warn = (flags & 16) ? s : NULL, .dialog = (flags & 32) ? &dialog : NULL };
     tui_render(rows, cols, &session, 1, 0, &peer, 1, net, 1, &sb, &console, &view, &bar, (flags & 64) != 0);
     tui_render_bar(rows, cols, &view, &bar, (flags & 64) != 0);
-    tui_row_t row[2] = { { s, s, (flags & 1) ? s : NULL, (tui_value_kind_t)(flags % 6), (flags & 4) ? rgb : NULL },
+    tui_row_t row[2] = { { s, s, (flags & 1) ? s : NULL, (tui_value_kind_t)(flags % 8), (flags & 4) ? rgb : NULL,
+                           (flags & 8) ? s : NULL, g_progress.permille },
                          { NULL, s, NULL, TUI_V_TEXT, NULL } };
     const char *nav[2] = { s, s };
     tui_page_t page = { .title = s, .clock = s, .intro = (flags & 2) ? s : NULL, .nav = (flags & 4) ? nav : NULL,
@@ -169,6 +171,14 @@ static void fuzz_render(const char *s, const uint8_t *data, size_t size) {
     in.mode = TUI_IMODE_INSERT;
     bar.input = (flags & 16) ? &in : NULL;
     tui_render_page(rows, cols, &page, &bar, (flags & 64) != 0);
+    // A picture on its own page, or what it says without one: as big as the input says, whatever room
+    // the page has for it.
+    int pw, ph;
+    tui_picture_room(rows, cols, &pw, &ph);
+    check(pw >= 1 && pw <= TUI_PICTURE_MAX_W && ph >= 1 && ph <= TUI_PICTURE_MAX_H);
+    tui_picture_t pic = { .title = s, .clock = s, .image = (flags & 2) && g_pic.w > 0 ? &g_pic : NULL, .note = s,
+                          .progress = (flags & 4) ? &g_progress : NULL, .caption = (flags & 8) ? s : NULL };
+    tui_render_picture(rows, cols, &pic, &bar, (flags & 64) != 0);
 }
 
 int LLVMFuzzerInitialize(int *argc, char ***argv) {

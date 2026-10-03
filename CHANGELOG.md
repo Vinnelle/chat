@@ -10,6 +10,21 @@
   setting you change ends in `· not saved (autosave is off)`. `:save` saves them, and turning
   autosave on saves the ones changed meanwhile. The `autosave` row is always saved itself, so
   turning it on lasts. Either way, the signing key is only saved by `:save` or `:install`.
+- A files page. `Ctrl+F` (`f` in NORMAL, or `:files`) lists the files offered in the session,
+  theirs then yours, newest first, with what each one is doing and the selected one's details
+  beside the list, so nothing needs its number typed. `Enter` shows a picture or saves a file in
+  Downloads, `d` saves in Downloads, `s` in a folder you pick, `v` shows or hides a picture in
+  the chat, `y` copies where a file was saved and `n` sends one. `x` stops a fetch, or stops
+  offering one of yours, after a box asks. A file over your size limit is fetched once a box asks
+  (with roughly how long it takes), instead of needing `anyway`.
+- Pictures on a page of their own, as big as the terminal allows (up to 200 by 120 pixels, where
+  the chat shows 64 by 48). `Enter` on the files page opens one, fetching it first if it isn't
+  here and showing how far it's got until it comes. `j` / `k` go to the next and previous picture.
+- A picture you send shows in your own chat straight away, and `:show N` works for your own
+  pictures, from the file you offered as long as it hasn't changed.
+- Progressive JPEGs and GIFs are pictures too, shown with `:show N` like a PNG. An animated GIF
+  shows its first frame, still. They're read by chat's own decoders, with the same checks as
+  the others.
 
 ### Changed
 - The Windows exe has version information and a manifest (Properties, Details shows them).
@@ -24,6 +39,12 @@
   what quitting loses: files still downloading, settings or a signing key that aren't saved,
   and an update that's still running. `y` quits, and `n` or `Esc` stays. In `--simple`, a
   second `Ctrl+C` within 3 seconds quits, and from a script it still quits at once.
+- The row under the line that offered a file stays once the fetch is over: where it was saved,
+  or why it failed and how to try again. Under one of yours it shows who's fetching it and how
+  far they've got, then who it has gone to in full. The console says so too.
+- The reply to `:download`, `:show`, `:cancel` and `:send` goes on the bottom bar as well as the
+  console, so it isn't missed with the console hidden.
+- `:files` with `--simple` says why a fetch failed, and for yours, who's fetching it or has.
 
 ## 0.1.14
 

@@ -23,6 +23,7 @@ static int fail(char *why, size_t cap, const char *msg) {
 const char *image_kind(const uint8_t *data, size_t len) {
     if (len >= 8 && memcmp(data, "\x89PNG\r\n\x1a\n", 8) == 0) return "png";
     if (len >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF) return "jpeg";
+    if (len >= 6 && (memcmp(data, "GIF87a", 6) == 0 || memcmp(data, "GIF89a", 6) == 0)) return "gif";
     return NULL;
 }
 
@@ -39,12 +40,8 @@ typedef struct {
     uint64_t *acc;   // tw * th * 4: red, green, blue, and how many
 } thumb_acc_t;
 
-static int acc_init(thumb_acc_t *a, int sw, int sh, int max_w, int max_h) {
-    memset(a, 0, sizeof *a);
-    if (sw < 1 || sh < 1 || max_w < 1 || max_h < 1) return -1;
-    a->sw = sw;
-    a->sh = sh;
-    // As wide as allowed (never wider than the source), then scaled down to fit if that's too tall.
+// As wide as allowed (never wider than the source), then scaled down to fit if that's too tall.
+static void fit(int sw, int sh, int max_w, int max_h, int *tw_out, int *th_out) {
     int tw = sw < max_w ? sw : max_w;
     int th = (int)(((int64_t)sh * tw + sw / 2) / sw);
     if (th < 1) th = 1;
@@ -54,9 +51,17 @@ static int acc_init(thumb_acc_t *a, int sw, int sh, int max_w, int max_h) {
         if (tw < 1) tw = 1;
         if (tw > max_w) tw = max_w;
     }
-    a->tw = tw;
-    a->th = th;
-    a->acc = calloc((size_t)tw * (size_t)th * 4, sizeof *a->acc);
+    *tw_out = tw;
+    *th_out = th;
+}
+
+static int acc_init(thumb_acc_t *a, int sw, int sh, int max_w, int max_h) {
+    memset(a, 0, sizeof *a);
+    if (sw < 1 || sh < 1 || max_w < 1 || max_h < 1) return -1;
+    a->sw = sw;
+    a->sh = sh;
+    fit(sw, sh, max_w, max_h, &a->tw, &a->th);
+    a->acc = calloc((size_t)a->tw * (size_t)a->th * 4, sizeof *a->acc);
     return a->acc ? 0 : -1;
 }
 
@@ -68,6 +73,33 @@ static inline void acc_add(thumb_acc_t *a, int x, int y, int r, int g, int b) {
     c[1] += (uint64_t)g;
     c[2] += (uint64_t)b;
     c[3]++;
+}
+
+// A rectangle of one colour, x0 to x1 by y0 to y1 (not including x1 and y1), added a thumbnail pixel
+// at a time rather than a source pixel at a time, so a GIF claiming a huge screen around a small
+// frame costs no more than the thumbnail.
+static void acc_fill(thumb_acc_t *a, int x0, int y0, int x1, int y1, const uint8_t rgb[3]) {
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > a->sw) x1 = a->sw;
+    if (y1 > a->sh) y1 = a->sh;
+    if (x0 >= x1 || y0 >= y1) return;
+    for (int ty = 0; ty < a->th; ty++) {
+        // The source rows that fall in thumbnail row ty are lo to hi, as acc_add maps them.
+        int64_t lo = ((int64_t)ty * a->sh + a->th - 1) / a->th, hi = ((int64_t)(ty + 1) * a->sh + a->th - 1) / a->th;
+        int64_t ny = (hi < y1 ? hi : y1) - (lo > y0 ? lo : y0);
+        if (ny <= 0) continue;
+        for (int tx = 0; tx < a->tw; tx++) {
+            int64_t xl = ((int64_t)tx * a->sw + a->tw - 1) / a->tw, xh = ((int64_t)(tx + 1) * a->sw + a->tw - 1) / a->tw;
+            int64_t nx = (xh < x1 ? xh : x1) - (xl > x0 ? xl : x0);
+            if (nx <= 0) continue;
+            uint64_t n = (uint64_t)nx * (uint64_t)ny, *c = a->acc + ((size_t)ty * (size_t)a->tw + (size_t)tx) * 4;
+            c[0] += rgb[0] * n;
+            c[1] += rgb[1] * n;
+            c[2] += rgb[2] * n;
+            c[3] += n;
+        }
+    }
 }
 
 static int acc_finish(thumb_acc_t *a, int src_w, int src_h, image_thumb_t *out) {
@@ -535,6 +567,7 @@ typedef struct {
     int bw, bh;             // its blocks across and down, padded to whole MCUs
     uint8_t *plane;         // bw * 8 by bh * 8 samples, or one per block with dc_only
     int stride;
+    int16_t *coef;          // progressive: 64 a block (1 with dc_only), refined scan by scan
 } jcomp_t;
 
 typedef struct {
@@ -552,6 +585,9 @@ typedef struct {
     int restart;
     int dc_only;            // an eighth of the size: each block's DC alone
     int adobe_transform;    // -1 none seen
+    int progressive;
+    int ss, se, ah, al;     // the scan's band of coefficients, and which of their bits
+    int eobrun;             // progressive: blocks left with nothing more in this band
 } jpeg_t;
 
 static const uint8_t ZIGZAG[64] = {
@@ -618,6 +654,15 @@ static int jdecode(jpeg_t *j, const jhuff_t *t) {
 
 static int extend(int v, int s) { return s == 0 ? 0 : v < (1 << (s - 1)) ? v - (1 << s) + 1 : v; }
 
+// A real image's DC never leaves 16 bits. Held there, it can't overflow once it's scaled by a 16-bit
+// table or shifted for a progressive scan, however many differences a damaged one adds up.
+static void dc_add(jcomp_t *c, int diff) {
+    int v = c->dc_pred + diff;
+    c->dc_pred = v < -32768 ? -32768 : v > 32767 ? 32767 : v;
+}
+
+static uint8_t clamp8(int v) { return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v); }
+
 static void idct8x8(const int *in, uint8_t *out, int stride) {
     static float c[8][8];
     static int ready;
@@ -649,8 +694,7 @@ static int decode_block(jpeg_t *j, jcomp_t *c, int bx, int by) {
     const jhuff_t *dc = &j->dc[c->td], *ac = &j->ac[c->ta];
     int s = jdecode(j, dc);
     if (s < 0 || s > 11) return -1;
-    int diff = extend(jbits(j, s), s);
-    c->dc_pred += diff;
+    dc_add(c, extend(jbits(j, s), s));
     const uint16_t *q = j->qt[c->tq];
     coef[0] = c->dc_pred * q[0];
     if (j->dc_only) {
@@ -685,6 +729,84 @@ static int decode_block(jpeg_t *j, jcomp_t *c, int bx, int by) {
     return 0;
 }
 
+// A coefficient that's already non-zero gets the scan's bit, away from zero.
+static void refine(jpeg_t *j, int16_t *v) {
+    int p1 = 1 << j->al;
+    if (jbit(j) && (*v & p1) == 0) *v = (int16_t)(*v >= 0 ? *v + p1 : *v - p1);
+}
+
+// One block of a progressive scan: its DC or a band of its AC coefficients, the first bits of them or
+// one more. They're kept as they come, to be scaled and turned into samples after the last scan.
+static int decode_prog_block(jpeg_t *j, jcomp_t *c, int bx, int by) {
+    if (bx >= c->bw || by >= c->bh) return -1;
+    int16_t *b = c->coef + ((size_t)by * (size_t)c->bw + (size_t)bx) * (j->dc_only ? 1 : 64);
+    if (j->ss == 0) {
+        if (j->ah == 0) {
+            int s = jdecode(j, &j->dc[c->td]);
+            if (s < 0 || s > 11) return -1;
+            dc_add(c, extend(jbits(j, s), s));
+            b[0] = (int16_t)(c->dc_pred * (1 << j->al));
+        } else if (jbit(j)) {
+            b[0] = (int16_t)(b[0] | (1 << j->al));
+        }
+        return 0;
+    }
+    const jhuff_t *ac = &j->ac[c->ta];
+    if (j->ah == 0) {
+        if (j->eobrun > 0) { j->eobrun--; return 0; }
+        for (int k = j->ss; k <= j->se; ) {
+            int rs = jdecode(j, ac);
+            if (rs < 0) return -1;
+            int r = rs >> 4, s = rs & 15;
+            if (s == 0) {
+                if (r < 15) { j->eobrun = (1 << r) - 1 + (r ? jbits(j, r) : 0); break; }
+                k += 16;
+                continue;
+            }
+            k += r;
+            if (k > j->se) return -1;
+            b[ZIGZAG[k]] = (int16_t)(extend(jbits(j, s), s) * (1 << j->al));
+            k++;
+        }
+        return 0;
+    }
+    // A refining scan: each new coefficient is a single bit, and the ones skipped over on the way to
+    // it that are already non-zero each get a bit too.
+    int k = j->ss;
+    if (j->eobrun == 0) {
+        for (; k <= j->se; k++) {
+            int rs = jdecode(j, ac);
+            if (rs < 0) return -1;
+            int r = rs >> 4, s = rs & 15, v = 0;
+            if (s) {
+                if (s != 1) return -1;
+                v = jbit(j) ? 1 << j->al : -(1 << j->al);
+            } else if (r < 15) {
+                j->eobrun = (1 << r) + (r ? jbits(j, r) : 0);
+                break;
+            }
+            for (; k <= j->se; k++) {
+                int16_t *z = &b[ZIGZAG[k]];
+                if (*z) refine(j, z);
+                else if (r-- == 0) break;
+            }
+            if (v) {
+                if (k > j->se) return -1;
+                b[ZIGZAG[k]] = (int16_t)v;
+            }
+        }
+    }
+    if (j->eobrun > 0) {
+        for (; k <= j->se; k++) if (b[ZIGZAG[k]]) refine(j, &b[ZIGZAG[k]]);
+        j->eobrun--;
+    }
+    return 0;
+}
+
+static int scan_block(jpeg_t *j, jcomp_t *c, int bx, int by) {
+    return j->progressive ? decode_prog_block(j, c, bx, by) : decode_block(j, c, bx, by);
+}
+
 // Back to the start of a byte, past a restart marker if there is one, with the predictions reset.
 static int restart_marker(jpeg_t *j) {
     j->bitcnt = 0;
@@ -695,6 +817,7 @@ static int restart_marker(jpeg_t *j) {
     if (j->pos + 1 >= j->len) return -1;
     j->pos += 2;
     j->marker_hit = 0;
+    j->eobrun = 0;
     for (int i = 0; i < j->ncomp; i++) j->comp[i].dc_pred = 0;
     return 0;
 }
@@ -702,6 +825,7 @@ static int restart_marker(jpeg_t *j) {
 static int decode_scan(jpeg_t *j, jcomp_t **sc, int ns) {
     j->bitcnt = 0;
     j->marker_hit = 0;
+    j->eobrun = 0;
     for (int i = 0; i < ns; i++) sc[i]->dc_pred = 0;
     long count = 0;
     if (ns == 1) {
@@ -712,7 +836,7 @@ static int decode_scan(jpeg_t *j, jcomp_t **sc, int ns) {
         for (int by = 0; by < bh; by++)
             for (int bx = 0; bx < bw; bx++) {
                 if (j->restart && count && count % j->restart == 0 && restart_marker(j) != 0) return -1;
-                if (decode_block(j, c, bx, by) != 0) return -1;
+                if (scan_block(j, c, bx, by) != 0) return -1;
                 count++;
                 if (j->overrun > 64) return -1;
             }
@@ -725,7 +849,7 @@ static int decode_scan(jpeg_t *j, jcomp_t **sc, int ns) {
                 jcomp_t *c = sc[i];
                 for (int v = 0; v < c->v; v++)
                     for (int h = 0; h < c->h; h++)
-                        if (decode_block(j, c, mx * c->h + h, my * c->v + v) != 0) return -1;
+                        if (scan_block(j, c, mx * c->h + h, my * c->v + v) != 0) return -1;
             }
             count++;
             if (j->overrun > 64) return -1;
@@ -736,7 +860,12 @@ static int decode_scan(jpeg_t *j, jcomp_t **sc, int ns) {
 static int u16(const uint8_t *p) { return (p[0] << 8) | p[1]; }
 
 static void jpeg_free(jpeg_t *j) {
-    for (int i = 0; i < 3; i++) { free(j->comp[i].plane); j->comp[i].plane = NULL; }
+    for (int i = 0; i < 3; i++) {
+        free(j->comp[i].plane);
+        free(j->comp[i].coef);
+        j->comp[i].plane = NULL;
+        j->comp[i].coef = NULL;
+    }
 }
 
 static int jpeg_thumb(const uint8_t *p, size_t len, int max_w, int max_h, image_thumb_t *out, char *why, size_t cap) {
@@ -792,8 +921,9 @@ static int jpeg_thumb(const uint8_t *p, size_t len, int max_w, int max_h, image_
             j->restart = u16(d);
         } else if (m == 0xEE) {
             if (dl >= 12 && memcmp(d, "Adobe", 5) == 0) j->adobe_transform = d[11];
-        } else if (m == 0xC0 || m == 0xC1) {
+        } else if (m == 0xC0 || m == 0xC1 || m == 0xC2) {
             if (have_frame || dl < 6) { msg = "the JPEG is damaged"; goto done; }
+            j->progressive = m == 0xC2;
             if (d[0] != 8) { msg = "chat only shows 8-bit JPEGs - download it instead"; goto done; }
             j->h = u16(d + 1);
             j->w = u16(d + 3);
@@ -815,9 +945,12 @@ static int jpeg_thumb(const uint8_t *p, size_t len, int max_w, int max_h, image_
             }
             j->mcux = (j->w + 8 * j->hmax - 1) / (8 * j->hmax);
             j->mcuy = (j->h + 8 * j->vmax - 1) / (8 * j->vmax);
-            // Big images are read at an eighth of their size. A thumbnail doesn't need more, and memory use
-            // stays small whatever size the image claims.
-            j->dc_only = (int64_t)j->w * j->h > 4000000;
+            // Big images, and any where an eighth of the size is as big as the thumbnail, are read at an
+            // eighth of their size. A thumbnail doesn't need more, and memory use stays small whatever
+            // size the image claims.
+            int tw, th;
+            fit(j->w, j->h, max_w, max_h, &tw, &th);
+            j->dc_only = (int64_t)j->w * j->h > 4000000 || (tw <= (j->w + 7) / 8 && th <= (j->h + 7) / 8);
             int px = j->dc_only ? 1 : 8;
             for (int i = 0; i < j->ncomp; i++) {
                 jcomp_t *c = &j->comp[i];
@@ -826,16 +959,35 @@ static int jpeg_thumb(const uint8_t *p, size_t len, int max_w, int max_h, image_
                 c->stride = c->bw * px;
                 c->plane = calloc((size_t)c->bw * (size_t)px * (size_t)c->bh * (size_t)px, 1);
                 if (!c->plane) { msg = "out of memory"; goto done; }
+                if (j->progressive) {
+                    c->coef = calloc((size_t)c->bw * (size_t)c->bh * (j->dc_only ? 1u : 64u), sizeof *c->coef);
+                    if (!c->coef) { msg = "out of memory"; goto done; }
+                }
             }
             have_frame = 1;
-        } else if ((m >= 0xC2 && m <= 0xC3) || (m >= 0xC5 && m <= 0xC7) || (m >= 0xC9 && m <= 0xCB) || (m >= 0xCD && m <= 0xCF)) {
-            msg = m == 0xC2 ? "chat doesn't show progressive JPEGs - download it instead"
-                            : "chat only shows baseline JPEGs - download it instead";
+        } else if (m == 0xC3 || (m >= 0xC5 && m <= 0xC7) || (m >= 0xC9 && m <= 0xCB) || (m >= 0xCD && m <= 0xCF)) {
+            msg = "chat only shows baseline and progressive JPEGs - download it instead";
             goto done;
         } else if (m == 0xDA) {
             if (!have_frame || dl < 1) { msg = "the JPEG is damaged"; goto done; }
+            // Real ones have a dozen or so. A progressive scan can pass over thousands of blocks in a few
+            // bytes, so without a limit a small file could take minutes.
+            if (scans >= 500) { msg = "the JPEG has too many scans"; goto done; }
             int ns = d[0];
             if (ns < 1 || ns > j->ncomp || dl < 1 + 2 * (size_t)ns + 3) { msg = "the JPEG is damaged"; goto done; }
+            const uint8_t *tail = d + 1 + 2 * ns;
+            j->ss = tail[0];
+            j->se = tail[1];
+            j->ah = tail[2] >> 4;
+            j->al = tail[2] & 15;
+            if (!j->progressive) {
+                if (j->ss != 0 || j->se != 63 || tail[2] != 0) { msg = "chat only shows baseline JPEGs - download it instead"; goto done; }
+            } else if (j->se > 63 || j->ss > j->se || (j->ss == 0) != (j->se == 0) || (j->ss > 0 && ns != 1) || j->ah > 13 || j->al > 13) {
+                msg = "the JPEG is damaged";
+                goto done;
+            }
+            // A progressive scan only uses the table for what it carries, and a refining DC scan none.
+            int need_dc = j->ss == 0 && j->ah == 0, need_ac = !j->progressive || j->ss > 0;
             jcomp_t *sc[3];
             for (int i = 0; i < ns; i++) {
                 int id = d[1 + i * 2], tb = d[2 + i * 2];
@@ -845,19 +997,19 @@ static int jpeg_thumb(const uint8_t *p, size_t len, int max_w, int max_h, image_
                 for (int k = 0; k < i; k++) if (sc[k] == sc[i]) { msg = "the JPEG is damaged"; goto done; }
                 sc[i]->td = tb >> 4;
                 sc[i]->ta = tb & 15;
-                if (sc[i]->td > 3 || sc[i]->ta > 3 || !j->dc[sc[i]->td].set || !j->ac[sc[i]->ta].set || !j->qt_set[sc[i]->tq]) {
+                if (sc[i]->td > 3 || sc[i]->ta > 3 || (need_dc && !j->dc[sc[i]->td].set) || (need_ac && !j->ac[sc[i]->ta].set)
+                    || (!j->progressive && !j->qt_set[sc[i]->tq])) {
                     msg = "the JPEG's tables are missing"; goto done;
                 }
             }
-            const uint8_t *tail = d + 1 + 2 * ns;
-            if (tail[0] != 0 || tail[1] != 63 || tail[2] != 0) { msg = "chat only shows baseline JPEGs - download it instead"; goto done; }
             if (ns > 1) {
                 // An interleaved MCU is at most ten blocks.
                 int blocks = 0;
                 for (int i = 0; i < ns; i++) blocks += sc[i]->h * sc[i]->v;
                 if (blocks > 10) { msg = "the JPEG is damaged"; goto done; }
             }
-            if (decode_scan(j, sc, ns) != 0) { msg = "the JPEG's image data is damaged"; goto done; }
+            // At an eighth of the size only the DC is used, so AC scans are skipped like any other segment.
+            if (!(j->dc_only && j->ss > 0) && decode_scan(j, sc, ns) != 0) { msg = "the JPEG's image data is damaged"; goto done; }
             scans++;
             // Skip past the scan's data to the next marker.
             j->bitcnt = 0;
@@ -867,6 +1019,25 @@ static int jpeg_thumb(const uint8_t *p, size_t len, int max_w, int max_h, image_
         }
     }
     if (msg) goto done;
+
+    for (int i = 0; j->progressive && i < j->ncomp; i++) {
+        jcomp_t *c = &j->comp[i];
+        if (!j->qt_set[c->tq]) { msg = "the JPEG's tables are missing"; goto done; }
+        const uint16_t *q = j->qt[c->tq];
+        for (int by = 0; by < c->bh; by++)
+            for (int bx = 0; bx < c->bw; bx++) {
+                const int16_t *b = c->coef + ((size_t)by * (size_t)c->bw + (size_t)bx) * (j->dc_only ? 1 : 64);
+                if (j->dc_only) {
+                    c->plane[(size_t)by * (size_t)c->stride + (size_t)bx] = clamp8(b[0] * q[0] / 8 + 128);
+                    continue;
+                }
+                int in[64];
+                for (int k = 0; k < 64; k++) in[ZIGZAG[k]] = b[ZIGZAG[k]] * q[k];
+                idct8x8(in, c->plane + (size_t)by * 8 * (size_t)c->stride + (size_t)bx * 8, c->stride);
+            }
+        free(c->coef);
+        c->coef = NULL;
+    }
 
     {
         int scale = j->dc_only ? 8 : 1;
@@ -908,6 +1079,156 @@ done:
     return rc;
 }
 
+// ---- GIF: the first frame ----
+
+static int le16(const uint8_t *p) { return p[0] | (p[1] << 8); }
+
+// Past a run of sub-blocks and the empty one that ends it.
+static int gif_skip(const uint8_t *p, size_t len, size_t *pos) {
+    for (;;) {
+        if (*pos >= len) return -1;
+        size_t n = p[(*pos)++];
+        if (n == 0) return 0;
+        if (n > len - *pos) return -1;
+        *pos += n;
+    }
+}
+
+typedef struct {
+    const uint8_t *p;
+    size_t len, pos;
+    size_t left;            // bytes left in the sub-block being read
+    uint32_t bitbuf;
+    int bitcnt;
+} gif_bits_t;
+
+// The next code of n bits, read across sub-blocks, or -1 when they've run out.
+static int gif_code(gif_bits_t *g, int n) {
+    while (g->bitcnt < n) {
+        if (g->left == 0) {
+            if (g->pos >= g->len || g->p[g->pos] == 0) return -1;
+            g->left = g->p[g->pos++];
+        }
+        if (g->pos >= g->len) return -1;
+        g->bitbuf |= (uint32_t)g->p[g->pos++] << g->bitcnt;
+        g->bitcnt += 8;
+        g->left--;
+    }
+    int v = (int)(g->bitbuf & ((1u << n) - 1));
+    g->bitbuf >>= n;
+    g->bitcnt -= n;
+    return v;
+}
+
+typedef struct {
+    uint16_t prefix[4096];
+    uint8_t suffix[4096], first[4096];
+    uint8_t stack[4096];    // a code's string, last byte first
+} gif_dict_t;
+
+static const int GIF_Y0[4] = { 0, 4, 2, 1 }, GIF_DY[4] = { 8, 8, 4, 2 };
+
+static int gif_thumb(const uint8_t *p, size_t len, int max_w, int max_h, const uint8_t bg[3], image_thumb_t *out,
+                     char *why, size_t cap) {
+    if (len < 13) return fail(why, cap, "the GIF is cut short");
+    int sw = le16(p + 6), sh = le16(p + 8);
+    const uint8_t *pal = NULL;
+    int npal = 0;
+    size_t pos = 13;
+    if (p[10] & 0x80) {
+        npal = 2 << (p[10] & 7);
+        if ((size_t)npal * 3 > len - pos) return fail(why, cap, "the GIF is cut short");
+        pal = p + pos;
+        pos += (size_t)npal * 3;
+    }
+    // Extensions up to the first frame are skipped, but for which colour is see-through.
+    int trans = -1;
+    for (;;) {
+        if (pos >= len) return fail(why, cap, "the GIF is cut short");
+        int b = p[pos++];
+        if (b == 0x2C) break;
+        if (b == 0x3B) return fail(why, cap, "the GIF has no image data");
+        if (b != 0x21) return fail(why, cap, "the GIF is damaged");
+        if (pos >= len) return fail(why, cap, "the GIF is cut short");
+        if (p[pos++] == 0xF9 && len - pos >= 5 && p[pos] == 4) trans = p[pos + 1] & 1 ? p[pos + 4] : -1;
+        if (gif_skip(p, len, &pos) != 0) return fail(why, cap, "the GIF is cut short");
+    }
+    if (len - pos < 10) return fail(why, cap, "the GIF is cut short");
+    int fx = le16(p + pos), fy = le16(p + pos + 2), fw = le16(p + pos + 4), fh = le16(p + pos + 6), flags = p[pos + 8];
+    pos += 9;
+    if (flags & 0x80) {
+        npal = 2 << (flags & 7);
+        if ((size_t)npal * 3 > len - pos) return fail(why, cap, "the GIF is cut short");
+        pal = p + pos;
+        pos += (size_t)npal * 3;
+    }
+    if (!pal) return fail(why, cap, "the GIF has no colours");
+    if (fw == 0 || fh == 0) return fail(why, cap, "the GIF is damaged");
+    // A frame that goes past the screen it's on makes the picture bigger, as browsers do.
+    int cw = fx + fw > sw ? fx + fw : sw, ch = fy + fh > sh ? fy + fh : sh;
+    if (!sides_ok((uint32_t)cw, (uint32_t)ch)) return fail(why, cap, "the image is too big to show");
+    if (pos >= len) return fail(why, cap, "the GIF is cut short");
+    int minbits = p[pos++];
+    if (minbits < 2 || minbits > 8) return fail(why, cap, "the GIF's image data is damaged");
+
+    gif_dict_t *d = malloc(sizeof *d);
+    thumb_acc_t acc;
+    if (!d || acc_init(&acc, cw, ch, max_w, max_h) != 0) { free(d); return fail(why, cap, "out of memory"); }
+    // Around the frame the screen shows through, drawn like any other transparency.
+    acc_fill(&acc, 0, 0, cw, fy, bg);
+    acc_fill(&acc, 0, fy + fh, cw, ch, bg);
+    acc_fill(&acc, 0, fy, fx, fy + fh, bg);
+    acc_fill(&acc, fx + fw, fy, cw, fy + fh, bg);
+
+    gif_bits_t g = { p, len, pos, 0, 0, 0 };
+    int clear = 1 << minbits, eoi = clear + 1, next = clear + 2, size = minbits + 1, prev = -1;
+    for (int i = 0; i < clear; i++) { d->prefix[i] = 0; d->suffix[i] = d->first[i] = (uint8_t)i; }
+    int interlaced = (flags & 0x40) != 0, pass = 0, x = 0, y = 0, bad = 0;
+    uint64_t total = (uint64_t)fw * (uint64_t)fh, done = 0;
+    while (done < total) {
+        int code = gif_code(&g, size);
+        if (code < 0 || code == eoi) break;
+        if (code == clear) { size = minbits + 1; next = clear + 2; prev = -1; continue; }
+        if (code > next || (prev < 0 && code > eoi)) { bad = 1; break; }
+        // The string for code, last byte first. The code not in the table yet is prev's string and
+        // its own first byte.
+        int n = 0, c = code;
+        if (code == next) {
+            d->stack[n++] = d->first[prev];
+            c = prev;
+        }
+        while (c >= clear) { d->stack[n++] = d->suffix[c]; c = d->prefix[c]; }
+        d->stack[n++] = (uint8_t)c;
+        if (prev >= 0 && next < 4096) {
+            d->prefix[next] = (uint16_t)prev;
+            d->suffix[next] = (uint8_t)c;
+            d->first[next] = d->first[prev];
+            if (++next == 1 << size && size < 12) size++;
+        }
+        prev = code;
+        while (n > 0 && done < total) {
+            int idx = d->stack[--n];
+            if (idx == trans) acc_add(&acc, fx + x, fy + y, bg[0], bg[1], bg[2]);
+            // An index past the end of the palette means damage. It's shown as black and never read past.
+            else if (idx >= npal) acc_add(&acc, fx + x, fy + y, 0, 0, 0);
+            else acc_add(&acc, fx + x, fy + y, pal[idx * 3], pal[idx * 3 + 1], pal[idx * 3 + 2]);
+            done++;
+            if (++x < fw) continue;
+            x = 0;
+            if (!interlaced) { y++; continue; }
+            y += GIF_DY[pass];
+            while (y >= fh && pass < 3) y = GIF_Y0[++pass];
+        }
+    }
+    free(d);
+    if (bad || done < total) {
+        free(acc.acc);
+        return fail(why, cap, "the GIF's image data is damaged");
+    }
+    if (acc_finish(&acc, cw, ch, out) != 0) return fail(why, cap, "out of memory");
+    return 0;
+}
+
 int image_thumbnail(const uint8_t *data, size_t len, int max_w, int max_h, const uint8_t bg[3],
                     image_thumb_t *out, char *why, size_t why_cap) {
     memset(out, 0, sizeof *out);
@@ -915,7 +1236,8 @@ int image_thumbnail(const uint8_t *data, size_t len, int max_w, int max_h, const
     if (!bg) bg = dark;
     if (max_w < 1 || max_h < 1) return fail(why, why_cap, "no room to show it");
     const char *kind = image_kind(data, len);
-    if (!kind) return fail(why, why_cap, "not a PNG or JPEG image");
+    if (!kind) return fail(why, why_cap, "not a PNG, JPEG or GIF image");
     if (strcmp(kind, "png") == 0) return png_thumb(data, len, max_w, max_h, bg, out, why, why_cap);
+    if (strcmp(kind, "gif") == 0) return gif_thumb(data, len, max_w, max_h, bg, out, why, why_cap);
     return jpeg_thumb(data, len, max_w, max_h, out, why, why_cap);
 }

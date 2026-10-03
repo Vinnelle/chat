@@ -775,6 +775,7 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
         memcpy(slot->serve_fid, carry.serve_fid, FILE_ID_LEN);
         slot->serve_next = carry.serve_next;
         slot->serve_end = carry.serve_end;
+        slot->serve_at = carry.serve_at;
         // The same peer, as the rk it announced proves, so a compared code stays compared.
         slot->code_ok = carry.code_ok;
         slot->trust = carry.trust;
@@ -1848,6 +1849,7 @@ void chat_tick(chat_t *c, double now) {
     for (int i = 0; i < c->peer_hi; i++) {
         peer_t *p = &c->peers[i];
         if (!p->used) continue;
+        if (p->serving) p->serve_at = now;
         if (p->ok && !p->announced && now - p->ok_since >= JOIN_WAIT) announce_join(c, p);
         // Slots start once there's a chain to send on. Before a peer is connected, our first frame to it
         // is what connects it.
@@ -2327,7 +2329,14 @@ static void file_stop_download(file_entry_t *e, dl_state_t to) {
     if (e->part_path[0]) { platform_remove(e->part_path); e->part_path[0] = '\0'; }
     if (e->mem) { crypto_wipe(e->mem, e->size ? (size_t)e->size : 1); free(e->mem); e->mem = NULL; }
     if (e->win) { crypto_wipe(e->win, (size_t)FILE_WINDOW * FILE_CHUNK); free(e->win); e->win = NULL; }
+    e->done = e->win_off = e->win_got = 0;
+    e->win_n = 0;
     e->dl = to;
+}
+
+static void file_fail(file_entry_t *e, const char *why) {
+    file_stop_download(e, DL_FAILED);
+    copy_str(e->why, why, sizeof e->why);
 }
 
 static void file_cache_drop(file_entry_t *e) {
@@ -2471,23 +2480,35 @@ void chat_send_file(chat_t *c, const char *path) {
     uint8_t buf[65536], head[8] = { 0 };
     uint64_t total = 0;
     size_t n;
+    uint8_t *mem = NULL;
     while ((n = fread(buf, 1, sizeof buf, f)) > 0) {
         if (total < sizeof head) memcpy(head + total, buf, n < sizeof head - total ? n : sizeof head - total);
+        // A picture is kept as it's read, to show it here.
+        if (total == 0 && size <= FILE_VIEW_MAX && image_kind(buf, n)) mem = malloc(size ? (size_t)size : 1);
+        if (mem && n <= size - total) memcpy(mem + total, buf, n);
         sha256_update(&h, buf, n);
         total += n;
         if (total > size) break;
     }
-    if (ferror(f) || total != size) { fclose(f); ui_print(c, "* can't send %s: it changed while it was read", path); return; }
-    file_entry_t *e = file_new(c, NULL);
-    if (!e) { fclose(f); ui_print(c, "* can't offer more files at once - :cancel one you offered first"); return; }
+    crypto_wipe(buf, sizeof buf);
+    int image = image_kind(head, total < sizeof head ? (size_t)total : sizeof head) != NULL;
+    file_entry_t *e = NULL;
+    if (ferror(f) || total != size) ui_print(c, "* can't send %s: it changed while it was read", path);
+    else if (!(e = file_new(c, NULL))) ui_print(c, "* can't offer more files at once - :cancel one you offered first");
+    if (!e || !image) {
+        if (mem) { crypto_wipe(mem, size ? (size_t)size : 1); free(mem); mem = NULL; }
+        if (!e) { fclose(f); return; }
+    }
     e->mine = 1;
     memcpy(e->owner, c->my_id, ID_LEN);
     gen_random(e->fid, FILE_ID_LEN);
     e->size = size;
     sha256_final(&h, e->sha);
     file_clean_name(file_basename(path), e->name);
-    e->image = image_kind(head, total < sizeof head ? (size_t)total : sizeof head) != NULL;
+    e->image = image;
     e->fp = f;
+    current_hhmm(e->at);
+    if (mem) { e->mem = mem; file_cache_keep(c, e); }
     char desc[FILE_NAME_MAX + 48]; file_desc(e, desc, sizeof desc);
     char who[MAX_NICK + 8]; snprintf(who, sizeof who, "%s (you)", c->nick);
     char text[FILE_NAME_MAX + 96];
@@ -2504,6 +2525,7 @@ void chat_send_file(chat_t *c, const char *path) {
     if (held) ui_print(c, "* not offered to %d peer%s whose verify code you haven't compared", held, held == 1 ? "" : "s");
     else if (!sent) ui_print(c, "* nobody else is here yet - it's offered to whoever joins");
     if (e->image) ui_print(c, "* it's offered as a picture: others see it hidden until they choose :show %d", e->num);
+    if (e->cache && c->file_view) c->file_view(c->ui, e->num, e->name, e->cache, (size_t)e->size);
 }
 
 // Asks p for the first run of the window that hasn't arrived (the whole window at the start).
@@ -2615,6 +2637,67 @@ static int file_check_saved(const file_entry_t *e, uint8_t **mem) {
     return 0;
 }
 
+// One of ours as it is now, if it's still what was offered.
+static int file_read_own(const file_entry_t *e, uint8_t **mem) {
+    *mem = NULL;
+    if (!e->fp || e->size > FILE_VIEW_MAX || fseek(e->fp, 0, SEEK_SET) != 0) return -1;
+    uint8_t *m = malloc(e->size ? (size_t)e->size : 1);
+    if (!m) return -1;
+    if (file_copy_checked(e, e->fp, NULL, m) != 1) { crypto_wipe(m, e->size ? (size_t)e->size : 1); free(m); return -1; }
+    *mem = m;
+    return 0;
+}
+
+const uint8_t *chat_file_bytes(chat_t *c, int num) {
+    file_entry_t *e = file_by_num(c, num);
+    if (!e || !e->image || e->size > FILE_VIEW_MAX) return NULL;
+    if (!e->cache) {
+        uint8_t *m = NULL;
+        int coming = e->dl == DL_ACTIVE || e->dl == DL_QUEUED;
+        if (e->mine ? file_read_own(e, &m) == 0 : !coming && file_check_saved(e, &m) == 0) {
+            e->mem = m;
+            file_cache_keep(c, e);
+        }
+    }
+    return e->cache;
+}
+
+int chat_file_sending(const chat_t *c, const file_entry_t *e, double now, char name[CHAT_NAME_LEN], int *permille) {
+    int n = 0;
+    uint64_t best = 0;
+    name[0] = '\0';
+    *permille = 0;
+    for (int i = 0; e->mine && e->fp && i < c->peer_hi; i++) {
+        const peer_t *p = &c->peers[i];
+        if (!p->used || !p->ok || memcmp(p->serve_fid, e->fid, FILE_ID_LEN) != 0 || p->serve_next >= e->size) continue;
+        if (!p->serving && now - p->serve_at > FILE_SENDING_QUIET) continue;
+        if (n++ == 0 || p->serve_next > best) { best = p->serve_next; chat_peer_name(c, p, name); }
+    }
+    if (n) *permille = e->size ? (int)(best * 1000 / e->size) : 1000;
+    return n;
+}
+
+void chat_file_sent_to(const file_entry_t *e, char *out, size_t cap) {
+    if (cap == 0) return;
+    if (e->n_sent <= 0) out[0] = '\0';
+    else if (e->n_sent == 1) snprintf(out, cap, "%s", e->sent_name[0]);
+    else if (e->n_sent == 2) snprintf(out, cap, "%s and %s", e->sent_name[0], e->sent_name[1]);
+    else snprintf(out, cap, "%s and %d others", e->sent_name[0], e->n_sent - 1);
+}
+
+// p has been sent the last of one of ours. Peers past FILE_SENT_MAX are only counted, so one of them
+// fetching it again counts twice.
+static void file_sent(chat_t *c, file_entry_t *e, const peer_t *p) {
+    for (int i = 0; i < e->n_sent && i < FILE_SENT_MAX; i++) if (memcmp(e->sent_id[i], p->id, ID_LEN) == 0) return;
+    char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
+    if (e->n_sent < FILE_SENT_MAX) {
+        memcpy(e->sent_id[e->n_sent], p->id, ID_LEN);
+        copy_str(e->sent_name[e->n_sent], name, sizeof e->sent_name[0]);
+    }
+    e->n_sent++;
+    ui_print(c, "* sent all of file %d (%s) to %s", e->num, e->name, name);
+}
+
 // Saves file e in its folder without fetching it: from mem (its bytes, already checked), or as a
 // copy of where it was saved before, checked as it's read. Returns 0 once saved, 1 if there's no
 // copy that still matches, -1 if it couldn't be written (after saying why).
@@ -2650,7 +2733,7 @@ static void file_finish(chat_t *c, file_entry_t *e) {
     sha256_final(&e->hash, got);
     char desc[FILE_NAME_MAX + 48]; file_desc(e, desc, sizeof desc);
     if (crypto_equal(got, e->sha, 32) != 0) {
-        file_stop_download(e, DL_FAILED);
+        file_fail(e, "didn't match the offer, so it was thrown away");
         ui_print(c, "* file %d (%s) didn't match what was offered - it was thrown away", e->num, desc);
         return;
     }
@@ -2668,7 +2751,8 @@ static void file_finish(chat_t *c, file_entry_t *e) {
     if (e->out) { if (fclose(e->out) != 0) ok = 0; e->out = NULL; }
     if (!ok || file_save_as(e) != 0) {
         char where[600]; file_dir_name(e, where, sizeof where);
-        file_stop_download(e, DL_FAILED);
+        char why[sizeof e->why]; snprintf(why, sizeof why, "couldn't be saved in %.40s", where);
+        file_fail(e, why);
         ui_print(c, "* file %d (%s) downloaded, but couldn't be saved in %s", e->num, desc, where);
         return;
     }
@@ -2698,12 +2782,14 @@ static int file_start(chat_t *c, file_entry_t *e, peer_t *p) {
     e->win_n = e->req_end = 0;
     e->retries = 0;
     e->gone_since = 0.0;
+    e->why[0] = '\0';
     e->win = malloc((size_t)FILE_WINDOW * FILE_CHUNK);
     if (e->view) e->mem = malloc(e->size ? (size_t)e->size : 1);
-    if (!e->win || (e->view && !e->mem)) { file_stop_download(e, DL_FAILED); ui_print(c, "* out of memory"); return -1; }
+    if (!e->win || (e->view && !e->mem)) { file_fail(e, "out of memory"); ui_print(c, "* out of memory"); return -1; }
     if (!e->view && !(e->out = file_open_part(e))) {
         char where[600]; file_dir_name(e, where, sizeof where);
-        file_stop_download(e, DL_FAILED);
+        char why[sizeof e->why]; snprintf(why, sizeof why, "couldn't write a file in %.36s", where);
+        file_fail(e, why);
         ui_print(c, "* can't write a file in %s", where);
         return -1;
     }
@@ -2728,12 +2814,19 @@ static int file_start(chat_t *c, file_entry_t *e, peer_t *p) {
 int chat_file_fetch(chat_t *c, int num, int view, int anyway, const char *dir) {
     file_entry_t *e = file_by_num(c, num);
     if (!e) { ui_print(c, "* there's no file %d - :files lists them", num); return -1; }
-    if (e->mine) { ui_print(c, "* file %d is yours", num); return -1; }
+    if (e->mine && (!view || !e->image)) { ui_print(c, "* file %d is yours", num); return -1; }
     if (view && !e->image) { ui_print(c, "* file %d isn't offered as a picture - :download %d saves it instead", num, num); return -1; }
     char sz[32]; file_format_size(e->size, sz, sizeof sz);
     if (view && e->size > FILE_VIEW_MAX) {
-        ui_print(c, "* file %d is too big to show (%s) - :download %d saves it instead", num, sz, num);
+        if (e->mine) ui_print(c, "* file %d is too big to show (%s)", num, sz);
+        else ui_print(c, "* file %d is too big to show (%s) - :download %d saves it instead", num, sz, num);
         return -1;
+    }
+    if (e->mine) {
+        const uint8_t *b = chat_file_bytes(c, num);
+        if (!b) { ui_print(c, "* can't show file %d: %s", num, e->fp ? "it changed after you offered it" : "it isn't offered any more"); return -1; }
+        if (c->file_view) c->file_view(c->ui, e->num, e->name, b, (size_t)e->size);
+        return 0;
     }
     int coming = e->dl == DL_ACTIVE || e->dl == DL_QUEUED;
     if (view) {
@@ -2741,6 +2834,7 @@ int chat_file_fetch(chat_t *c, int num, int view, int anyway, const char *dir) {
         uint8_t *m = NULL;
         if (!e->cache && !coming && file_check_saved(e, &m) == 0) { e->mem = m; file_cache_keep(c, e); }
         if (e->cache) {
+            if (!coming) { e->dl = DL_DONE; e->why[0] = '\0'; }
             if (c->file_view) c->file_view(c->ui, e->num, e->name, e->cache, (size_t)e->size);
             return 0;
         }
@@ -2773,7 +2867,12 @@ int chat_file_fetch(chat_t *c, int num, int view, int anyway, const char *dir) {
         // Shown before, or saved somewhere else: copied from there instead of fetched again.
         if (e->cache || e->saved[0]) {
             int r = file_save_local(c, e, e->cache);
-            if (r == 0) { ui_print(c, "* saved file %d to %s, from the copy already here", num, e->saved); return 0; }
+            if (r == 0) {
+                e->dl = DL_DONE;
+                e->why[0] = '\0';
+                ui_print(c, "* saved file %d to %s, from the copy already here", num, e->saved);
+                return 0;
+            }
             if (r < 0) return -1;
         }
     }
@@ -2870,7 +2969,14 @@ static cmd_result_t cmd_files(void *ctx, const char *arg) {
         peer_t *p = e->mine ? NULL : find_peer_by_id(c, e->owner);
         if (!e->mine) { if (p) chat_peer_name(c, p, who); else copy_str(who, "someone who left", sizeof who); }
         char state[1024] = "";
-        if (e->mine) copy_str(state, e->fp ? "offered" : "no longer offered", sizeof state);
+        if (e->mine) {
+            char name[CHAT_NAME_LEN], to[CHAT_NAME_LEN * 2 + 16];
+            int pm, fetching = chat_file_sending(c, e, now_seconds(), name, &pm);
+            chat_file_sent_to(e, to, sizeof to);
+            if (fetching) snprintf(state, sizeof state, "sending to %s%s, %d%%", name, fetching > 1 ? " and others" : "", pm / 10);
+            else if (to[0]) snprintf(state, sizeof state, "sent to %s%s", to, e->fp ? "" : ", no longer offered");
+            else copy_str(state, e->fp ? "offered" : "no longer offered", sizeof state);
+        }
         else if (e->dl == DL_ACTIVE) {
             uint64_t got = chat_file_got(e);
             double s = chat_file_eta(c, e, now_seconds());
@@ -2889,7 +2995,9 @@ static cmd_result_t cmd_files(void *ctx, const char *arg) {
         else if (e->saved[0]) snprintf(state, sizeof state, "saved to %s", e->saved);
         else if (e->cache) snprintf(state, sizeof state, "shown - :download %d saves it without fetching it again", e->num);
         else if (e->dl == DL_DONE) copy_str(state, "shown", sizeof state);
-        else if (e->dl == DL_FAILED) snprintf(state, sizeof state, "failed - :%s %d tries again", e->view ? "show" : "download", e->num);
+        else if (e->dl == DL_FAILED)
+            snprintf(state, sizeof state, "failed%s%s%s - :%s %d tries again", e->why[0] ? " (" : "", e->why,
+                     e->why[0] ? ")" : "", e->view ? "show" : "download", e->num);
         else copy_str(state, e->image ? ":show or :download" : ":download", sizeof state);
         ui_print(c, "* file %d from %s: %s - %s", e->num, who, desc, state);
     }
@@ -2917,6 +3025,7 @@ static int file_next_chunk(chat_t *c, peer_t *p, char *text, size_t *pos, size_t
     crypto_wipe(buf, sizeof buf);
     p->serve_next += want;
     if (p->serve_next >= p->serve_end) p->serving = 0;
+    if (p->serve_next >= e->size) file_sent(c, e, p);
     return 1;
 }
 
@@ -2951,6 +3060,7 @@ static void file_on_record(chat_t *c, peer_t *p, char **f, int n, double now) {
         memcpy(e->sha, sha, 32);
         e->image = strcmp(f[5], "image") == 0;
         file_clean_name(f[6], e->name);
+        current_hhmm(e->at);
         char desc[FILE_NAME_MAX + 48]; file_desc(e, desc, sizeof desc);
         uint64_t cap = c->file_cap ? c->file_cap : FILE_CAP_DEFAULT;
         char lim[32]; file_format_size(cap, lim, sizeof lim);
@@ -2988,6 +3098,7 @@ static void file_on_record(chat_t *c, peer_t *p, char **f, int n, double now) {
         memcpy(p->serve_fid, fid, FILE_ID_LEN);
         p->serve_next = off;
         p->serve_end = off + count * FILE_CHUNK < e->size ? off + count * FILE_CHUNK : e->size;
+        p->serve_at = now;
     } else if (n == 4 && strcmp(f[0], "fd") == 0) {
         uint64_t off;
         if (strlen(f[1]) != FILE_ID_LEN * 2 || hex_decode(f[1], FILE_ID_LEN * 2, fid) != 0 || parse_u64(f[2], &off) != 0) return;
@@ -3017,7 +3128,7 @@ static void file_on_record(chat_t *c, peer_t *p, char **f, int n, double now) {
         if (e->view) memcpy(e->mem + e->done, e->win, bytes);
         else if (fwrite(e->win, 1, bytes, e->out) != bytes) {
             char desc[FILE_NAME_MAX + 48]; file_desc(e, desc, sizeof desc);
-            file_stop_download(e, DL_FAILED);
+            file_fail(e, "couldn't be written - is the disk full?");
             ui_print(c, "* couldn't write file %d (%s) - is the disk full?", e->num, desc);
             return;
         }
@@ -3031,7 +3142,7 @@ static void file_on_record(chat_t *c, peer_t *p, char **f, int n, double now) {
         if (strlen(f[1]) != FILE_ID_LEN * 2 || hex_decode(f[1], FILE_ID_LEN * 2, fid) != 0) return;
         file_entry_t *e = file_by_fid(c, p->id, fid);
         if (!e || e->dl != DL_ACTIVE) return;
-        file_stop_download(e, DL_FAILED);
+        file_fail(e, "isn't offered any more");
         char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
         ui_print(c, "* %s no longer offers file %d", name, e->num);
     }
@@ -3060,7 +3171,7 @@ static void files_tick(chat_t *c, double now) {
         if (!p || !peer_trusted(c, p)) {
             if (p || e->gone_since == 0.0) e->gone_since = now;
             if (p || now - e->gone_since < FILE_OWNER_GRACE) continue;
-            file_stop_download(e, DL_FAILED);
+            file_fail(e, "its sender left before it finished");
             ui_print(c, "* whoever offered file %d left before it finished - fetch it again once they're back", e->num);
             continue;
         }
@@ -3078,7 +3189,7 @@ static void files_tick(chat_t *c, double now) {
         if (rehandshaking_with(c, p)) { e->retry_at = now + 1.0; continue; }
         if (++e->retries > FILE_RETRIES) {
             char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
-            file_stop_download(e, DL_FAILED);
+            file_fail(e, "stopped coming");
             ui_print(c, "* file %d stopped downloading from %s - try again later", e->num, name);
             continue;
         }
