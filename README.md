@@ -244,13 +244,24 @@ you ask. `:install` saves them, and after that `:save` saves what you change, or
 
 `:send PATH` offers a file to everyone in the session whose verify code you've compared (and
 anyone who joins or gets compared later). `:send` on its own opens a file browser to pick one.
-Nothing is sent until someone fetches it. `:download N` saves it in `~/Downloads`, and for a
-picture (PNG or JPEG) `:show N` draws it in the chat under the line that offered it. Pictures stay
-hidden until you ask, and `:hide N` hides one again. While a file is coming in, a row under that
-line shows the progress and roughly how long is left. `:files` lists what's been offered, how far
-each fetch has got, and where each file was saved. `:cancel N` stops a fetch, or stops offering
-one of your files.
+Nothing is sent until someone fetches it. A picture you send shows in your own chat straight
+away. `:download N` saves a file in `~/Downloads`, and for a picture (PNG, JPEG or GIF) `:show N`
+draws it in the chat under the line that offered it. Pictures from others stay hidden until you ask, and
+`:hide N` hides one again. `:cancel N` stops a fetch, or stops offering one of your files.
 
+A row under the line that offered a file says what's happening to it: how far a fetch has got and
+roughly how long is left, where it was saved, or why it failed. Under one of yours, it says who's
+fetching it and who it has gone to in full. The reply to `:download`, `:show`, `:cancel` and
+`:send` goes on the bottom bar as well as the console, so you see it with the console hidden.
+
+- **The files page.** `Ctrl+F` (`f` in NORMAL, or `:files`) lists the files offered in the
+  session, theirs then yours, newest first, with what each one is doing, and the selected one's
+  details beside the list. `Enter` shows a picture on a page of its own, as big as the terminal
+  allows (fetching it first if it isn't here), or saves a file in Downloads. `d` saves in
+  Downloads, `s` in a folder you pick, `v` shows or hides a picture in the chat, `y` copies where
+  a file was saved and `n` sends one. `x` stops a fetch or stops offering one of yours, after a box
+  asks, since what's come so far is thrown away. On a picture's page, `j` / `k` go to the next and
+  previous picture, and `Esc` goes back to the list.
 - **Downloading.** `:download` without a number takes the newest file that isn't saved yet.
   `:download N FOLDER` saves in another folder, and `:saveto N` picks the folder in a file
   browser (`s` saves in the folder shown). One file comes from each sender at a time: asking for
@@ -287,13 +298,14 @@ one of your files.
 - **Names.** A name from a peer can't be a path, a hidden file, a Windows device (`CON`, `NUL`)
   or anything the terminal acts on. Folders, control and right-to-left characters, and
   `/ \ : * ? " < > |` are stripped. Nothing chat saves is executable.
-- **Pictures.** Decoded by chat's own PNG and baseline JPEG readers. They check every length,
+- **Pictures.** Decoded by chat's own PNG, JPEG and GIF readers. They check every length,
   table and dimension, inflate a PNG to exactly what its header says and no more, and never
-  hold the full size image: each pixel goes straight into the thumbnail. Progressive JPEGs,
-  GIFs and everything else aren't shown, download them instead.
+  hold the full size image: each pixel goes straight into the thumbnail. A JPEG can be baseline
+  or progressive, and an animated GIF shows its first frame, still. WebP, HEIC, lossless and
+  arithmetic coded JPEGs and everything else aren't shown, download them instead.
 - **Size.** **File size limit** (8 MB by default) is the biggest file chat fetches without
   asking. An offer over it says so, and `:download N anyway` (or `:show N anyway`) fetches it
-  regardless. The max is 1 GB.
+  regardless. On the files page a box asks first, with roughly how long it takes. The max is 1 GB.
 
 ## Download
 
@@ -500,12 +512,13 @@ joining, that nothing goes over UDP unmasked, that every datagram is one cell se
 matter how many messages are sent, and that the DHT queries as a read only node and stops using
 the bootstrap servers once it knows enough nodes. It also tests the parsers for what relays,
 routers and Tor send, the hourly DHT keys, that key files are only read from regular files, the
-PNG and JPEG readers (and what they reject), file names from peers, and files end to end:
-offered, saved next to a file with the same name, over the size limit, shown from memory,
-changed after being offered (thrown away), sent fast, cancelled and withdrawn. The fuzz targets
-(libFuzzer, so clang) cover bencode and DHT replies (IPv4 and IPv6), relay JSON and UPnP gateway
-replies, PGP and AGE key import, PNG and JPEG images, text cleaning, file names, the input line,
-pictures drawn in the chat, and everything a session receives, including messages from a room
+PNG, JPEG and GIF readers (and what they reject), file names from peers, and files end to end:
+offered, saved next to a file with the same name, over the size limit, shown from memory, shown
+to whoever sent it, changed after being offered (thrown away, saying why), sent fast, followed
+by its sender, cancelled and withdrawn. The fuzz targets (libFuzzer, so clang) cover bencode and
+DHT replies (IPv4 and IPv6), relay JSON and UPnP gateway replies, PGP and AGE key import, PNG,
+JPEG and GIF images, text cleaning, file names, the input line, pictures drawn in the chat and on a
+page of their own, and everything a session receives, including messages from a room
 member or a connected peer, and datagrams that unmask to anything at all. GitHub Actions runs
 the engine test, and each fuzz target for a minute, on every push and pull request.
 
@@ -581,6 +594,7 @@ saved your settings, it starts on your sessions, and `Ctrl+S` opens the page.
 | `Tab` / `Shift+Tab` | next / previous session (`j` / `k` in NORMAL too) |
 | `PgUp` / `PgDn` | scroll the chat back / forward (`Ctrl+U` / `Ctrl+D` in NORMAL, `G` the newest) |
 | `Ctrl+B` / `Ctrl+O` / `Ctrl+T` | toggle sidebar / console / chat pane (`s` / `c` / `C` in NORMAL) |
+| `Ctrl+F` | the files page: what's been offered here and yours, to show, save or stop (`f` in NORMAL) |
 | `Ctrl+S` | settings |
 | `F1` | list all commands and keybinds (`?` in NORMAL, and `:help`, too) |
 | `Ctrl+C` | quit, after a `y`/`n` box saying what's open and what isn't saved (every session leaves cleanly first) |
@@ -590,8 +604,9 @@ The bottom row is the same on every screen: a chip for where you are (`INSERT`, 
 (until your next key), and what the keys do there.
 
 The input line is a small vim. It starts in NORMAL (`h`/`l` move, `0`/`$` go to the ends, `x`
-deletes, `j`/`k` switch session, `s`/`c`/`C` toggle the sidebar/console/chat). `i`/`a`/`I`/`A`
-go to INSERT, where Enter sends, `Ctrl+W` deletes the word before the cursor and `Ctrl+U`
+deletes, `j`/`k` switch session, `s`/`c`/`C` toggle the sidebar/console/chat, `f` opens the
+files). `i`/`a`/`I`/`A` go to INSERT, where Enter sends, `Ctrl+W` deletes the word before the
+cursor and `Ctrl+U`
 everything before it, and `Esc` goes back to NORMAL. The input box border is the mode's colour,
 and the box grows a row at a time as what you type wraps, up to six rows (fewer on a short
 terminal). The count under it goes red once a message is over 250 bytes, and `Enter` then
@@ -631,10 +646,10 @@ puts it on the command line.
 | `:uninstall [NAME]` | delete what `:install` saved (the save in use, or the one called NAME) |
 | `:changelog` | show changelog (`:news`); built in, so it works offline |
 | `:send [PATH]` | offer a file, or pick one in a file browser without PATH (see [Files and pictures](#files-and-pictures)) |
-| `:files` | the files offered here, and how each fetch is going |
+| `:files` | the files page (`Ctrl+F`): the files offered here and yours, to show, save or stop; with `--simple`, a list |
 | `:download [N] [anyway] [FOLDER]` | save file N in `~/Downloads` or FOLDER (`:dl`); the newest file without N; `anyway` if it's over your size limit |
 | `:saveto N [anyway]` | pick a folder in a file browser and save file N there |
-| `:show N [anyway]`, `:hide N` | draw picture N in the chat where it was offered, or hide it |
+| `:show N [anyway]`, `:hide N` | draw picture N in the chat where it was offered (yours too), or hide it |
 | `:cancel N` | stop fetching file N or take it off the queue, or stop offering one of yours |
 
 ### Settings

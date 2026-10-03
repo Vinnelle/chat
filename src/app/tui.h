@@ -41,11 +41,14 @@ typedef struct {
     const uint8_t *rgb;
 } tui_image_t;
 
-// A file being downloaded, on a row under the line offering it: a progress bar (in thousandths),
-// and text after it ("34% · 50 KB of 146 KB · about 6 min left").
+// What a file is doing, on a row under the line offering it: a progress bar (in thousandths) and
+// text after it ("34% · 50 KB of 146 KB · about 6 min left"), or by kind, the text alone after a
+// tick (done) or a cross (failed), or faint (a note).
+typedef enum { TUI_PROGRESS_BAR = 0, TUI_PROGRESS_DONE, TUI_PROGRESS_FAILED, TUI_PROGRESS_NOTE } tui_progress_kind_t;
 typedef struct {
     int permille;
-    char text[112];
+    char text[160];
+    tui_progress_kind_t kind;
 } tui_progress_t;
 
 #define TUI_ROW_LABEL_MAX 40
@@ -105,6 +108,7 @@ typedef enum {
     TUI_KEY_TOGGLE_CHAT,
     TUI_KEY_SETTINGS,
     TUI_KEY_HELP,
+    TUI_KEY_FILES,
     TUI_KEY_CTRL_C,
     TUI_KEY_ESCAPE,
     // Not keys: the terminal's reply to a background colour query (r, g, b in ch[0..2]), and its
@@ -228,8 +232,8 @@ typedef struct {
     int new_lines;
     int elsewhere;
     int elsewhere_mention;
-    // The progress of a file being fetched, for the row under the line offering it (also given
-    // image_ctx), or NULL while it isn't being fetched.
+    // What a file is doing, for the row under the line offering it (also given image_ctx), or NULL
+    // for no row.
     const tui_progress_t *(*progress)(const void *ctx, int file);
     const char *build_label;   // a test build's, right of the console's title
 } tui_view_t;
@@ -304,8 +308,10 @@ int tui_render_bar(int rows, int cols, const tui_view_t *view, const tui_bar_t *
 void tui_invalidate(void);
 
 // How a row's value is drawn: as it is, as a switch, as a choice h/l steps through, as a way into
-// another page, or dim.
-typedef enum { TUI_V_TEXT = 0, TUI_V_ON, TUI_V_OFF, TUI_V_CHOICE, TUI_V_LINK, TUI_V_MUTED } tui_value_kind_t;
+// another page, dim, after a progress bar, or after a red cross.
+typedef enum {
+    TUI_V_TEXT = 0, TUI_V_ON, TUI_V_OFF, TUI_V_CHOICE, TUI_V_LINK, TUI_V_MUTED, TUI_V_PROGRESS, TUI_V_BAD
+} tui_value_kind_t;
 
 typedef struct {
     const char *section;   // starts a new section with this heading, or NULL
@@ -314,6 +320,7 @@ typedef struct {
     tui_value_kind_t kind;
     const uint8_t *swatch; // a sample of this colour before the value, or NULL
     const char *prefix;    // drawn faint before the label (a tree's lines), or NULL
+    int permille;          // TUI_V_PROGRESS's bar, in thousandths
 } tui_row_t;
 
 // A list page (settings, the pages under it, and help): rows grouped by section with one selected,
@@ -349,6 +356,8 @@ void tui_render_page(int rows, int cols, const tui_page_t *page, const tui_bar_t
 // before any side column, and the width that column gets, or 0 if it doesn't fit.
 int tui_page_row_cols(int cols, int with_nav);
 int tui_side_width(int cols, int with_nav);
+// The columns each of a page's nav entries gets for its text, or 0 when there's no room for the nav.
+int tui_nav_text_cols(int cols);
 
 // A page of Markdown to read (the changelog): paragraphs wrapped to the page's width, with
 // **bold**, *italic*, `code` and [links](url) inside them, headings, bullets and numbered items
@@ -367,5 +376,22 @@ struct tui_para {
 };
 int tui_render_text(int rows, int cols, const char *title, const char *clock, const tui_para_t *paras, int n,
                     int *scroll, const tui_bar_t *bar, int color_enabled);
+
+// A picture on a page of its own, centred, with caption under it. tui_picture_room gives the pixels
+// it can take at this size (two to a row). Without a picture, note takes its place (lines split by
+// '\n', the first bold), with progress under it.
+#define TUI_PICTURE_MAX_W 200
+#define TUI_PICTURE_MAX_H 120
+typedef struct {
+    const char *title;
+    const char *clock;
+    const tui_image_t *image;
+    const char *note;
+    const tui_progress_t *progress;
+    const char *caption;
+} tui_picture_t;
+
+void tui_picture_room(int rows, int cols, int *w, int *h);
+void tui_render_picture(int rows, int cols, const tui_picture_t *pic, const tui_bar_t *bar, int color_enabled);
 
 #endif

@@ -61,6 +61,7 @@ static const char *USAGE =
     "  Ctrl+B     hide/show the sidebar   Ctrl+O   hide/show the console\n"
     "  Ctrl+T     hide/show the chat (hide two of the three and the last one fills the screen)\n"
     "  Ctrl+S     settings: routing, identity, files, notifications (also :set)\n"
+    "  Ctrl+F     files offered here and yours: show, save or stop them (f in NORMAL, :files)\n"
     "  F1         list all commands and keybinds (also ? in NORMAL, and :help)\n"
     "  Ctrl+C     quit chat, after asking (every open session leaves cleanly first)\n"
     "\n"
@@ -71,7 +72,8 @@ static const char *USAGE =
     "until the next key.\n"
     "\n"
     "The input line works like a small vim. It starts in NORMAL: h/l move, 0/$ go to the\n"
-    "ends, x deletes, j/k switch session, s/c/C hide/show the sidebar/console/chat.\n"
+    "ends, x deletes, j/k switch session, s/c/C hide/show the sidebar/console/chat, f opens\n"
+    "the files.\n"
     "  i/a/I/A  NORMAL -> INSERT, where Enter sends\n"
     "  /        on an empty line: the command line, with a menu of matching commands. Once\n"
     "           the text can't be a command (/shrug, /usr/bin) it's sent as normal text\n"
@@ -88,6 +90,7 @@ static const char *USAGE =
     "you type is sent:\n"
     "  :new :join :quit (:q) :quitall (:qa) :copyid :update :peers :verify NICK [ok|no] :net\n"
     "  :verified [forget NICK] :port [N] :set [NAME [VALUE]] :install :uninstall :help\n"
+    "  :send [PATH] :files :download [N] :show N :hide N :cancel N\n"
     "  (:help opens a page of keys and commands)\n"
     "\n"
     "Anyone with a session's id and password can sit between two other members. When a peer\n"
@@ -194,12 +197,14 @@ static const char *USAGE =
 #define MAX_PEER_ARGS 16
 #define PEER_ARG_LEN 256
 
-// A picture fetched to show: its thumbnail, drawn under the line that offered it while shown.
+// A picture fetched to show: its thumbnail, drawn under the line that offered it while shown, or
+// why it can't be shown.
 #define MAX_PICS 16
 typedef struct {
     int used, num, shown;
     image_thumb_t th;
     tui_image_t ti;
+    char why[96];
 } pic_t;
 
 typedef struct {
@@ -227,6 +232,9 @@ typedef enum {
     MODE_SIGN_BROWSE,
     MODE_SEND_BROWSE,
     MODE_SAVE_BROWSE,
+    MODE_FILES,
+    MODE_FILE_VIEW,
+    MODE_FILE_ASK,
     MODE_SIGN_PASTE,
     MODE_SIGN_PASSWORD,
     MODE_SIGN_PATH,
@@ -334,6 +342,11 @@ typedef struct {
     char send_dir[900];   // the folder :send's browser last offered a file from
     char save_dir[900];   // the folder :saveto's browser last saved a file in
     int save_num, save_anyway;   // what :saveto's browser saves
+    app_mode_t browse_back;      // where :send's and :saveto's browsers go back to
+    // The files page's selected file, by its number. A y/n box over it or the picture asks file_ask
+    // about file file_ask_num, then goes back to file_back.
+    int file_num, file_ask, file_ask_num;
+    app_mode_t file_back;
     char paste_buf[16384];
     size_t paste_len;
     char paste_status[80];
@@ -411,9 +424,17 @@ static void push_log(const char *fmt, ...) {
     g_app.dirty = 1;
 }
 
+// While set, the first line a session prints to its console goes on the bottom bar too: the reply to
+// a file action, which would otherwise only reach a console that may be hidden, or not on screen.
+static int g_echo;
+
 static void session_print(void *ui, const char *hhmm, const char *text, const uint8_t *rgb,
                           unsigned flags, int color_len, int file) {
     session_slot_t *s = (session_slot_t *)ui;
+    if (g_echo == 1 && !(flags & LINE_CHAT) && s == g_app.selected) {
+        copy_str(g_app.message, strncmp(text, "* ", 2) == 0 ? text + 2 : text, sizeof g_app.message);
+        g_echo = 2;
+    }
     // A warning goes in the chat too, since the console can be hidden.
     if (flags & LINE_WARN) {
         tui_scrollback_push(&s->sb, hhmm, text, NULL, 0, 0);
@@ -457,34 +478,101 @@ static void pics_free(session_slot_t *s) {
 static const tui_image_t *pic_for(const void *ctx, int file) {
     const session_slot_t *s = ctx;
     for (int i = 0; i < MAX_PICS; i++)
-        if (s->pics[i].used && s->pics[i].num == file && s->pics[i].shown) return &s->pics[i].ti;
+        if (s->pics[i].used && s->pics[i].num == file && s->pics[i].shown && s->pics[i].th.rgb) return &s->pics[i].ti;
     return NULL;
 }
 
-// Someone else's file being fetched, for the row under the line that offered it. Through the
-// relays it can take a long time, and nothing else shows its progress.
+static void tilde_path(const char *path, char *out, size_t cap);
+
+static const char *pic_why(const session_slot_t *s, int num) {
+    for (int i = 0; i < MAX_PICS; i++)
+        if (s->pics[i].used && s->pics[i].num == num && !s->pics[i].th.rgb && s->pics[i].why[0]) return s->pics[i].why;
+    return NULL;
+}
+
+// The progress of a fetch, as its row in the chat and the picture page say it.
+static int fetch_progress(const chat_t *e, const file_entry_t *f, char *text, size_t cap) {
+    if (f->dl == DL_QUEUED) {
+        int after = chat_file_queued_after(e, f);
+        if (after) snprintf(text, cap, "queued \xc2\xb7 starts after file %d", after);
+        else snprintf(text, cap, "queued \xc2\xb7 waiting for its sender");
+        return 0;
+    }
+    uint64_t got = chat_file_got(f);
+    int permille = f->size ? (int)(got * 1000 / f->size) : 1000;
+    char gs[32], all[32], eta[64];
+    file_format_size(got, gs, sizeof gs);
+    file_format_size(f->size, all, sizeof all);
+    double left = chat_file_eta(e, f, now_seconds());
+    if (left >= 0.0) { file_format_duration(left, eta, sizeof eta); strcat(eta, " left"); }
+    else copy_str(eta, left < -1.0 ? "waiting until verify codes are compared" : "waiting for its sender", sizeof eta);
+    snprintf(text, cap, "%d%% \xc2\xb7 %s of %s \xc2\xb7 %s", permille / 10, gs, all, eta);
+    return permille;
+}
+
+// The row under the line that offered a file: how a fetch is going (through the relays it can take
+// a long time), where it was saved or why it failed, and for one of ours, who's fetching it or has.
 static const tui_progress_t *progress_for(const void *ctx, int file) {
     static tui_progress_t pg;
     const session_slot_t *s = ctx;
     const file_entry_t *f = chat_file(&s->engine, file);
-    if (!f || f->mine || (f->dl != DL_ACTIVE && f->dl != DL_QUEUED)) return NULL;
-    if (f->dl == DL_QUEUED) {
-        int after = chat_file_queued_after(&s->engine, f);
-        pg.permille = 0;
-        if (after) snprintf(pg.text, sizeof pg.text, "queued \xc2\xb7 starts after file %d", after);
-        else copy_str(pg.text, "queued \xc2\xb7 waiting for its sender", sizeof pg.text);
+    if (!f) return NULL;
+    memset(&pg, 0, sizeof pg);
+    if (f->mine) {
+        char name[CHAT_NAME_LEN], to[CHAT_NAME_LEN * 2 + 16];
+        int pm, n = chat_file_sending(&s->engine, f, now_seconds(), name, &pm);
+        chat_file_sent_to(f, to, sizeof to);
+        if (n) {
+            pg.permille = pm;
+            snprintf(pg.text, sizeof pg.text, "%d%% \xc2\xb7 sending to %s%s", pm / 10, name, n > 1 ? " and others" : "");
+        } else if (to[0]) {
+            pg.kind = TUI_PROGRESS_DONE;
+            snprintf(pg.text, sizeof pg.text, "sent to %s%s", to, f->fp ? "" : " \xc2\xb7 no longer offered");
+        } else if (!f->fp) {
+            pg.kind = TUI_PROGRESS_NOTE;
+            copy_str(pg.text, "no longer offered", sizeof pg.text);
+        } else {
+            return NULL;
+        }
         return &pg;
     }
-    uint64_t got = chat_file_got(f);
-    pg.permille = f->size ? (int)(got * 1000 / f->size) : 1000;
-    char gs[32], all[32], eta[64];
-    file_format_size(got, gs, sizeof gs);
-    file_format_size(f->size, all, sizeof all);
-    double left = chat_file_eta(&s->engine, f, now_seconds());
-    if (left >= 0.0) { file_format_duration(left, eta, sizeof eta); strcat(eta, " left"); }
-    else copy_str(eta, left < -1.0 ? "waiting until verify codes are compared" : "waiting for its sender", sizeof eta);
-    snprintf(pg.text, sizeof pg.text, "%d%% \xc2\xb7 %s of %s \xc2\xb7 %s", pg.permille / 10, gs, all, eta);
-    return &pg;
+    if (f->dl == DL_ACTIVE || f->dl == DL_QUEUED) {
+        pg.permille = fetch_progress(&s->engine, f, pg.text, sizeof pg.text);
+        return &pg;
+    }
+    if (f->dl == DL_FAILED) {
+        pg.kind = TUI_PROGRESS_FAILED;
+        snprintf(pg.text, sizeof pg.text, "%s \xc2\xb7 :%s %d tries again", f->why[0] ? f->why : "it didn't finish",
+                 f->view ? "show" : "download", f->num);
+        return &pg;
+    }
+    if (f->saved[0]) {
+        char where[sizeof f->saved];
+        tilde_path(f->saved, where, sizeof where);
+        pg.kind = TUI_PROGRESS_DONE;
+        snprintf(pg.text, sizeof pg.text, "saved to %.150s", where);
+        return &pg;
+    }
+    const char *why = pic_why(s, file);
+    if (why) {
+        pg.kind = TUI_PROGRESS_FAILED;
+        snprintf(pg.text, sizeof pg.text, "can't show it: %s \xc2\xb7 :download %d saves it", why, f->num);
+        return &pg;
+    }
+    return NULL;
+}
+
+static pic_t *pic_slot(session_slot_t *s, int num) {
+    pic_t *p = pic_find(s, num);
+    if (!p) for (int i = 0; i < MAX_PICS && !p; i++) if (!s->pics[i].used) p = &s->pics[i];
+    if (!p) {
+        p = &s->pics[0];
+        for (int i = 1; i < MAX_PICS; i++) if (s->pics[i].num < p->num) p = &s->pics[i];
+    }
+    pic_free(p);
+    p->used = 1;
+    p->num = num;
+    return p;
 }
 
 // A picture fetched to show has arrived. It's decoded into a thumbnail here, then the bytes are discarded.
@@ -495,18 +583,13 @@ static void session_file_view(void *ui, int num, const char *name, const uint8_t
     image_thumb_t th;
     char why[160];
     if (image_thumbnail(data, len, TUI_IMAGE_MAX_W, TUI_IMAGE_MAX_H, bg, &th, why, sizeof why) != 0) {
-        console_note(s, "* can't show file %d: %s - :download %d saves it", num, why, num);
+        const file_entry_t *f = chat_file(&s->engine, num);
+        copy_str(pic_slot(s, num)->why, why, sizeof s->pics[0].why);
+        if (f && f->mine) console_note(s, "* can't show file %d: %s", num, why);
+        else console_note(s, "* can't show file %d: %s - :download %d saves it", num, why, num);
         return;
     }
-    pic_t *p = pic_find(s, num);
-    if (!p) for (int i = 0; i < MAX_PICS && !p; i++) if (!s->pics[i].used) p = &s->pics[i];
-    if (!p) {
-        p = &s->pics[0];
-        for (int i = 1; i < MAX_PICS; i++) if (s->pics[i].num < p->num) p = &s->pics[i];
-    }
-    pic_free(p);
-    p->used = 1;
-    p->num = num;
+    pic_t *p = pic_slot(s, num);
     p->shown = 1;
     p->th = th;
     p->ti = (tui_image_t){ th.w, th.h, th.rgb };
@@ -580,9 +663,12 @@ static session_slot_t *first_session(void) {
     return NULL;
 }
 
+static void view_forget(const session_slot_t *s);
+
 static void close_session(session_slot_t *s) {
     if (!s) return;
     int idx = slot_index(s);
+    view_forget(s);
     chat_shutdown(&s->engine);
     pics_free(s);
     release_scrollbacks(s);
@@ -1102,6 +1188,7 @@ static void update_key(const tui_key_t *key) {
 
 static cmd_result_t app_help(void *ctx, const char *arg);
 static cmd_result_t app_changelog(void *ctx, const char *arg);
+static cmd_result_t app_files(void *ctx, const char *arg);
 static cmd_result_t app_show(void *ctx, const char *arg);
 static cmd_result_t app_hide(void *ctx, const char *arg);
 static cmd_result_t app_saveto(void *ctx, const char *arg);
@@ -2371,11 +2458,12 @@ static void browser_key(const tui_key_t *key) {
 
 // :send without a path: the file is picked here, starting where the last one came from.
 static void begin_send_browse(void) {
-    if (g_app.mode != MODE_CHAT) return;
+    if (g_app.mode != MODE_CHAT && g_app.mode != MODE_FILES) return;
     const char *home = platform_home_dir();
     if ((!g_app.send_dir[0] || browser_load(&g_app.browser, g_app.send_dir) != 0)
         && (!home || browser_load(&g_app.browser, home) != 0))
         browser_load(&g_app.browser, "/");
+    g_app.browse_back = g_app.mode;
     g_app.mode = MODE_SEND_BROWSE;
     g_app.dirty = 1;
 }
@@ -2394,18 +2482,23 @@ static void send_browser_key(const tui_key_t *key) {
             if (sel->is_dir) {
                 browser_load(b, full);
             } else if (k == LIST_CHOOSE) {
-                g_app.mode = MODE_CHAT;
+                g_app.mode = g_app.browse_back;
                 if (!g_app.selected || g_app.selected->initialising) {
                     note("no session to send %.80s to", sel->name);
                     break;
                 }
                 copy_str(g_app.send_dir, b->path, sizeof g_app.send_dir);
-                chat_send_file(&g_app.selected->engine, full);
+                chat_t *e = &g_app.selected->engine;
+                int was = e->file_seq;
+                g_echo = 1;
+                chat_send_file(e, full);
+                g_echo = 0;
+                if (e->file_seq != was) g_app.file_num = e->file_seq;
             }
             break;
         }
         case LIST_BACK:
-        case LIST_CLOSE: g_app.mode = MODE_CHAT; break;
+        case LIST_CLOSE: g_app.mode = g_app.browse_back; break;
         default: list_move(k, &b->selected, b->n_items); break;
     }
     g_app.dirty = 1;
@@ -2414,7 +2507,7 @@ static void send_browser_key(const tui_key_t *key) {
 // :saveto N: the folder to save file N in is picked here, starting where the last one went, or in
 // Downloads.
 static void begin_save_browse(int num, int anyway) {
-    if (g_app.mode != MODE_CHAT) return;
+    if (g_app.mode != MODE_CHAT && g_app.mode != MODE_FILES && g_app.mode != MODE_FILE_VIEW) return;
     char dl[600];
     const char *home = platform_home_dir();
     if ((!g_app.save_dir[0] || browser_load(&g_app.browser, g_app.save_dir) != 0)
@@ -2423,6 +2516,7 @@ static void begin_save_browse(int num, int anyway) {
         browser_load(&g_app.browser, "/");
     g_app.save_num = num;
     g_app.save_anyway = anyway;
+    g_app.browse_back = g_app.mode;
     g_app.mode = MODE_SAVE_BROWSE;
     g_app.dirty = 1;
 }
@@ -2432,11 +2526,13 @@ static void save_browser_key(const tui_key_t *key) {
     browser_t *b = &g_app.browser;
     if (key->type == TUI_KEY_CHAR && key->ch_len == 1 && key->ch[0] == '~') { browser_home(); g_app.dirty = 1; return; }
     if (key->type == TUI_KEY_CHAR && key->ch_len == 1 && key->ch[0] == 's') {
-        g_app.mode = MODE_CHAT;
+        g_app.mode = g_app.browse_back;
         g_app.dirty = 1;
         if (!g_app.selected || g_app.selected->initialising) { note("no session to save file %d from", g_app.save_num); return; }
         copy_str(g_app.save_dir, b->path, sizeof g_app.save_dir);
+        g_echo = 1;
         chat_file_fetch(&g_app.selected->engine, g_app.save_num, 0, g_app.save_anyway, b->path);
+        g_echo = 0;
         return;
     }
     list_key_t k = list_key(key);
@@ -2452,7 +2548,7 @@ static void save_browser_key(const tui_key_t *key) {
             break;
         }
         case LIST_BACK:
-        case LIST_CLOSE: g_app.mode = MODE_CHAT; break;
+        case LIST_CLOSE: g_app.mode = g_app.browse_back; break;
         default: list_move(k, &b->selected, b->n_items); break;
     }
     g_app.dirty = 1;
@@ -2539,7 +2635,7 @@ static void render_settings(int rows_n, int cols_n, const char *clock, const tui
         if (i == g_app.settings_sel) sel_row = n_rows;
         setting_value(d->id, values[n_rows], sizeof values[n_rows]);
         rows[n_rows] = (tui_row_t){ section, d->label, values[n_rows], setting_kind(d),
-                                    d->id == SET_COLOUR ? g_app.color : NULL, NULL };
+                                    d->id == SET_COLOUR ? g_app.color : NULL, NULL, 0 };
         section = NULL;
         n_rows++;
     }
@@ -2587,7 +2683,7 @@ static void render_sign_picker(int rows_n, int cols_n, const char *clock, const 
     tui_row_t rows[N_PICKS];
     int in_use = sign_row_in_use();
     for (int i = 0; i < N_PICKS; i++) {
-        rows[i] = (tui_row_t){ SIGN_PICKS[i].section, SIGN_PICKS[i].label, NULL, TUI_V_TEXT, NULL, NULL };
+        rows[i] = (tui_row_t){ SIGN_PICKS[i].section, SIGN_PICKS[i].label, NULL, TUI_V_TEXT, NULL, NULL, 0 };
         if (i == in_use) { rows[i].value = "in use"; rows[i].kind = TUI_V_ON; }
     }
     char help[600], usage[32] = "";
@@ -2706,10 +2802,10 @@ static void browser_rows(const browser_t *b, int row_cols, int list_rows, char *
         snprintf(cut, sizeof cut, "\xe2\x80\xa6%s", tail);
         copy_str(head, cut, sizeof head);
     }
-    g_browser_rows[0] = (tui_row_t){ NULL, head, NULL, TUI_V_TEXT, NULL, NULL };
+    g_browser_rows[0] = (tui_row_t){ NULL, head, NULL, TUI_V_TEXT, NULL, NULL, 0 };
     for (int i = 1; i < levels; i++) {
         snprintf(level_pre[i], sizeof level_pre[i], "%*s\xe2\x94\x94\xe2\x94\x80 ", (i - 1) * TREE_INDENT, "");
-        g_browser_rows[i] = (tui_row_t){ NULL, parts[joined + i - 1], NULL, TUI_V_TEXT, NULL, level_pre[i] };
+        g_browser_rows[i] = (tui_row_t){ NULL, parts[joined + i - 1], NULL, TUI_V_TEXT, NULL, level_pre[i], 0 };
     }
     g_browser_levels = levels;
 
@@ -2723,7 +2819,7 @@ static void browser_rows(const browser_t *b, int row_cols, int list_rows, char *
         if (e->is_dir && ln > 1 && g_browser_labels[i][ln - 1] == '/') g_browser_labels[i][ln - 1] = '\0';
         if (e->is_dir) folders++; else files++;
         g_browser_rows[levels + i] = (tui_row_t){ NULL, g_browser_labels[i], e->is_dir ? "" : NULL, TUI_V_LINK, NULL,
-                                                  i == b->n_items - 1 ? last_pre : mid_pre };
+                                                  i == b->n_items - 1 ? last_pre : mid_pre, 0 };
     }
     char f[24] = "", g[24] = "";
     if (folders) snprintf(f, sizeof f, "%d folder%s", folders, folders == 1 ? "" : "s");
@@ -2909,6 +3005,705 @@ static void render_save_browser(int rows_n, int cols_n, const char *clock, const
     tui_render_page(rows_n, cols_n, &page, bar, g_app.color_enabled);
 }
 
+// ---- the files page, and a picture on a page of its own ----
+
+static int add_para(tui_para_t *p, int n, tui_para_kind_t kind, const char *text);
+
+typedef enum { FS_NEW, FS_OVER, FS_COMING, FS_QUEUED, FS_FAILED, FS_SAVED, FS_HERE, FS_BROKEN, FS_MINE } file_state_t;
+
+// What a y/n box over the files page or the picture asks.
+enum { ASK_VIEW = 1, ASK_SHOW, ASK_FETCH, ASK_RETRY, ASK_SAVETO, ASK_STOP, ASK_UNOFFER };
+
+static const pic_t *pic_of(const session_slot_t *s, int num) {
+    for (int i = 0; i < MAX_PICS; i++) if (s->pics[i].used && s->pics[i].num == num) return &s->pics[i];
+    return NULL;
+}
+
+static file_state_t file_state(const session_slot_t *s, const file_entry_t *f) {
+    if (f->mine) return FS_MINE;
+    if (f->dl == DL_ACTIVE) return FS_COMING;
+    if (f->dl == DL_QUEUED) return FS_QUEUED;
+    if (f->dl == DL_FAILED) return FS_FAILED;
+    if (f->saved[0]) return FS_SAVED;
+    const pic_t *p = pic_of(s, f->num);
+    if (f->cache || (p && p->th.rgb)) return FS_HERE;
+    if (p && p->why[0]) return FS_BROKEN;
+    uint64_t cap = s->engine.file_cap ? s->engine.file_cap : FILE_CAP_DEFAULT;
+    return f->size > cap ? FS_OVER : FS_NEW;
+}
+
+// Fetching f now would take it past the size limit: it's over, and there's no copy here to use instead.
+static int file_needs_anyway(const session_slot_t *s, const file_entry_t *f) {
+    uint64_t cap = s->engine.file_cap ? s->engine.file_cap : FILE_CAP_DEFAULT;
+    return !f->mine && f->size > cap && !f->cache && !f->saved[0] && f->dl != DL_ACTIVE && f->dl != DL_QUEUED;
+}
+
+static int file_cmp(const void *a, const void *b) {
+    const file_entry_t *x = *(const file_entry_t *const *)a, *y = *(const file_entry_t *const *)b;
+    return x->mine != y->mine ? x->mine - y->mine : y->num - x->num;
+}
+
+// The session's files in the page's order: those offered to you, then yours, newest first.
+static int files_list(const session_slot_t *s, const file_entry_t **l) {
+    int n = 0;
+    for (int i = 0; s && !s->initialising && i < FILE_OFFERS_MAX; i++)
+        if (s->engine.files[i].used) l[n++] = &s->engine.files[i];
+    qsort(l, (size_t)n, sizeof *l, file_cmp);
+    return n;
+}
+
+static int files_sel(const file_entry_t *const *l, int n) {
+    for (int i = 0; i < n; i++) if (l[i]->num == g_app.file_num) return i;
+    return 0;
+}
+
+static const file_entry_t *selected_file(void) {
+    const file_entry_t *l[FILE_OFFERS_MAX];
+    int n = files_list(g_app.selected, l);
+    return n ? l[files_sel(l, n)] : NULL;
+}
+
+static void file_owner_name(const chat_t *e, const file_entry_t *f, char out[CHAT_NAME_LEN]) {
+    if (f->mine) { copy_str(out, "you", CHAT_NAME_LEN); return; }
+    for (int i = 0; i < MAX_PEERS + MAX_PENDING_PEERS; i++) {
+        const peer_t *p = &e->peers[i];
+        if (p->used && memcmp(p->id, f->owner, ID_LEN) == 0) { chat_peer_name(e, p, out); return; }
+    }
+    copy_str(out, "someone who left", CHAT_NAME_LEN);
+}
+
+static tui_value_kind_t file_value(const session_slot_t *s, const file_entry_t *f, char *out, size_t cap, int *permille) {
+    char sz[32]; file_format_size(f->size, sz, sizeof sz);
+    *permille = 0;
+    switch (file_state(s, f)) {
+        case FS_MINE: {
+            char name[CHAT_NAME_LEN], to[CHAT_NAME_LEN * 2 + 16];
+            int pm, n = chat_file_sending(&s->engine, f, now_seconds(), name, &pm);
+            chat_file_sent_to(f, to, sizeof to);
+            if (n) {
+                *permille = pm;
+                snprintf(out, cap, "%d%% \xc2\xb7 sending to %s%s", pm / 10, name, n > 1 ? " and others" : "");
+                return TUI_V_PROGRESS;
+            }
+            if (to[0]) { snprintf(out, cap, "sent to %s", to); return TUI_V_ON; }
+            if (!f->fp) { snprintf(out, cap, "no longer offered"); return TUI_V_MUTED; }
+            snprintf(out, cap, "offered \xc2\xb7 %s", sz);
+            return TUI_V_TEXT;
+        }
+        case FS_COMING:
+        case FS_QUEUED: *permille = fetch_progress(&s->engine, f, out, cap); return TUI_V_PROGRESS;
+        case FS_FAILED: snprintf(out, cap, "%s", f->why[0] ? f->why : "it didn't finish"); return TUI_V_BAD;
+        case FS_SAVED:  snprintf(out, cap, "saved \xc2\xb7 %s", sz); return TUI_V_ON;
+        case FS_HERE: {
+            const pic_t *p = pic_of(s, f->num);
+            snprintf(out, cap, "%s \xc2\xb7 %s", p && p->shown && p->th.rgb ? "shown" : "here, hidden", sz);
+            return TUI_V_ON;
+        }
+        case FS_BROKEN: snprintf(out, cap, "can't be shown"); return TUI_V_BAD;
+        case FS_OVER:   snprintf(out, cap, "%s \xc2\xb7 over your size limit", sz); return TUI_V_OFF;
+        default:        snprintf(out, cap, "%s \xc2\xb7 %s", f->image ? "picture" : "file", sz); return TUI_V_OFF;
+    }
+}
+
+#define DETAIL_LINES 24
+static int add_wrapped(char lines[][128], int n, const char *t, int width) {
+    size_t len = strlen(t);
+    if (len == 0 && n < DETAIL_LINES) lines[n++][0] = '\0';
+    while (len > 0 && n < DETAIL_LINES) {
+        size_t fit = utf8_fit_cols(t, len, width, NULL);
+        if (fit == 0) utf8_char_cols(t, len, 0, &fit);
+        if (fit < len) {
+            size_t sp = fit;
+            while (sp > 0 && t[sp] != ' ') sp--;
+            if (sp > 0) fit = sp;
+        }
+        snprintf(lines[n++], 128, "%.*s", (int)(fit < 127 ? fit : 127), t);
+        t += fit;
+        len -= fit;
+        while (len > 0 && *t == ' ') { t++; len--; }
+    }
+    return n;
+}
+
+static int file_details(const session_slot_t *s, const file_entry_t *f, int width, const char **out) {
+    static char lines[DETAIL_LINES][128];
+    char t[900], sz[32], who[CHAT_NAME_LEN];
+    int n = 0;
+    if (width < 8) return 0;
+    file_format_size(f->size, sz, sizeof sz);
+    file_owner_name(&s->engine, f, who);
+    n = add_wrapped(lines, n, f->name, width);
+    n = add_wrapped(lines, n, "", width);
+    snprintf(t, sizeof t, "%s \xc2\xb7 %s", f->image ? "picture" : "file", sz);
+    n = add_wrapped(lines, n, t, width);
+    if (f->mine) copy_str(t, "yours", sizeof t);
+    else snprintf(t, sizeof t, "from %s", who);
+    n = add_wrapped(lines, n, t, width);
+    snprintf(t, sizeof t, "file %d, at %s", f->num, f->at[0] ? f->at : "--:--");
+    n = add_wrapped(lines, n, t, width);
+    n = add_wrapped(lines, n, "", width);
+    char name[CHAT_NAME_LEN], to[CHAT_NAME_LEN * 2 + 16];
+    int pm;
+    switch (file_state(s, f)) {
+        case FS_MINE:
+            chat_file_sent_to(f, to, sizeof to);
+            if (chat_file_sending(&s->engine, f, now_seconds(), name, &pm)) snprintf(t, sizeof t, "sending to %s: %d%%", name, pm / 10);
+            else snprintf(t, sizeof t, "%s", f->fp ? "offered to everyone here" : "no longer offered");
+            n = add_wrapped(lines, n, t, width);
+            if (to[0]) { snprintf(t, sizeof t, "sent to %s", to); n = add_wrapped(lines, n, t, width); }
+            break;
+        case FS_COMING:
+        case FS_QUEUED: {
+            fetch_progress(&s->engine, f, t, sizeof t);
+            for (char *part = t, *next; part; part = next) {
+                next = strstr(part, " \xc2\xb7 ");
+                if (next) { *next = '\0'; next += 4; }
+                n = add_wrapped(lines, n, part, width);
+            }
+            break;
+        }
+        case FS_FAILED:
+            snprintf(t, sizeof t, "failed: %s", f->why[0] ? f->why : "it didn't finish");
+            n = add_wrapped(lines, n, t, width);
+            break;
+        case FS_SAVED: {
+            char where[sizeof f->saved];
+            tilde_path(f->saved, where, sizeof where);
+            char *slash = strrchr(where, '/');
+            n = add_wrapped(lines, n, "saved in", width);
+            if (slash) { *slash = '\0'; n = add_wrapped(lines, n, where[0] ? where : "/", width); }
+            snprintf(t, sizeof t, "as %s", slash ? slash + 1 : where);
+            n = add_wrapped(lines, n, t, width);
+            break;
+        }
+        case FS_HERE: {
+            const pic_t *p = pic_of(s, f->num);
+            n = add_wrapped(lines, n, p && p->shown && p->th.rgb ? "shown in the chat" : "here, hidden in the chat", width);
+            n = add_wrapped(lines, n, "only in memory", width);
+            break;
+        }
+        case FS_BROKEN:
+            snprintf(t, sizeof t, "can't be shown: %s", pic_why(s, f->num));
+            n = add_wrapped(lines, n, t, width);
+            break;
+        case FS_OVER: {
+            uint64_t cap = s->engine.file_cap ? s->engine.file_cap : FILE_CAP_DEFAULT;
+            char lim[32]; file_format_size(cap, lim, sizeof lim);
+            snprintf(t, sizeof t, "not fetched, and over your %s limit", lim);
+            n = add_wrapped(lines, n, t, width);
+            break;
+        }
+        default:
+            n = add_wrapped(lines, n, "not fetched yet", width);
+            break;
+    }
+    for (int i = 0; i < n; i++) out[i] = lines[i];
+    return n;
+}
+
+// What Enter does with f, for the bottom row, or NULL for nothing.
+static const char *file_enter(const session_slot_t *s, const file_entry_t *f) {
+    file_state_t st = file_state(s, f);
+    if (f->image && st != FS_BROKEN) return st == FS_NEW || st == FS_OVER || st == FS_FAILED ? "show" : "view";
+    if (st == FS_NEW || st == FS_OVER) return "download";
+    return st == FS_FAILED ? "retry" : NULL;
+}
+
+// usage gets the command that does what Enter does.
+static void file_help(const session_slot_t *s, const file_entry_t *f, char *help, size_t cap, char *usage, size_t ucap) {
+    char who[CHAT_NAME_LEN], where[sizeof f->saved] = "";
+    file_owner_name(&s->engine, f, who);
+    if (f->saved[0]) tilde_path(f->saved, where, sizeof where);
+    const char *save = "d saves it in Downloads, s in a folder you pick.";
+    usage[0] = '\0';
+    switch (file_state(s, f)) {
+        case FS_MINE:
+            if (!f->fp) snprintf(help, cap, "Yours, and no longer offered. :send offers it again, as a new file.");
+            else snprintf(help, cap, "Yours, offered to everyone here%s.%s x stops offering it.",
+                          s->engine.verify_required ? " whose verify code you've compared" : "",
+                          f->image ? " Enter shows it big." : "");
+            if (f->fp) snprintf(usage, ucap, ":cancel %d", f->num);
+            return;
+        case FS_COMING:
+        case FS_QUEUED:
+            snprintf(help, cap, "%s%s x stops it.", f->dl == DL_QUEUED ? "Queued: one file comes from each sender at a time." : "On its way.",
+                     f->image ? " Enter shows how far it's got, then the picture." : "");
+            snprintf(usage, ucap, ":cancel %d", f->num);
+            return;
+        case FS_FAILED:
+            snprintf(help, cap, "Failed: %s. Enter tries again. %s", f->why[0] ? f->why : "it stopped", save);
+            snprintf(usage, ucap, ":%s %d", f->image ? "show" : "download", f->num);
+            return;
+        case FS_SAVED:
+            snprintf(help, cap, "Saved as %s.%s y copies where it is, s saves a copy in another folder.", where,
+                     f->image ? " Enter shows it big, v in the chat." : "");
+            snprintf(usage, ucap, ":saveto %d", f->num);
+            return;
+        case FS_HERE:
+            snprintf(help, cap, "Enter shows it big, v shows or hides it in the chat. It's only in memory: %s", save);
+            snprintf(usage, ucap, ":download %d", f->num);
+            return;
+        case FS_BROKEN:
+            snprintf(help, cap, "chat can't show it (%s). d saves it in Downloads, to open with something else.", pic_why(s, f->num));
+            snprintf(usage, ucap, ":download %d", f->num);
+            return;
+        default: {
+            const char *over = file_state(s, f) == FS_OVER ? " It's over your file size limit, so chat asks first." : "";
+            if (f->image)
+                snprintf(help, cap, "%s offers it. Enter fetches it and shows it big, and in the chat under the offer. %s%s",
+                         who, save, over);
+            else
+                snprintf(help, cap, "%s offers it. Enter saves it in Downloads, s in a folder you pick. Nothing is fetched until "
+                         "you ask.%s", who, over);
+            snprintf(usage, ucap, ":%s %d%s", f->image ? "show" : "download", f->num, *over ? " anyway" : "");
+            return;
+        }
+    }
+}
+
+static void file_ask(int what, const file_entry_t *f) {
+    g_app.file_ask = what;
+    g_app.file_ask_num = f->num;
+    g_app.file_back = g_app.mode;
+    g_app.mode = MODE_FILE_ASK;
+}
+
+// The engine's reply goes on the bottom bar, since the page covers the console.
+static int echo_fetch(session_slot_t *s, int num, int view, int anyway, const char *dir) {
+    g_echo = 1;
+    int r = chat_file_fetch(&s->engine, num, view, anyway, dir);
+    g_echo = 0;
+    return r;
+}
+
+static void echo_cancel(session_slot_t *s, int num) {
+    char cmd[32];
+    snprintf(cmd, sizeof cmd, "cancel %d", num);
+    g_echo = 1;
+    chat_run_command(&s->engine, cmd);
+    g_echo = 0;
+}
+
+static void file_download(session_slot_t *s, const file_entry_t *f) {
+    if (f->mine) note("file %d is yours", f->num);
+    else if (file_needs_anyway(s, f)) file_ask(ASK_FETCH, f);
+    else echo_fetch(s, f->num, 0, 0, NULL);
+}
+
+static void file_save_in(session_slot_t *s, const file_entry_t *f) {
+    if (f->mine) note("file %d is yours", f->num);
+    else if (file_needs_anyway(s, f)) file_ask(ASK_SAVETO, f);
+    else begin_save_browse(f->num, 0);
+}
+
+static void file_toggle_shown(session_slot_t *s, const file_entry_t *f) {
+    if (!f->image) { note("only pictures are shown in the chat - d saves %s", f->name); return; }
+    pic_t *p = pic_find(s, f->num);
+    if (p && p->th.rgb) {
+        p->shown = !p->shown;
+        note(p->shown ? "file %d is shown in the chat" : "file %d is hidden in the chat - v shows it again", f->num);
+    } else if (file_needs_anyway(s, f)) {
+        file_ask(ASK_SHOW, f);
+    } else {
+        echo_fetch(s, f->num, 1, 0, NULL);
+    }
+}
+
+static void file_stop(session_slot_t *s, const file_entry_t *f) {
+    if (f->mine && f->fp) file_ask(ASK_UNOFFER, f);
+    else if (f->mine) note("file %d isn't offered any more", f->num);
+    else if (f->dl == DL_ACTIVE) file_ask(ASK_STOP, f);
+    else if (f->dl == DL_QUEUED) echo_cancel(s, f->num);
+    else note("file %d isn't on its way - there's nothing to stop", f->num);
+}
+
+static void file_copy_path(const file_entry_t *f) {
+    if (!f->saved[0]) { note(f->mine ? "file %d is yours, not a copy chat saved" : "file %d isn't saved - d saves it", f->num); return; }
+    osc52_copy(f->saved);
+    char where[sizeof f->saved];
+    tilde_path(f->saved, where, sizeof where);
+    note("copied %s to the clipboard (OSC 52)", where);
+}
+
+// The keys the files page and the picture share. Returns 1 if ch is one of them.
+static int file_action(char ch, session_slot_t *s, const file_entry_t *f) {
+    switch (ch) {
+        case 'd': file_download(s, f); return 1;
+        case 's': file_save_in(s, f); return 1;
+        case 'v': file_toggle_shown(s, f); return 1;
+        case 'x': file_stop(s, f); return 1;
+        case 'y': file_copy_path(f); return 1;
+        default:  return 0;
+    }
+}
+
+// Enter: a picture opens on a page of its own, fetched first if it isn't here. A file is saved in
+// Downloads, or where it was going if that failed.
+static void file_open(session_slot_t *s, const file_entry_t *f) {
+    file_state_t st = file_state(s, f);
+    if (f->image && st != FS_BROKEN) {
+        if (st == FS_NEW || st == FS_OVER || st == FS_FAILED) {
+            if (file_needs_anyway(s, f)) { file_ask(ASK_VIEW, f); return; }
+            if (echo_fetch(s, f->num, 1, 0, NULL) != 0) return;
+        }
+        g_app.mode = MODE_FILE_VIEW;
+        return;
+    }
+    switch (st) {
+        case FS_MINE:   note("file %d is yours - x stops offering it", f->num); break;
+        case FS_BROKEN: note("chat can't show it (%s) - d saves it", pic_why(s, f->num)); break;
+        case FS_COMING: note("file %d is on its way - x stops it", f->num); break;
+        case FS_QUEUED: note("file %d is queued - x takes it off the queue", f->num); break;
+        case FS_SAVED: {
+            char where[sizeof f->saved];
+            tilde_path(f->saved, where, sizeof where);
+            note("saved as %s - y copies where it is", where);
+            break;
+        }
+        case FS_FAILED:
+            if (file_needs_anyway(s, f)) file_ask(ASK_RETRY, f);
+            else echo_fetch(s, f->num, 0, 0, f->save_dir);
+            break;
+        default: file_download(s, f); break;
+    }
+}
+
+static void file_ask_yes(void) {
+    session_slot_t *s = g_app.selected;
+    int num = g_app.file_ask_num;
+    g_app.mode = g_app.file_back;
+    g_app.dirty = 1;
+    const file_entry_t *f = s && !s->initialising ? chat_file(&s->engine, num) : NULL;
+    if (!f) return;
+    switch (g_app.file_ask) {
+        case ASK_VIEW:    if (echo_fetch(s, num, 1, 1, NULL) == 0) g_app.mode = MODE_FILE_VIEW; break;
+        case ASK_SHOW:    echo_fetch(s, num, 1, 1, NULL); break;
+        case ASK_FETCH:   echo_fetch(s, num, 0, 1, NULL); break;
+        case ASK_RETRY: {
+            char dir[sizeof f->save_dir];
+            copy_str(dir, f->save_dir, sizeof dir);
+            echo_fetch(s, num, 0, 1, dir);
+            break;
+        }
+        case ASK_SAVETO:  begin_save_browse(num, 1); break;
+        case ASK_STOP:
+        case ASK_UNOFFER: echo_cancel(s, num); break;
+        default: break;
+    }
+}
+
+static void file_ask_no(void) {
+    g_app.mode = g_app.file_back;
+    g_app.dirty = 1;
+}
+
+static int file_ask_paras(tui_para_t *paras, const char **title, const char **keys) {
+    static char text[900];
+    session_slot_t *s = g_app.selected;
+    const file_entry_t *f = s && !s->initialising ? chat_file(&s->engine, g_app.file_ask_num) : NULL;
+    if (!f) { *title = "FILES"; *keys = "n back"; return add_para(paras, 0, TUI_P_TEXT, "That file isn't here any more."); }
+    char sz[32], lim[32];
+    file_format_size(f->size, sz, sizeof sz);
+    file_format_size(s->engine.file_cap ? s->engine.file_cap : FILE_CAP_DEFAULT, lim, sizeof lim);
+    switch (g_app.file_ask) {
+        case ASK_STOP: {
+            char got[32]; file_format_size(chat_file_got(f), got, sizeof got);
+            *title = "STOP";
+            *keys = "y stop \xc2\xb7 n keep it coming";
+            snprintf(text, sizeof text, "Stop fetching `%s`? The %s that's come so far is thrown away, and fetching it again "
+                     "starts from the beginning.", f->name, got);
+            break;
+        }
+        case ASK_UNOFFER:
+            *title = "STOP";
+            *keys = "y stop offering \xc2\xb7 n keep offering";
+            snprintf(text, sizeof text, "Stop offering `%s`? Nobody can fetch it after this, and anyone fetching it now stops. "
+                     "`:send` offers it again, as a new file.", f->name);
+            break;
+        default: {
+            char eta[48], took[160] = "";
+            double left = chat_file_eta(&s->engine, f, now_seconds());
+            if (left >= 0.0) {
+                char who[CHAT_NAME_LEN];
+                file_owner_name(&s->engine, f, who);
+                file_format_duration(left, eta, sizeof eta);
+                snprintf(took, sizeof took, " At chat's normal rate it takes %s to come, less if %s has fast transfers on.", eta, who);
+            }
+            int ask = g_app.file_ask;
+            *title = "OVER YOUR LIMIT";
+            *keys = "y fetch it \xc2\xb7 n cancel";
+            snprintf(text, sizeof text, "`%s` is %s, over your %s file size limit. Fetch it anyway%s?%s", f->name, sz, lim,
+                     ask == ASK_SAVETO ? ", into a folder you pick" : ask == ASK_VIEW || ask == ASK_SHOW ? ", to show it" : "", took);
+            break;
+        }
+    }
+    return add_para(paras, 0, TUI_P_TEXT, text);
+}
+
+static const char *files_hint(void) {
+    static char hint[200];
+    session_slot_t *s = g_app.selected;
+    const file_entry_t *f = selected_file();
+    if (!f) return "n send a file \xc2\xb7 esc close";
+    const char *enter = file_enter(s, f);
+    file_state_t st = file_state(s, f);
+    snprintf(hint, sizeof hint, "%s%s%s%s%s%sn send \xc2\xb7 esc close", enter ? "enter " : "", enter ? enter : "",
+             enter ? " \xc2\xb7 " : "", f->saved[0] ? "y copy path \xc2\xb7 " : "",
+             f->mine ? "" : "d download \xc2\xb7 s save in \xc2\xb7 ",
+             (f->mine && f->fp) || st == FS_COMING || st == FS_QUEUED ? "x stop \xc2\xb7 " : "");
+    return hint;
+}
+
+static void begin_files(void) {
+    if (g_app.mode != MODE_CHAT) return;
+    session_slot_t *s = g_app.selected;
+    if (!s || s->initialising) { note("no session open - ctrl+n starts one, ctrl+j joins one"); return; }
+    // The newest file, since that's usually the one to do something with.
+    g_app.file_num = s->engine.file_seq;
+    g_app.mode = MODE_FILES;
+    g_app.dirty = 1;
+}
+
+static void render_files(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar) {
+    static tui_row_t rows[FILE_OFFERS_MAX];
+    static char values[FILE_OFFERS_MAX][160], prefix[FILE_OFFERS_MAX][24];
+    static char title[MAX_SESSION_NAME + 16], intro[200], help[1200], usage[64];
+    session_slot_t *s = g_app.selected;
+    const file_entry_t *l[FILE_OFFERS_MAX];
+    int n = files_list(s, l), sel = files_sel(l, n), digits = 1, theirs = 0, coming = 0;
+    snprintf(title, sizeof title, "%s" CRUMB "Files", s ? s->name : "");
+    for (int i = 0; i < n; i++) {
+        char d[12];
+        int w = snprintf(d, sizeof d, "%d", l[i]->num);
+        if (w > digits) digits = w;
+        theirs += !l[i]->mine;
+        coming += l[i]->dl == DL_ACTIVE || l[i]->dl == DL_QUEUED;
+    }
+    for (int i = 0; i < n; i++) {
+        int pm;
+        tui_value_kind_t kind = file_value(s, l[i], values[i], sizeof values[i], &pm);
+        snprintf(prefix[i], sizeof prefix[i], "%*d  ", digits, l[i]->num);
+        const char *section = i == 0 || l[i]->mine != l[i - 1]->mine ? (l[i]->mine ? "Yours" : "Offered to you") : NULL;
+        rows[i] = (tui_row_t){ section, l[i]->name, values[i], kind, NULL, prefix[i], pm };
+    }
+    char parts[3][40];
+    int np = 0;
+    if (theirs) snprintf(parts[np++], sizeof parts[0], "%d offered to you", theirs);
+    if (coming) snprintf(parts[np++], sizeof parts[0], "%d on the way", coming);
+    if (n - theirs) snprintf(parts[np++], sizeof parts[0], "%d yours", n - theirs);
+    if (!n) snprintf(intro, sizeof intro, "Nothing's been offered here yet.");
+    else snprintf(intro, sizeof intro, "%s%s%s%s%s", parts[0], np > 1 ? " \xc2\xb7 " : "", np > 1 ? parts[1] : "",
+                  np > 2 ? " \xc2\xb7 " : "", np > 2 ? parts[2] : "");
+    const char *nav[DETAIL_LINES];
+    int n_nav = 0;
+    usage[0] = '\0';
+    if (n) {
+        n_nav = file_details(s, l[sel], tui_nav_text_cols(cols_n), nav);
+        file_help(s, l[sel], help, sizeof help, usage, sizeof usage);
+    } else {
+        snprintf(help, sizeof help, "n picks a file to send, or :send PATH. What others offer shows up here, and nothing is "
+                 "fetched until you ask.");
+    }
+    tui_page_t page = {
+        .title = title,
+        .clock = clock,
+        .intro = intro,
+        .nav = n_nav ? nav : NULL, .n_nav = n_nav, .nav_sel = 0,
+        .rows = rows, .n_rows = n, .selected = sel,
+        .help = help, .usage = usage[0] ? usage : NULL,
+    };
+    tui_render_page(rows_n, cols_n, &page, bar, g_app.color_enabled);
+}
+
+static void files_key(const tui_key_t *key) {
+    session_slot_t *s = g_app.selected;
+    const file_entry_t *l[FILE_OFFERS_MAX];
+    int n = files_list(s, l), sel = files_sel(l, n);
+    const file_entry_t *f = n ? l[sel] : NULL;
+    g_app.dirty = 1;
+    if (key->type == TUI_KEY_CHAR && key->ch_len == 1) {
+        if (key->ch[0] == 'n') { begin_send_browse(); return; }
+        if (f && file_action(key->ch[0], s, f)) return;
+    }
+    list_key_t k = list_key(key);
+    switch (k) {
+        case LIST_CHOOSE:
+        case LIST_RIGHT: if (f) file_open(s, f); break;
+        case LIST_LEFT:
+        case LIST_BACK:
+        case LIST_CLOSE: g_app.mode = MODE_CHAT; break;
+        case LIST_NEXT_SECTION:
+        case LIST_PREV_SECTION:
+            for (int i = 0; i < n; i++) if (l[i]->mine != (f && f->mine)) { g_app.file_num = l[i]->num; break; }
+            break;
+        default:
+            list_move(k, &sel, n);
+            if (n) g_app.file_num = l[sel]->num;
+            break;
+    }
+}
+
+// The picture on its own page, decoded to fit the screen. It's decoded again for another file or
+// size, or when its bytes may have come.
+static struct {
+    const session_slot_t *s;
+    int num, w, h;
+    unsigned sig;
+    image_thumb_t th;
+    tui_image_t ti;
+    char why[160];
+} g_view;
+
+static void view_drop(void) {
+    if (g_view.th.rgb) crypto_wipe(g_view.th.rgb, (size_t)g_view.th.w * (size_t)g_view.th.h * 3);
+    image_thumb_free(&g_view.th);
+    memset(&g_view, 0, sizeof g_view);
+}
+
+static void view_forget(const session_slot_t *s) {
+    if (g_view.s == s) view_drop();
+}
+
+static unsigned view_sig(const file_entry_t *f) {
+    return (unsigned)f->dl | (f->cache ? 8u : 0u) | (f->saved[0] ? 16u : 0u) | (f->fp ? 32u : 0u);
+}
+
+static void view_update(session_slot_t *s, const file_entry_t *f, int w, int h) {
+    if (g_view.s == s && g_view.num == f->num && g_view.w == w && g_view.h == h && g_view.sig == view_sig(f)) return;
+    view_drop();
+    g_view.s = s;
+    g_view.num = f->num;
+    g_view.w = w;
+    g_view.h = h;
+    const uint8_t *b = f->dl == DL_ACTIVE || f->dl == DL_QUEUED ? NULL : chat_file_bytes(&s->engine, f->num);
+    static const uint8_t bg[3] = { 0, 0, 0 };
+    if (b && image_thumbnail(b, (size_t)f->size, w, h, bg, &g_view.th, g_view.why, sizeof g_view.why) == 0)
+        g_view.ti = (tui_image_t){ g_view.th.w, g_view.th.h, g_view.th.rgb };
+    g_view.sig = view_sig(f);
+}
+
+static void render_viewer(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar) {
+    static char title[MAX_SESSION_NAME + FILE_NAME_MAX + 32], caption[400], text[700];
+    static tui_progress_t pg;
+    session_slot_t *s = g_app.selected;
+    const file_entry_t *f = selected_file();
+    tui_picture_t pic = { .title = title, .clock = clock, .caption = caption };
+    caption[0] = '\0';
+    if (!f || !f->image) {
+        snprintf(title, sizeof title, "%s" CRUMB "Files", s ? s->name : "");
+        pic.note = "That picture isn't here any more\nesc goes back to the files";
+        tui_render_picture(rows_n, cols_n, &pic, bar, g_app.color_enabled);
+        return;
+    }
+    snprintf(title, sizeof title, "%s" CRUMB "Files" CRUMB "%s", s->name, f->name);
+    int w, h;
+    tui_picture_room(rows_n, cols_n, &w, &h);
+    view_update(s, f, w, h);
+
+    const file_entry_t *l[FILE_OFFERS_MAX];
+    int n = files_list(s, l), at = 0, pics = 0;
+    for (int i = 0; i < n; i++) if (l[i]->image) { pics++; if (l[i] == f) at = pics; }
+    char sz[32], who[CHAT_NAME_LEN], dims[32] = "", of[40] = "";
+    file_format_size(f->size, sz, sizeof sz);
+    file_owner_name(&s->engine, f, who);
+    const pic_t *small = pic_of(s, f->num);
+    file_state_t st = file_state(s, f);
+    if (g_view.th.rgb) {
+        pic.image = &g_view.ti;
+        snprintf(dims, sizeof dims, "%d\xc3\x97%d \xc2\xb7 ", g_view.th.src_w, g_view.th.src_h);
+    } else if (small && small->th.rgb && st != FS_COMING && st != FS_QUEUED) {
+        // Only the small copy the chat shows is left: what was fetched has been dropped from memory.
+        pic.image = &small->ti;
+        snprintf(dims, sizeof dims, "small copy \xc2\xb7 ");
+    }
+    if (pics > 1) snprintf(of, sizeof of, " \xc2\xb7 %d of %d", at, pics);
+    snprintf(caption, sizeof caption, "%s \xc2\xb7 %s%s \xc2\xb7 %s%s%s", f->name, dims, sz, f->mine ? "yours" : "from ",
+             f->mine ? "" : who, of);
+    if (!pic.image) {
+        memset(&pg, 0, sizeof pg);
+        switch (st) {
+            case FS_COMING:
+            case FS_QUEUED: {
+                snprintf(text, sizeof text, "On its way\n%s from %s", sz, who);
+                pg.permille = fetch_progress(&s->engine, f, pg.text, sizeof pg.text);
+                // The bar has the percentage already.
+                char *after = f->dl == DL_ACTIVE ? strstr(pg.text, " \xc2\xb7 ") : NULL;
+                if (after) memmove(pg.text, after + 4, strlen(after + 4) + 1);
+                pic.progress = &pg;
+                break;
+            }
+            case FS_FAILED:
+                snprintf(text, sizeof text, "It didn't finish\n%s\nenter tries again", f->why[0] ? f->why : "it stopped");
+                break;
+            case FS_OVER:
+                snprintf(text, sizeof text, "Not fetched yet\n%s, over your file size limit\nenter fetches it, after asking", sz);
+                break;
+            case FS_NEW:
+                snprintf(text, sizeof text, "Not fetched yet\n%s from %s\nenter fetches it \xc2\xb7 d saves it in Downloads", sz, who);
+                break;
+            case FS_MINE:
+                snprintf(text, sizeof text, "It can't be shown\n%s", g_view.why[0] ? g_view.why
+                         : f->fp ? "it's changed since you offered it" : "it isn't offered any more");
+                break;
+            default:
+                if (g_view.why[0] || st == FS_BROKEN)
+                    snprintf(text, sizeof text, "chat can't show this picture\n%s\nd saves it, to open with something else",
+                             g_view.why[0] ? g_view.why : pic_why(s, f->num));
+                else
+                    snprintf(text, sizeof text, "It isn't here any more\nthe copy shown was dropped from memory, or the "
+                             "saved one has changed\nenter fetches it again");
+                break;
+        }
+        pic.note = text;
+    }
+    tui_render_picture(rows_n, cols_n, &pic, bar, g_app.color_enabled);
+}
+
+static void view_fetch(session_slot_t *s, const file_entry_t *f) {
+    if (g_view.th.rgb && g_view.num == f->num) return;
+    file_state_t st = file_state(s, f);
+    if (st == FS_COMING || st == FS_QUEUED) note("on its way - it's shown here once it's come");
+    else if (st == FS_MINE) note("it can't be shown - it's changed since you offered it, or isn't offered any more");
+    else if (st == FS_BROKEN || g_view.why[0]) note("chat can't show it - d saves it");
+    else if (file_needs_anyway(s, f)) file_ask(ASK_SHOW, f);
+    else echo_fetch(s, f->num, 1, 0, NULL);
+}
+
+// The picture page: j and k go to the next and previous picture in the files page's order.
+static void viewer_key(const tui_key_t *key) {
+    session_slot_t *s = g_app.selected;
+    const file_entry_t *l[FILE_OFFERS_MAX];
+    int n = files_list(s, l), sel = files_sel(l, n);
+    const file_entry_t *f = n ? l[sel] : NULL;
+    g_app.dirty = 1;
+    if (key->type == TUI_KEY_CHAR && key->ch_len == 1 && f && file_action(key->ch[0], s, f)) return;
+    int pics[FILE_OFFERS_MAX], np = 0, at = -1;
+    for (int i = 0; i < n; i++) if (l[i]->image) { if (i == sel) at = np; pics[np++] = i; }
+    switch (list_key(key)) {
+        case LIST_DOWN:  if (at + 1 < np) g_app.file_num = l[pics[at + 1]]->num; break;
+        case LIST_UP:    if (at > 0) g_app.file_num = l[pics[at - 1]]->num; break;
+        case LIST_FIRST: if (np) g_app.file_num = l[pics[0]]->num; break;
+        case LIST_LAST:  if (np) g_app.file_num = l[pics[np - 1]]->num; break;
+        case LIST_CHOOSE:
+        case LIST_RIGHT: if (f) view_fetch(s, f); break;
+        case LIST_LEFT:
+        case LIST_BACK:  view_drop(); g_app.mode = MODE_FILES; break;
+        case LIST_CLOSE: view_drop(); g_app.mode = MODE_CHAT; break;
+        default: break;
+    }
+}
+
+static const char *viewer_hint(void) {
+    static char hint[200];
+    const file_entry_t *f = selected_file();
+    if (!f) return "esc back";
+    file_state_t st = file_state(g_app.selected, f);
+    int fetch = !(g_view.th.rgb && g_view.num == f->num) && st != FS_MINE && st != FS_COMING && st != FS_QUEUED && st != FS_BROKEN;
+    snprintf(hint, sizeof hint, "%sj/k next/previous \xc2\xb7 %sv in chat \xc2\xb7 esc back", fetch ? "enter fetch \xc2\xb7 " : "",
+             f->mine ? "x stop offering \xc2\xb7 " : "d download \xc2\xb7 s save in \xc2\xb7 ");
+    return hint;
+}
+
 // ---- the help page: every key, then every command ----
 
 static const struct { const char *section, *keys, *what; } HELP_KEYS[] = {
@@ -2933,8 +3728,17 @@ static const struct { const char *section, *keys, *what; } HELP_KEYS[] = {
     { NULL,          "ctrl+u  ctrl+d",  "scroll the chat back / forward" },
     { NULL,          "G",               "back to the newest message" },
     { NULL,          "s  c  C",         "show or hide the sidebar / console / chat" },
+    { NULL,          "f",               "the files" },
     { NULL,          ":  /",            "the command line" },
     { NULL,          "?",               "this page" },
+    { "Files",       "ctrl+f",          "the files offered here, and yours (f in NORMAL)" },
+    { NULL,          "enter",           "show a picture big, fetching it first, or download a file" },
+    { NULL,          "d  s",            "save in Downloads / in a folder you pick" },
+    { NULL,          "v",               "show or hide a picture in the chat" },
+    { NULL,          "x",               "stop fetching it, or stop offering yours" },
+    { NULL,          "y",               "copy where it was saved" },
+    { NULL,          "n",               "send a file" },
+    { NULL,          "j  k",            "on a picture: the next / previous one" },
     { "Pages",       "j  k  g  G",      "move, to the first / last" },
     { NULL,          "h  l  enter",     "change a value, go in, choose" },
     { NULL,          "tab  shift+tab",  "next / previous section" },
@@ -4018,6 +4822,7 @@ static const command_t APP_COMMANDS[] = {
     { "save",    NULL,                  NULL,     "save what's in use now to the open save, after asking (or :install it)", app_save },
     { "uninstall", NULL,                "[NAME]", "delete what :install saved (NAME: that save)",    app_uninstall },
     { "changelog", "news",              NULL,     "show changelog",                    app_changelog },
+    { "files",   NULL,                  NULL,     "the files offered here: show, save or stop them (Ctrl+F)", app_files },
     { "show",    NULL,                  "N [anyway]", "show picture N in the chat, where it was offered", app_show },
     { "hide",    NULL,                  "N",      "tuck picture N away again",                       app_hide },
     { "saveto",  NULL,                  "N [anyway]", "pick a folder in a file browser and save file N there", app_saveto },
@@ -4055,8 +4860,14 @@ static cmd_result_t app_show(void *ctx, const char *arg) {
     if (!s || s->initialising) { note("open a session first"); return CMD_OK; }
     if (!n) { note("usage: :show N [anyway] - N is the number in the offer"); return CMD_OK; }
     pic_t *p = pic_find(s, n);
-    if (p) { p->shown = 1; g_app.dirty = 1; return CMD_OK; }
-    chat_file_fetch(&s->engine, n, 1, anyway, NULL);
+    if (p && p->th.rgb) { p->shown = 1; g_app.dirty = 1; return CMD_OK; }
+    echo_fetch(s, n, 1, anyway, NULL);
+    return CMD_OK;
+}
+
+static cmd_result_t app_files(void *ctx, const char *arg) {
+    (void)ctx; (void)arg;
+    begin_files();
     return CMD_OK;
 }
 
@@ -4089,14 +4900,14 @@ static int help_rows(tui_row_t *rows, const command_t **cmds) {
     static char labels[MAX_HELP_COMMANDS][CMD_WORD_MAX + 24];
     int n = 0, k = 0;
     for (int i = 0; i < N_HELP_KEYS; i++) {
-        rows[n] = (tui_row_t){ HELP_KEYS[i].section, HELP_KEYS[i].keys, HELP_KEYS[i].what, TUI_V_TEXT, NULL, NULL };
+        rows[n] = (tui_row_t){ HELP_KEYS[i].section, HELP_KEYS[i].keys, HELP_KEYS[i].what, TUI_V_TEXT, NULL, NULL, 0 };
         cmds[n++] = NULL;
     }
     for (const command_t *const *t = ALL_COMMANDS; *t; t++) {
         for (const command_t *cmd = *t; cmd->name && k < MAX_HELP_COMMANDS; cmd++) {
             if (*t != APP_COMMANDS && cmd_find(APP_COMMANDS, cmd->name)) continue;
             snprintf(labels[k], sizeof labels[k], ":%s%s%s", cmd->name, cmd->args ? " " : "", cmd->args ? cmd->args : "");
-            rows[n] = (tui_row_t){ k == 0 ? "Commands" : NULL, labels[k], cmd->help, TUI_V_TEXT, NULL, NULL };
+            rows[n] = (tui_row_t){ k == 0 ? "Commands" : NULL, labels[k], cmd->help, TUI_V_TEXT, NULL, NULL, 0 };
             cmds[n++] = cmd;
             k++;
         }
@@ -4304,8 +5115,8 @@ static int arg_words(arg_menu_t *m, const char *rest) {
 // Whether file f is one the command can take.
 static int file_fits(const command_t *c, const file_entry_t *f) {
     pic_t *p = pic_find(g_app.selected, f->num);
-    if (strcmp(c->name, "show") == 0) return f->image && !f->mine && !(p && p->shown);
-    if (strcmp(c->name, "hide") == 0) return p && p->shown;
+    if (strcmp(c->name, "show") == 0) return f->image && !(p && p->shown && p->th.rgb);
+    if (strcmp(c->name, "hide") == 0) return p && p->shown && p->th.rgb;
     if (strcmp(c->name, "cancel") == 0) return f->mine ? f->fp != NULL : f->dl == DL_ACTIVE || f->dl == DL_QUEUED;
     return !f->mine;
 }
@@ -4529,7 +5340,10 @@ static void run_command(const char *line) {
         return;
     }
     if (strcmp(word, "send") == 0 && !arg[strspn(arg, " ")]) { begin_send_browse(); return; }
-    if (chat_run_command(&g_app.selected->engine, line) == CMD_QUIT) close_session(g_app.selected);
+    g_echo = strcmp(word, "download") == 0 || strcmp(word, "dl") == 0 || strcmp(word, "cancel") == 0 || strcmp(word, "send") == 0;
+    cmd_result_t r = chat_run_command(&g_app.selected->engine, line);
+    g_echo = 0;
+    if (r == CMD_QUIT) close_session(g_app.selected);
 }
 
 static void submit_prompt(void) {
@@ -4663,6 +5477,9 @@ static void handle_key(const tui_key_t *key) {
         case MODE_SIGN_BROWSE: browser_key(key); return;
         case MODE_SEND_BROWSE: send_browser_key(key); return;
         case MODE_SAVE_BROWSE: save_browser_key(key); return;
+        case MODE_FILES:       files_key(key); return;
+        case MODE_FILE_VIEW:   viewer_key(key); return;
+        case MODE_FILE_ASK:    confirm_key(key, file_ask_yes, file_ask_no); return;
         case MODE_SIGN_PASTE:  paste_key(key); return;
         case MODE_SIGN_PASSWORD:  field_key(key, commit_sign_password, end_sign_password); return;
         case MODE_SIGN_PATH:      field_key(key, commit_key_path, end_key_path); return;
@@ -4695,14 +5512,15 @@ static void handle_key(const tui_key_t *key) {
     }
 
     // NORMAL leaves these to the app: j and k switch sessions, like moving through a list, G goes back
-    // to the newest message, ? opens the help, and c, C and s show or hide the console, the chat and
-    // the sidebar.
+    // to the newest message, ? opens the help, f the files, and c, C and s show or hide the console,
+    // the chat and the sidebar.
     if (key->type == TUI_KEY_CHAR && input->mode == TUI_IMODE_NORMAL) {
         switch (key->ch[0]) {
             case 'j': select_step(1); break;
             case 'k': select_step(-1); break;
             case 'G': scroll_chat(0); break;
             case '?': begin_help(); break;
+            case 'f': begin_files(); break;
             case 'c': g_app.show_console = !g_app.show_console; g_app.dirty = 1; break;
             case 'C': g_app.show_chat = !g_app.show_chat; g_app.dirty = 1; break;
             case 's': g_app.show_sidebar = !g_app.show_sidebar; g_app.dirty = 1; break;
@@ -4721,6 +5539,7 @@ static void handle_key(const tui_key_t *key) {
         case TUI_KEY_TOGGLE_CHAT:    g_app.show_chat = !g_app.show_chat; g_app.dirty = 1; break;
         case TUI_KEY_SETTINGS:       begin_settings(); break;
         case TUI_KEY_HELP:           begin_help(); break;
+        case TUI_KEY_FILES:          begin_files(); break;
         case TUI_KEY_PAGE_UP:
         case TUI_KEY_CTRL_U:         scroll_chat(1); break;
         case TUI_KEY_PAGE_DOWN:
@@ -4836,7 +5655,8 @@ static void chat_input(tui_bar_t *b, const tui_input_t *in) {
     b->warn = held_warning(s);
     if (m == TUI_IMODE_NORMAL) {
         b->placeholder = "i to type \xc2\xb7 : for a command";
-        b->hint = "i type \xc2\xb7 : command \xc2\xb7 j/k session \xc2\xb7 pgup/pgdn scroll \xc2\xb7 ? help";
+        b->hint = s && !s->initialising ? "i type \xc2\xb7 : command \xc2\xb7 f files \xc2\xb7 j/k session \xc2\xb7 pgup/pgdn scroll \xc2\xb7 ? help"
+                                        : "i type \xc2\xb7 : command \xc2\xb7 j/k session \xc2\xb7 pgup/pgdn scroll \xc2\xb7 ? help";
         return;
     }
     if (m == TUI_IMODE_COMMAND) {
@@ -4852,8 +5672,9 @@ static void chat_input(tui_bar_t *b, const tui_input_t *in) {
     else if (!session_ready(s)) snprintf(placeholder, sizeof placeholder, "Waiting for someone in %s to answer\xe2\x80\xa6", s->name);
     else snprintf(placeholder, sizeof placeholder, "Message %s", s->name);
     b->placeholder = placeholder;
-    snprintf(hint, sizeof hint, "enter send \xc2\xb7 / commands%s \xc2\xb7 esc normal \xc2\xb7 f1 help",
-             session_count() > 1 ? " \xc2\xb7 tab next session" : "");
+    snprintf(hint, sizeof hint, "enter send \xc2\xb7 / commands%s%s \xc2\xb7 esc normal \xc2\xb7 f1 help",
+             session_count() > 1 ? " \xc2\xb7 tab next session" : "",
+             !s->initialising && s->engine.file_seq > 0 ? " \xc2\xb7 ctrl+f files" : "");
     b->hint = hint;
 }
 
@@ -5180,6 +6001,10 @@ static const tui_dialog_t *current_dialog(void) {
             d.input = NULL;
             d.keys = "y delete \xc2\xb7 n cancel";
             break;
+        case MODE_FILE_ASK:
+            d.n_text = file_ask_paras(paras, &d.title, &d.keys);
+            d.input = NULL;
+            break;
         case MODE_UPDATE: {
             static update_view_t v;
             static const char *lines[UPDATE_LOG_MAX];
@@ -5278,6 +6103,18 @@ static tui_bar_t current_bar(void) {
         case MODE_SAVE_BROWSE:
             b.chip = "SAVE";
             b.hint = "s save here \xc2\xb7 enter open \xc2\xb7 h up \xc2\xb7 ~ home \xc2\xb7 j/k move \xc2\xb7 esc close";
+            break;
+        case MODE_FILES:
+            b.chip = "FILES";
+            b.hint = files_hint();
+            break;
+        case MODE_FILE_VIEW:
+            b.chip = "PICTURE";
+            b.hint = viewer_hint();
+            break;
+        case MODE_FILE_ASK:
+            b.chip = g_app.file_back == MODE_FILE_VIEW ? "PICTURE" : "FILES";
+            b.tone = TUI_TONE_PROMPT;
             break;
         case MODE_CHAT:
             chat_input(&b, &g_app.input);
@@ -5400,6 +6237,12 @@ static void render(void) {
         case MODE_SIGN_BROWSE:     render_browser(rows_n, cols_n, hhmm, &bar); return;
         case MODE_SEND_BROWSE:     render_send_browser(rows_n, cols_n, hhmm, &bar); return;
         case MODE_SAVE_BROWSE:     render_save_browser(rows_n, cols_n, hhmm, &bar); return;
+        case MODE_FILES:           render_files(rows_n, cols_n, hhmm, &bar); return;
+        case MODE_FILE_VIEW:       render_viewer(rows_n, cols_n, hhmm, &bar); return;
+        case MODE_FILE_ASK:
+            if (g_app.file_back == MODE_FILE_VIEW) render_viewer(rows_n, cols_n, hhmm, &bar);
+            else render_files(rows_n, cols_n, hhmm, &bar);
+            return;
         default: break;
     }
 
@@ -5583,7 +6426,12 @@ static void plain_file_view(void *ui, int num, const char *name, const uint8_t *
     static const uint8_t bg[3] = { 0, 0, 0 };
     image_thumb_t th;
     char why[160];
-    if (!term_ansi_ok()) { printf("* file %d came, but showing a picture needs a terminal with colour - :download %d saves it\n", num, num); return; }
+    const file_entry_t *f = g_plain_engine ? chat_file(g_plain_engine, num) : NULL;
+    if (!term_ansi_ok()) {
+        // One you've just sent isn't worth a note.
+        if (!(f && f->mine)) printf("* file %d came, but showing a picture needs a terminal with colour - :download %d saves it\n", num, num);
+        return;
+    }
     if (image_thumbnail(data, len, TUI_IMAGE_MAX_W, TUI_IMAGE_MAX_H, bg, &th, why, sizeof why) != 0) {
         printf("* can't show file %d: %s - :download %d saves it\n", num, why, num);
         return;

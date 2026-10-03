@@ -186,6 +186,7 @@ size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out) {
     if (b0 == 0x0f) { out->type = TUI_KEY_TOGGLE_CONSOLE; return 1; }
     if (b0 == 0x14) { out->type = TUI_KEY_TOGGLE_CHAT; return 1; }
     if (b0 == 0x13) { out->type = TUI_KEY_SETTINGS; return 1; }
+    if (b0 == 0x06) { out->type = TUI_KEY_FILES; return 1; }
     if (b0 == 0x03) { out->type = TUI_KEY_CTRL_C; return 1; }
     if (b0 < 0x20) { out->type = TUI_KEY_UNKNOWN; return 1; }
 
@@ -374,9 +375,9 @@ static int normal_feed(tui_input_t *in, const tui_key_t *key) {
         switch (key->ch[0]) {
             case 'h': in->cursor = step_left(in, in->cursor); return 1;
             case 'l': in->cursor = step_right(in, in->cursor); normal_clamp(in); return 1;
-            // Handled by the caller: switching sessions, jumping to the newest message, opening the help,
-            // and showing or hiding the console, the chat and the sidebar.
-            case 'j': case 'k': case 'G': case '?': case 'c': case 'C': case 's': return 0;
+            // Handled by the caller: switching sessions, jumping to the newest message, opening the help
+            // or the files, and showing or hiding the console, the chat and the sidebar.
+            case 'j': case 'k': case 'G': case '?': case 'f': case 'c': case 'C': case 's': return 0;
             case 'i': in->mode = TUI_IMODE_INSERT; return 1;
             case 'a': in->cursor = step_right(in, in->cursor); in->mode = TUI_IMODE_INSERT; return 1;
             case 'I': in->cursor = 0; in->mode = TUI_IMODE_INSERT; return 1;
@@ -520,7 +521,8 @@ int tui_input_feed(tui_input_t *in, const tui_key_t *key) {
 // terminal's theme, whatever it is, and changes with it. Peers' colours are the only exception
 // (see readable()).
 
-#define FRAME_CAP 262144
+// A picture page can fill the screen with cells of two 24-bit colours each, up to 40 bytes a cell.
+#define FRAME_CAP 1048576
 static char g_frame[FRAME_CAP];
 
 typedef struct { char *buf; size_t cap; size_t len; } wbuf_t;
@@ -999,23 +1001,31 @@ static void draw_image_row(pen_t *p, const tui_image_t *im, int cols, int r) {
         if (r == 0) ptext(p, S_FAINT, "(a picture: it needs a terminal with colour)");
         return;
     }
+    int y0 = r * 2, y1 = r * 2 + 1;
+    uint8_t last[6] = { 0 };
     for (int x = 0; x < w && p->used < p->room; x++) {
         int sx = (int)((int64_t)x * im->w / w);
-        int y0 = r * 2, y1 = r * 2 + 1;
         const uint8_t *top = im->rgb + ((size_t)((int64_t)y0 * im->h / h) * (size_t)im->w + (size_t)sx) * 3;
-        if (y1 < h) {
-            const uint8_t *bot = im->rgb + ((size_t)((int64_t)y1 * im->h / h) * (size_t)im->w + (size_t)sx) * 3;
-            wapp(p->w, "\x1b[38;2;%u;%u;%u;48;2;%u;%u;%um\xe2\x96\x80", top[0], top[1], top[2], bot[0], bot[1], bot[2]);
-        } else {
-            wapp(p->w, "\x1b[0;38;2;%u;%u;%um\xe2\x96\x80", top[0], top[1], top[2]);
-        }
+        const uint8_t *bot = y1 < h ? im->rgb + ((size_t)((int64_t)y1 * im->h / h) * (size_t)im->w + (size_t)sx) * 3 : top;
+        if (x > 0 && memcmp(last, top, 3) == 0 && memcmp(last + 3, bot, 3) == 0) wapp(p->w, "\xe2\x96\x80");
+        else if (y1 < h) wapp(p->w, "\x1b[38;2;%u;%u;%u;48;2;%u;%u;%um\xe2\x96\x80", top[0], top[1], top[2], bot[0], bot[1], bot[2]);
+        else wapp(p->w, "\x1b[0;38;2;%u;%u;%um\xe2\x96\x80", top[0], top[1], top[2]);
+        memcpy(last, top, 3);
+        memcpy(last + 3, bot, 3);
         p->used++;
     }
     wapp(p->w, "\x1b[0m");
 }
 
-// A file being downloaded: a progress bar (heavier without colour), and its text.
+// What a file is doing: a progress bar (heavier without colour) and its text, or the text after
+// its mark.
 static void draw_progress(pen_t *p, const tui_progress_t *pg) {
+    if (pg->kind != TUI_PROGRESS_BAR) {
+        if (pg->kind == TUI_PROGRESS_DONE) ptext(p, S_GREEN, G_CHECK " ");
+        else if (pg->kind == TUI_PROGRESS_FAILED) ptext(p, S_RED, G_CROSS " ");
+        pell(p, S_FAINT, pg->text, p->room - p->used);
+        return;
+    }
     int room = p->room - p->used;
     int bw = room >= 40 ? 16 : room >= 24 ? 8 : 0;
     int lit = pg->permille <= 0 ? 0 : pg->permille >= 1000 ? bw : pg->permille * bw / 1000;
@@ -1940,6 +1950,24 @@ static void draw_value(pen_t *p, const tui_row_t *r, int on) {
         case TUI_V_MUTED:
             pell(p, S_FAINT, r->value, room);
             break;
+        case TUI_V_PROGRESS: {
+            int bw = room >= 30 ? 10 : room >= 18 ? 6 : 0;
+            int pm = r->permille < 0 ? 0 : r->permille > 1000 ? 1000 : r->permille;
+            if (bw) {
+                sty(p->w, S_ACCENT);
+                for (int i = 0; i < pm * bw / 1000; i++) wapp(p->w, G_HEAVY);
+                sty(p->w, S_FAINT);
+                for (int i = pm * bw / 1000; i < bw; i++) wapp(p->w, G_H);
+                p->used += bw;
+                ptext(p, S_PLAIN, " ");
+            }
+            pell(p, S_PLAIN, r->value, p->room - p->used);
+            break;
+        }
+        case TUI_V_BAD:
+            ptext(p, S_RED, G_CROSS " ");
+            pell(p, S_PLAIN, r->value, room - 2);
+            break;
         default:
             pell(p, S_PLAIN, r->value, room);
             break;
@@ -2057,6 +2085,11 @@ static int page_inner_width(int cols, int with_nav) {
 int tui_page_row_cols(int cols, int with_nav) { return page_inner_width(cols, with_nav) - 4; }
 
 int tui_side_width(int cols, int with_nav) { return side_width(page_inner_width(cols, with_nav)); }
+
+int tui_nav_text_cols(int cols) {
+    int navw = cols - page_inner_width(cols, 1) - 1;
+    return navw > 6 ? navw - 6 : 0;
+}
 
 // The side column: its title, a blank row, then its entries, scrolled so the selected one is in
 // the middle when they don't all fit, with a rule on its right.
@@ -2405,6 +2438,102 @@ int tui_render_text(int rows, int cols, const char *title, const char *clock, co
     for (int v = total - *scroll; v < ih; v++) blank_row(&w, top + v, left, iw);
     finish_frame(&w, rows, cols, bar, 0, 0);
     return most;
+}
+
+// ---- a picture ----
+
+// Inside the border: a column of padding either side, and a blank row and the caption under the picture.
+void tui_picture_room(int rows, int cols, int *w, int *h) {
+    clamp_size(&rows, &cols);
+    int pw = cols - 4, pr = rows - 5;
+    *w = pw < 1 ? 1 : pw < TUI_PICTURE_MAX_W ? pw : TUI_PICTURE_MAX_W;
+    *h = pr < 1 ? 2 : pr * 2 < TUI_PICTURE_MAX_H ? pr * 2 : TUI_PICTURE_MAX_H;
+}
+
+static void center_text(pen_t *p, style_t st, const char *mark, style_t mark_st, const char *t) {
+    int c = utf8_str_cols(t) + (mark ? utf8_str_cols(mark) + 1 : 0);
+    pspace(p, c < p->room ? (p->room - c) / 2 : 0);
+    if (mark) { ptext(p, mark_st, mark); ptext(p, S_PLAIN, " "); }
+    pell(p, st, t, p->room - p->used);
+}
+
+static void center_bar(pen_t *p, int permille) {
+    int pm = permille < 0 ? 0 : permille > 1000 ? 1000 : permille;
+    char pct[8];
+    snprintf(pct, sizeof pct, " %d%%", pm / 10);
+    int bw = p->room - 8 < 40 ? p->room - 8 : 40;
+    if (bw < 4) bw = 0;
+    pspace(p, (p->room - bw - (int)strlen(pct)) / 2);
+    sty(p->w, S_ACCENT);
+    for (int i = 0; i < pm * bw / 1000; i++) wapp(p->w, G_HEAVY);
+    sty(p->w, S_FAINT);
+    for (int i = pm * bw / 1000; i < bw; i++) wapp(p->w, G_H);
+    p->used += bw;
+    ptext(p, S_BOLD, pct);
+}
+
+void tui_render_picture(int rows, int cols, const tui_picture_t *pic, const tui_bar_t *bar, int color_enabled) {
+    clamp_size(&rows, &cols);
+    g_color = color_enabled;
+    g_row_bg = "";
+    g_input_h = 0;
+    wbuf_t w = { g_frame, FRAME_CAP, 0 };
+    begin_frame(&w);
+
+    rect_t r = { 1, 1, rows - 1, cols };
+    span_t title, right;
+    span_init(&right, r.w);
+    if (pic->clock) ptext(&right.p, S_FAINT, pic->clock);
+    span_init(&title, title_room(r.w, right.p.used));
+    crumb_title(&title, pic->title ? pic->title : "");
+    box(&w, r, border_sgr(TUI_TONE_PAGE), &title, &right, NULL);
+
+    int top = r.top + 1, ih = r.h - 2, left = r.left + 1, iw = r.w - 2;
+    int caption = ih > 2, area = caption ? ih - 2 : ih;
+    const tui_image_t *im = pic->image && pic->image->rgb && pic->image->w > 0 && pic->image->h > 0 ? pic->image : NULL;
+    const char *lines[8];
+    size_t lens[8];
+    int nl = 0;
+    for (const char *s = pic->note; !im && s && *s && nl < 8; ) {
+        const char *end = strchr(s, '\n');
+        lens[nl] = end ? (size_t)(end - s) : strlen(s);
+        lines[nl++] = s;
+        if (!end) break;
+        s = end + 1;
+    }
+    const tui_progress_t *pg = im ? NULL : pic->progress;
+    int pg_rows = pg ? (pg->kind == TUI_PROGRESS_BAR ? 2 : 1) : 0;
+    int block = im ? (im->h + 1) / 2 : nl + (nl && pg ? 1 : 0) + pg_rows;
+    if (block > area) block = area;
+    int first = (area - block) / 2;
+
+    for (int i = 0; i < ih; i++) {
+        pen_t p;
+        inner_begin(&w, &p, top + i, left, iw);
+        int k = i - first;
+        if (caption && i == ih - 1) {
+            if (pic->caption) center_text(&p, S_FAINT, NULL, S_PLAIN, pic->caption);
+        } else if (i < area && k >= 0 && k < block) {
+            int under = k - nl - (nl && pg ? 1 : 0);
+            if (im) {
+                pspace(&p, im->w < p.room ? (p.room - im->w) / 2 : 0);
+                draw_image_row(&p, im, im->w, k);
+            } else if (k < nl) {
+                char t[TUI_LINE_MAX];
+                size_t n = lens[k] < sizeof t - 1 ? lens[k] : sizeof t - 1;
+                memcpy(t, lines[k], n);
+                t[n] = '\0';
+                center_text(&p, k == 0 ? S_BOLD : S_FAINT, NULL, S_PLAIN, t);
+            } else if (pg && under == 0 && pg->kind == TUI_PROGRESS_BAR) {
+                center_bar(&p, pg->permille);
+            } else if (pg && under == pg_rows - 1) {
+                const char *mark = pg->kind == TUI_PROGRESS_DONE ? G_CHECK : pg->kind == TUI_PROGRESS_FAILED ? G_CROSS : NULL;
+                center_text(&p, S_FAINT, mark, pg->kind == TUI_PROGRESS_DONE ? S_GREEN : S_RED, pg->text);
+            }
+        }
+        inner_end(&p);
+    }
+    finish_frame(&w, rows, cols, bar, 0, 0);
 }
 
 // ---- a dialog over the screen ----
