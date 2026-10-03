@@ -1,140 +1,6 @@
 # Changelog
 
-## Unreleased
-
-### Added
-- `:save` saves what's in use now to the save that's open, after asking, command line options
-  included. With no save open, it does what `:install` does.
-- An `autosave` setting, off by default. On, a setting you change, and a key you verify or
-  forget, is saved as you change it. Off, they last until chat exits, and the reply to a
-  setting you change ends in `· not saved (autosave is off)`. `:save` saves them, and turning
-  autosave on saves the ones changed meanwhile. The `autosave` row is always saved itself, so
-  turning it on lasts. Either way, the signing key is only saved by `:save` or `:install`.
-- A files page. `Ctrl+F` (`f` in NORMAL, or `:files`) lists the files offered in the session,
-  theirs then yours, newest first, with what each one is doing and the selected one's details
-  beside the list, so nothing needs its number typed. `Enter` shows a picture or saves a file in
-  Downloads, `d` saves in Downloads, `s` in a folder you pick, `v` shows or hides a picture in
-  the chat, `y` copies where a file was saved and `n` sends one. `x` stops a fetch, or stops
-  offering one of yours, after a box asks. A file over your size limit is fetched once a box asks
-  (with roughly how long it takes), instead of needing `anyway`.
-- Pictures on a page of their own, as big as the terminal allows (up to 200 by 120 pixels, where
-  the chat shows 64 by 48). `Enter` on the files page opens one, fetching it first if it isn't
-  here and showing how far it's got until it comes. `j` / `k` go to the next and previous picture.
-- A picture you send shows in your own chat straight away, and `:show N` works for your own
-  pictures, from the file you offered as long as it hasn't changed.
-- Progressive JPEGs and GIFs are pictures too, shown with `:show N` like a PNG. An animated GIF
-  shows its first frame, still. They're read by chat's own decoders, with the same checks as
-  the others.
-
-### Changed
-- The Windows exe has version information and a manifest (Properties, Details shows them).
-  Antivirus heuristics count an exe without them against it, and Malwarebytes flagged
-  0.4.0-beta.2 as Malware.Heuristic.2062.
-- On Windows, tor starts inside the job that ends it with chat, instead of being started
-  suspended, added to the job, then resumed. This needs Windows 10 1607 or later.
-- After `:install`, a setting you change or a key you verify or forget isn't saved straight
-  away any more: `:save` saves it, or `:set autosave on` saves each change as before. A save
-  from an earlier version has no `autosave` row, so it opens with autosave off.
-- `Ctrl+C` asks before quitting, in a box that says how many sessions and peers are open, and
-  what quitting loses: files still downloading, settings or a signing key that aren't saved,
-  and an update that's still running. `y` quits, and `n` or `Esc` stays. In `--simple`, a
-  second `Ctrl+C` within 3 seconds quits, and from a script it still quits at once.
-- The row under the line that offered a file stays once the fetch is over: where it was saved,
-  or why it failed and how to try again. Under one of yours it shows who's fetching it and how
-  far they've got, then who it has gone to in full. The console says so too.
-- The reply to `:download`, `:show`, `:cancel` and `:send` goes on the bottom bar as well as the
-  console, so it isn't missed with the console hidden.
-- `:files` with `--simple` says why a fetch failed, and for yours, who's fetching it or has.
-
-## 0.4.0-beta.2
-
-### Changed
-- **Compare verify codes** on the settings page is now `optional` by default. What you send
-  goes to every peer, whether you've compared codes or not. `:set verify required`, or the new
-  `--verify-required`, holds messages back from a peer until you've marked its code as matching
-  (`:verify NICK ok`). `--verify-optional` still works.
-- `:update` opens a box over the chat that shows the update while it runs. At the top is a
-  console with each step: what it fetched from GitHub, the signature and SHA-256 checks, and
-  where it installed. Under that is a progress bar for the download, then a line saying what
-  it's doing now ("Checking GitHub for a newer release", "Release v0.4.0 found",
-  "Downloading v0.4.0", "Installing v0.4.0"). Esc hides the box and the update keeps going.
-  `:update` shows it again. The result still goes to the console.
-- For a signing key from a file, `:install` now saves the file's path instead of the key, and
-  chat reads the file again each time it starts. If the file is gone, or holds a different key,
-  the console says so. A key file that an earlier `:install` saved as the key keeps loading as
-  before, and is saved as a path the next time you pick it and run `:install`. A pasted key
-  has no file, so `:install` still seals the key itself.
-- The signing identity picker has a **Type a key file path** row under AGE and PGP, for when
-  you'd rather not use the file browser. In the browser, `/` does the same, starting with the
-  selected file. `:set sign age:PATH` and `:set sign pgp:PATH` work too. `~` is your home folder.
-- The picker, the browser, the path field and the paste box say why chat needs your secret key:
-  it signs your handshakes, and only the secret key can make a signature. It stays in memory and
-  is never sent.
-- The file browser (for a key file, and for `:send`) is drawn as a tree: the folder you're in
-  and the folders above it, one level per row, with its folders and then its files under it.
-  Hidden ones come last, and there's no `..` row (`h` goes up). How many levels get their own row
-  depends on the terminal's width. The levels above those are joined into the top row's path,
-  cut from the left with `…` if it's still too long. The top line says how many folders and files
-  there are. On a wide terminal, a column left of the tree lists the parent folder, with the
-  folder you're in selected and the parent's path above it. The sidebar shows the selected
-  entry: whether it's a file, folder or link, its size or number of entries, when it was changed
-  and its permissions. In the key file browser it also says whether a small file holds an AGE or
-  PGP secret key, and if one does but others can read the file, says to `chmod 600` it. Going up
-  selects the folder you came from, and `~` goes to the home folder. The key file browser opens
-  in the folder of the key file in use.
-- `:install` while nothing saved is open (`Esc` at the start) asks whether to use what's saved.
-  Yes asks for its passphrase, after picking a save from a list when there's more than one, and
-  from then on that save is in use, as if it had been opened at the start. Settings changed
-  before that which it doesn't have, and keys verified before that, are kept and saved to it.
-  A command line option doesn't undo a setting changed in that run, and keys from a save
-  uninstalled in that run are left out.
-  No makes a new save, with a name and a passphrase of its own. Before, the only choice was to
-  save what's in use over it. `:install NAME` for another save while one is open asks whether to
-  save over it, then asks for that save's passphrase.
-- A picture that was shown is kept in memory (up to 128 MB in all, the oldest dropped first)
-  and wiped when the session closes. `:download N` saves it from there straight away, and
-  `:show N` draws it again, without fetching it a second time.
-- `:download N` for a file that's already saved says where it is instead of fetching it again,
-  as long as the saved file still matches the offer. `:show N` of a picture saved earlier draws
-  it from the saved file.
-- `:download N FOLDER` saves in a folder other than Downloads, copying from an earlier save or a
-  shown picture when there is one. `:saveto N` picks the folder in a file browser: Enter opens a
-  folder and `s` saves in the one shown.
-- `:download` without a number takes the newest file that isn't saved yet.
-- Asking for a second file from a sender while one is coming queues it, and it starts by itself
-  once the first is done, instead of being refused. The row under its offer and `:files` say
-  what it's waiting for, and `:cancel N` takes it off the queue.
-- `:download N` while a picture is coming to be shown, or `:show N` while it's coming to be
-  saved, does both once it's here.
-- `:files` says where each file was saved, and the message when a file is saved gives its size
-  and how long it took.
-
-### Fixed
-- `:install` could keep the old signing key after you picked a different one, and said a key that
-  was saved wasn't. It compared the keys the wrong way round.
-
-### Added
-- More than one save. `:install NAME` saves your settings and signing key as a save called
-  NAME, in `~/.config/chat/saves/NAME`, with its own passphrase. `:install` alone keeps using
-  the save in use, and the save in `~/.config/chat` itself is called `default`.
-  `:uninstall NAME` deletes that save. With more than one save, chat lists them when it starts,
-  with what each one holds and when it was last saved, and you pick the one to open before its
-  passphrase is asked for. Esc on the passphrase goes back to the list. `--simple` and `--update`
-  list them in the terminal and take a number or a name. `--save NAME` opens that save without
-  the list, and if there's no save called NAME yet, chat starts from its defaults and
-  `:install` makes it. Without `--save`, `CHAT_INSTALL_PASSWORD` opens the first save it fits.
-  With only one save, chat asks for its passphrase straight away, as before.
-- Verified keys. For a peer that signs with an identity, `:verify NICK ok` keeps its signing
-  key and nick as verified, for every session in the run. A peer that signs a later handshake
-  with a verified key needs no code comparing. `:install` saves the keys in a `verified` file,
-  sealed with the settings of the save in use, and each change after that is saved. `:verified` lists them with
-  their fingerprints, and `:verified forget NICK` (or `all`) removes them.
-- When a peer has the nick of a verified key but signs with another key, or none, chat prints
-  a warning in the chat (bold yellow, and in yellow in `--simple`) as well as the console, and
-  the sidebar shows `key changed`. The peer counts as not compared until you compare codes
-  again. `:verify NICK ok` then replaces the key kept for that nick.
-
-## 0.4.0-beta.1
+## 0.4.0
 
 ### Security
 - Verify codes and identity fingerprints are 128 bits, shown in groups of four hex digits. A
@@ -200,16 +66,17 @@
 - The `hi` sent to every connected peer every 10 seconds is gone. It was three pieces, and it
   marked chat's traffic as clearly as a header would. A peer now only gets a `hi` when it has
   gone quiet, or hasn't re-handshaken with new keys.
-- Nothing you send goes to a peer until you've compared its verify code with them over another
-  channel and marked it with `:verify NICK ok`. Anyone with a session's id and password could
-  sit between two members and read what they said. The code only matches on both ends if
-  nobody is in the middle. When a peer joins, chat shows the code to compare. `:verify NICK no`
-  marks a code that didn't match, and that peer then gets nothing. Messages from a peer you
-  haven't compared show `(code not compared)`, and the sidebar says `compare code` until you do.
-  If a peer's signing identity was confirmed this way and it comes back with a fresh handshake
-  signed by the same key, you don't need to compare again. **Compare verify codes** on the
-  settings page (`:set verify optional`, `--verify-optional`) sends to everyone, compared or
-  not.
+- Verify codes: when a peer joins, chat shows a code to compare with them over another channel.
+  Anyone with a session's id and password could sit between two members and read what they
+  said, and the code only matches on both ends if nobody is in the middle. `:verify NICK ok`
+  marks it as matching, and `:verify NICK no` marks a code that didn't match: that peer then
+  gets nothing. By default what you send goes to every other peer, compared or not.
+  **Compare verify codes** on the settings page (`:set verify required`, `--verify-required`)
+  holds it back from a peer until you've marked its code `ok`. Until then, that peer's messages
+  show `(code not compared)`, the sidebar says `compare code`, and the input box says your
+  messages aren't being sent to them (`:verify NICK` shows the code). If a peer's signing
+  identity was confirmed this way and it comes back with a fresh handshake signed by the same
+  key, you don't need to compare again.
 - DHT routing only connects to the Nostr relays while it needs them: before anyone is reached,
   while a peer is only reachable through them, or while a peer's UDP has gone quiet. It
   disconnects a minute after. Before, every DHT-routed member's address stayed connected to
@@ -228,30 +95,6 @@
 - A DHT lookup starts from the nodes that answered earlier lookups, and only asks the bootstrap
   servers while it knows fewer than eight. Before, every lookup (every 30 seconds while alone)
   went to the same four bootstrap servers with the room's lookup key.
-
-### Fixed
-- A message sent just before a peer rekeyed or rejoined could be lost, because the re-handshake
-  discarded its retries.
-- Joining or creating a session without the 512 MiB of free memory its key needs quit chat
-  immediately, leaving the terminal in raw mode and the other sessions without a goodbye. The
-  session now doesn't start, and chat says why.
-- In Tor mode, a long session stopped reaching new members once it had seen 58 onion addresses.
-  The least recently used one is now dropped to make room.
-- The DHT bootstrap lookup, which runs on a thread, could write into a session after it closed.
-- A key file or Tor cookie file that was a FIFO or a device made chat hang.
-- A native build (`just build`, `just build test`) always used the build machine's CPU features
-  in liboqs, so a copy could crash on a CPU without them. It now picks AVX2 code at run time.
-- `--simple` writing to a pipe that closes no longer kills chat before its sessions leave, and a
-  terminal resize no longer cuts a frame short.
-- libsodium's build started a compiler for every file at once, which could run a small machine
-  out of memory.
-- `--nonostr` and `--nostr-always` were overridden by the routing choice. `--simple` without a
-  terminal, or `--routing dht+nostr` given after them, went back to the relay fallback, so
-  `--nonostr` still connected to the Nostr relays. They now apply whatever the routing, and
-  `--simple --nonostr` without a terminal uses DHT only. The routing line says when the relays
-  are always on.
-- `Enter` on a message over the 250-byte limit sent it with the end cut off. It now stays in the
-  box, where the count is already red, and the bottom row says how far over the limit it is.
 
 ### Added
 - A page listing every key and command: `F1`, `?` in NORMAL, or `:help`. `Enter` on a command
@@ -278,11 +121,11 @@
   using the names `:set` uses, and the key goes in `~/.config/chat/key`. Both are sealed with
   one passphrase you choose (Argon2id, XChaCha20-Poly1305), which it asks for even with no key
   to save, and nothing in them is stored in the clear. A key installed later is sealed under
-  the same passphrase without asking for it again. After that, a setting is saved when you
-  change it, and chat starts on your sessions instead of the settings page. On startup it asks
-  for the passphrase, or reads it from `CHAT_INSTALL_PASSWORD`, and says so if it's wrong.
-  Command line options override what's saved, for that run. `:uninstall` deletes it all.
-  Sessions, messages, peers and files are never saved.
+  the same passphrase without asking for it again. After that, chat starts on your sessions
+  instead of the settings page. On startup it asks for the passphrase, or reads it from
+  `CHAT_INSTALL_PASSWORD`, and says so if it's wrong. Command line options override what's
+  saved, for that run. `:uninstall` deletes it all. Sessions, messages, peers and files are
+  never saved.
 - `:send` without a path opens a file browser to pick the file to offer.
 - **Files and pictures**: `:send PATH` offers a file to the session. Nothing is transferred
   until someone fetches it with `:download N` (saved in `~/Downloads`), or, for a PNG or JPEG,
@@ -311,9 +154,47 @@
   send something.
 - Your nick is highlighted wherever a message mentions it (`@nick`), not just the time next to
   it.
-- While a peer's verify code hasn't been compared, the input box says your messages aren't
-  being sent to them, and that `:verify NICK` shows the code. Before, only the console said so,
-  once per message.
+- More than one save. `:install NAME` saves your settings and signing key as a save called
+  NAME, in `~/.config/chat/saves/NAME`, with its own passphrase. `:install` alone keeps using
+  the save in use, and the save in `~/.config/chat` itself is called `default`.
+  `:uninstall NAME` deletes that save. With more than one save, chat lists them when it starts,
+  with what each one holds and when it was last saved, and you pick the one to open before its
+  passphrase is asked for. Esc on the passphrase goes back to the list. `--simple` and `--update`
+  list them in the terminal and take a number or a name. `--save NAME` opens that save without
+  the list, and if there's no save called NAME yet, chat starts from its defaults and
+  `:install` makes it. Without `--save`, `CHAT_INSTALL_PASSWORD` opens the first save it fits.
+  With only one save, chat asks for its passphrase straight away, as before.
+- Verified keys. For a peer that signs with an identity, `:verify NICK ok` keeps its signing
+  key and nick as verified, for every session in the run. A peer that signs a later handshake
+  with a verified key needs no code comparing. `:install` saves the keys in a `verified` file,
+  sealed with the settings of the save in use. `:verified` lists them with their fingerprints,
+  and `:verified forget NICK` (or `all`) removes them.
+- When a peer has the nick of a verified key but signs with another key, or none, chat prints
+  a warning in the chat (bold yellow, and in yellow in `--simple`) as well as the console, and
+  the sidebar shows `key changed`. The peer counts as not compared until you compare codes
+  again. `:verify NICK ok` then replaces the key kept for that nick.
+- `:save` saves what's in use now to the save that's open, after asking, command line options
+  included. With no save open, it does what `:install` does.
+- An `autosave` setting, off by default. On, a setting you change, and a key you verify or
+  forget, is saved as you change it. Off, they last until chat exits, and the reply to a
+  setting you change ends in `· not saved (autosave is off)`. `:save` saves them, and turning
+  autosave on saves the ones changed meanwhile. The `autosave` row is always saved itself, so
+  turning it on lasts. Either way, the signing key is only saved by `:save` or `:install`.
+- A files page. `Ctrl+F` (`f` in NORMAL, or `:files`) lists the files offered in the session,
+  theirs then yours, newest first, with what each one is doing and the selected one's details
+  beside the list, so nothing needs its number typed. `Enter` shows a picture or saves a file in
+  Downloads, `d` saves in Downloads, `s` in a folder you pick, `v` shows or hides a picture in
+  the chat, `y` copies where a file was saved and `n` sends one. `x` stops a fetch, or stops
+  offering one of yours, after a box asks. A file over your size limit is fetched once a box asks
+  (with roughly how long it takes), instead of needing `anyway`.
+- Pictures on a page of their own, as big as the terminal allows (up to 200 by 120 pixels, where
+  the chat shows 64 by 48). `Enter` on the files page opens one, fetching it first if it isn't
+  here and showing how far it's got until it comes. `j` / `k` go to the next and previous picture.
+- A picture you send shows in your own chat straight away, and `:show N` works for your own
+  pictures, from the file you offered as long as it hasn't changed.
+- Progressive JPEGs and GIFs are pictures too, shown with `:show N` like a PNG. An animated GIF
+  shows its first frame, still. They're read by chat's own decoders, with the same checks as
+  the others.
 
 ### Changed
 - `just build test` names each binary after its build id, as `chat-<build id>-<system>-<arch>`.
@@ -362,6 +243,97 @@
 - `just build` takes what to build: `just build linux` (was `just build-static`),
   `just build windows` or `win` (was `build-win`), `just build all` (was `all`) and
   `just build test [all|linux|windows]` (was `test-build`). Build directories keep their names.
+- `:update` opens a box over the chat that shows the update while it runs. At the top is a
+  console with each step: what it fetched from GitHub, the signature and SHA-256 checks, and
+  where it installed. Under that is a progress bar for the download, then a line saying what
+  it's doing now ("Checking GitHub for a newer release", "Release v0.4.0 found",
+  "Downloading v0.4.0", "Installing v0.4.0"). Esc hides the box and the update keeps going.
+  `:update` shows it again. The result still goes to the console.
+- For a signing key from a file, `:install` saves the file's path rather than the key, and chat
+  reads the file again each time it starts. If the file is gone, or holds a different key, the
+  console says so. A pasted key has no file, so `:install` seals the key itself.
+- The signing identity picker has a **Type a key file path** row under AGE and PGP, for when
+  you'd rather not use the file browser. In the browser, `/` does the same, starting with the
+  selected file. `:set sign age:PATH` and `:set sign pgp:PATH` work too. `~` is your home folder.
+- The picker, the browser, the path field and the paste box say why chat needs your secret key:
+  it signs your handshakes, and only the secret key can make a signature. It stays in memory and
+  is never sent.
+- The file browser (for a key file, and for `:send`) is drawn as a tree: the folder you're in
+  and the folders above it, one level per row, with its folders and then its files under it.
+  Hidden ones come last, and there's no `..` row (`h` goes up). How many levels get their own row
+  depends on the terminal's width. The levels above those are joined into the top row's path,
+  cut from the left with `…` if it's still too long. The top line says how many folders and files
+  there are. On a wide terminal, a column left of the tree lists the parent folder, with the
+  folder you're in selected and the parent's path above it. The sidebar shows the selected
+  entry: whether it's a file, folder or link, its size or number of entries, when it was changed
+  and its permissions. In the key file browser it also says whether a small file holds an AGE or
+  PGP secret key, and if one does but others can read the file, says to `chmod 600` it. Going up
+  selects the folder you came from, and `~` goes to the home folder. The key file browser opens
+  in the folder of the key file in use.
+- `:install` while nothing saved is open (`Esc` at the start) asks whether to use what's saved.
+  Yes asks for its passphrase, after picking a save from a list when there's more than one, and
+  from then on that save is in use, as if it had been opened at the start. Settings changed
+  before that which it doesn't have, and keys verified before that, are kept and saved to it.
+  A command line option doesn't undo a setting changed in that run, and keys from a save
+  uninstalled in that run are left out.
+  No makes a new save, with a name and a passphrase of its own. `:install NAME` for another save
+  while one is open asks whether to save over it, then asks for that save's passphrase.
+- A picture that was shown is kept in memory (up to 128 MB in all, the oldest dropped first)
+  and wiped when the session closes. `:download N` saves it from there straight away, and
+  `:show N` draws it again, without fetching it a second time.
+- `:download N` for a file that's already saved says where it is instead of fetching it again,
+  as long as the saved file still matches the offer. `:show N` of a picture saved earlier draws
+  it from the saved file.
+- `:download N FOLDER` saves in a folder other than Downloads, copying from an earlier save or a
+  shown picture when there is one. `:saveto N` picks the folder in a file browser: Enter opens a
+  folder and `s` saves in the one shown.
+- `:download` without a number takes the newest file that isn't saved yet.
+- Asking for a second file from a sender while one is coming queues it, and it starts by itself
+  once the first is done, instead of being refused. The row under its offer and `:files` say
+  what it's waiting for, and `:cancel N` takes it off the queue.
+- `:download N` while a picture is coming to be shown, or `:show N` while it's coming to be
+  saved, does both once it's here.
+- `:files` says where each file was saved, and the message when a file is saved gives its size
+  and how long it took.
+- The Windows exe has version information and a manifest (Properties, Details shows them).
+  Antivirus heuristics count an exe without them against it, and Malwarebytes flagged
+  0.4.0-beta.2 as Malware.Heuristic.2062.
+- On Windows, tor starts inside the job that ends it with chat, instead of being started
+  suspended, added to the job, then resumed. This needs Windows 10 1607 or later.
+- `Ctrl+C` asks before quitting, in a box that says how many sessions and peers are open, and
+  what quitting loses: files still downloading, settings or a signing key that aren't saved,
+  and an update that's still running. `y` quits, and `n` or `Esc` stays. In `--simple`, a
+  second `Ctrl+C` within 3 seconds quits, and from a script it still quits at once.
+- The row under the line that offered a file stays once the fetch is over: where it was saved,
+  or why it failed and how to try again. Under one of yours it shows who's fetching it and how
+  far they've got, then who it has gone to in full. The console says so too.
+- The reply to `:download`, `:show`, `:cancel` and `:send` goes on the bottom bar as well as the
+  console, so it isn't missed with the console hidden.
+- `:files` with `--simple` says why a fetch failed, and for yours, who's fetching it or has.
+
+### Fixed
+- A message sent just before a peer rekeyed or rejoined could be lost, because the re-handshake
+  discarded its retries.
+- Joining or creating a session without the 512 MiB of free memory its key needs quit chat
+  immediately, leaving the terminal in raw mode and the other sessions without a goodbye. The
+  session now doesn't start, and chat says why.
+- In Tor mode, a long session stopped reaching new members once it had seen 58 onion addresses.
+  The least recently used one is now dropped to make room.
+- The DHT bootstrap lookup, which runs on a thread, could write into a session after it closed.
+- A key file or Tor cookie file that was a FIFO or a device made chat hang.
+- A native build (`just build`, `just build test`) always used the build machine's CPU features
+  in liboqs, so a copy could crash on a CPU without them. It now picks AVX2 code at run time.
+- `--simple` writing to a pipe that closes no longer kills chat before its sessions leave, and a
+  terminal resize no longer cuts a frame short.
+- libsodium's build started a compiler for every file at once, which could run a small machine
+  out of memory.
+- `--nonostr` and `--nostr-always` were overridden by the routing choice. `--simple` without a
+  terminal, or `--routing dht+nostr` given after them, went back to the relay fallback, so
+  `--nonostr` still connected to the Nostr relays. They now apply whatever the routing, and
+  `--simple --nonostr` without a terminal uses DHT only. The routing line says when the relays
+  are always on.
+- `Enter` on a message over the 250-byte limit sent it with the end cut off. It now stays in the
+  box, where the count is already red, and the bottom row says how far over the limit it is.
 
 ## 0.3.1
 

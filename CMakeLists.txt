@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.15)
 project(chat VERSION 0.4.0 LANGUAGES C)
 # "-beta.N" on a beta of the version above, empty on a release.
-set(CHAT_PRERELEASE "-beta.2")
+set(CHAT_PRERELEASE "")
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
