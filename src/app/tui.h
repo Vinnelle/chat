@@ -321,6 +321,7 @@ typedef struct {
     const uint8_t *swatch; // a sample of this colour before the value, or NULL
     const char *prefix;    // drawn faint before the label (a tree's lines), or NULL
     int permille;          // TUI_V_PROGRESS's bar, in thousandths
+    int disabled;          // can't be used here: label and value faint, the help says why
 } tui_row_t;
 
 // A list page (settings, the pages under it, and help): rows grouped by section with one selected,

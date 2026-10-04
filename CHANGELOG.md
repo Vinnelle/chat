@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- A device lock for saves. `:set devicelock on` (the **Device lock** row) locks a save to the
+  device it's on: its key then needs a secret only this device can unseal as well as the
+  passphrase, so a copy of its files, from a backup, a synced folder or the disk, can't be opened
+  anywhere else, even with the passphrase. On Linux, systemd's credential service (systemd 256 or
+  later) seals the secret with the TPM 2.0 and systemd's own key, for your user only, without
+  needing the `tss` group. Without that service (runit, OpenRC, s6, or an older systemd), chat
+  speaks to the TPM itself through `/dev/tpmrm0`: it seals the secret under the TPM's storage key,
+  sends it across the TPM's bus encrypted in a session salted to that key, checks every answer's
+  HMAC, and refuses a storage key other than the one it sealed under. That needs the `tss` group,
+  and the greyed-out row says how to join it. On Windows, an RSA key the TPM makes for the save,
+  which never leaves it, seals it. Without a TPM it's systemd's key alone, or DPAPI on Windows, and the box that
+  turns it on says what that leaves. With no save open it applies to the next save `:install`
+  makes, and the open save is sealed again after a box asks. A save is only locked once the
+  device has unsealed its secret again. The list of saves says which ones are locked. Where the
+  device can't lock a save at all, the row is greyed out and its help says why. Older versions of
+  chat can't open a locked save.
+- A locked save is gone for good if what the device keeps for it is wiped, so before anything is
+  locked, a box lists what does that: the TPM being cleared (in the firmware settings, from
+  Windows, or by some firmware updates), a new motherboard or CPU, a reinstall, systemd's key or
+  the machine id changing, the save's `device` file being deleted, and the computer breaking. If
+  the machine id is made anew at each boot, it says a restart would lose the save. For a new save,
+  `:install` shows this box before asking for a passphrase. It says to turn the lock off before
+  any of these you can see coming, and the console says so again once a save is locked.
+
 ## 0.4.0
 
 ### Security

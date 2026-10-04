@@ -406,9 +406,20 @@ int identity_from_password(const char *password, const char *device_id, identity
     return 0;
 }
 
-// The header: "chatkey1", Argon2id's opslimit and memlimit (KiB, big-endian), salt. Then each
-// secret sealed: the header, a nonce, the sealed secret.
+// The header: "chatkey1" ("chatdev1" for a lock that needs a device), Argon2id's opslimit and
+// memlimit (KiB, big-endian), salt. Then each secret sealed: the header, a nonce, the sealed secret.
 #define PASS_MAGIC "chatkey1"
+#define PASS_DEVICE_MAGIC "chatdev1"
+
+static int known_magic(const uint8_t *h) {
+    return memcmp(h, PASS_MAGIC, 8) == 0 || memcmp(h, PASS_DEVICE_MAGIC, 8) == 0;
+}
+
+// A lock that needs a device seals and opens nothing until it has the device's secret.
+static int lock_ready(const pass_lock_t *lk) {
+    if (memcmp(lk->header, PASS_MAGIC, 8) == 0) return !lk->device;
+    return memcmp(lk->header, PASS_DEVICE_MAGIC, 8) == 0 && lk->device;
+}
 
 // Limits above these mean a tampered file, which could otherwise ask for any amount of memory.
 static int derive_lock_key(const char *passphrase, pass_lock_t *lk) {
@@ -416,8 +427,36 @@ static int derive_lock_key(const char *passphrase, pass_lock_t *lk) {
     uint32_t ops = (uint32_t)h[8] << 24 | (uint32_t)h[9] << 16 | (uint32_t)h[10] << 8 | h[11];
     uint32_t mem_kib = (uint32_t)h[12] << 24 | (uint32_t)h[13] << 16 | (uint32_t)h[14] << 8 | h[15];
     if (ops < 1 || ops > 16 || mem_kib < 8 || mem_kib > 1024u * 1024u) return PASS_FORMAT;
-    return crypto_pwhash(lk->key, sizeof lk->key, passphrase, strlen(passphrase), h + 16, ops, (size_t)mem_kib * 1024u,
-                         crypto_pwhash_ALG_ARGON2ID13) == 0 ? 0 : PASS_NOMEM;
+    lk->device = 0;
+    sodium_memzero(lk->key, sizeof lk->key);
+    if (crypto_pwhash(lk->base, sizeof lk->base, passphrase, strlen(passphrase), h + 16, ops, (size_t)mem_kib * 1024u,
+                      crypto_pwhash_ALG_ARGON2ID13) != 0) return PASS_NOMEM;
+    if (memcmp(h, PASS_MAGIC, 8) == 0) memcpy(lk->key, lk->base, sizeof lk->key);
+    return 0;
+}
+
+int pass_needs_device(const uint8_t *sealed, size_t len) {
+    return len >= 8 && memcmp(sealed, PASS_DEVICE_MAGIC, 8) == 0;
+}
+
+void pass_lock_device(pass_lock_t *lk, const uint8_t secret[PASS_DEVICE_SECRET_LEN]) {
+    static const char LABEL[] = "chat device lock v1";
+    memcpy(lk->header, PASS_DEVICE_MAGIC, 8);
+    // Keyed with the passphrase's key: without either one, the key can't be worked out.
+    crypto_generichash_state st;
+    crypto_generichash_init(&st, lk->base, sizeof lk->base, sizeof lk->key);
+    crypto_generichash_update(&st, (const unsigned char *)LABEL, sizeof LABEL - 1);
+    crypto_generichash_update(&st, lk->header + 8, PASS_HEADER_LEN - 8);
+    crypto_generichash_update(&st, secret, PASS_DEVICE_SECRET_LEN);
+    crypto_generichash_final(&st, lk->key, sizeof lk->key);
+    sodium_memzero(&st, sizeof st);
+    lk->device = 1;
+}
+
+void pass_lock_portable(pass_lock_t *lk) {
+    memcpy(lk->header, PASS_MAGIC, 8);
+    memcpy(lk->key, lk->base, sizeof lk->key);
+    lk->device = 0;
 }
 
 int pass_lock_new(const char *passphrase, pass_lock_t *lk) {
@@ -432,13 +471,13 @@ int pass_lock_new(const char *passphrase, pass_lock_t *lk) {
 }
 
 int pass_lock_of(const char *passphrase, const uint8_t *sealed, size_t len, pass_lock_t *lk) {
-    if (len < PASS_SEAL_OVERHEAD || memcmp(sealed, PASS_MAGIC, 8) != 0) return PASS_FORMAT;
+    if (len < PASS_SEAL_OVERHEAD || !known_magic(sealed)) return PASS_FORMAT;
     memcpy(lk->header, sealed, PASS_HEADER_LEN);
     return derive_lock_key(passphrase, lk);
 }
 
 int pass_seal(const pass_lock_t *lk, const void *plain, size_t len, uint8_t *out, size_t cap, size_t *out_len) {
-    if (cap < len + PASS_SEAL_OVERHEAD) return PASS_FORMAT;
+    if (cap < len + PASS_SEAL_OVERHEAD || !lock_ready(lk)) return PASS_FORMAT;
     memcpy(out, lk->header, PASS_HEADER_LEN);
     uint8_t *nonce = out + PASS_HEADER_LEN;
     randombytes_buf(nonce, AEAD_NONCE_LEN);
@@ -450,9 +489,9 @@ int pass_seal(const pass_lock_t *lk, const void *plain, size_t len, uint8_t *out
 }
 
 int pass_unseal(const pass_lock_t *lk, const uint8_t *in, size_t len, void *plain, size_t cap, size_t *plain_len) {
-    if (len < PASS_SEAL_OVERHEAD || memcmp(in, PASS_MAGIC, 8) != 0) return PASS_FORMAT;
+    if (len < PASS_SEAL_OVERHEAD || !known_magic(in)) return PASS_FORMAT;
     if (cap < len - PASS_SEAL_OVERHEAD) return PASS_FORMAT;
-    if (memcmp(in, lk->header, PASS_HEADER_LEN) != 0) return PASS_WRONG;
+    if (memcmp(in, lk->header, PASS_HEADER_LEN) != 0 || !lock_ready(lk)) return PASS_WRONG;
     unsigned long long n;
     const uint8_t *nonce = in + PASS_HEADER_LEN;
     if (crypto_aead_xchacha20poly1305_ietf_decrypt(plain, &n, NULL, nonce + AEAD_NONCE_LEN,

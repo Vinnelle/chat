@@ -66,6 +66,35 @@ const char *platform_home_dir(void);
 // program on the machine can read it. Returns -1 if there isn't one.
 int platform_machine_id(char *out, size_t cap);
 
+// A secret sealed to this device, for a save locked to it. Ids like the machine id are no use for
+// that, since anything that can read the files can read them too: the device has to hold a key it
+// never lets out. On Linux that's systemd's credential service (systemd 256 or later), which seals
+// it with this computer's TPM 2.0 and systemd's own key (only root can read it), for this user
+// only. On Windows it's an RSA key the TPM makes for it and never lets out. Without a TPM it's
+// systemd's key alone, or DPAPI on Windows. The sealed form is kept with the save, and nothing
+// anywhere else can unseal it.
+#define DEVICE_SECRET_LEN 32
+#define DEVICE_SEALED_MAX 8192
+typedef enum { DEVICE_NONE, DEVICE_TPM, DEVICE_OS } device_kind_t;
+// What sealing would use here, checked without sealing anything. For DEVICE_NONE, why says what's
+// missing.
+device_kind_t platform_device_kind(char *why, size_t why_cap);
+// What a sealed form uses: DEVICE_NONE if it isn't one this system makes.
+device_kind_t platform_device_sealed_kind(const uint8_t *sealed, size_t len);
+// What a kind uses here, for the box that turns the lock on.
+const char *platform_device_uses(device_kind_t kind);
+// What wipes what this device keeps for a save locked this way, and with it the save, for good:
+// up to max short phrases for a list ("the TPM is cleared: ..."). Returns how many.
+#define DEVICE_LOSSES_MAX 6
+int platform_device_losses(device_kind_t kind, const char **out, int max);
+// Seals secret, then unseals it again to be sure it comes back. Returns the sealed form's length,
+// or -1 with why set.
+long platform_device_seal(const uint8_t secret[DEVICE_SECRET_LEN], uint8_t *out, size_t cap, char *why, size_t why_cap);
+// 0, or -1 with why set.
+int platform_device_unseal(const uint8_t *sealed, size_t len, uint8_t secret[DEVICE_SECRET_LEN], char *why, size_t why_cap);
+// Destroys what this device keeps for it (on Windows, its TPM key), so it can't be unsealed again.
+void platform_device_forget(const uint8_t *sealed, size_t len);
+
 int platform_spawn_thread(void (*fn)(void *), void *arg);
 
 #include <stdio.h>

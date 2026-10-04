@@ -391,7 +391,9 @@ then renamed into place, so a crash can't leave half a file. Sessions, their ids
 messages, peers and files are never saved.
 
 `settings` and `key` are the only files chat writes there (and the same two in `saves/NAME` for
-a save made with `:install NAME`, see [More than one save](#more-than-one-save)), and both are always sealed. chat
+a save made with `:install NAME`, see [More than one save](#more-than-one-save)), and both are always sealed, as is
+`verified`. A save locked to the device also has a `device` file, sealed by the device instead
+(see [Locking a save to this device](#locking-a-save-to-this-device)). chat
 never writes your settings in plain text, as `settings.toml` or anything else. The TOML above
 only exists inside the sealed file. If there's a plain text file in that folder, like a
 `settings.toml`, it didn't come from chat. chat doesn't read it, update it or delete it, and
@@ -457,6 +459,86 @@ list starts without any of them. With `--simple` or `--update` the list is print
 terminal and you type a number or a name. `--save NAME` skips the list and opens that save.
 Without `--save`, `CHAT_INSTALL_PASSWORD` is tried on each save in turn and opens the first one
 it fits. With only one save, there's no list.
+
+#### Locking a save to this device
+
+`:set devicelock on` (the **Device lock** row on the settings page) locks a save to the device
+it's on. Its key then needs a secret only this device can unseal, as well as the passphrase, so
+its files don't open anywhere else: not from a backup, a synced folder, a copy of the disk or a
+stolen drive, even with the passphrase. With no save open, it applies to the next save `:install`
+makes, and the box `:install` opens says so. For the open save, a box says what it means and asks
+first, then seals it again. `:set devicelock off`, on this device, seals it with the passphrase
+alone again. When chat starts, the list of saves says which ones are locked to a device. Where
+the device can't lock a save at all (on Linux without systemd's credential service, below), the
+row is greyed out, and its help on the settings page says why.
+
+Ids like the machine id don't help here: anything that can read the save's files can read those
+too. What holds the secret is something the device never lets out:
+
+- **Linux**: systemd's credential service (systemd 256 or later). It runs as root and seals the
+  secret with the computer's TPM 2.0 and systemd's own key in `/var/lib/systemd/credential.secret`,
+  which only root can read, for your user only: your user id and name and the machine id go into
+  its key, and it only unseals it for you. You don't need to be in the `tss` group. It binds to no
+  PCRs, so firmware, bootloader and kernel updates don't lose it, and from systemd 262 on it pins
+  the TPM's storage key, so a chip spliced onto the TPM's bus can't pose as it. Without a TPM 2.0,
+  it's systemd's key alone: then root, or anyone with a copy of the whole disk, could get past the
+  device part, and only the passphrase would be left.
+- **Linux without systemd's credential service** (runit, OpenRC, s6, or systemd before 256): chat
+  speaks to the TPM 2.0 itself, through `/dev/tpmrm0`, the kernel's resource manager. The secret
+  is sealed under the TPM's storage key, which the TPM makes again from its owner seed each time
+  and never lets out, with no PCRs. It crosses the TPM's bus encrypted, in a session salted to that
+  key, and every answer's HMAC is checked. The save keeps the key's name, so a cleared TPM, or
+  something posing as the TPM, is refused. On a computer Windows set the TPM up on (dual booting),
+  the TPM's owner has a password Windows forgot, so the key Windows keeps at `0x81000001` is used
+  instead. `/dev/tpmrm0` is usually only open to the `tss` group: join it (as root, `usermod -aG
+  tss NAME`) and log in again. Until then, the row is greyed out and says so.
+- **Windows**: an RSA key the TPM makes for the save, for your Windows account, which never
+  leaves the TPM (the Platform Crypto Provider). Unlocking or uninstalling the save deletes it, so
+  copies of the files from while it was locked can't be opened again. Without a TPM, it's DPAPI,
+  which ties it to your Windows account on this computer: an administrator, or anyone with a copy
+  of the disk and your Windows password, could get past the device part.
+
+A random 32-byte secret is sealed to the device and kept in the save's `device` file. The key the
+other files are sealed with is BLAKE2b, keyed with the key Argon2id makes from the passphrase,
+over that secret and the save's salt: without both, there's no way to it. Each file's header says
+the save is locked to a device, and it's sealed with the file, so changing it to say otherwise
+only makes the file unreadable. Opening a locked save asks the device first: anywhere else, no
+passphrase is even tried. A save is only locked once the device has unsealed its secret again,
+so a lock that can't be opened is never written, and its files are sealed again in an order that
+leaves the save openable if chat stops halfway. A save found only part locked when it opens
+(chat stopped halfway, or one of its files was swapped for one sealed with the passphrase alone)
+is locked to the device again straight away, and the console says so.
+
+Copies made before a save was locked, like old backups, are still sealed with the passphrase
+alone. If one could be out there, move to a new passphrase: with the lock on, `:install NEWNAME`
+makes a new save, locked too, with a passphrase of its own, and `:uninstall OLDNAME` deletes the
+old one.
+
+**There's no way back in from anywhere else.** A locked save is gone for good, and so is a
+signing key that's only saved in it, if what the device keeps for it is wiped. That happens if:
+
+- the TPM is cleared: in the firmware settings, from Windows (Clear TPM, in Windows Security), by
+  a tool like `tpm2_clear`, or by a firmware update. Some BIOS and TPM firmware updates clear it,
+  and a TPM that's part of the CPU (AMD's fTPM, Intel's PTT) is the one most often cleared that way
+- the motherboard is replaced, or the CPU where the TPM is part of it, or the firmware is switched
+  to another TPM (its own in place of a chip, or the other way round)
+- the OS is reinstalled, or Windows is reset. Sealed by the TPM alone (through `/dev/tpmrm0`), a
+  save only needs the TPM and its files, so a reinstall doesn't lose it if they come back from a
+  backup
+- on Linux with systemd's service: systemd's key, `/var/lib/systemd/credential.secret`, is
+  deleted, or your user name, your user id or the machine id (`/etc/machine-id`) changes. Some
+  privacy setups make a new machine id at every boot, and a save can't be locked there for long
+- on Windows: your Windows profile is deleted, or, with DPAPI, an administrator resets your Windows
+  password (changing it yourself is fine)
+- the save's `device` file is deleted. A backup of the save needs that file too, and only opens on
+  this device
+- the computer breaks or is lost
+
+Before one of those you can see coming, like a firmware update or a reinstall, `:set devicelock
+off` first, and lock it again after. The box that locks a save lists all of this (for a new save,
+`:install` shows it before asking for the passphrase), and the console says it again once it's
+locked. Keep a key you can't lose somewhere else too. Versions of chat from before the device lock
+can't open a locked save at all (they say it's damaged).
 
 ## Build
 

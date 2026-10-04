@@ -116,6 +116,9 @@ static const char *USAGE =
     "run only. :uninstall deletes it.\n"
     ":install NAME makes another save, in ~/.config/chat/saves/NAME, with its own passphrase.\n"
     "With more than one save, chat lists them on startup to pick the one to open.\n"
+    ":set devicelock on locks a save to this device too: its key also needs a secret only this\n"
+    "device can unseal (its TPM: on Linux through systemd's credential service, or without one,\n"
+    "/dev/tpmrm0), so a copy of its files can't be opened anywhere else, even with the passphrase.\n"
     "\n"
     "  --save      open the save :install NAME made with this name, without the list\n"
     "              (default is the one in ~/.config/chat itself). If there's no save\n"
@@ -253,6 +256,7 @@ typedef enum {
     MODE_UNINSTALL,
     MODE_SAVES,
     MODE_UNLOCK,
+    MODE_DEVICE_LOCK,
     MODE_UPDATE
 } app_mode_t;
 
@@ -308,6 +312,15 @@ typedef struct {
     uint64_t file_cap;   // 0: the default
     int fast_files;
     int autosave;   // what's changed is saved as it changes, while installed
+    // Locked to this device: the open save, or with none open, the next one :install makes.
+    // device_want is what the DEVICE LOCK box asks to change it to, and device_back where it goes back to.
+    // device_new: the box is for the new save :install is making, before its passphrase.
+    int device_lock, device_want, device_new;
+    app_mode_t device_back;
+    // What locking would use here. DEVICE_NONE: it can't, and device_why says why. Checked at the
+    // start, and again whenever something that shows it opens.
+    device_kind_t device_kind;
+    char device_why[200];
     uint8_t color[3];
     identity_source_t identity_source;
     identity_keypair_t identity;
@@ -1236,7 +1249,7 @@ typedef enum {
     SET_ROUTING, SET_DHT4, SET_DHT6, SET_PORTMAP, SET_LAN,
     SET_TOR_LAUNCH, SET_TOR_PATH, SET_TOR_SOCKS, SET_TOR_CONTROL, SET_TOR_PASSWORD,
     SET_NOSTR, SET_RELAYS,
-    SET_NICK, SET_COLOUR, SET_SIGN, SET_AGE_RECIPIENT, SET_PGP_PUBKEY, SET_AUTOSAVE,
+    SET_NICK, SET_COLOUR, SET_SIGN, SET_AGE_RECIPIENT, SET_PGP_PUBKEY, SET_AUTOSAVE, SET_DEVICE_LOCK,
     SET_VERIFY, SET_FILE_LIMIT, SET_FAST_FILES, SET_NOTIFY, SET_PREVIEW, SET_NET, SET_PORT
 } setting_id_t;
 
@@ -1308,6 +1321,10 @@ static const setting_def_t SETTINGS[] = {
       "Once chat is installed: on saves a setting you change, and a key you verify or forget, as you change it. "
       "off keeps changes until chat exits, unless :save saves them. The signing key is only saved by :save or "
       ":install either way, so a key you're trying out isn't kept by accident." },
+    { SET_DEVICE_LOCK, NULL, "devicelock", "Device lock", K_TOGGLE, "on|off",
+      "on: what :install saves only opens here, even with the passphrase: its key also needs a secret this device "
+      "keeps (in its TPM, where there's one). If the TPM is cleared (some firmware updates do it), the motherboard "
+      "replaced or the OS reinstalled, it's gone for good: turn this off first. off: the passphrase alone opens it." },
     { SET_VERIFY, "Chat", "verify", "Compare verify codes", K_CHOICE, "required|optional",
       "Anyone with a session's id and password could sit between two members and read what they say. When a peer "
       "joins, chat shows a code to compare with them over another channel. It only matches on both ends if "
@@ -1405,6 +1422,7 @@ static int setting_options(setting_id_t id, const char *const **names, int *n) {
         case SET_VERIFY:     *names = VERIFY_NAMES; return g_app.verify_optional != 0;
         case SET_FAST_FILES: return g_app.fast_files != 0;
         case SET_AUTOSAVE:   return g_app.autosave != 0;
+        case SET_DEVICE_LOCK: return g_app.device_lock != 0;
         case SET_TOR_LAUNCH: *names = TOR_LAUNCH_NAMES; *n = 3; return g_app.tor_launch;
         case SET_NOTIFY:     *names = NOTIFY_NAMES; *n = 3; return (int)g_app.notify_mode;
         case SET_PREVIEW:    *names = PREVIEW_NAMES; *n = 3; return (int)g_app.notify_preview;
@@ -1508,7 +1526,8 @@ static void setting_value(setting_id_t id, char *out, size_t cap) {
 // A row's value in the form :set takes. 0 for a secret, or a value that comes from the signing key.
 static int setting_text(setting_id_t id, char *out, size_t cap) {
     const setting_def_t *d = setting_def(id);
-    if (d->kind == K_SECRET || d->kind == K_ACTION) return 0;
+    // The device lock is how the save is sealed, not a setting in it.
+    if (d->kind == K_SECRET || d->kind == K_ACTION || id == SET_DEVICE_LOCK) return 0;
     const routing_t *r = &g_app.route;
     switch (id) {
         case SET_RELAYS: {
@@ -1690,6 +1709,20 @@ static void set_colour_all(void) {
 
 // Sets a toggle or choice row to its i-th value, wherever it applies.
 static void autosave_changed(void);
+static void device_lock_choose(int on);
+
+static void device_check(void) {
+    g_app.device_why[0] = '\0';
+    g_app.device_kind = platform_device_kind(g_app.device_why, sizeof g_app.device_why);
+}
+
+static const char DEVICE_REMINDER[] =
+    "* device lock: before you clear the TPM, update the firmware, replace the motherboard or reinstall the OS, "
+    ":set devicelock off first, and lock it again after - or the save is gone for good";
+
+// Turning the lock off never needs the device, so a save locked to it, or a lock already chosen,
+// stays usable.
+static int device_lock_greyed(void) { return g_app.device_kind == DEVICE_NONE && !g_app.device_lock; }
 
 static void setting_choose(setting_id_t id, int i) {
     routing_t *r = &g_app.route;
@@ -1734,6 +1767,7 @@ static void setting_choose(setting_id_t id, int i) {
             g_app.autosave = i;
             autosave_changed();
             break;
+        case SET_DEVICE_LOCK: device_lock_choose(i); return;
         default: return;
     }
     char v[32]; setting_value(id, v, sizeof v);
@@ -1920,6 +1954,7 @@ static int settings_section_step(int dir) {
 
 static void begin_settings(void) {
     if (g_app.mode != MODE_CHAT) return;
+    device_check();
     g_app.mode = MODE_SETTINGS;
     if (g_app.settings_sel == SETTINGS_DONE) g_app.settings_sel = 0;
     settings_fix_sel();
@@ -1956,10 +1991,11 @@ static const char *settings_hint(void) {
     else if (d->kind == K_TEXT || d->kind == K_SECRET) act = "enter edit";
     else if (d->id == SET_SIGN) act = "enter choose";
     else if (d->id == SET_AGE_RECIPIENT || d->id == SET_PGP_PUBKEY) act = "enter copy";
+    else if (d->id == SET_DEVICE_LOCK && device_lock_greyed()) act = NULL;
     else act = "h/l change";
     static char hint[160];
-    snprintf(hint, sizeof hint, "%s \xc2\xb7 j/k move \xc2\xb7 tab section \xc2\xb7 esc %s", act,
-             g_app.onboarding ? "start" : "done");
+    snprintf(hint, sizeof hint, "%s%sj/k move \xc2\xb7 tab section \xc2\xb7 esc %s", act ? act : "",
+             act ? " \xc2\xb7 " : "", g_app.onboarding ? "start" : "done");
     return hint;
 }
 
@@ -2634,8 +2670,10 @@ static void render_settings(int rows_n, int cols_n, const char *clock, const tui
         if (!setting_shown(d->id)) continue;
         if (i == g_app.settings_sel) sel_row = n_rows;
         setting_value(d->id, values[n_rows], sizeof values[n_rows]);
+        int greyed = d->id == SET_DEVICE_LOCK && device_lock_greyed();
+        if (greyed) copy_str(values[n_rows], "can't be used here", sizeof values[n_rows]);
         rows[n_rows] = (tui_row_t){ section, d->label, values[n_rows], setting_kind(d),
-                                    d->id == SET_COLOUR ? g_app.color : NULL, NULL, 0 };
+                                    d->id == SET_COLOUR ? g_app.color : NULL, NULL, 0, greyed };
         section = NULL;
         n_rows++;
     }
@@ -2661,8 +2699,16 @@ static void render_settings(int rows_n, int cols_n, const char *clock, const tui
             age_export_recipient(&g_app.identity, recipient);
             strcat(recipient, ": ");
         }
-        snprintf(help, sizeof help, "%s%s", recipient, d->help);
-        if (d->values) snprintf(usage, sizeof usage, ":set %s %s", d->key, d->values);
+        int greyed = d->id == SET_DEVICE_LOCK && device_lock_greyed();
+        if (greyed)
+            snprintf(help, sizeof help, "Can't be used here: %s. The device lock makes what :install saves open only "
+                     "on this device, by sealing a secret with something the device keeps to itself: its TPM, on Linux "
+                     "through systemd's credential service or /dev/tpmrm0. Without that, there's nothing to seal it "
+                     "with.",
+                     g_app.device_why);
+        else
+            snprintf(help, sizeof help, "%s%s", recipient, d->help);
+        if (d->values && !greyed) snprintf(usage, sizeof usage, ":set %s %s", d->key, d->values);
         else if (d->kind == K_SECRET) snprintf(usage, sizeof usage, ":set %s", d->key);
     }
     tui_page_t page = {
@@ -2683,7 +2729,7 @@ static void render_sign_picker(int rows_n, int cols_n, const char *clock, const 
     tui_row_t rows[N_PICKS];
     int in_use = sign_row_in_use();
     for (int i = 0; i < N_PICKS; i++) {
-        rows[i] = (tui_row_t){ SIGN_PICKS[i].section, SIGN_PICKS[i].label, NULL, TUI_V_TEXT, NULL, NULL, 0 };
+        rows[i] = (tui_row_t){ SIGN_PICKS[i].section, SIGN_PICKS[i].label, NULL, TUI_V_TEXT, NULL, NULL, 0, 0 };
         if (i == in_use) { rows[i].value = "in use"; rows[i].kind = TUI_V_ON; }
     }
     char help[600], usage[32] = "";
@@ -2802,10 +2848,10 @@ static void browser_rows(const browser_t *b, int row_cols, int list_rows, char *
         snprintf(cut, sizeof cut, "\xe2\x80\xa6%s", tail);
         copy_str(head, cut, sizeof head);
     }
-    g_browser_rows[0] = (tui_row_t){ NULL, head, NULL, TUI_V_TEXT, NULL, NULL, 0 };
+    g_browser_rows[0] = (tui_row_t){ NULL, head, NULL, TUI_V_TEXT, NULL, NULL, 0, 0 };
     for (int i = 1; i < levels; i++) {
         snprintf(level_pre[i], sizeof level_pre[i], "%*s\xe2\x94\x94\xe2\x94\x80 ", (i - 1) * TREE_INDENT, "");
-        g_browser_rows[i] = (tui_row_t){ NULL, parts[joined + i - 1], NULL, TUI_V_TEXT, NULL, level_pre[i], 0 };
+        g_browser_rows[i] = (tui_row_t){ NULL, parts[joined + i - 1], NULL, TUI_V_TEXT, NULL, level_pre[i], 0, 0 };
     }
     g_browser_levels = levels;
 
@@ -2819,7 +2865,7 @@ static void browser_rows(const browser_t *b, int row_cols, int list_rows, char *
         if (e->is_dir && ln > 1 && g_browser_labels[i][ln - 1] == '/') g_browser_labels[i][ln - 1] = '\0';
         if (e->is_dir) folders++; else files++;
         g_browser_rows[levels + i] = (tui_row_t){ NULL, g_browser_labels[i], e->is_dir ? "" : NULL, TUI_V_LINK, NULL,
-                                                  i == b->n_items - 1 ? last_pre : mid_pre, 0 };
+                                                  i == b->n_items - 1 ? last_pre : mid_pre, 0, 0 };
     }
     char f[24] = "", g[24] = "";
     if (folders) snprintf(f, sizeof f, "%d folder%s", folders, folders == 1 ? "" : "s");
@@ -3484,7 +3530,7 @@ static void render_files(int rows_n, int cols_n, const char *clock, const tui_ba
         tui_value_kind_t kind = file_value(s, l[i], values[i], sizeof values[i], &pm);
         snprintf(prefix[i], sizeof prefix[i], "%*d  ", digits, l[i]->num);
         const char *section = i == 0 || l[i]->mine != l[i - 1]->mine ? (l[i]->mine ? "Yours" : "Offered to you") : NULL;
-        rows[i] = (tui_row_t){ section, l[i]->name, values[i], kind, NULL, prefix[i], pm };
+        rows[i] = (tui_row_t){ section, l[i]->name, values[i], kind, NULL, prefix[i], pm, 0 };
     }
     char parts[3][40];
     int np = 0;
@@ -4107,10 +4153,15 @@ static int open_saved_key(int use) {
 }
 
 static const char *open_error(int rc) {
+    static char device[320];
     switch (rc) {
         case PASS_WRONG:      return "that passphrase doesn't open what :install saved";
         case PASS_NOMEM:      return "opening what :install saved needs 512 MiB of free memory for a moment";
         case INSTALL_NO_FILE: return "what :install saved isn't there any more";
+        case INSTALL_DEVICE:
+            snprintf(device, sizeof device, "what :install saved only opens on the device it's locked to: %s",
+                     install_device_why());
+            return device;
         default:              return "what :install saved is damaged, or isn't something chat wrote";
     }
 }
@@ -4165,6 +4216,14 @@ static void reapply_options(void);
 static void use_opened_save(char (*loaded)[ROW_TEXT_MAX]) {
     g_app.installed = 1;
     g_app.locked = 0;
+    g_app.device_lock = install_device_lock() != DEVICE_NONE;
+    if (install_relocked() > 0)
+        saved_note("* the save %s was only part locked to this device: chat stopped while locking or unlocking it, "
+                   "or one of its files was replaced. It's locked to this device again - :set devicelock off unlocks it",
+                   install_shown_name(install_current()));
+    else if (install_relocked() < 0)
+        saved_note("* the save %s is only part locked to this device, and couldn't be locked again: %s",
+                   install_shown_name(install_current()), install_device_why());
     memcpy(g_saved_rows, g_setting_defaults, sizeof g_saved_rows);
     load_saved_settings();
     for (int i = 0; loaded && i < N_SETTINGS; i++)
@@ -4190,8 +4249,8 @@ static int open_saved(const char *name, const char *passphrase) {
 
 // What a save holds and when it was last written, for the list to pick one from.
 static void save_detail(const install_save_t *sv, char *out, size_t cap) {
-    snprintf(out, cap, "%s%s%s", sv->settings && sv->key ? "settings and key" : sv->settings ? "settings" : "key",
-             sv->modified[0] ? " \xc2\xb7 " : "", sv->modified);
+    snprintf(out, cap, "%s%s%s%s", sv->settings && sv->key ? "settings and key" : sv->settings ? "settings" : "key",
+             sv->device ? " \xc2\xb7 this device only" : "", sv->modified[0] ? " \xc2\xb7 " : "", sv->modified);
 }
 
 // With more than one save and no --save, one is picked from a list before its passphrase is asked for.
@@ -4233,13 +4292,18 @@ static void unlock_at_start(int in_box) {
     char pw[256] = "";
     int from_env = platform_env_take("CHAT_INSTALL_PASSWORD", pw, sizeof pw) == 0;
     if (from_env) {
-        int rc = PASS_WRONG;
+        int rc = PASS_WRONG, elsewhere = 0;
         if (!save_to_pick()) rc = open_saved(install_current(), pw);
-        else for (int i = 0; i < g_app.n_saves && rc == PASS_WRONG; i++) rc = open_saved(g_app.saves[i].name, pw);
+        else for (int i = 0; i < g_app.n_saves && (rc == PASS_WRONG || rc == INSTALL_DEVICE); i++) {
+            rc = open_saved(g_app.saves[i].name, pw);
+            elsewhere |= rc == INSTALL_DEVICE;
+        }
         crypto_wipe(pw, sizeof pw);
         if (rc == 0) return;
         saved_note("* CHAT_INSTALL_PASSWORD: %s", rc == PASS_WRONG && save_to_pick()
-                   ? "that passphrase doesn't open any of the saves :install made" : open_error(rc));
+                   ? (elsewhere ? "that passphrase doesn't open any of the saves :install made that open on this device"
+                                : "that passphrase doesn't open any of the saves :install made")
+                   : open_error(rc));
     }
     if (in_box) { g_app.unlock_at_start = 1; return; }
     int picked = !save_to_pick() || (term_is_tty() && pick_save_in_terminal() == 0);
@@ -4283,9 +4347,17 @@ static void finish_install(const char *passphrase) {
     char where[900] = "";
     install_where(g_app.save_target, where, sizeof where);
     if (passphrase) {
-        note("sealing...");
+        note(g_app.device_lock ? "sealing, and locking it to this device..." : "sealing...");
         render();
-        if (install_lock_new(g_app.save_target, passphrase) != 0) { note("not installed: sealing needs 512 MiB of free memory for a moment"); return; }
+        // With the device lock on, a save that can't be locked isn't made at all.
+        int rc = install_lock_new(g_app.save_target, passphrase, g_app.device_lock);
+        if (rc == INSTALL_DEVICE) {
+            push_log("* not installed: it can't be locked to this device - %s. :set devicelock off installs it "
+                     "without the device lock", install_device_why());
+            note("not installed: it can't be locked to this device - %s", install_device_why());
+            return;
+        }
+        if (rc != 0) { note("not installed: sealing needs 512 MiB of free memory for a moment"); return; }
         // A new save has no key in it yet.
         g_app.saved_key_known = 0;
         g_app.saved_key_path[0] = '\0';
@@ -4295,12 +4367,18 @@ static void finish_install(const char *passphrase) {
     memcpy(g_saved_rows, g_seen_rows, sizeof g_saved_rows);
     static char text[INSTALL_SETTINGS_MAX];
     if (settings_text(text, sizeof text) != 0 || install_write_settings(text) != 0) {
-        if (passphrase) { install_forget(); g_app.installed = 0; }
+        if (passphrase) {
+            // A new save leaves nothing behind, not even its device file.
+            if (install_device_lock() != DEVICE_NONE) install_remove(g_app.save_target);
+            install_forget();
+            g_app.installed = 0;
+        }
         note("couldn't write your settings to %s%s", where, g_app.installed ? "" : " - not installed");
         return;
     }
     g_app.installed = 1;
     g_app.locked = 0;
+    g_app.device_lock = install_device_lock() != DEVICE_NONE;
     // A new save, or one saved over, gets every key in use.
     g_n_uninstalled_keys = 0;
     static char vtext[TRUST_TEXT_MAX];
@@ -4319,8 +4397,10 @@ static void finish_install(const char *passphrase) {
         copy_str(g_app.saved_key_path, path ? g_app.key_path : "", sizeof g_app.saved_key_path);
         g_app.saved_key_known = 1;
     }
-    push_log("* %s: your settings%s are in %s, sealed, for next time. :uninstall deletes them",
-             resave ? "saved" : "installed", path ? " and your signing key's path" : key ? " and signing key" : "", where);
+    push_log("* %s: your settings%s are in %s, sealed%s, for next time. :uninstall deletes them",
+             resave ? "saved" : "installed", path ? " and your signing key's path" : key ? " and signing key" : "", where,
+             install_device_lock() != DEVICE_NONE ? " and locked to this device" : "");
+    if (passphrase && install_device_lock() != DEVICE_NONE) push_log("%s", DEVICE_REMINDER);
     note("%s in %s", resave ? "saved" : "installed", where);
 }
 
@@ -4340,6 +4420,21 @@ static void install_confirmed(void) {
     if (install_resaves()) {
         end_prompt();
         finish_install(NULL);
+        return;
+    }
+    // A new save locked to the device: first the box that says what would lose it for good.
+    if (g_app.device_lock) {
+        device_check();
+        if (g_app.device_kind == DEVICE_NONE) {
+            end_prompt();
+            note("not installed: it can't be locked to this device - %s. :set devicelock off installs it without the "
+                 "lock", g_app.device_why);
+            return;
+        }
+        g_app.device_want = g_app.device_new = 1;
+        g_app.device_back = MODE_CHAT;
+        g_app.mode = MODE_DEVICE_LOCK;
+        g_app.dirty = 1;
         return;
     }
     g_app.mode = MODE_INSTALL_PASS;
@@ -4617,7 +4712,7 @@ static void commit_unlock(void) {
     crypto_wipe(pw, sizeof pw);
     crypto_wipe(g_app.input.buf, sizeof g_app.input.buf);
     tui_input_clear(&g_app.input);
-    if (rc == PASS_WRONG || rc == PASS_NOMEM) { note("%s", open_error(rc)); return; }
+    if (rc == PASS_WRONG || rc == PASS_NOMEM || rc == INSTALL_DEVICE) { note("%s", open_error(rc)); return; }
     // The key before chat starts, so a --session opens signed.
     if (key_in_use_saved()) identity_chosen();
     end_unlock();
@@ -4659,6 +4754,81 @@ static void saves_key(const tui_key_t *key) {
 static void cancel_uninstall(void) {
     end_prompt();
     note("nothing was deleted");
+}
+
+// With no save open, the next one :install makes. The open save is sealed again, after a box asks.
+static void device_lock_choose(int on) {
+    device_check();
+    if (on && g_app.device_kind == DEVICE_NONE) { note("Device lock: can't be used here - %s", g_app.device_why); return; }
+    if (!g_app.installed) {
+        g_app.device_lock = on;
+        note(on ? "Device lock: on - the save :install makes next only opens on this device" : "Device lock: off");
+        return;
+    }
+    if (!on == !g_app.device_lock) {
+        // This also finishes one a failed write left half done.
+        if (install_set_device_lock(on) == 0) note("Device lock: %s already", on ? "on" : "off");
+        else note("Device lock: %s - %s", on ? "on" : "off", install_device_why());
+        return;
+    }
+    g_app.device_want = on;
+    g_app.device_new = 0;
+    g_app.device_back = g_app.mode == MODE_SETTINGS ? MODE_SETTINGS : MODE_CHAT;
+    if (g_app.device_back == MODE_CHAT) begin_prompt(MODE_DEVICE_LOCK);
+    else { g_app.mode = MODE_DEVICE_LOCK; g_app.dirty = 1; }
+}
+
+static void device_lock_back(void) {
+    if (g_app.device_back == MODE_CHAT) { end_prompt(); return; }
+    g_app.mode = g_app.device_back;
+    g_app.dirty = 1;
+}
+
+static void device_lock_yes(void) {
+    if (g_app.device_new) {
+        g_app.device_new = 0;
+        g_app.mode = MODE_INSTALL_PASS;
+        g_app.dirty = 1;
+        return;
+    }
+    int on = g_app.device_want;
+    device_lock_back();
+    const char *shown = install_shown_name(install_current());
+    char where[900] = "";
+    install_where(install_current(), where, sizeof where);
+    // A TPM can take a few seconds to make a key.
+    note(on ? "locking %s to this device..." : "unlocking %s from this device...", shown);
+    render();
+    int rc = install_set_device_lock(on);
+    device_kind_t kind = install_device_lock();
+    g_app.device_lock = kind != DEVICE_NONE;
+    const char *also = install_device_why();
+    if (rc != 0) {
+        push_log("* device lock: %s for the save %s - %s", g_app.device_lock ? "on" : "off", shown, also);
+        note("Device lock: %s - %s", g_app.device_lock ? "on" : "off", also);
+        return;
+    }
+    if (on) {
+        push_log("* device lock: the save %s in %s is locked to this device. It uses %s", shown, where,
+                 platform_device_uses(kind));
+        push_log("%s", DEVICE_REMINDER);
+    } else {
+        push_log("* device lock: the save %s in %s opens with its passphrase alone again, wherever its files are",
+                 shown, where);
+    }
+    if (also[0]) push_log("* device lock: %s", also);
+    note(on ? "Device lock: on - %s only opens on this device" : "Device lock: off - %s opens with its passphrase alone",
+         shown);
+}
+
+static void device_lock_no(void) {
+    if (g_app.device_new) {
+        g_app.device_new = 0;
+        cancel_install();
+        return;
+    }
+    device_lock_back();
+    note("nothing was changed");
 }
 
 // Enter doesn't answer. A question takes y or n.
@@ -4766,6 +4936,7 @@ static int pick_save_target(const char *arg) {
 static cmd_result_t app_install(void *ctx, const char *arg) {
     (void)ctx;
     if (pick_save_target(arg) != 0) return CMD_OK;
+    device_check();
     char where[900];
     if (install_where(g_app.save_target, where, sizeof where) != 0) { note("there's nowhere to install to - no home folder"); return CMD_OK; }
     g_app.n_saves = install_list(g_app.saves, INSTALL_SAVES_MAX);
@@ -4900,14 +5071,14 @@ static int help_rows(tui_row_t *rows, const command_t **cmds) {
     static char labels[MAX_HELP_COMMANDS][CMD_WORD_MAX + 24];
     int n = 0, k = 0;
     for (int i = 0; i < N_HELP_KEYS; i++) {
-        rows[n] = (tui_row_t){ HELP_KEYS[i].section, HELP_KEYS[i].keys, HELP_KEYS[i].what, TUI_V_TEXT, NULL, NULL, 0 };
+        rows[n] = (tui_row_t){ HELP_KEYS[i].section, HELP_KEYS[i].keys, HELP_KEYS[i].what, TUI_V_TEXT, NULL, NULL, 0, 0 };
         cmds[n++] = NULL;
     }
     for (const command_t *const *t = ALL_COMMANDS; *t; t++) {
         for (const command_t *cmd = *t; cmd->name && k < MAX_HELP_COMMANDS; cmd++) {
             if (*t != APP_COMMANDS && cmd_find(APP_COMMANDS, cmd->name)) continue;
             snprintf(labels[k], sizeof labels[k], ":%s%s%s", cmd->name, cmd->args ? " " : "", cmd->args ? cmd->args : "");
-            rows[n] = (tui_row_t){ k == 0 ? "Commands" : NULL, labels[k], cmd->help, TUI_V_TEXT, NULL, NULL, 0 };
+            rows[n] = (tui_row_t){ k == 0 ? "Commands" : NULL, labels[k], cmd->help, TUI_V_TEXT, NULL, NULL, 0, 0 };
             cmds[n++] = cmd;
             k++;
         }
@@ -5498,6 +5669,7 @@ static void handle_key(const tui_key_t *key) {
         case MODE_UNINSTALL:      confirm_key(key, uninstall_confirmed, cancel_uninstall); return;
         case MODE_SAVES:          saves_key(key); return;
         case MODE_UNLOCK:         field_key(key, commit_unlock, back_from_unlock); return;
+        case MODE_DEVICE_LOCK:    confirm_key(key, device_lock_yes, device_lock_no); return;
         case MODE_UPDATE:         update_key(key); return;
         default:
             break;
@@ -5556,6 +5728,8 @@ static int on_chat_screen(void) {
         case MODE_INSTALL_EXISTING: case MODE_INSTALL_PICK: case MODE_INSTALL_OVERWRITE: case MODE_INSTALL_NAME:
         case MODE_UNINSTALL: case MODE_SAVES: case MODE_UNLOCK: case MODE_UPDATE:
             return 1;
+        case MODE_DEVICE_LOCK:
+            return g_app.device_back == MODE_CHAT;
         default:
             return 0;
     }
@@ -5680,7 +5854,7 @@ static void chat_input(tui_bar_t *b, const tui_input_t *in) {
 
 // ---- the dialogs ----
 
-#define MAX_DIALOG_PARAS 12
+#define MAX_DIALOG_PARAS 20
 
 static int add_para(tui_para_t *p, int n, tui_para_kind_t kind, const char *text) {
     p[n] = (tui_para_t){ .kind = kind, .text = text };
@@ -5688,7 +5862,7 @@ static int add_para(tui_para_t *p, int n, tui_para_kind_t kind, const char *text
 }
 
 static int install_paras(tui_para_t *p) {
-    static char settings[1200], key[1400], intro[600], verified[1200], outro[400];
+    static char settings[1200], key[1400], intro[600], verified[1200], outro[400], device[1200];
     char where[900] = "";
     const char *target = g_app.save_target;
     install_where(target, where, sizeof where);
@@ -5746,6 +5920,26 @@ static int install_paras(tui_para_t *p) {
         : "It's all sealed (Argon2id, XChaCha20-Poly1305) with one passphrase you choose next, which chat asks for "
           "when it starts.");
     n = add_para(p, n, TUI_P_BLANK, "");
+    device[0] = '\0';
+    if (!exists && g_app.device_lock && g_app.device_kind == DEVICE_NONE)
+        copy_str(device, "**Device lock is on**, but this device can't lock anything now, so installing stops there and "
+                 "says why. `:set devicelock off` installs it without the lock.", sizeof device);
+    else if (!exists && g_app.device_lock)
+        copy_str(device, "**Locked to this device** as well: its files won't open anywhere else, even with the "
+                 "passphrase. The next box says what would lose it for good. `:set devicelock off` installs it "
+                 "without the lock.", sizeof device);
+    else if (!exists && g_app.device_kind != DEVICE_NONE)
+        copy_str(device, "Not locked to this device: a copy of the files opens anywhere with the passphrase. "
+                 "`:set devicelock on` locks it to this device as well.", sizeof device);
+    else if (!exists)
+        snprintf(device, sizeof device, "Not locked to this device, which can't lock a save to it: %s.",
+                 g_app.device_why);
+    else if (open && install_device_lock() != DEVICE_NONE)
+        copy_str(device, "It stays locked to this device.", sizeof device);
+    if (device[0]) {
+        n = add_para(p, n, TUI_P_TEXT, device);
+        n = add_para(p, n, TUI_P_BLANK, "");
+    }
     snprintf(outro, sizeof outro, "%s Never saved: sessions, their passwords, messages or files. `:uninstall` deletes "
              "it all - but a disk and its backups can keep traces of deleted files.", g_app.autosave
              ? "Settings and verified keys you change from then on are saved as you change them (`:set autosave off` "
@@ -5755,6 +5949,41 @@ static int install_paras(tui_para_t *p) {
     return add_para(p, n, TUI_P_TEXT, outro);
 }
 
+// What would lose the save comes straight after the intro, since a box too tall for the screen
+// loses its end.
+static int device_lock_paras(tui_para_t *p) {
+    static char intro[600], lead[160], uses[900];
+    static const char *losses[DEVICE_LOSSES_MAX + 2];
+    const char *shown = install_shown_name(g_app.device_new ? g_app.save_target : install_current());
+    if (!g_app.device_want) {
+        snprintf(intro, sizeof intro, "This seals the save `%s` again with its passphrase alone: its files open wherever "
+                 "they're copied, for anyone with the passphrase, as if it had never been locked. `:set devicelock on` "
+                 "locks it again.", shown);
+        return add_para(p, 0, TUI_P_TEXT, intro);
+    }
+    snprintf(intro, sizeof intro, "%s `%s` %s: it only opens here, with its passphrase. A copy of its files anywhere "
+             "else, from a backup or from the disk itself, can't be opened, even with the passphrase.",
+             g_app.device_new ? "The new save" : "This locks the save", shown,
+             g_app.device_new ? "is locked to this device" : "to this device");
+    int key = g_app.device_new ? g_app.identity_source != IDENT_NONE && !key_saved_as_path()
+                               : install_has_key(install_current()) && !g_app.saved_key_path[0];
+    snprintf(lead, sizeof lead, "**The save is gone for good%s, with no way back, if:**",
+             key ? ", and the signing key only saved in it" : "");
+    int n_losses = platform_device_losses(g_app.device_kind, losses, DEVICE_LOSSES_MAX);
+    losses[n_losses++] = "its `device` file is deleted: a backup it's restored from needs that file too";
+    losses[n_losses++] = "this computer breaks or is lost";
+    snprintf(uses, sizeof uses, "It uses %s.", platform_device_uses(g_app.device_kind));
+    int n = add_para(p, 0, TUI_P_TEXT, intro);
+    n = add_para(p, n, TUI_P_BLANK, "");
+    n = add_para(p, n, TUI_P_TEXT, lead);
+    for (int i = 0; i < n_losses; i++) n = add_para(p, n, TUI_P_BULLET, losses[i]);
+    n = add_para(p, n, TUI_P_BLANK, "");
+    n = add_para(p, n, TUI_P_TEXT, "Before one of those you can see coming, like a firmware update or a reinstall, "
+                                   "`:set devicelock off` here first, then lock it again after.");
+    n = add_para(p, n, TUI_P_BLANK, "");
+    return add_para(p, n, TUI_P_TEXT, uses);
+}
+
 static int uninstall_paras(tui_para_t *p) {
     static char what[1200];
     char where[900] = "";
@@ -5762,8 +5991,10 @@ static int uninstall_paras(tui_para_t *p) {
     install_where(target, where, sizeof where);
     int settings = install_has_settings(target), key = install_has_key(target), same = is_current_save(target);
     snprintf(what, sizeof what, "This deletes what `:install` saved in `%s`: your %s, and the signing keys of peers "
-             "you verified.%s", where,
+             "you verified.%s%s", where,
              settings && key ? "sealed settings and signing key" : settings ? "sealed settings" : "sealed signing key",
+             install_locked_to_device(target) ? " It's locked to this device, and the secret the device sealed for it "
+                                                "goes too." : "",
              same ? " What's in use now lasts until chat exits." : "");
     int n = add_para(p, 0, TUI_P_TEXT, what);
     if (key && same && g_app.saved_key_known && g_app.saved_key_path[0]) {
@@ -5912,6 +6143,14 @@ static const tui_dialog_t *current_dialog(void) {
             int first = g_app.mode == MODE_INSTALL_PASS;
             d.title = "INSTALL \xc2\xb7 PASSPHRASE";
             d.n_text = add_para(paras, 0, TUI_P_TEXT, !first ? "Type it again, to be sure of it."
+                : g_app.identity_source != IDENT_NONE && g_app.device_lock
+                ? "Your settings and signing key are sealed with this passphrase, which chat asks for when it starts. "
+                  "Make it long: anyone who gets onto this device can try passphrases against them. Forget it, and "
+                  "they're lost."
+                : g_app.device_lock
+                ? "Your settings are sealed with this passphrase, which chat asks for when it starts, and so is a "
+                  "signing key you `:install` later. Make it long: anyone who gets onto this device can try passphrases "
+                  "against them. Forget it, and they're lost."
                 : g_app.identity_source != IDENT_NONE
                 ? "Your settings and signing key are sealed with this passphrase, which chat asks for when it starts. "
                   "Make it long: anyone who gets the files can try passphrases against them. Forget it, and they're lost."
@@ -6001,6 +6240,13 @@ static const tui_dialog_t *current_dialog(void) {
             d.input = NULL;
             d.keys = "y delete \xc2\xb7 n cancel";
             break;
+        case MODE_DEVICE_LOCK:
+            d.title = "DEVICE LOCK";
+            d.n_text = device_lock_paras(paras);
+            d.input = NULL;
+            d.keys = g_app.device_new ? "y lock it \xc2\xb7 n cancel"
+                   : g_app.device_want ? "y lock \xc2\xb7 n cancel" : "y unlock \xc2\xb7 n cancel";
+            break;
         case MODE_FILE_ASK:
             d.n_text = file_ask_paras(paras, &d.title, &d.keys);
             d.input = NULL;
@@ -6049,17 +6295,18 @@ static const tui_dialog_t *current_dialog(void) {
             static char text[400];
             const char *name = install_current();
             int key = install_has_key(name);
+            const char *here = install_locked_to_device(name) ? " and locked to this device" : "";
             if (g_app.n_saves > 1 || name[0])
-                snprintf(text, sizeof text, "`:install` saved your settings%s here as `%s`, sealed. Its passphrase "
-                         "opens it; Esc %s.", key ? " and signing key" : "", install_shown_name(name),
+                snprintf(text, sizeof text, "`:install` saved your settings%s here as `%s`, sealed%s. Its passphrase "
+                         "opens it; Esc %s.", key ? " and signing key" : "", install_shown_name(name), here,
                          save_to_pick() ? "goes back to the list"
                                         : "starts without it, from chat's defaults, and saves nothing until `:install` opens a "
                                           "save or makes a new one");
             else
-                snprintf(text, sizeof text, "`:install` saved your settings%s here, sealed. Their passphrase opens "
+                snprintf(text, sizeof text, "`:install` saved your settings%s here, sealed%s. Their passphrase opens "
                          "them; Esc starts without them, from chat's defaults, and saves nothing until `:install` opens a "
                          "save or makes a new one.",
-                         key ? " and signing key" : "");
+                         key ? " and signing key" : "", here);
             d.n_text = add_para(paras, 0, TUI_P_TEXT, text);
             d.title = "UNLOCK";
             d.placeholder = "passphrase";
@@ -6114,6 +6361,11 @@ static tui_bar_t current_bar(void) {
             break;
         case MODE_FILE_ASK:
             b.chip = g_app.file_back == MODE_FILE_VIEW ? "PICTURE" : "FILES";
+            b.tone = TUI_TONE_PROMPT;
+            break;
+        case MODE_DEVICE_LOCK:
+            if (g_app.device_back == MODE_CHAT) chat_input(&b, &g_app.saved_input);
+            b.chip = g_app.device_new ? "INSTALL" : "SETTINGS";
             b.tone = TUI_TONE_PROMPT;
             break;
         case MODE_CHAT:
@@ -6227,6 +6479,9 @@ static void render(void) {
         case MODE_CHANGELOG:       render_changelog(rows_n, cols_n, hhmm, &bar); return;
         case MODE_SETTINGS:
         case MODE_SETTINGS_EDIT:   render_settings(rows_n, cols_n, hhmm, &bar); return;
+        case MODE_DEVICE_LOCK:
+            if (g_app.device_back == MODE_SETTINGS) { render_settings(rows_n, cols_n, hhmm, &bar); return; }
+            break;
         case MODE_SIGN_CHOICE:
         case MODE_SIGN_PASTE:
         case MODE_SIGN_PASSWORD:   render_sign_picker(rows_n, cols_n, hhmm, &bar); return;
@@ -6744,6 +6999,7 @@ int main(int argc, char **argv) {
     update_cleanup_stale();
 
     crypto_setup();
+    device_check();
     update_self_build(&g_self_build);
     // The signing key, a pasted key block and typed passwords pass through these for the whole run.
     // Best effort, as in chat_init.

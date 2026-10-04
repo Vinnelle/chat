@@ -1928,6 +1928,7 @@ static void draw_value(pen_t *p, const tui_row_t *r, int on) {
         p->used += wapp_trunc(p->w, G_BLOCK G_BLOCK " ", p->room - p->used);
     }
     int room = p->room - p->used;
+    if (r->disabled) { pell(p, S_FAINT, r->value, room); return; }
     switch (r->kind) {
         case TUI_V_ON:
             ptext(p, S_GREEN, G_DOT " ");
@@ -2055,7 +2056,8 @@ static void draw_list(wbuf_t *w, int top, int left, int iw, int view, int nrows,
             pc = utf8_str_cols(pr->prefix);
             ptext(&p, S_FAINT, pr->prefix);
         }
-        pell(&p, on ? S_ACCENT_BOLD : pg->keys ? S_ACCENT : S_PLAIN, pr->label, (pr->value ? lw - 2 : lw) - pc);
+        pell(&p, pr->disabled ? S_FAINT : on ? S_ACCENT_BOLD : pg->keys ? S_ACCENT : S_PLAIN, pr->label,
+             (pr->value ? lw - 2 : lw) - pc);
         if (pr->value) {
             pspace(&p, 2 + lw);
             draw_value(&p, pr, on);

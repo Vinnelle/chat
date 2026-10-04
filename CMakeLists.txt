@@ -180,6 +180,7 @@ add_executable(chat
     src/common/image.c
     src/platform/${CHAT_OS}/net.c
     src/platform/${CHAT_OS}/platform.c
+    src/platform/${CHAT_OS}/device.c
 )
 
 add_custom_target(build_stamp ALL
@@ -234,9 +235,11 @@ if(WIN32)
         OBJECT_DEPENDS ${CMAKE_SOURCE_DIR}/src/platform/windows/chat.manifest)
     target_sources(chat PRIVATE $<TARGET_OBJECTS:chat_rc>)
     target_compile_definitions(chat PRIVATE SODIUM_STATIC=1 SECP256K1_STATIC=1 WIN32_LEAN_AND_MEAN)
-    target_link_libraries(chat PRIVATE ws2_32 bcrypt advapi32 shell32 user32 crypt32 iphlpapi)
+    target_link_libraries(chat PRIVATE ws2_32 bcrypt ncrypt advapi32 shell32 user32 crypt32 iphlpapi)
     target_link_options(chat PRIVATE -static)
 else()
+    # A device lock without systemd's credential service speaks to the TPM itself.
+    target_sources(chat PRIVATE src/platform/linux/tpm2.c)
     find_package(Threads REQUIRED)
     target_link_libraries(chat PRIVATE Threads::Threads m)
 endif()

@@ -199,20 +199,32 @@ int identity_from_password(const char *password, const char *device_id, identity
 // salt, plus its header (format, limits, salt). XChaCha20-Poly1305 seals each secret under that
 // key, with the header as associated data. Everything sealed under a lock includes its header, so
 // one Argon2id run opens all of it, and sealing more doesn't need another run.
+//
+// A lock can also need a device: its header's format says so, and its key is then the passphrase's
+// key mixed with a secret only that device can give back. Without that secret the passphrase opens
+// nothing, and since the header is associated data, it can't be changed to say otherwise.
 #define PASS_HEADER_LEN 32
 #define PASS_SEAL_OVERHEAD (PASS_HEADER_LEN + AEAD_NONCE_LEN + AEAD_TAG_LEN)
 #define PASS_WRONG  -1   // or sealed under another lock, or changed since it was sealed
 #define PASS_NOMEM  -2
 #define PASS_FORMAT -3
+#define PASS_DEVICE_SECRET_LEN 32
 typedef struct {
     uint8_t header[PASS_HEADER_LEN];
     uint8_t key[32];
+    uint8_t base[32];   // the passphrase's key alone
+    int device;         // key has the device's secret in it
 } pass_lock_t;
 // A new lock with its own salt: 0 or PASS_NOMEM.
 int pass_lock_new(const char *passphrase, pass_lock_t *lk);
 // The lock that sealed was sealed under, if passphrase is the right one (only pass_unseal can
-// tell): 0, PASS_FORMAT or PASS_NOMEM.
+// tell): 0, PASS_FORMAT or PASS_NOMEM. If it needs a device, nothing opens until pass_lock_device.
 int pass_lock_of(const char *passphrase, const uint8_t *sealed, size_t len, pass_lock_t *lk);
+// Whether sealed was sealed under a lock that needs a device.
+int pass_needs_device(const uint8_t *sealed, size_t len);
+// The same passphrase and salt, needing the device whose secret this is as well, or no device.
+void pass_lock_device(pass_lock_t *lk, const uint8_t secret[PASS_DEVICE_SECRET_LEN]);
+void pass_lock_portable(pass_lock_t *lk);
 int pass_seal(const pass_lock_t *lk, const void *plain, size_t len, uint8_t *out, size_t cap, size_t *out_len);
 int pass_unseal(const pass_lock_t *lk, const uint8_t *in, size_t len, void *plain, size_t cap, size_t *plain_len);
 

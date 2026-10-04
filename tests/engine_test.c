@@ -775,6 +775,53 @@ static void test_passphrase_seal(double *t) {
           "bytes that were never sealed weren't refused");
 }
 
+// A lock that needs a device: the passphrase alone opens and seals nothing under it, and its header
+// can't be changed to say it needs no device.
+static void test_device_lock(double *t) {
+    (void)t;
+    static const char settings[] = "[profile]\nnick = \"alice\"\n";
+    uint8_t secret[PASS_DEVICE_SECRET_LEN], other[PASS_DEVICE_SECRET_LEN], opened[sizeof settings];
+    uint8_t plain[sizeof settings + PASS_SEAL_OVERHEAD], locked[sizeof settings + PASS_SEAL_OVERHEAD];
+    uint8_t scratch[sizeof settings + PASS_SEAL_OVERHEAD];
+    size_t n = 0, ln = 0, sn = 0, got = 0;
+    gen_random(secret, sizeof secret);
+    memcpy(other, secret, sizeof other);
+    other[0] ^= 1;
+    pass_lock_t lk, dev, again, wrong;
+    CHECK(pass_lock_new("correct horse", &lk) == 0
+          && pass_seal(&lk, settings, sizeof settings, plain, sizeof plain, &n) == 0 && !pass_needs_device(plain, n),
+          "a lock without a device said it needed one");
+    dev = lk;
+    pass_lock_device(&dev, secret);
+    CHECK(pass_seal(&dev, settings, sizeof settings, locked, sizeof locked, &ln) == 0 && pass_needs_device(locked, ln)
+          && memcmp(locked + 8, plain + 8, PASS_HEADER_LEN - 8) == 0,
+          "a device lock's header didn't say so, or didn't keep the limits and salt");
+    CHECK(pass_unseal(&lk, locked, ln, opened, sizeof opened, &got) == PASS_WRONG
+          && pass_unseal(&dev, plain, n, opened, sizeof opened, &got) == PASS_WRONG,
+          "one lock opened what the other sealed");
+    int rc = pass_lock_of("correct horse", locked, ln, &again);
+    CHECK(rc == 0 && pass_unseal(&again, locked, ln, opened, sizeof opened, &got) == PASS_WRONG
+          && pass_seal(&again, settings, sizeof settings, scratch, sizeof scratch, &sn) == PASS_FORMAT,
+          "the passphrase alone opened or sealed something under a device lock (%d)", rc);
+    wrong = again;
+    pass_lock_device(&wrong, other);
+    CHECK(pass_unseal(&wrong, locked, ln, opened, sizeof opened, &got) == PASS_WRONG, "another device's secret opened it");
+    pass_lock_device(&again, secret);
+    rc = pass_unseal(&again, locked, ln, opened, sizeof opened, &got);
+    CHECK(rc == 0 && got == sizeof settings && memcmp(opened, settings, sizeof settings) == 0,
+          "the passphrase and the device's secret didn't open it (%d)", rc);
+    memcpy(scratch, locked, ln);
+    memcpy(scratch, plain, 8);
+    CHECK(pass_lock_of("correct horse", scratch, ln, &wrong) == 0
+          && pass_unseal(&wrong, scratch, ln, opened, sizeof opened, &got) == PASS_WRONG
+          && pass_unseal(&again, scratch, ln, opened, sizeof opened, &got) == PASS_WRONG,
+          "a device-locked file opened once its header said it needed no device");
+    pass_lock_portable(&again);
+    rc = pass_unseal(&again, plain, n, opened, sizeof opened, &got);
+    CHECK(rc == 0 && memcmp(again.header, plain, PASS_HEADER_LEN) == 0,
+          "unlocked again, it wasn't the passphrase's own lock (%d)", rc);
+}
+
 static void test_identity_keys(double *t) {
     (void)t;
     // An identity file age-keygen wrote, and the recipient it gave for it.
@@ -1570,7 +1617,7 @@ int main(int argc, char **argv) {
         { "junk", test_junk }, { "lookalike nick", test_lookalike_nick },
         { "third peer", test_third_peer }, { "candidates settle", test_candidates_settle }, { "builds", test_builds },
         { "parsers", test_parsers }, { "toml", test_toml }, { "dht keys", test_dht_keys }, { "dht", test_dht }, { "read file", test_read_file },
-        { "identity keys", test_identity_keys }, { "passphrase seal", test_passphrase_seal }, { "images", test_images }, { "file names", test_file_names }, { "files", test_files },
+        { "identity keys", test_identity_keys }, { "passphrase seal", test_passphrase_seal }, { "device lock", test_device_lock }, { "images", test_images }, { "file names", test_file_names }, { "files", test_files },
         { "verified keys", test_trust },
     };
     size_t n_tests = sizeof tests / sizeof tests[0];

@@ -4,23 +4,27 @@
 #define CHAT_INSTALL_H
 
 #include <stddef.h>
+#include "platform/platform.h"
 
 // What :install keeps in platform_config_dir: the settings, the signing key and the verified
 // signing keys of peers, all sealed under one passphrase. Nothing is written there before :install.
 // There can be more than one save: the one in that folder itself, named "" here and default to the
 // user, and named ones in saves/NAME under it, each with its own passphrase. One of them is in use
-// at a time.
+// at a time. A save can be locked to this device as well: then its key also needs a secret only
+// this device can unseal (platform_device_seal), kept sealed in a device file beside the others.
 
 #define INSTALL_SETTINGS_MAX 8192
 #define INSTALL_KEY_MAX 1280
 #define INSTALL_VERIFIED_MAX 24576
 #define INSTALL_NO_FILE -4
+#define INSTALL_DEVICE -5    // it's locked to a device, and this one can't unseal it: install_device_why says why
 #define INSTALL_NAME_MAX 32
 #define INSTALL_SAVES_MAX 32
 
 typedef struct {
     char name[INSTALL_NAME_MAX + 1];
     int settings, key;    // which of the two files it has
+    int device;           // locked to a device
     char modified[17];    // when its settings (or key) were last written: "YYYY-MM-DD HH:MM"
 } install_save_t;
 
@@ -40,14 +44,28 @@ void install_use(const char *name);
 int install_where(const char *name, char *out, size_t cap);
 int install_has_settings(const char *name);
 int install_has_key(const char *name);
+// Whether a save is locked to a device (this one or another).
+int install_locked_to_device(const char *name);
 
 // Both run Argon2id and keep the result until install_forget, so saving doesn't need the
 // passphrase again. On success, the save named is the one in use. A new passphrase, for files not
-// written yet: 0 or PASS_NOMEM.
-int install_lock_new(const char *name, const char *passphrase);
-// The passphrase of the files there: 0, INSTALL_NO_FILE, or a PASS_ code.
+// written yet, locked to this device too if device is set: 0, PASS_NOMEM or INSTALL_DEVICE.
+int install_lock_new(const char *name, const char *passphrase, int device);
+// The passphrase of the files there: 0, INSTALL_NO_FILE, INSTALL_DEVICE, or a PASS_ code.
 int install_unlock(const char *name, const char *passphrase);
+// After install_unlock: 1 if the save was only part locked to this device (chat stopped while its
+// lock was changing, or a file was replaced) and has been locked to it again, -1 if that failed
+// (install_device_why says why), otherwise 0.
+int install_relocked(void);
 void install_forget(void);
+
+// What the open save is locked to: DEVICE_NONE when its passphrase alone opens it.
+device_kind_t install_device_lock(void);
+// Seals the open save again, locked to this device as well, or with its passphrase alone. On
+// Windows, unlocking deletes its TPM key. 0, or -1 with install_device_why.
+int install_set_device_lock(int on);
+// Why the last step that needed this device failed.
+const char *install_device_why(void);
 
 // These use the save in use and the passphrase already held. Returns the length, or
 // INSTALL_NO_FILE or a PASS_ code.
@@ -61,8 +79,8 @@ int install_read_key(void *secret, size_t cap, size_t *len);
 long install_read_verified(char *buf, size_t cap);
 int install_write_verified(const char *text);
 
-// Deletes a save's files, then its folder and the folders above it that nothing else is in. If
-// it's the save in use, its passphrase is forgotten.
+// Deletes a save's files, what this device keeps for it if it's locked to it, then its folder and
+// the folders above it that nothing else is in. If it's the save in use, its passphrase is forgotten.
 int install_remove(const char *name);
 
 #endif

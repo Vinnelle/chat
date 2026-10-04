@@ -161,7 +161,7 @@ static void fuzz_render(const char *s, const uint8_t *data, size_t size) {
     tui_render(rows, cols, &session, 1, 0, &peer, 1, net, 1, &sb, &console, &view, &bar, (flags & 64) != 0);
     tui_render_bar(rows, cols, &view, &bar, (flags & 64) != 0);
     tui_row_t row[2] = { { s, s, (flags & 1) ? s : NULL, (tui_value_kind_t)(flags % 8), (flags & 4) ? rgb : NULL,
-                           (flags & 8) ? s : NULL, g_progress.permille },
+                           (flags & 8) ? s : NULL, g_progress.permille, (flags & 128) != 0 },
                          { NULL, s, NULL, TUI_V_TEXT, NULL } };
     const char *nav[2] = { s, s };
     tui_page_t page = { .title = s, .clock = s, .intro = (flags & 2) ? s : NULL, .nav = (flags & 4) ? nav : NULL,
