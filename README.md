@@ -378,7 +378,9 @@ you're saving it. It would be off unless you turn it on.
 of peers (see [Security](#security)) so they're there next time chat starts. For a key from a
 file it saves the file's path instead of the key, and reads the file again each time chat
 starts. If the file is gone or holds a different key, the console says so. It asks first, and tells you what it leaves on disk. The files tell anyone who can read the
-disk (an admin, malware, a backup, forensics) that chat is used there.
+disk (an admin, malware, a backup, forensics) that chat is used there. Before that it asks for
+the save's name, and leaving it blank picks a random one, like `swift-otter42` (see
+[More than one save](#more-than-one-save)).
 
 The files are sealed with one passphrase you pick, typed twice, even if there's no signing
 key to save. Argon2id (512 MiB, same as for a session) makes a key from it with a salt, and
@@ -386,8 +388,9 @@ XChaCha20-Poly1305 seals each file with that key. Each file starts with what Arg
 (its limits and the salt), and nothing else is readable: not your nick, routing or relays, and
 not the key's public half, so neither file can be linked to the fingerprint peers know you by.
 
-- `~/.config/chat/settings` (`$XDG_CONFIG_HOME/chat` if that's set, `%LOCALAPPDATA%\chat` on
-  Windows, which a roaming profile doesn't carry): the settings you've changed from the
+- `~/.config/chat/saves/NAME/settings` (with `$XDG_CONFIG_HOME/chat` for `~/.config/chat` if
+  that's set, and `%LOCALAPPDATA%\chat` on Windows, which a roaming profile doesn't carry), NAME
+  being the save's (see [More than one save](#more-than-one-save)): the settings you've changed from the
   defaults. Defaults aren't saved, so if a later version changes one, you get the new one. The
   Tor control password is never saved. Inside the seal it's TOML:
 
@@ -410,14 +413,14 @@ not the key's public half, so neither file can be linked to the fingerprint peer
   `colour` and `autosave` in `[profile]`, and the rest in `[chat]`. A
   switch is `true` or `false`, `port` is a number, `relays` is a list, and the rest are strings,
   written the way `:set` takes them. A key chat can't use is skipped, and the console says so.
-- `~/.config/chat/key`: your signing key, what kind it is and where it came from.
+- `~/.config/chat/saves/NAME/key`: your signing key, what kind it is and where it came from.
 
 Only you can open the folder and the files (`0700`, `0600`). Each file is written in full and
 then renamed into place, so a crash can't leave half a file. Sessions, their ids and passwords,
 messages, peers and files are never saved.
 
-`settings` and `key` are the only files chat writes there (and the same two in `saves/NAME` for
-a save made with `:install NAME`, see [More than one save](#more-than-one-save)), and both are always sealed, as is
+`settings` and `key` are the only files chat writes there (and the same two in `~/.config/chat`
+itself for the save called `default`, see [More than one save](#more-than-one-save)), and both are always sealed, as is
 `verified`. A save locked to the device also has a `device` file, sealed by the device instead
 (see [Locking a save to this device](#locking-a-save-to-this-device)). One that needs a security key
 has a `securitykey` file, with the key's credential and the save's secret wrapped under the key's,
@@ -469,11 +472,14 @@ have what was in them.
 
 #### More than one save
 
-`:install NAME` saves what's in use as a separate save called NAME, in
-`~/.config/chat/saves/NAME` (the same `settings` and `key` files), sealed with its own
-passphrase. A name is 1 to 32 letters, digits, `-` and `_`. The save in `~/.config/chat` itself is
-called `default`. The folder names are readable on disk, so pick names that don't say more than
-you want them to. Once a save is open, `:save` (or autosave) saves what you change to that one, and `:install`
+Each save has a name and its own folder, `~/.config/chat/saves/NAME` (the same `settings` and
+`key` files), and is sealed with its own passphrase. A name is 1 to 32 letters, digits, `-` and
+`_`. When `:install` makes a new save it asks for the name. Leave it blank and chat picks a random
+one, like `swift-otter42`, which the box shows before you choose. `:install NAME` saves what's in
+use as a separate save called NAME without asking. The save in `~/.config/chat` itself, which
+earlier versions made, is called `default`, and typing `default` as the name makes it. The folder
+names are readable on disk, so pick names that don't say more than you want them to, or let chat
+pick one. Once a save is open, `:save` (or autosave) saves what you change to that one, and `:install`
 alone saves to it too, after asking first, as above. `:install NAME` for a save that doesn't exist
 yet makes it, with a new passphrase. For one that does, while another save is open, it asks
 whether to save what's in use over it, and then asks for that save's passphrase. To use what's
@@ -817,7 +823,7 @@ puts it on the command line.
 | `:port [N]` | show or change this session's UDP port (`0` picks a free one) |
 | `:copyid` | copy the session id to the clipboard |
 | `:update` | install the latest release |
-| `:install [NAME]` | save your settings and signing key on this computer, after telling you what that leaves on disk; with NAME, as a save of that name (see [Installing](#installing)) |
+| `:install [NAME]` | save your settings and signing key on this computer, after telling you what that leaves on disk; a new save asks for its name (blank picks a random one), and with NAME it's a save of that name (see [Installing](#installing)) |
 | `:save` | save what's in use now to the save that's open, after asking (`:install` if none is) |
 | `:uninstall [NAME]` | delete what `:install` saved (the save in use, or the one called NAME) |
 | `:changelog` | show changelog (`:news`); built in, so it works offline |
@@ -906,7 +912,7 @@ Options given here override what `:install` saved, for that run.
 | `--tor-path PATH` | The tor program chat starts (default: `tor` on `PATH` or in the usual folders) |
 | `--tor-socks`, `--tor-control` | Where to look for a running tor's SOCKS and control ports (`HOST:PORT`) |
 | `--identity ...` | `age` or `pgp` for a key made from a password (asked for, or `CHAT_SIGN_PASSWORD`), or `age:KEYFILE` or `pgp:KEYFILE` for your own (see [Security](#security)); for that run, instead of a key `:install` saved |
-| `--save NAME` | Open the save `:install NAME` made, without the list of saves (`default` is the one in `~/.config/chat` itself); if there isn't one, start from the defaults and let `:install` make it (see [Installing](#installing)) |
+| `--save NAME` | Open the save called NAME, without the list of saves (`default` is the one in `~/.config/chat` itself); if there isn't one, start from the defaults and let `:install` make it (see [Installing](#installing)) |
 | `--simple` | Plain `[HH:MM] ...` lines, one session, stdin, `:name` runs a command. Used automatically when stdout isn't a tty |
 | `--session ID` | Join a session at startup (with `--port`, `--peer`) |
 | `--update` | Install the latest release and exit, without opening chat (see [Updating](#updating)) |

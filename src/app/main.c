@@ -115,7 +115,8 @@ static const char *USAGE =
     "CHAT_INSTALL_PASSWORD). What you change after that waits for :save, unless :set autosave\n"
     "on (then it's saved as it changes). Options given here override what's saved, for that\n"
     "run only. :uninstall deletes it.\n"
-    ":install NAME makes another save, in ~/.config/chat/saves/NAME, with its own passphrase.\n"
+    "A new save goes in ~/.config/chat/saves/NAME, with its own passphrase. :install asks for its\n"
+    "name, and a blank one picks a random name. :install NAME makes another save named NAME.\n"
     "With more than one save, chat lists them on startup to pick the one to open.\n"
     ":set devicelock on locks a save to this device too: its key also needs a secret only this\n"
     "device can unseal (its TPM: on Linux through systemd's credential service, or without one,\n"
@@ -126,7 +127,7 @@ static const char *USAGE =
     ":set destroy N deletes a save after N wrong passphrases in a row, and :set shadow on adds a\n"
     "second passphrase that opens a decoy and deletes the real save for good.\n"
     "\n"
-    "  --save      open the save :install NAME made with this name, without the list\n"
+    "  --save      open the save with this name, without the list\n"
     "              (default is the one in ~/.config/chat itself). If there's no save\n"
     "              with that name, chat starts from its defaults and :install makes it\n"
     "  --nick      display name. A random one (like \"swift-otter42\") is used if omitted.\n"
@@ -384,7 +385,9 @@ typedef struct {
     // :install for a save that's sealed: after its passphrase, save what's in use over it (1, only
     // while another save is open), or use what's saved there (0). install_pick: the save to use is
     // picked from the list of saves. save_named: :install or :uninstall was given a NAME.
+    // save_random: the name a new save gets if none is typed.
     int install_overwrite, install_pick, save_named;
+    char save_random[INSTALL_NAME_MAX + 1];
     app_mode_t mode;
     int asking_quit;   // Ctrl+C's QUIT box, over whatever mode is showing
     char pending_session_id[MAX_SESSION_NAME + 1];
@@ -4709,6 +4712,11 @@ static int is_current_save(const char *name) {
 
 static int save_exists(const char *name) { return install_has_settings(name) || install_has_key(name); }
 
+static void pick_random_save_name(void) {
+    do random_nickname(g_app.save_random, sizeof g_app.save_random);
+    while (save_exists(g_app.save_random));
+}
+
 // :install for the save that's open and installed already only saves what's in use to it.
 static int install_resaves(void) { return g_app.installed && is_current_save(g_app.save_target); }
 
@@ -4789,8 +4797,16 @@ static void install_use_existing(void) {
     g_app.install_overwrite = 0;
     to_install_mode(g_app.install_pick ? MODE_INSTALL_PICK : MODE_INSTALL_UNLOCK);
 }
-static void install_new_save(void) { to_install_mode(MODE_INSTALL_NAME); }
+static void install_new_save(void) {
+    pick_random_save_name();
+    to_install_mode(MODE_INSTALL_NAME);
+}
 static void back_to_existing(void) { to_install_mode(MODE_INSTALL_EXISTING); }
+// With no saves there, the name was the first box: there's nothing to go back to.
+static void back_from_install_name(void) {
+    if (g_app.n_saves > 0) back_to_existing();
+    else cancel_install();
+}
 
 static void install_pick_key(const tui_key_t *key) {
     list_key_t k = list_key(key);
@@ -4836,7 +4852,7 @@ static void commit_install_name(void) {
     while (n > 0 && name[n - 1] == ' ') name[--n] = '\0';
     const char *p = name;
     while (*p == ' ') p++;
-    if (!*p) { note("type a name for the new save - or Esc to go back"); return; }
+    if (!*p) p = g_app.save_random;
     if (install_name_ok(p) != 0) { note("a save's name is 1 to %d letters, digits, - and _", INSTALL_NAME_MAX); return; }
     if (save_exists(p)) { note("there's a save called %s already - pick another name", install_shown_name(p)); return; }
     copy_str(g_app.save_target, strcmp(p, "default") == 0 ? "" : p, sizeof g_app.save_target);
@@ -5667,6 +5683,9 @@ static cmd_result_t app_install(void *ctx, const char *arg) {
         for (int i = 0; i < g_app.n_saves; i++)
             if (strcmp(g_app.saves[i].name, t) == 0) g_app.save_sel = i;
         mode = MODE_INSTALL_EXISTING;
+    } else if (!named) {
+        pick_random_save_name();
+        mode = MODE_INSTALL_NAME;
     }
     begin_prompt(mode);
     return CMD_OK;
@@ -6383,7 +6402,7 @@ static void handle_key(const tui_key_t *key) {
         case MODE_INSTALL_EXISTING:  choice_key(key, install_use_existing, install_new_save, cancel_install); return;
         case MODE_INSTALL_PICK:      install_pick_key(key); return;
         case MODE_INSTALL_OVERWRITE: confirm_key(key, install_overwrite_yes, cancel_install); return;
-        case MODE_INSTALL_NAME:   field_key(key, commit_install_name, back_to_existing); return;
+        case MODE_INSTALL_NAME:   field_key(key, commit_install_name, back_from_install_name); return;
         case MODE_UNINSTALL:      confirm_key(key, uninstall_confirmed, cancel_uninstall); return;
         case MODE_SAVES:          saves_key(key); return;
         case MODE_UNLOCK:         field_key(key, commit_unlock, back_from_unlock); return;
@@ -7122,13 +7141,14 @@ static const tui_dialog_t *current_dialog(void) {
                 d.placeholder = "passphrase";
                 d.keys = g_app.install_overwrite ? "enter install \xc2\xb7 esc back" : "enter open \xc2\xb7 esc back";
             } else {
-                snprintf(text, sizeof text, "A name for the new save: 1 to %d letters, digits, - and _. It goes in "
-                         "`saves/NAME` in chat's folder (`default` is the folder itself), and anyone who can read the "
-                         "disk can see the folder's name. What it leaves on disk is shown next.", INSTALL_NAME_MAX);
+                snprintf(text, sizeof text, "A name for the new save: 1 to %d letters, digits, - and _, or blank for "
+                         "`%s`, picked at random. It goes in `saves/NAME` in chat's folder (`default` is the folder "
+                         "itself), and anyone who can read the disk can see the folder's name. What it leaves on disk "
+                         "is shown next.", INSTALL_NAME_MAX, g_app.save_random);
                 d.title = "INSTALL \xc2\xb7 NEW SAVE";
                 d.mask = 0;
-                d.placeholder = "name";
-                d.keys = "enter next \xc2\xb7 esc back";
+                d.placeholder = g_app.save_random;
+                d.keys = g_app.n_saves > 0 ? "enter next \xc2\xb7 esc back" : "enter next \xc2\xb7 esc cancel";
             }
             d.n_text = add_para(paras, 0, TUI_P_TEXT, text);
             break;

@@ -76,6 +76,11 @@
   it. chat also raises its working set, so the keys and conversation it locks in memory stay out
   of the page file (before, the default was too small for most of them).
 - Reading a save no longer updates its access time (Linux).
+- `:install` asks for a new save's name every time, not only when there are saves already, and a
+  blank name picks a random one, like `swift-otter42`, shown in the box before you choose. A
+  first save used to go in `~/.config/chat` itself as `default`. Now it goes in
+  `~/.config/chat/saves/NAME` like the rest. Typing `default` still makes the old kind, and saves
+  made there before keep working.
 
 ## 0.4.0
 
