@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0-beta.3
 
 ### Added
 - Beta releases are opt-in: with the new `betas` setting on (Chat > Updates, `:set betas on`, or
