@@ -742,9 +742,9 @@ signed. If a step fails, run it again and it picks up from the tag.
 
 `just release beta` is for testing builds. It does the same, but as `VERSION-beta.N`, N counting up from 1:
 the heading becomes `## 0.5.0-beta.1`, `CMakeLists.txt` gets `0.5.0` and `CHAT_PRERELEASE`
-`-beta.1`, and the release on GitHub is a pre-release. `:update` only installs GitHub's latest
-release, which is never a pre-release, so testers download a beta themselves, and `:update`
-takes them on to `0.5.0` once it's out. `just release` then folds the Unreleased section and
+`-beta.1`, and the release on GitHub is a pre-release. `:update` only installs one with
+`betas` on (`:set betas on`, or `--betas`), so testers turn that on or download a beta
+themselves, and `:update` takes them on to `0.5.0` once it's out. `just release` then folds the Unreleased section and
 every beta's since the last release into one `## 0.5.0`: oldest first, each `###` heading once.
 It keeps every line, so if a later beta fixed something an earlier one added, tidy those sections
 first. Once the release is published, it deletes the betas' GitHub releases, keeping their tags.
@@ -766,9 +766,9 @@ chat [--nick NAME] [--colour NAME|#HEX] [--identity age|pgp[:KEYFILE]] [--simple
      [--noportmap] [--nonostr] [--nostr-always] [--relay wss://HOST ...]
      [--tor-launch auto|always|never] [--tor-path PATH] [--tor-socks HOST:PORT]
      [--tor-control HOST:PORT] [--verify-required] [--file-limit SIZE]
-     [--fast-files]
+     [--fast-files] [--betas]
      [--session ID --port UDP_PORT --peer HOST:PORT ...]
-chat --update | --version
+chat --update [--betas] | --version
 ```
 
 In a terminal, `chat` opens a full screen UI. The sidebar on the left lists your sessions
@@ -889,6 +889,7 @@ after a name. Under each row's help, the page shows the `:set` command that does
 | `preview` | what a notification shows: `off` (only that a message came), `nick` (who from), `message` (who, and what); never the session |
 | `net` | `normal`, `verbose` (every handshake packet, relay and Tor event) |
 | `port` | the UDP port for new sessions (`0` picks a free one) |
+| `betas` | `on` (`:update` installs betas too), `off` (only releases) |
 
 The settings page shows one section at a time (Network, Profile, Security and Chat, listed on
 the left), with its rows grouped under headings, and **Done** at the end of each. `j`/`k` go on
@@ -914,6 +915,12 @@ goes, with a progress bar for the download. Esc hides the box and the update kee
 `chat --update` exits with status 1 if the update failed. It needs `curl` (on `PATH` on Linux,
 or on Windows the one built into Windows 10+ in `System32`) and write access to the folder the
 executable is in.
+
+Betas, the test builds of the next release, are opt-in: with `betas` on (`:set betas on`, or
+`--betas` for one run), `:update` and `chat --update` install the newest release on the
+[releases page](https://github.com/Vinnelle/chat/releases), betas included. A beta is signed
+and checked the same way as a release. With `betas` off, a beta you're running stays until its
+release is out, and `:update` then takes you on to that.
 
 ### Options
 
@@ -942,6 +949,7 @@ Options given here override what `:install` saved, for that run.
 | `--simple` | Plain `[HH:MM] ...` lines, one session, stdin, `:name` runs a command. Used automatically when stdout isn't a tty |
 | `--session ID` | Join a session at startup (with `--port`, `--peer`) |
 | `--update` | Install the latest release and exit, without opening chat (see [Updating](#updating)) |
+| `--betas` | Let `:update` and `--update` install betas too, for that run (`:set betas on` keeps it) |
 | `--version` | Print the version and exit |
 
 ## License

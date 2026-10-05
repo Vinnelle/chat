@@ -41,9 +41,9 @@ static const char *USAGE =
     "            [--noportmap] [--nonostr] [--nostr-always] [--relay wss://HOST ...]\n"
     "            [--tor-launch auto|always|never] [--tor-path PATH] [--tor-socks HOST:PORT]\n"
     "            [--tor-control HOST:PORT] [--verify-required] [--file-limit SIZE]\n"
-    "            [--fast-files]\n"
+    "            [--fast-files] [--betas]\n"
     "            [--session ID --port UDP_PORT --peer HOST:PORT ...]\n"
-    "       chat --update | --version\n"
+    "       chat --update [--betas] | --version\n"
     "\n"
     "In a terminal, chat opens a full-screen UI. Sessions you've joined or created are listed\n"
     "on the left (Tab/Shift+Tab to switch), with who's online and how the session reaches\n"
@@ -197,6 +197,8 @@ static const char *USAGE =
     "  --session   join this session at startup (needs --port; \"chat --session ID\" alone\n"
     "              still opens the TUI so you can join yourself)\n"
     "  --update    install the latest release from GitHub and exit, without opening chat\n"
+    "  --betas     let :update and --update install betas too, the test builds of the\n"
+    "              next release (:set betas on keeps it)\n"
     "  --version   print the version and exit\n"
     "\n"
     "Encryption: X25519 + ML-KEM-768 (hybrid, post-quantum), XChaCha20-Poly1305, and a\n"
@@ -332,6 +334,7 @@ typedef struct {
     char tor_path[512];
     uint64_t file_cap;   // 0: the default
     int fast_files;
+    int betas;
     int autosave;   // what's changed is saved as it changes, while installed
     // Locked to this device: the open save, or with none open, the new one :install is making for it
     // (install_for). device_want is what the DEVICE LOCK box asks to change it to, and device_back
@@ -1259,7 +1262,8 @@ static cmd_result_t app_update(void *ctx, const char *arg) {
         return CMD_OK;
     }
     // If an update is already running, its box is shown again.
-    if (update_start() == 0) push_log("* update: checking GitHub for a newer release (v" CHAT_VERSION " here)...");
+    if (update_start(g_app.betas) == 0)
+        push_log("* update: checking GitHub for a newer release%s (v" CHAT_VERSION " here)...", g_app.betas ? " or beta" : "");
     begin_prompt(MODE_UPDATE);
     return CMD_OK;
 }
@@ -1328,7 +1332,7 @@ typedef enum {
     SET_NOSTR, SET_RELAYS,
     SET_NICK, SET_COLOUR, SET_SIGN, SET_AGE_RECIPIENT, SET_PGP_PUBKEY, SET_AUTOSAVE, SET_DEVICE_LOCK,
     SET_SECURITY_KEY, SET_AUTHENTICATOR, SET_DESTROY, SET_SHADOW,
-    SET_VERIFY, SET_FILE_LIMIT, SET_FAST_FILES, SET_NOTIFY, SET_PREVIEW, SET_NET, SET_PORT,
+    SET_VERIFY, SET_FILE_LIMIT, SET_FAST_FILES, SET_NOTIFY, SET_PREVIEW, SET_NET, SET_PORT, SET_BETAS,
     N_SETTING_IDS
 } setting_id_t;
 
@@ -1445,6 +1449,10 @@ static const setting_def_t SETTINGS[] = {
       "file, your slots to that peer come every few milliseconds. It takes seconds instead of minutes, but anyone "
       "watching the network sees a burst about the size of the file. Through the relays it goes as often as they "
       "allow, about twice the normal rate, and the relays can see that. Only the sender's setting matters." },
+    { SET_BETAS, NULL, "Updates", "betas", "Beta releases", K_TOGGLE, "on|off",
+      "on: :update installs betas too, the test builds of the next release. They're signed and checked like a "
+      "release, but have had less testing. off: only releases, so a beta you're on stays until its release is "
+      "out, and :update then takes you on to that." },
 };
 #define N_SETTINGS ((int)(sizeof SETTINGS / sizeof SETTINGS[0]))
 _Static_assert(N_SETTINGS == N_SETTING_IDS, "every setting has a row");
@@ -1519,6 +1527,7 @@ static int setting_options(setting_id_t id, const char *const **names, int *n) {
         case SET_NOSTR:      *names = NOSTR_NAMES; *n = 3; return r->nostr;
         case SET_VERIFY:     *names = VERIFY_NAMES; return g_app.verify_optional != 0;
         case SET_FAST_FILES: return g_app.fast_files != 0;
+        case SET_BETAS:      return g_app.betas != 0;
         case SET_AUTOSAVE:   return g_app.autosave != 0;
         case SET_DEVICE_LOCK: return g_app.device_lock != 0;
         case SET_SECURITY_KEY: return g_app.key_factor != 0;
@@ -1883,6 +1892,9 @@ static void setting_choose(setting_id_t id, int i) {
             g_app.fast_files = i;
             for (int s = 0; s < MAX_SESSIONS; s++)
                 if (takes_settings(s)) chat_set_file_options(&g_app.sessions[s].engine, g_app.file_cap, i);
+            break;
+        case SET_BETAS:
+            g_app.betas = i;
             break;
         case SET_AUTOSAVE:
             g_app.autosave = i;
@@ -8025,6 +8037,8 @@ static int read_options(int argc, char **argv, options_t *o) {
             g_app.file_cap = v;
         } else if (strcmp(key, "fast-files") == 0) {
             g_app.fast_files = 1;
+        } else if (strcmp(key, "betas") == 0) {
+            g_app.betas = 1;
         } else if (strcmp(key, "verify-optional") == 0) {
             g_app.verify_optional = 1;
         } else if (strcmp(key, "verify-required") == 0) {
@@ -8161,10 +8175,11 @@ int main(int argc, char **argv) {
             }
             sync_update_proxy();
         }
-        printf("chat: checking GitHub for a newer release (v" CHAT_VERSION " here)%s...\n", over_tor ? " through Tor" : "");
+        printf("chat: checking GitHub for a newer release%s (v" CHAT_VERSION " here)%s...\n",
+               g_app.betas ? " or beta" : "", over_tor ? " through Tor" : "");
         fflush(stdout);
         char msg[UPDATE_MSG_MAX];
-        int rc = update_run(msg, sizeof msg);
+        int rc = update_run(g_app.betas, msg, sizeof msg);
         if (over_tor) tor_link_stop();
         const char *text = strncmp(msg, "* update: ", 10) == 0 ? msg + 10 : msg;
         fprintf(rc == 0 ? stdout : stderr, "chat: %s\n", text);

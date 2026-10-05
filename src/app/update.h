@@ -32,11 +32,12 @@ typedef struct {
 // update check doesn't show GitHub this machine's address.
 void update_set_proxy(const char *socks);
 
-int update_start(void);
+// betas: install the newest release, betas included, instead of only releases.
+int update_start(int betas);
 
 int update_poll(char *msg, size_t cap);
 
-int update_run(char *msg, size_t cap);
+int update_run(int betas, char *msg, size_t cap);
 
 // A copy of the current (or last) update's progress.
 void update_view(update_view_t *v);

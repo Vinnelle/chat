@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+- Beta releases are opt-in: with the new `betas` setting on (Chat > Updates, `:set betas on`, or
+  `--betas` for one run), `:update` and `chat --update` install the newest release, betas
+  included. It's off by default, so `:update` still only installs releases. A newer beta of the
+  same version counts as an update, so testers go from `-beta.1` to `-beta.2`.
+
 ### Changed
 - `just release` deletes the GitHub releases of the version's betas once the release is
   published, so the release is the one left to download. The betas' tags stay.

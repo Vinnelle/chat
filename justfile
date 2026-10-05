@@ -267,10 +267,10 @@ release what="" *args: _can-release
     exec "$just" _publish "$v"
 
 # A beta is for testers: tagged vVERSION-beta.N, signed and published like a release, but as a
-# GitHub pre-release, which :update never offers. Testers download it, and :update takes them on
-# to VERSION once it's released. Releasing VERSION deletes its betas' GitHub releases, but not
-# their tags. VERSION defaults to the one `just release` would release next, and
-# N counts up from 1 (or picks up a beta whose publishing failed). "## Unreleased" becomes
+# GitHub pre-release, which :update only installs with betas on (:set betas on). Testers turn
+# that on or download it, and :update takes them on to VERSION once it's released. Releasing
+# VERSION deletes its betas' GitHub releases, but not their tags. VERSION defaults to the one
+# `just release` would release next, and N counts up from 1 (or picks up a beta whose publishing failed). "## Unreleased" becomes
 # "## VERSION-beta.N" and CMakeLists.txt gets the version, with "-beta.N" as CHAT_PRERELEASE.
 # Build, sign and publish a beta of the next release, or of VERSION
 _release-beta version="":

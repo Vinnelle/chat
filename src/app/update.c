@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <limits.h>
 #include <stdarg.h>
 
 #ifndef CHAT_VERSION
@@ -37,6 +38,7 @@ enum { UPD_IDLE = 0, UPD_RUNNING = 1, UPD_DONE = 2 };
 static int g_state = UPD_IDLE;
 static char g_msg[UPDATE_MSG_MAX];
 static int g_ok;
+static int g_betas;
 
 static char g_proxy[64];
 
@@ -183,8 +185,9 @@ static int parse_tag(const char *json, char *tag, size_t cap) {
     return 0;
 }
 
-// Returns whether it's a beta ("0.5.0-beta.1"), which comes before the release it's a beta of.
-static int parse_version(const char *s, long v[3]) {
+// Returns a beta's number ("0.5.0-beta.2" is 2), or LONG_MAX for a release, which comes after
+// its betas.
+static long parse_version(const char *s, long v[3]) {
     v[0] = v[1] = v[2] = 0;
     if (*s == 'v' || *s == 'V') s++;
     for (int i = 0; i < 3 && isdigit((unsigned char)*s); i++) {
@@ -192,16 +195,19 @@ static int parse_version(const char *s, long v[3]) {
         if (*s != '.') break;
         s++;
     }
-    return *s == '-';
+    if (*s != '-') return LONG_MAX;
+    const char *dot = strrchr(s, '.');
+    long n = dot ? strtol(dot + 1, NULL, 10) : 0;
+    return n > 0 && n < LONG_MAX ? n : 1;
 }
 
 static int version_newer(const char *remote, const char *local) {
     long r[3], l[3];
-    int remote_beta = parse_version(remote, r);
-    int local_beta = parse_version(local, l);
+    long remote_beta = parse_version(remote, r);
+    long local_beta = parse_version(local, l);
     for (int i = 0; i < 3; i++)
         if (r[i] != l[i]) return r[i] > l[i];
-    return local_beta && !remote_beta;
+    return remote_beta > local_beta;
 }
 
 static int sums_lookup(const char *sums, const char *name, uint8_t hash[crypto_hash_sha256_BYTES]) {
@@ -338,7 +344,7 @@ static void succeed(const char *fmt, const char *arg) {
 
 static void update_thread(void *unused) {
     (void)unused;
-    stage(0, "Checking GitHub for a newer release%s", "");
+    stage(0, "Checking GitHub for a newer release%s", g_betas ? " or beta" : "");
 #if !defined(UPDATE_ASSET)
     finish("* update: no release builds exist for this CPU architecture%s", "");
 #else
@@ -355,8 +361,11 @@ static void update_thread(void *unused) {
 
     say(UPDATE_LINE_INFO, "this is v" CHAT_VERSION ", " UPDATE_ASSET);
     if (g_proxy[0]) say(UPDATE_LINE_DETAIL, "downloads go through Tor (%s)", g_proxy);
-    say(UPDATE_LINE_DETAIL, "GET api.github.com/repos/" UPDATE_REPO "/releases/latest");
-    if (fetch("https://api.github.com/repos/" UPDATE_REPO "/releases/latest", tmp_json, 1) != 0) {
+    // GitHub's latest release is never a pre-release, so betas come from the list, newest first.
+    snprintf(url, sizeof url, "https://api.github.com/repos/" UPDATE_REPO "/releases%s",
+             g_betas ? "?per_page=1" : "/latest");
+    say(UPDATE_LINE_DETAIL, "GET %s", url + 8);
+    if (fetch(url, tmp_json, 1) != 0) {
         platform_remove(tmp_json);
         finish("* update: could not reach GitHub (is curl installed, and is %s's folder writable?)", exe);
         return;
@@ -368,10 +377,11 @@ static void update_thread(void *unused) {
     long total = ok ? asset_size(json, UPDATE_ASSET) : 0;
     free(json);
     if (!ok) { finish("* update: GitHub's reply had no usable release tag%s", ""); return; }
-    say(UPDATE_LINE_INFO, "latest release is %s", tag);
+    say(UPDATE_LINE_INFO, g_betas ? "newest release, betas included, is %s" : "latest release is %s", tag);
     if (!version_newer(tag, CHAT_VERSION)) {
         stage(1000, "Already up to date", "");
-        succeed("* update: already up to date (v" CHAT_VERSION ", latest is %s)", tag);
+        if (g_betas) succeed("* update: already up to date (v" CHAT_VERSION ", newest with betas is %s)", tag);
+        else succeed("* update: already up to date (v" CHAT_VERSION ", latest is %s)", tag);
         return;
     }
     stage(100, "Release %s found", tag);
@@ -453,11 +463,12 @@ static void update_thread(void *unused) {
 #endif
 }
 
-int update_start(void) {
+int update_start(int betas) {
     int idle = UPD_IDLE;
     if (!__atomic_compare_exchange_n(&g_state, &idle, UPD_RUNNING, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
         return -1;
     g_ok = 0;
+    g_betas = betas;
     view_reset();
     if (platform_spawn_thread(update_thread, NULL) != 0) {
         view_lock();
@@ -476,8 +487,9 @@ int update_poll(char *msg, size_t cap) {
     return 1;
 }
 
-int update_run(char *msg, size_t cap) {
+int update_run(int betas, char *msg, size_t cap) {
     g_ok = 0;
+    g_betas = betas;
     view_reset();
     update_thread(NULL);
     update_poll(msg, cap);
