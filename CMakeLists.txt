@@ -2,7 +2,7 @@
 # Copyright (C) 2026 finlay@tuta.com
 cmake_minimum_required(VERSION 3.15)
 project(chat VERSION 0.5.0 LANGUAGES C)
-# "-beta.N" on a beta of the version above, empty on a release.
+# "-beta.N" on a beta of the version above (`just beta`); `just release` empties it.
 set(CHAT_PRERELEASE "-beta.1")
 
 set(CMAKE_C_STANDARD 11)

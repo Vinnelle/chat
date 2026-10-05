@@ -204,24 +204,37 @@ _append-list dir:
         { cat BUILDS; printf '%s\n%08dCHATBLD1' "$sig" "$len"; } >> "$f"
     done
 
-# Releases what's under "## Unreleased" in CHANGELOG.md as VERSION: that heading becomes
-# "## VERSION", CMakeLists.txt gets the version, and both are committed and tagged vVERSION.
-# VERSION defaults to the one in CMakeLists.txt, or the patch after it once that one is published.
-# Nothing is pushed until SHA256SUMS is signed; if a later step fails, running this again picks up
-# from the tag. Signing happens here, offline, so a compromised GitHub account can't publish an
-# update that chat will install.
-# Build, sign and publish a release (needs zig, minisign, gh)
-[group('release')]
-release version="":
+# Release preconditions
+_can-release:
     #!/bin/sh
     set -eu
-    just={{quote(just_executable())}}
-    key="${CHAT_SIGNING_KEY:-$HOME/.minisign/chat-release.key}"
     test -e minisign.pub || { echo "no minisign.pub - run just keygen" >&2; exit 1; }
     test -z "$(git status --porcelain)" || { echo "working tree not clean" >&2; exit 1; }
     gh auth status >/dev/null 2>&1 || { echo "gh isn't logged in - run gh auth login" >&2; exit 1; }
+
+#   just release                  the next version: the one in CMakeLists.txt, or the patch after it
+#   just release 1.0.0            another version
+#   just release beta [VERSION]   a beta of the next version, or of VERSION, see _release-beta
+# Releases the sections at the top of CHANGELOG.md, "## Unreleased" and those of the betas since
+# the last release, as VERSION: they become one "## VERSION" (see _fold-changelog), CMakeLists.txt
+# gets the version, and both are committed and tagged vVERSION. VERSION defaults to the one in
+# CMakeLists.txt, or the patch after it once that one is published. Nothing is pushed until
+# SHA256SUMS is signed; if a later step fails, running this again picks up from the tag.
+# Build, sign and publish a release: [VERSION], or beta [VERSION] (needs zig, minisign, gh)
+[group('release')]
+release what="" *args: _can-release
+    #!/bin/sh
+    set -eu
+    just={{quote(just_executable())}}
+    if [ "${1:-}" = beta ]; then
+        shift
+        if [ $# -gt 1 ]; then echo "just release beta takes one version at most, not $*" >&2; exit 1; fi
+        exec "$just" _release-beta "$@"
+    fi
+    if [ $# -gt 1 ]; then echo "just release takes a version or beta [VERSION], not $*" >&2; exit 1; fi
     cmake_version() { sed -n 's/^project(chat VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt; }
     published() { gh release view "v$1" >/dev/null 2>&1; }
+    pending() { awk '/^## [0-9]+\.[0-9]+\.[0-9]+$/ { exit } /^## / { printf "%s%s", (n++ ? ", " : ""), substr($0, 4) }' CHANGELOG.md; }
     v="${1:-}"
     if [ -z "$v" ]; then
         v=$(cmake_version)
@@ -234,24 +247,140 @@ release version="":
         echo "v$v is older than $(cmake_version), the version in CMakeLists.txt" >&2; exit 1
     fi
 
-    if grep -q '^## Unreleased$' CHANGELOG.md; then
+    if [ -n "$(pending)" ]; then
         if git rev-parse -q --verify "refs/tags/v$v" >/dev/null; then
-            echo "tag v$v already exists, but CHANGELOG.md still has an Unreleased section" >&2; exit 1
+            echo "tag v$v already exists, but CHANGELOG.md still has $(pending) above it" >&2; exit 1
         fi
         if grep -q "^## $v\$" CHANGELOG.md; then echo "CHANGELOG.md already has a section for $v" >&2; exit 1; fi
-        awk '$0 == "## Unreleased" { on = 1; next } on && /^## / { exit } on && /[^[:space:]]/ { found = 1 } END { exit !found }' \
-            CHANGELOG.md || { echo "the Unreleased section of CHANGELOG.md is empty" >&2; exit 1; }
-        echo "releasing the Unreleased changes as v$v"
-        awk -v v="$v" '$0 == "## Unreleased" && !done { print "## " v; done = 1; next } { print }' CHANGELOG.md > CHANGELOG.md.tmp
-        mv CHANGELOG.md.tmp CHANGELOG.md
-        sed "s/^project(chat VERSION [0-9.]*/project(chat VERSION $v/" CMakeLists.txt > CMakeLists.txt.tmp
+        awk '/^## [0-9]+\.[0-9]+\.[0-9]+$/ { exit } /^## / { on = 1; next } on && /[^[:space:]]/ { found = 1 } END { exit !found }' \
+            CHANGELOG.md || { echo "CHANGELOG.md's $(pending) has nothing in it" >&2; exit 1; }
+        echo "releasing CHANGELOG.md's $(pending) as v$v"
+        "$just" _fold-changelog "$v"
+        sed -e "s/^project(chat VERSION [0-9.]*/project(chat VERSION $v/" -e 's/^set(CHAT_PRERELEASE ".*")$/set(CHAT_PRERELEASE "")/' \
+            CMakeLists.txt > CMakeLists.txt.tmp
         mv CMakeLists.txt.tmp CMakeLists.txt
         git commit -q -m "Release $v" CHANGELOG.md CMakeLists.txt
         git tag "v$v"
     fi
     git rev-parse -q --verify "refs/tags/v$v" >/dev/null \
         || { echo "no tag v$v and no Unreleased section in CHANGELOG.md to release" >&2; exit 1; }
-    test "$(cmake_version)" = "$v" || { echo "CMakeLists.txt says $(cmake_version), not $v" >&2; exit 1; }
+    exec "$just" _publish "$v"
+
+# A beta is for testers: tagged vVERSION-beta.N, signed and published like a release, but as a
+# GitHub pre-release, which :update never offers. Testers download it, and :update takes them on
+# to VERSION once it's released. VERSION defaults to the one `just release` would release next, and
+# N counts up from 1 (or picks up a beta whose publishing failed). "## Unreleased" becomes
+# "## VERSION-beta.N" and CMakeLists.txt gets the version, with "-beta.N" as CHAT_PRERELEASE.
+# Build, sign and publish a beta of the next release, or of VERSION
+_release-beta version="":
+    #!/bin/sh
+    set -eu
+    just={{quote(just_executable())}}
+    cmake_version() { sed -n 's/^project(chat VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt; }
+    published() { gh release view "v$1" >/dev/null 2>&1; }
+    base="${1:-}"
+    if [ -z "$base" ]; then
+        base=$(cmake_version)
+        if published "$base"; then base=$(echo "$base" | awk -F. '{ print $1 "." $2 "." $3 + 1 }'); fi
+    fi
+    echo "$base" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "not a version: $base (want MAJOR.MINOR.PATCH)" >&2; exit 1; }
+    if published "$base"; then echo "v$base is already released" >&2; exit 1; fi
+    older=$(printf '%s\n%s\n' "$base" "$(cmake_version)" | sort -V | head -n 1)
+    if [ "$older" = "$base" ] && [ "$base" != "$(cmake_version)" ]; then
+        echo "v$base is older than $(cmake_version), the version in CMakeLists.txt" >&2; exit 1
+    fi
+    n=0
+    for t in $(git tag -l "v$base-beta.*"); do
+        m=${t#"v$base-beta."}
+        case "$m" in ''|*[!0-9]*) continue ;; esac
+        if [ "$m" -gt "$n" ]; then n=$m; fi
+    done
+    if [ "$n" -eq 0 ] || published "$base-beta.$n"; then n=$((n + 1)); fi
+    v="$base-beta.$n"
+    # Peers drop a version longer than MAX_VERSION (src/core/chat.h), and with it the build check.
+    test ${#v} -le 15 || { echo "$v is longer than the 15 characters peers take" >&2; exit 1; }
+
+    if grep -q '^## Unreleased$' CHANGELOG.md; then
+        if git rev-parse -q --verify "refs/tags/v$v" >/dev/null; then
+            echo "tag v$v already exists, but CHANGELOG.md still has an Unreleased section" >&2; exit 1
+        fi
+        awk '$0 == "## Unreleased" { on = 1; next } on && /^## / { exit } on && /[^[:space:]]/ { found = 1 } END { exit !found }' \
+            CHANGELOG.md || { echo "the Unreleased section of CHANGELOG.md is empty" >&2; exit 1; }
+        echo "releasing the Unreleased changes as beta v$v"
+        awk -v v="$v" '$0 == "## Unreleased" && !done { print "## " v; done = 1; next } { print }' CHANGELOG.md > CHANGELOG.md.tmp
+        mv CHANGELOG.md.tmp CHANGELOG.md
+        sed -e "s/^project(chat VERSION [0-9.]*/project(chat VERSION $base/" -e "s/^set(CHAT_PRERELEASE \".*\")\$/set(CHAT_PRERELEASE \"-beta.$n\")/" \
+            CMakeLists.txt > CMakeLists.txt.tmp
+        mv CMakeLists.txt.tmp CMakeLists.txt
+        git commit -q -m "Release $v" CHANGELOG.md CMakeLists.txt
+        git tag "v$v"
+    fi
+    git rev-parse -q --verify "refs/tags/v$v" >/dev/null \
+        || { echo "no tag v$v and no Unreleased section in CHANGELOG.md to release" >&2; exit 1; }
+    exec "$just" _publish "$v"
+
+# The sections above the last release's, newest first, become one "## VERSION" holding each
+# section's lines from the oldest on, under each ### heading once: Security, Added, Changed,
+# Deprecated, Removed and Fixed in that order, then any others. Every line is kept, so a later
+# beta's fix to something an earlier one added lists both: tidy their sections before releasing.
+# A lone section is only renamed.
+# Fold CHANGELOG.md's Unreleased and beta sections into one for VERSION
+_fold-changelog version:
+    #!/bin/sh
+    set -eu
+    awk -v v="$1" '
+        function blank(s) { return s !~ /[^[:space:]]/ }
+        function add(k, a, b,    i) {
+            while (a <= b && blank(line[a])) a++
+            while (b >= a && blank(line[b])) b--
+            if (a > b) return
+            if (!(k in body) && k != "") order[++kinds] = k
+            for (i = a; i <= b; i++) body[k] = (k in body) ? body[k] "\n" line[i] : line[i]
+        }
+        function put(k) {
+            if (!(k in body) || (k in done)) return
+            done[k] = 1
+            print ""
+            print "### " k
+            print body[k]
+        }
+        { line[NR] = $0 }
+        END {
+            for (first = 1; first <= NR && line[first] !~ /^## /; first++) print line[first]
+            for (stop = first; stop <= NR && line[stop] !~ /^## [0-9]+\.[0-9]+\.[0-9]+$/; stop++)
+                if (line[stop] ~ /^## /) head[++heads] = stop
+            if (heads < 2) {
+                for (i = first; i <= NR; i++) print (i == first && heads ? "## " v : line[i])
+                exit
+            }
+            head[heads + 1] = stop
+            for (h = heads; h >= 1; h--) {
+                k = ""
+                from = head[h] + 1
+                for (i = from; i < head[h + 1]; i++)
+                    if (line[i] ~ /^### /) { add(k, from, i - 1); k = substr(line[i], 5); from = i + 1 }
+                add(k, from, head[h + 1] - 1)
+            }
+            print "## " v
+            if ("" in body) { print ""; print body[""] }
+            n = split("Security Added Changed Deprecated Removed Fixed", known, " ")
+            for (j = 1; j <= n; j++) put(known[j])
+            for (j = 1; j <= kinds; j++) put(order[j])
+            for (i = stop; i <= NR; i++) { if (i == stop) print ""; print line[i] }
+        }
+    ' CHANGELOG.md > CHANGELOG.md.tmp
+    mv CHANGELOG.md.tmp CHANGELOG.md
+
+# Signing happens here, offline, so a compromised GitHub account can't publish an update that chat
+# will install.
+# Build, sign and publish tag vVERSION, which HEAD must be at, as a GitHub release
+_publish version:
+    #!/bin/sh
+    set -eu
+    v="$1"
+    just={{quote(just_executable())}}
+    key="${CHAT_SIGNING_KEY:-$HOME/.minisign/chat-release.key}"
+    test {{quote(version)}} = "$v" || { echo "CMakeLists.txt says {{version}}, not $v" >&2; exit 1; }
     test "$(git rev-parse HEAD)" = "$(git rev-parse "v$v^{commit}")" || { echo "HEAD is not tag v$v" >&2; exit 1; }
 
     "$just" dist
@@ -277,5 +406,6 @@ release version="":
     # The branch goes too when there is one, so the release commit is on GitHub, not just its tag.
     branch=$(git symbolic-ref -q --short HEAD || true)
     git push --atomic origin ${branch:+"$branch"} "refs/tags/v$v"
-    gh release create "v$v" --title "v$v" --notes-file dist/notes.md --verify-tag \
+    case "$v" in *-*) pre=--prerelease ;; *) pre= ;; esac
+    gh release create "v$v" --title "v$v" --notes-file dist/notes.md --verify-tag ${pre:+"$pre"} \
         dist/chat-linux-x86_64 dist/chat-windows-x86_64.exe dist/SHA256SUMS dist/SHA256SUMS.minisig

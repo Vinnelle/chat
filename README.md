@@ -731,12 +731,23 @@ just fuzz engine 600    # fuzz one target (bencode, json, pgp, text, engine, ima
 just dist               # static musl Linux + Windows binaries and SHA256SUMS in dist/ (needs zig)
 just release            # release CHANGELOG.md's Unreleased section: tag, dist, sign, publish (needs minisign, gh)
 just release 1.0.0      # the same, as a version other than the next patch
+just release beta       # release the Unreleased section as a beta of the next release, e.g. v0.5.0-beta.1
+just release beta 1.0.0 # the same, as a beta of a version other than the next patch
 ```
 
 Changes go under `## Unreleased` at the top of [CHANGELOG.md](CHANGELOG.md). `just release`
 renames that heading to the new version, sets the version in `CMakeLists.txt`, commits both as
 `Release VERSION` and tags `vVERSION`. It only pushes the branch and tag once `SHA256SUMS` is
 signed. If a step fails, run it again and it picks up from the tag.
+
+`just release beta` is for testing builds. It does the same, but as `VERSION-beta.N`, N counting up from 1:
+the heading becomes `## 0.5.0-beta.1`, `CMakeLists.txt` gets `0.5.0` and `CHAT_PRERELEASE`
+`-beta.1`, and the release on GitHub is a pre-release. `:update` only installs GitHub's latest
+release, which is never a pre-release, so testers download a beta themselves, and `:update`
+takes them on to `0.5.0` once it's out. `just release` then folds the Unreleased section and
+every beta's since the last release into one `## 0.5.0`: oldest first, each `###` heading once.
+It keeps every line, so if a later beta fixed something an earlier one added, tidy those sections
+first.
 
 It signs twice, so minisign asks for the key's password twice. First it signs the list of the
 release's binaries (`dist/BUILDS`) and appends it to each binary, so peers can check builds.

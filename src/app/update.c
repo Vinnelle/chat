@@ -183,7 +183,8 @@ static int parse_tag(const char *json, char *tag, size_t cap) {
     return 0;
 }
 
-static void parse_version(const char *s, long v[3]) {
+// Returns whether it's a beta ("0.5.0-beta.1"), which comes before the release it's a beta of.
+static int parse_version(const char *s, long v[3]) {
     v[0] = v[1] = v[2] = 0;
     if (*s == 'v' || *s == 'V') s++;
     for (int i = 0; i < 3 && isdigit((unsigned char)*s); i++) {
@@ -191,15 +192,16 @@ static void parse_version(const char *s, long v[3]) {
         if (*s != '.') break;
         s++;
     }
+    return *s == '-';
 }
 
 static int version_newer(const char *remote, const char *local) {
     long r[3], l[3];
-    parse_version(remote, r);
-    parse_version(local, l);
+    int remote_beta = parse_version(remote, r);
+    int local_beta = parse_version(local, l);
     for (int i = 0; i < 3; i++)
         if (r[i] != l[i]) return r[i] > l[i];
-    return 0;
+    return local_beta && !remote_beta;
 }
 
 static int sums_lookup(const char *sums, const char *name, uint8_t hash[crypto_hash_sha256_BYTES]) {

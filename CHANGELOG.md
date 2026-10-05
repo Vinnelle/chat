@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+- `just release beta` releases the Unreleased section as a beta of the next version,
+  `vVERSION-beta.N`, signed like a release and published as a GitHub pre-release, which `:update`
+  doesn't install. On a beta, `:update` installs the release it's a beta of once that's out.
+  `just release` folds the betas' sections since the last release into the new version's.
+
 ### Changed
 - Turning on **Device lock**, **Security key** or **Authenticator app** with no save open no
   longer just flips the row on, waiting for a later `:install`: a box says it needs chat installed
