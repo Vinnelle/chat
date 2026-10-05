@@ -2660,6 +2660,18 @@ static void draw_console_dialog(wbuf_t *w, int rows, int cols, const tui_dialog_
 }
 
 // What doesn't fit is cut from the end of the text, then from the note. The field is always shown.
+static int dialog_width(int cols) {
+    return cols - 4 < 76 ? cols - 4 : 76;
+}
+
+int tui_dialog_rows(int cols, const tui_dialog_t *d) {
+    int tw = dialog_width(cols) - 6;
+    size_t off[DIALOG_NOTE_ROWS], len[DIALOG_NOTE_ROWS];
+    int text_n = d->n_text > 0 ? layout_text(d->text, d->n_text, tw, NULL, NULL) : 0;
+    int note_n = d->note && d->note[0] ? wrap_rows(d->note, tw, tw, off, len, DIALOG_NOTE_ROWS) : 0;
+    return dialog_rows(text_n, d->n_items > 0 ? d->n_items : 0, d->input || d->status, note_n) + 3;
+}
+
 static void draw_dialog(wbuf_t *w, int rows, int cols, const tui_dialog_t *d, int *cr, int *cc) {
     *cr = 0;
     const char *was = g_row_bg;
@@ -2670,7 +2682,7 @@ static void draw_dialog(wbuf_t *w, int rows, int cols, const tui_dialog_t *d, in
         return;
     }
     int avail = rows - 1;
-    int bw = cols - 4 < 76 ? cols - 4 : 76, mx = 2, my = 1;
+    int bw = dialog_width(cols), mx = 2, my = 1;
     int iw = bw - 2, tw = iw - 4;
     int text_n = d->n_text > 0 ? layout_text(d->text, d->n_text, tw, NULL, NULL) : 0;
     static size_t noff[DIALOG_NOTE_ROWS], nlen[DIALOG_NOTE_ROWS];

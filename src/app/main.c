@@ -355,9 +355,11 @@ typedef struct {
     key_purpose_t key_purpose;
     char key_pin[64];
     int key_stage, key_touches;   // what its thread waits for (seckey_stage_t), and the touches it's had
-    // The new authenticator secret, in base32 and as the link a QR code holds.
+    // The new authenticator secret, in base32 and as the link a QR code holds. code_qr: its box shows
+    // the QR code in place of its text (Tab).
     char code_b32[40];
     char code_uri[160];
+    int code_qr;
     // The startup unlock's passphrase came from CHAT_INSTALL_PASSWORD, and waits in install_pass
     // for the security key or the code the save needs.
     int unlock_env;
@@ -4706,6 +4708,7 @@ static void install_step(int after) {
     if (after < STEP_CODE && g_app.code_factor) {
         g_app.factor = INSTALL_FACTOR_CODE;
         install_code_new(g_app.save_target, g_app.code_b32, sizeof g_app.code_b32, g_app.code_uri, sizeof g_app.code_uri);
+        g_app.code_qr = 0;
         to_install_mode(MODE_CODE_SETUP);
         return;
     }
@@ -5170,6 +5173,7 @@ static void factor_choose(unsigned factor, int on) {
     g_app.factor_back = g_app.mode == MODE_SETTINGS ? MODE_SETTINGS : MODE_CHAT;
     if (factor == INSTALL_FACTOR_CODE && on) {
         install_code_new(install_current(), g_app.code_b32, sizeof g_app.code_b32, g_app.code_uri, sizeof g_app.code_uri);
+        g_app.code_qr = 0;
         begin_prompt(MODE_CODE_SETUP);
     } else {
         begin_prompt(MODE_FACTOR);
@@ -5476,6 +5480,12 @@ static void field_key(const tui_key_t *key, void (*enter)(void), void (*esc)(voi
     if (key->type == TUI_KEY_ESCAPE) esc();
     else if (key->type == TUI_KEY_ENTER) enter();
     else if (tui_input_feed(&g_app.input, key)) g_app.dirty = 1;
+}
+
+// Tab is only offered when the text and the QR code don't fit together, and then picks between them.
+static void code_setup_key(const tui_key_t *key) {
+    if (key->type == TUI_KEY_TAB) { g_app.code_qr = !g_app.code_qr; g_app.dirty = 1; }
+    else field_key(key, commit_code_setup, cancel_code_setup);
 }
 
 // ---- commands ----
@@ -6313,7 +6323,7 @@ static void handle_key(const tui_key_t *key) {
         case MODE_UNLOCK:         field_key(key, commit_unlock, back_from_unlock); return;
         case MODE_DEVICE_LOCK:    confirm_key(key, device_lock_yes, device_lock_no); return;
         case MODE_FACTOR:         confirm_key(key, factor_yes, factor_no); return;
-        case MODE_CODE_SETUP:     field_key(key, commit_code_setup, cancel_code_setup); return;
+        case MODE_CODE_SETUP:     code_setup_key(key); return;
         case MODE_KEY_WAIT:       key_wait_key(key); return;
         case MODE_KEY_PIN:        field_key(key, commit_key_pin, cancel_key_pin); return;
         case MODE_UNLOCK_CODE:    field_key(key, commit_unlock_code, back_from_unlock_code); return;
@@ -6727,19 +6737,11 @@ static int qr_rows(const char *text, char rows[QR_ROWS_MAX][QR_ROW_BYTES], int *
     return n;
 }
 
-static int code_setup_paras(tui_para_t *p, const char **note) {
-    static char rows[QR_ROWS_MAX][QR_ROW_BYTES], scan[400], secret[200];
-    const char *shown = factor_save();
-    int term_rows, term_cols, qr_cols = 0, n = 0;
-    term_get_size(&term_rows, &term_cols);
-    int nq = qr_rows(g_app.code_uri, rows, &qr_cols);
-    // Cut off by a small window, a QR code can't be scanned, so then there's only the secret.
-    int fits = nq > 0 && term_rows >= nq + 16 && term_cols >= qr_cols + 12;
-    for (int i = 0; fits && i < nq; i++) n = add_para(p, n, TUI_P_ART, rows[i]);
-    if (fits) n = add_para(p, n, TUI_P_BLANK, "");
+static int code_setup_text(tui_para_t *p, int n, int qr) {
+    static char scan[400];
     snprintf(scan, sizeof scan, "%s your authenticator app (Aegis, Google Authenticator, 2FAS...)%s, then type the 6-digit "
-             "code it shows for `chat:%s`, to be sure it has it.", fits ? "Scan this with" : "Type the secret below into",
-             fits ? ", or type in the secret below" : "", shown);
+             "code it shows for `chat:%s`, to be sure it has it.", qr ? "Scan this with" : "Type the secret below into",
+             qr ? ", or type in the secret below" : "", factor_save());
     n = add_para(p, n, TUI_P_TEXT, scan);
     n = add_para(p, n, TUI_P_BLANK, "");
     n = add_para(p, n, TUI_P_TEXT, "**A check chat makes, not a lock on the files:** the secret the codes come from is "
@@ -6748,8 +6750,18 @@ static int code_setup_paras(tui_para_t *p, const char **note) {
                                    "someone who knows your passphrase opening the save in chat without your phone. The "
                                    "security key or the device lock protect the files themselves.");
     n = add_para(p, n, TUI_P_BLANK, "");
-    n = add_para(p, n, TUI_P_TEXT, "Lose the app's entry and chat won't open the save, so keep a copy of the secret "
-                                   "somewhere safe, or `:set authenticator off` first.");
+    return add_para(p, n, TUI_P_TEXT, "Lose the app's entry and chat won't open the save, so keep a copy of the secret "
+                                      "somewhere safe, or `:set authenticator off` first.");
+}
+
+// The QR code goes over the text only when neither is cut off: a cut QR code can't be scanned, and
+// the text's warning is at its end. Otherwise Tab swaps the text for the QR code alone, if that fits.
+static void code_setup_dialog(tui_dialog_t *d, tui_para_t *p) {
+    static char rows[QR_ROWS_MAX][QR_ROW_BYTES], secret[200], keys[80];
+    const char *enter = g_app.factor_new ? "enter next" : "enter turn on";
+    int term_rows, term_cols, qr_cols = 0, alone = 0;
+    term_get_size(&term_rows, &term_cols);
+    int nq = qr_rows(g_app.code_uri, rows, &qr_cols);
     char grouped[48];
     size_t g = 0;
     for (size_t i = 0; g_app.code_b32[i] && g + 2 < sizeof grouped; i++) {
@@ -6757,10 +6769,30 @@ static int code_setup_paras(tui_para_t *p, const char **note) {
         grouped[g++] = g_app.code_b32[i];
     }
     grouped[g] = '\0';
-    snprintf(secret, sizeof secret, "Secret: %s%s", grouped, fits || nq == 0 ? "" : " \xc2\xb7 a bigger window shows a QR code");
+    snprintf(secret, sizeof secret, "Secret: %s", grouped);
     crypto_wipe(grouped, sizeof grouped);
-    *note = secret;
-    return n;
+
+    if (nq > 0 && term_cols >= qr_cols + 12) {
+        for (int i = 0; i < nq; i++) add_para(p, i, TUI_P_ART, rows[i]);
+        d->n_text = code_setup_text(p, add_para(p, nq, TUI_P_BLANK, ""), 1);
+        d->note = secret;
+        snprintf(keys, sizeof keys, "%s \xc2\xb7 esc cancel", enter);
+        d->keys = keys;
+        if (tui_dialog_rows(term_cols, d) <= term_rows) return;
+        d->n_text = nq;
+        d->note = NULL;
+        alone = tui_dialog_rows(term_cols, d) <= term_rows;
+        if (alone && g_app.code_qr) {
+            snprintf(keys, sizeof keys, "%s \xc2\xb7 tab text \xc2\xb7 esc cancel", enter);
+            return;
+        }
+    }
+    d->n_text = code_setup_text(p, 0, 0);
+    size_t sl = strlen(secret);
+    if (nq > 0 && !alone) snprintf(secret + sl, sizeof secret - sl, " \xc2\xb7 a bigger window shows a QR code");
+    d->note = secret;
+    snprintf(keys, sizeof keys, "%s%s \xc2\xb7 esc cancel", enter, alone ? " \xc2\xb7 tab QR code" : "");
+    d->keys = keys;
 }
 
 static int key_wait_paras(tui_para_t *p) {
@@ -7126,10 +7158,9 @@ static const tui_dialog_t *current_dialog(void) {
             break;
         case MODE_CODE_SETUP:
             d.title = "AUTHENTICATOR APP";
-            d.n_text = code_setup_paras(paras, &d.note);
             d.mask = 0;
             d.placeholder = "6-digit code";
-            d.keys = g_app.factor_new ? "enter next \xc2\xb7 esc cancel" : "enter turn on \xc2\xb7 esc cancel";
+            code_setup_dialog(&d, paras);
             break;
         case MODE_KEY_WAIT:
             d.title = "SECURITY KEY";

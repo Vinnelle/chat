@@ -272,6 +272,10 @@ typedef struct {
     int n_items, sel;
 } tui_dialog_t;
 
+// The rows a dialog (not a console) takes on a screen cols wide with nothing cut off, the bottom
+// row under it included.
+int tui_dialog_rows(int cols, const tui_dialog_t *d);
+
 // The bottom row and the input. The chip shows where you are, then your identity and nick, then
 // message (the result of the last action, until the next key) and hint ("key action · key action")
 // on the right. On the chat screen, input is in the box above it, with placeholder while it's empty

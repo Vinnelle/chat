@@ -41,7 +41,8 @@
   the save asks for the code it shows. The box and the help say what it is: a check chat makes,
   since the codes' secret has to be kept in the save (sealed with it), so it stops someone who
   knows the passphrase opening the save in chat, not someone reading the files with their own
-  program. A wrong code waits a moment before the next.
+  program. A window too short for both the QR code and the text shows the text, and Tab swaps the
+  QR code in for it. A wrong code waits a moment before the next.
 - A save can need any mix of the device lock, the security key and a code. The list of saves says
   which, the unlock box asks for each in turn (in the terminal with `--simple`), and a save left
   part way through a change to them is finished with all of them when it opens.
