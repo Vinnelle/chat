@@ -15,6 +15,12 @@
 #define CODE_NAME "authenticator"
 #define DEVICE_NAME "device"
 #define SECKEY_NAME "securitykey"
+#define TRIES_NAME "tries"
+#define SHADOW_SETTINGS "shadow-settings"
+#define SHADOW_KEY "shadow-key"
+#define SHADOW_VERIFIED "shadow-verified"
+#define SHADOW_CODE "shadow-authenticator"
+#define TRIES_MAGIC "CT1"   // then one byte each: the limit, the count so far
 #define SETTINGS_FILE_MAX (INSTALL_SETTINGS_MAX + PASS_SEAL_OVERHEAD)
 #define KEY_FILE_MAX (INSTALL_KEY_MAX + PASS_SEAL_OVERHEAD)
 #define VERIFIED_FILE_MAX (INSTALL_VERIFIED_MAX + PASS_SEAL_OVERHEAD)
@@ -37,8 +43,10 @@ _Static_assert(SECKEY_SECRET_LEN == 32 && PASS_KEY_SECRET_LEN == 32, "a security
 
 // Also removes any .new files left by a crash while writing.
 static const char *const FILES[] = { SETTINGS_NAME, KEY_NAME, VERIFIED_NAME, CODE_NAME, SECKEY_NAME,
+                                     TRIES_NAME, SHADOW_SETTINGS, SHADOW_KEY, SHADOW_VERIFIED, SHADOW_CODE,
                                      SETTINGS_NAME ".new", KEY_NAME ".new", VERIFIED_NAME ".new", CODE_NAME ".new",
-                                     SECKEY_NAME ".new", DEVICE_NAME ".new", DEVICE_NAME };
+                                     SECKEY_NAME ".new", TRIES_NAME ".new", SHADOW_SETTINGS ".new", SHADOW_KEY ".new",
+                                     SHADOW_VERIFIED ".new", SHADOW_CODE ".new", DEVICE_NAME ".new", DEVICE_NAME };
 #define N_FILES (sizeof FILES / sizeof FILES[0])
 static const char *const SEALED[] = { SETTINGS_NAME, KEY_NAME, VERIFIED_NAME, CODE_NAME };
 #define N_SEALED (sizeof SEALED / sizeof SEALED[0])
@@ -410,16 +418,6 @@ static int key_file_parse(const uint8_t *in, size_t len, key_file_t *f) {
         if (len - p < 3) return -1;
         e->uv = in[p];
         e->cred_len = (size_t)in[p + 1] << 8 | in[p + 2];
-Edit tor.h
-Modified
-Bash Find chat_tor_set_ports declaration
-IN
-grep -n "chat_tor_set_ports" -B4 -A1 src/core/chat.h
-￼
-OUT
-636-// Applies changed routing toggles to a running session. The mode and the Tor settings only apply
-637-// to sessions opened afterwards. Returns 1 if those differ from this session's.
-638-int ch
         p += 3;
         if (e->uv > 1 || e->cred_len == 0 || e->cred_len > SECKEY_CRED_MAX || len - p < e->cred_len + WRAP_LEN) return -1;
         memcpy(e->cred, in + p, e->cred_len);
@@ -481,13 +479,17 @@ static int write_sealed_with(const pass_lock_t *lk, const char *file, const void
     return platform_write_private(path, sealed, n);
 }
 
-static int write_code(const pass_lock_t *lk, const uint8_t secret[TOTP_SECRET_LEN]) {
+static int write_code_to(const pass_lock_t *lk, const char *file, const uint8_t secret[TOTP_SECRET_LEN]) {
     uint8_t plain[CODE_PLAIN_LEN];
     plain[0] = 1;
     memcpy(plain + 1, secret, TOTP_SECRET_LEN);
-    int rc = write_sealed_with(lk, CODE_NAME, plain, sizeof plain);
+    int rc = write_sealed_with(lk, file, plain, sizeof plain);
     crypto_wipe(plain, sizeof plain);
     return rc;
+}
+
+static int write_code(const pass_lock_t *lk, const uint8_t secret[TOTP_SECRET_LEN]) {
+    return write_code_to(lk, CODE_NAME, secret);
 }
 
 static int read_code(const char *name, const held_t *h, uint8_t secret[TOTP_SECRET_LEN]) {
@@ -503,6 +505,115 @@ static int read_code(const char *name, const held_t *h, uint8_t secret[TOTP_SECR
 }
 
 static int set_lock(unsigned target);
+
+// ---- the tries file, and the shadow passphrase ----
+
+static int read_tries(const char *name, unsigned *limit, unsigned *count) {
+    char path[1000];
+    uint8_t b[5];
+    if (save_path(name, TRIES_NAME, path, sizeof path, 0) != 0) return -1;
+    if (platform_read_file(path, b, sizeof b) != (long)sizeof b || memcmp(b, TRIES_MAGIC, 3) != 0) return -1;
+    *limit = b[3];
+    *count = b[4];
+    return 0;
+}
+
+static int write_tries(const char *name, unsigned limit, unsigned count) {
+    char path[1000];
+    uint8_t b[5];
+    if (save_path(name, TRIES_NAME, path, sizeof path, 1) != 0) return -1;
+    memcpy(b, TRIES_MAGIC, 3);
+    b[3] = (uint8_t)limit;
+    b[4] = (uint8_t)count;
+    return platform_write_private(path, b, sizeof b);
+}
+
+int install_destroy_limit(const char *name) {
+    unsigned l = 0, c = 0;
+    return read_tries(name, &l, &c) == 0 ? (int)l : 0;
+}
+
+int install_tries_left(const char *name) {
+    unsigned l = 0, c = 0;
+    if (read_tries(name, &l, &c) != 0 || l == 0) return -1;
+    return c >= l ? 0 : (int)(l - c);
+}
+
+int install_arm_destroy(const char *name, unsigned limit) {
+    if (limit > 255) limit = 255;
+    if (limit == 0) { remove_file(name, TRIES_NAME); return 0; }
+    return write_tries(name, limit, 0);
+}
+
+int install_has_shadow(const char *name) { return has(name, SHADOW_SETTINGS); }
+
+int install_shadow_clear(const char *name) {
+    remove_file(name, SHADOW_SETTINGS);
+    remove_file(name, SHADOW_KEY);
+    remove_file(name, SHADOW_VERIFIED);
+    remove_file(name, SHADOW_CODE);
+    return 0;
+}
+
+// The decoy's files become the save's own: the real sealed files and the strike count go, and the
+// device and securitykey files stay, since the decoy is sealed to share them.
+static int promote_decoy(const char *name) {
+    static const char *const map[][2] = {
+        { SHADOW_SETTINGS, SETTINGS_NAME }, { SHADOW_KEY, KEY_NAME },
+        { SHADOW_VERIFIED, VERIFIED_NAME }, { SHADOW_CODE, CODE_NAME },
+    };
+    static uint8_t buf[VERIFIED_FILE_MAX + 1];
+    char from[1000], to[1000];
+    remove_file(name, SETTINGS_NAME);
+    remove_file(name, KEY_NAME);
+    remove_file(name, VERIFIED_NAME);
+    remove_file(name, CODE_NAME);
+    remove_file(name, TRIES_NAME);
+    for (size_t i = 0; i < sizeof map / sizeof map[0]; i++) {
+        if (save_path(name, map[i][0], from, sizeof from, 0) != 0) continue;
+        long n = platform_read_file(from, buf, sizeof buf);
+        if (n > 0 && (size_t)n <= VERIFIED_FILE_MAX && save_path(name, map[i][1], to, sizeof to, 1) == 0)
+            platform_write_private(to, buf, (size_t)n);
+        platform_remove(from);
+    }
+    crypto_wipe(buf, sizeof buf);
+    return 0;
+}
+
+// A passphrase that didn't open the save. 1 if it was the shadow passphrase (the decoy is now the
+// save, so install_unlock opens it again), INSTALL_DESTROYED if too many wrong tries deleted the
+// save, or PASS_WRONG. h holds the factor secrets, which the shadow lock shares.
+#define WRONG_RETRY 1
+static int wrong_pass(const char *name, const char *passphrase, const held_t *h) {
+    if (install_has_shadow(name)) {
+        static uint8_t sealed[SETTINGS_FILE_MAX + 1], plain[SETTINGS_FILE_MAX];
+        size_t n = 0, got = 0;
+        if (read_sealed(name, SHADOW_SETTINGS, sealed, SETTINGS_FILE_MAX, &n) == 0) {
+            pass_lock_t sl;
+            int rc = pass_lock_of(passphrase, sealed, n, &sl);
+            if (rc == 0) pass_lock_set(&sl, pass_needs(sealed, n), h->device, h->key);
+            if (rc == 0) rc = pass_unseal(&sl, sealed, n, plain, sizeof plain, &got);
+            crypto_wipe(&sl, sizeof sl);
+            crypto_wipe(plain, sizeof plain);
+            if (rc == 0) {
+                unsigned limit = (unsigned)install_destroy_limit(name);
+                promote_decoy(name);
+                if (limit) write_tries(name, limit, 0);
+                return WRONG_RETRY;
+            }
+        }
+    }
+    unsigned limit = 0, count = 0;
+    if (read_tries(name, &limit, &count) != 0 || limit == 0) return PASS_WRONG;
+    count++;
+    if (count >= limit) {
+        install_remove(name);
+        snprintf(g_why, sizeof g_why, "the wrong passphrase was entered %u times in a row", count);
+        return INSTALL_DESTROYED;
+    }
+    write_tries(name, limit, count);
+    return PASS_WRONG;
+}
 
 int install_lock_new(const char *name, const char *passphrase, unsigned factors) {
     held_t *h = &g_opening;
@@ -593,10 +704,13 @@ int install_unlock(const char *name, const char *passphrase) {
     if (rc == 0) rc = pass_unseal(&h->lock, sealed, n, plain, sizeof plain, &got);
     crypto_wipe(plain, sizeof plain);
     if (rc != 0) {
+        int w = rc == PASS_WRONG ? wrong_pass(name, passphrase, h) : rc;
         crypto_wipe(h, sizeof *h);
-        return rc;
+        // The shadow passphrase opened: the decoy is now the save, so open it the ordinary way.
+        return w == WRONG_RETRY ? install_unlock(name, passphrase) : w;
     }
     forget_try_key();
+    { unsigned l = 0, c = 0; if (read_tries(name, &l, &c) == 0 && c != 0) write_tries(name, l, 0); }
     if (!h->have_device) h->device_kind = DEVICE_NONE;
     unsigned usable = all & ~(h->have_device ? 0u : F_DEVICE);
     if (all & F_CODE) {
@@ -1009,6 +1123,50 @@ int install_code_try(const char *code) {
 void install_setup_forget(void) {
     crypto_wipe(&g_new_key, sizeof g_new_key);
     crypto_wipe(&g_new_code, sizeof g_new_code);
+}
+
+// The decoy is sealed under its own passphrase but the save's own factor secrets, so it needs the
+// same device, security key and code, and so looks the same when it's opened.
+int install_shadow_set(const char *passphrase, const char *settings, const void *key, size_t key_len,
+                       const char *verified) {
+    g_why[0] = '\0';
+    if (!g_open) { copy_str(g_why, "no save is open", sizeof g_why); return -1; }
+    unsigned needs = g_held.lock.needs;
+    if (((needs & F_DEVICE) && !g_held.have_device) || ((needs & F_KEY) && !g_held.have_key)) {
+        copy_str(g_why, "the save's own factors aren't all available", sizeof g_why);
+        return -1;
+    }
+    if (key_len > INSTALL_KEY_MAX || strlen(settings) > INSTALL_SETTINGS_MAX || strlen(verified) > INSTALL_VERIFIED_MAX) {
+        copy_str(g_why, "the decoy is too big", sizeof g_why);
+        return -1;
+    }
+    pin_secrets();
+    pass_lock_t sl;
+    int rc = pass_lock_new(passphrase, &sl);
+    if (rc != 0) { crypto_wipe(&sl, sizeof sl); return rc; }
+    pass_lock_set(&sl, needs, g_held.device, g_held.key);
+    int ok = write_sealed_with(&sl, SHADOW_SETTINGS, settings, strlen(settings)) == 0;
+    if (ok) {
+        if (key_len) ok = write_sealed_with(&sl, SHADOW_KEY, key, key_len) == 0;
+        else remove_file(g_name, SHADOW_KEY);
+    }
+    if (ok) ok = write_sealed_with(&sl, SHADOW_VERIFIED, verified, strlen(verified)) == 0;
+    if (ok) {
+        if (needs & F_CODE) {
+            uint8_t sec[TOTP_SECRET_LEN];
+            ok = read_code(g_name, &g_held, sec) == 0 && write_code_to(&sl, SHADOW_CODE, sec) == 0;
+            crypto_wipe(sec, sizeof sec);
+        } else {
+            remove_file(g_name, SHADOW_CODE);
+        }
+    }
+    crypto_wipe(&sl, sizeof sl);
+    if (!ok) {
+        install_shadow_clear(g_name);
+        if (!g_why[0]) copy_str(g_why, "couldn't write the decoy's files", sizeof g_why);
+        return -1;
+    }
+    return 0;
 }
 
 // ---- uninstalling ----

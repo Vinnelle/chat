@@ -123,6 +123,8 @@ static const char *USAGE =
     ":set securitykey on makes it need your FIDO2 security key as well (a touch, and its secret\n"
     "goes into the key), and :set authenticator on asks for an authenticator app's code each time\n"
     "it opens (a check chat makes: the code's secret is kept in the save). One, the other or both.\n"
+    ":set destroy N deletes a save after N wrong passphrases in a row, and :set shadow on adds a\n"
+    "second passphrase that opens a decoy and deletes the real save for good.\n"
     "\n"
     "  --save      open the save :install NAME made with this name, without the list\n"
     "              (default is the one in ~/.config/chat itself). If there's no save\n"
@@ -266,6 +268,8 @@ typedef enum {
     MODE_KEY_WAIT,
     MODE_KEY_PIN,
     MODE_UNLOCK_CODE,
+    MODE_SHADOW_PASS,
+    MODE_SHADOW_PASS2,
     MODE_UPDATE
 } app_mode_t;
 
@@ -338,6 +342,10 @@ typedef struct {
     // none open, the next one :install makes. seckey_ok: security keys work here (seckey_why if not).
     int key_factor, code_factor, seckey_ok;
     char seckey_why[200];
+    // The open save deletes itself after this many wrong passphrases (0 off); with none open, what
+    // the next save :install makes starts with. Mirrored to the save's unsealed tries file.
+    int destroy_limit;
+    char shadow_pass[256];   // the shadow passphrase while its box asks for it again to confirm
     // The FACTOR box turns factor (INSTALL_FACTOR_) on (factor_want) or off, from the settings page or
     // the chat (factor_back); factor_new: it's a step of :install making a new save. key_purpose: what
     // the security key is touched for, and key_pin what to send it if it asks for its PIN.
@@ -1304,7 +1312,7 @@ typedef enum {
     SET_TOR_LAUNCH, SET_TOR_PATH, SET_TOR_SOCKS, SET_TOR_CONTROL, SET_TOR_PASSWORD,
     SET_NOSTR, SET_RELAYS,
     SET_NICK, SET_COLOUR, SET_SIGN, SET_AGE_RECIPIENT, SET_PGP_PUBKEY, SET_AUTOSAVE, SET_DEVICE_LOCK,
-    SET_SECURITY_KEY, SET_AUTHENTICATOR,
+    SET_SECURITY_KEY, SET_AUTHENTICATOR, SET_DESTROY, SET_SHADOW,
     SET_VERIFY, SET_FILE_LIMIT, SET_FAST_FILES, SET_NOTIFY, SET_PREVIEW, SET_NET, SET_PORT
 } setting_id_t;
 
@@ -1390,6 +1398,16 @@ static const setting_def_t SETTINGS[] = {
       "2FAS...) shows, each time it opens. A check chat makes: the secret the codes come from is kept with the save, "
       "sealed in it, so it stops someone who knows your passphrase opening it in chat, not someone reading the "
       "files with a program of their own. The security key or the device lock protect the files themselves." },
+    { SET_DESTROY, NULL, "destroy", "Self-destruct", K_CHOICE, "off|3|5|10",
+      "Deletes what :install saves for good after this many wrong passphrases in a row, so a found or taken "
+      "device can't be guessed at forever. The count is kept next to the save, not sealed (it has to be read "
+      "before the passphrase opens anything), so someone who copies the files first can reset it: this stops "
+      "guessing at the keyboard, not a forensic copy. A right passphrase clears the count." },
+    { SET_SHADOW, NULL, "shadow", "Shadow password", K_ACTION, "on|off",
+      "A second passphrase that opens a decoy instead of the real save, and deletes the real save first, for "
+      "good. Afterwards only the decoy is there, so there's nothing left to be forced to hand over. The decoy "
+      "needs the same security key, device and code, so opening it looks the same. Enter sets or removes it. "
+      "Only while a save is open, and it needs the save's own factors to hand." },
     { SET_VERIFY, "Chat", "verify", "Compare verify codes", K_CHOICE, "required|optional",
       "Anyone with a session's id and password could sit between two members and read what they say. When a peer "
       "joins, chat shows a code to compare with them over another channel. It only matches on both ends if "
@@ -1425,6 +1443,8 @@ static const char *const ROUTE_NAMES[] = { "dht", "tor" };
 static const char *const NOSTR_NAMES[] = { "off", "on", "always" };
 static const char *const VERIFY_NAMES[] = { "required", "optional" };
 static const char *const NET_LOG_NAMES[] = { "normal", "verbose" };
+static const char *const DESTROY_NAMES[] = { "off", "3", "5", "10" };
+static const int DESTROY_VALS[] = { 0, 3, 5, 10 };
 
 static setting_id_t g_edit_id;
 
@@ -1490,6 +1510,11 @@ static int setting_options(setting_id_t id, const char *const **names, int *n) {
         case SET_DEVICE_LOCK: return g_app.device_lock != 0;
         case SET_SECURITY_KEY: return g_app.key_factor != 0;
         case SET_AUTHENTICATOR: return g_app.code_factor != 0;
+        case SET_DESTROY: {
+            *names = DESTROY_NAMES; *n = 4;
+            for (int i = 0; i < 4; i++) if (DESTROY_VALS[i] == g_app.destroy_limit) return i;
+            return 0;
+        }
         case SET_TOR_LAUNCH: *names = TOR_LAUNCH_NAMES; *n = 3; return g_app.tor_launch;
         case SET_NOTIFY:     *names = NOTIFY_NAMES; *n = 3; return (int)g_app.notify_mode;
         case SET_PREVIEW:    *names = PREVIEW_NAMES; *n = 3; return (int)g_app.notify_preview;
@@ -1517,7 +1542,7 @@ static tui_value_kind_t setting_kind(const setting_def_t *d) {
     int n, cur = setting_options(d->id, &names, &n);
     if (d->kind == K_TOGGLE) return cur > 0 ? TUI_V_ON : TUI_V_OFF;
     if (d->kind == K_CHOICE) return TUI_V_CHOICE;
-    if (d->id == SET_SIGN) return TUI_V_LINK;
+    if (d->id == SET_SIGN || d->id == SET_SHADOW) return TUI_V_LINK;
     if (d->kind == K_SECRET) return TUI_V_MUTED;
     return TUI_V_TEXT;
 }
@@ -1584,6 +1609,9 @@ static void setting_value(setting_id_t id, char *out, size_t cap) {
             if (g_app.default_port) snprintf(out, cap, "%u", (unsigned)g_app.default_port);
             else snprintf(out, cap, "0 (a free one)");
             break;
+        case SET_SHADOW:
+            snprintf(out, cap, "%s", g_app.installed && install_has_shadow(install_current()) ? "on" : "off");
+            break;
         default:
             out[0] = '\0';
             break;
@@ -1595,7 +1623,7 @@ static int setting_text(setting_id_t id, char *out, size_t cap) {
     const setting_def_t *d = setting_def(id);
     // What a save needs to open is how it's sealed, not a setting in it.
     if (d->kind == K_SECRET || d->kind == K_ACTION || id == SET_DEVICE_LOCK || id == SET_SECURITY_KEY
-        || id == SET_AUTHENTICATOR)
+        || id == SET_AUTHENTICATOR || id == SET_DESTROY)
         return 0;
     const routing_t *r = &g_app.route;
     switch (id) {
@@ -1780,6 +1808,8 @@ static void set_colour_all(void) {
 static void autosave_changed(void);
 static void device_lock_choose(int on);
 static void factor_choose(unsigned factor, int on);
+static void destroy_choose(int limit);
+static void begin_shadow(void);
 
 // Security keys too.
 static void device_check(void) {
@@ -1850,6 +1880,7 @@ static void setting_choose(setting_id_t id, int i) {
         case SET_DEVICE_LOCK: device_lock_choose(i); return;
         case SET_SECURITY_KEY: factor_choose(INSTALL_FACTOR_KEY, i); return;
         case SET_AUTHENTICATOR: factor_choose(INSTALL_FACTOR_CODE, i); return;
+        case SET_DESTROY: destroy_choose(DESTROY_VALS[i]); return;
         default: return;
     }
     char v[32]; setting_value(id, v, sizeof v);
@@ -2072,6 +2103,7 @@ static const char *settings_hint(void) {
     else if (d->id == SET_COLOUR) act = "h/l step \xc2\xb7 enter type one";
     else if (d->kind == K_TEXT || d->kind == K_SECRET) act = "enter edit";
     else if (d->id == SET_SIGN) act = "enter choose";
+    else if (d->id == SET_SHADOW) act = "enter set";
     else if (d->id == SET_AGE_RECIPIENT || d->id == SET_PGP_PUBKEY) act = "enter copy";
     else if (row_greyed(d->id)) act = NULL;
     else act = "h/l change";
@@ -2490,12 +2522,14 @@ static void settings_key(const tui_key_t *key) {
         case LIST_RIGHT:
             if (steps) setting_step(d->id, 1);
             else if (d && d->id == SET_SIGN) begin_sign();
+            else if (d && d->id == SET_SHADOW) begin_shadow();
             break;
         case LIST_CHOOSE:
             if (!d) settings_done();
             else if (steps && d->id != SET_COLOUR) setting_step(d->id, 1);
             else if (d->kind == K_TEXT || d->kind == K_SECRET) begin_setting_edit(d->id);
             else if (d->id == SET_SIGN) begin_sign();
+            else if (d->id == SET_SHADOW) begin_shadow();
             else if (d->id == SET_AGE_RECIPIENT) copy_age_recipient();
             else if (d->id == SET_PGP_PUBKEY) copy_pgp_public_key();
             break;
@@ -4256,6 +4290,9 @@ static const char *open_error(int rc) {
         case INSTALL_LOST:
             snprintf(why, sizeof why, "what :install saved can't be opened: %s", install_why());
             return why;
+        case INSTALL_DESTROYED:
+            snprintf(why, sizeof why, "what :install saved has been deleted - %s", install_why());
+            return why;
         case OPEN_NO_CODE:    return "what :install saved needs the code your authenticator app shows";
         default:              return "what :install saved is damaged, or isn't something chat wrote";
     }
@@ -4335,6 +4372,7 @@ static void use_opened_save(char (*loaded)[ROW_TEXT_MAX]) {
     g_app.installed = 1;
     g_app.locked = 0;
     factors_in_use();
+    g_app.destroy_limit = install_destroy_limit(install_current());
     char needs[96];
     factors_text(install_open_factors(), needs, sizeof needs);
     if (install_relocked() > 0)
@@ -4571,6 +4609,7 @@ static void finish_install(const char *passphrase) {
     g_app.installed = 1;
     g_app.locked = 0;
     factors_in_use();
+    install_arm_destroy(g_app.save_target, (unsigned)g_app.destroy_limit);
     // A new save, or one saved over, gets every key in use.
     g_n_uninstalled_keys = 0;
     static char vtext[TRUST_TEXT_MAX];
@@ -4945,6 +4984,8 @@ static void end_unlock(void) {
 
 static void unlock_done(int rc) {
     if (rc == 0) use_opened_save(NULL);
+    // Deleted after too many wrong tries: there's nothing to open any more.
+    if (rc == INSTALL_DESTROYED) { g_app.installed = 0; verified_saving(0); }
     // The key before chat starts, so a --session opens signed.
     if (key_in_use_saved()) identity_chosen();
     end_unlock();
@@ -5209,6 +5250,91 @@ static void cancel_code_setup(void) {
     note("Authenticator app: not changed - delete the entry you added to your app, if you did");
 }
 
+// ---- self-destruct, and the shadow passphrase ----
+
+static void destroy_choose(int limit) {
+    g_app.destroy_limit = limit;
+    const char *shown = install_shown_name(install_current());
+    if (!g_app.installed) {
+        if (limit) note("Self-destruct: on - the save :install makes next deletes itself after %d wrong passphrases", limit);
+        else note("Self-destruct: off");
+        return;
+    }
+    if (install_arm_destroy(install_current(), (unsigned)limit) != 0) {
+        g_app.destroy_limit = install_destroy_limit(install_current());
+        note("Self-destruct: couldn't write the save's tries file");
+        return;
+    }
+    if (limit) {
+        push_log("* self-destruct: the save %s deletes everything chat saved for it after %d wrong passphrases in a "
+                 "row. A right one clears the count", shown, limit);
+        note("Self-destruct: on - after %d wrong passphrases", limit);
+    } else {
+        push_log("* self-destruct: off for the save %s", shown);
+        note("Self-destruct: off");
+    }
+}
+
+// The decoy is a clean save with no signing key or verified peers: it looks like a fresh install.
+static void shadow_set_decoy(void) {
+    const char *shown = install_shown_name(install_current());
+    int rc = install_shadow_set(g_app.shadow_pass, "", NULL, 0, "");
+    crypto_wipe(g_app.shadow_pass, sizeof g_app.shadow_pass);
+    factor_close();
+    if (rc == PASS_NOMEM) { note("Shadow password: setting it up needs 512 MiB of free memory for a moment"); return; }
+    if (rc != 0) { note("Shadow password: couldn't set it - %s", install_why()); return; }
+    push_log("* shadow password: the save %s now has a decoy. Opening it with the shadow passphrase deletes the real "
+             "save for good and keeps only the decoy. Don't forget which passphrase is which", shown);
+    note("Shadow password: on for %s", shown);
+}
+
+static void begin_shadow(void) {
+    if (!g_app.installed || g_app.locked) {
+        note("Shadow password: open a save first - :install, then set it while the save is open");
+        return;
+    }
+    const char *shown = install_shown_name(install_current());
+    if (install_has_shadow(install_current())) {
+        install_shadow_clear(install_current());
+        push_log("* shadow password: removed for the save %s - there's no decoy now", shown);
+        note("Shadow password: off");
+        return;
+    }
+    crypto_wipe(g_app.shadow_pass, sizeof g_app.shadow_pass);
+    g_app.factor_back = g_app.mode == MODE_SETTINGS ? MODE_SETTINGS : MODE_CHAT;
+    begin_prompt(MODE_SHADOW_PASS);
+}
+
+static void commit_shadow_pass(void) {
+    if (!g_app.input.buf[0]) { note("type the shadow passphrase - or Esc to cancel"); return; }
+    copy_str(g_app.shadow_pass, g_app.input.buf, sizeof g_app.shadow_pass);
+    crypto_wipe(g_app.input.buf, sizeof g_app.input.buf);
+    tui_input_clear(&g_app.input);
+    g_app.mode = MODE_SHADOW_PASS2;
+    g_app.dirty = 1;
+}
+
+static void commit_shadow_pass2(void) {
+    int same = strcmp(g_app.input.buf, g_app.shadow_pass) == 0;
+    crypto_wipe(g_app.input.buf, sizeof g_app.input.buf);
+    tui_input_clear(&g_app.input);
+    if (!same) {
+        crypto_wipe(g_app.shadow_pass, sizeof g_app.shadow_pass);
+        g_app.mode = MODE_SHADOW_PASS;
+        note("they weren't the same - type the shadow passphrase again");
+        return;
+    }
+    note("setting up the decoy...");
+    render();
+    shadow_set_decoy();
+}
+
+static void cancel_shadow_pass(void) {
+    crypto_wipe(g_app.shadow_pass, sizeof g_app.shadow_pass);
+    factor_close();
+    note("Shadow password: not changed");
+}
+
 // The security key's thread starts, and its box shows what it's waiting for until it's done.
 static void key_start(key_purpose_t why) {
     const char *pin = g_app.key_pin[0] ? g_app.key_pin : NULL;
@@ -5386,6 +5512,22 @@ static cmd_result_t app_set(void *ctx, const char *arg) {
             return CMD_OK;
         default:
             break;
+    }
+    if (d->id == SET_SHADOW) {
+        int on = g_app.installed && install_has_shadow(install_current());
+        if (strcmp(value, "off") == 0) {
+            if (!on) { note("Shadow password: off already"); return CMD_OK; }
+            install_shadow_clear(install_current());
+            push_log("* shadow password: removed for the save %s - there's no decoy now",
+                     install_shown_name(install_current()));
+            note("Shadow password: off");
+        } else if (strcmp(value, "on") == 0) {
+            if (on) note("Shadow password: on already - :set shadow off removes it");
+            else begin_shadow();
+        } else {
+            note("shadow takes on or off");
+        }
+        return CMD_OK;
     }
     if (d->id == SET_SIGN) {
         static const struct { const char *name; sign_pick_t pick; } SIGN_VALUES[] = {
@@ -6175,6 +6317,8 @@ static void handle_key(const tui_key_t *key) {
         case MODE_KEY_WAIT:       key_wait_key(key); return;
         case MODE_KEY_PIN:        field_key(key, commit_key_pin, cancel_key_pin); return;
         case MODE_UNLOCK_CODE:    field_key(key, commit_unlock_code, back_from_unlock_code); return;
+        case MODE_SHADOW_PASS:    field_key(key, commit_shadow_pass, cancel_shadow_pass); return;
+        case MODE_SHADOW_PASS2:   field_key(key, commit_shadow_pass2, cancel_shadow_pass); return;
         case MODE_UPDATE:         update_key(key); return;
         default:
             break;
@@ -6236,6 +6380,7 @@ static int on_chat_screen(void) {
         case MODE_DEVICE_LOCK:
             return g_app.device_back == MODE_CHAT;
         case MODE_FACTOR: case MODE_CODE_SETUP: case MODE_KEY_WAIT: case MODE_KEY_PIN:
+        case MODE_SHADOW_PASS: case MODE_SHADOW_PASS2:
             return g_app.factor_back == MODE_CHAT;
         default:
             return 0;
@@ -7012,6 +7157,19 @@ static const tui_dialog_t *current_dialog(void) {
             d.keys = "enter open \xc2\xb7 esc back";
             break;
         }
+        case MODE_SHADOW_PASS:
+        case MODE_SHADOW_PASS2: {
+            int first = g_app.mode == MODE_SHADOW_PASS;
+            d.title = "SHADOW PASSWORD";
+            d.n_text = add_para(paras, 0, TUI_P_TEXT, first
+                ? "A second passphrase for this save. Opening the save with it deletes the real save for good and "
+                  "leaves only a decoy - a clean, empty account that needs the same security key, device and code. "
+                  "Make it different from the real one, and don't forget which is which."
+                : "Type the shadow passphrase again, to be sure of it.");
+            d.placeholder = first ? "shadow passphrase" : "the same passphrase";
+            d.keys = first ? "enter next \xc2\xb7 esc cancel" : "enter set \xc2\xb7 esc cancel";
+            break;
+        }
         default:
             return NULL;
     }
@@ -7079,6 +7237,12 @@ static tui_bar_t current_bar(void) {
             b.tone = TUI_TONE_PROMPT;
             break;
         }
+        case MODE_SHADOW_PASS:
+        case MODE_SHADOW_PASS2:
+            if (g_app.factor_back == MODE_CHAT) chat_input(&b, &g_app.saved_input);
+            b.chip = g_app.factor_back == MODE_CHAT ? "CHAT" : "SETTINGS";
+            b.tone = TUI_TONE_PROMPT;
+            break;
         case MODE_CHAT:
             chat_input(&b, &g_app.input);
             break;
@@ -7197,6 +7361,8 @@ static void render(void) {
         case MODE_CODE_SETUP:
         case MODE_KEY_WAIT:
         case MODE_KEY_PIN:
+        case MODE_SHADOW_PASS:
+        case MODE_SHADOW_PASS2:
             if (g_app.factor_back == MODE_SETTINGS) { render_settings(rows_n, cols_n, hhmm, &bar); return; }
             break;
         case MODE_SIGN_CHOICE:

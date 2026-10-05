@@ -26,6 +26,7 @@
 #define INSTALL_DEVICE -5    // it's locked to a device, and this one can't unseal it: install_why says why
 #define INSTALL_KEY -6       // it needs its security key's secret first (install_key_open)
 #define INSTALL_LOST -7      // a file a factor needs is missing or damaged: install_why says which
+#define INSTALL_DESTROYED -8 // too many wrong passphrases: the save was deleted (install_why says)
 #define INSTALL_NAME_MAX 32
 #define INSTALL_SAVES_MAX 32
 
@@ -134,5 +135,26 @@ int install_write_verified(const char *text);
 // Deletes a save's files, what this device keeps for it if it's locked to it, then its folder and
 // the folders above it that nothing else is in. If it's the save in use, its passphrase is forgotten.
 int install_remove(const char *name);
+
+// ---- destruction after wrong passphrases, and a shadow passphrase ----
+//
+// A save can be set to delete itself after a number of wrong passphrases. The count and the limit
+// live in an unsealed "tries" file next to the save, since they have to be read before any
+// passphrase opens anything, so someone who can copy the files can roll the count back: this stops
+// forced or casual guessing at the keyboard, not a forensic copy. install_unlock does the counting
+// and the deleting, and returns INSTALL_DESTROYED when it deletes.
+int install_destroy_limit(const char *name);    // 0 if off, else the limit
+int install_tries_left(const char *name);       // tries before deletion, -1 if off
+int install_arm_destroy(const char *name, unsigned limit);   // set the limit (0 off), reset the count
+
+// A shadow (duress) passphrase opens a decoy instead of the real save, and deletes the real save
+// first, for good: afterwards only the decoy is there. The decoy is sealed under the shadow
+// passphrase and needs the save's same factors, so opening it looks the same. install_shadow_set
+// needs the save open, with its factor secrets held; the caller gives the decoy's settings (always),
+// signing key (len 0 for none) and verified keys, which are sealed the same way the real ones are.
+int install_has_shadow(const char *name);
+int install_shadow_clear(const char *name);
+int install_shadow_set(const char *passphrase, const char *settings, const void *key, size_t key_len,
+                       const char *verified);
 
 #endif
