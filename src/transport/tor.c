@@ -261,10 +261,12 @@ void tor_free(tor_t *t) {
     free(t);
 }
 
-void tor_set_ports(tor_t *t, const char *socks, const char *control) {
-    if (strcmp(t->o.socks, socks) == 0 && strcmp(t->o.control, control) == 0) return;
+void tor_set_ports(tor_t *t, const char *socks, const char *control, const char *password) {
+    if (strcmp(t->o.socks, socks) == 0 && strcmp(t->o.control, control) == 0 && strcmp(t->o.password, password) == 0)
+        return;
     copy_str(t->o.socks, socks, sizeof t->o.socks);
     copy_str(t->o.control, control, sizeof t->o.control);
+    copy_str(t->o.password, password, sizeof t->o.password);
     // Log in to the new one straight away. Streams through the old SOCKS port time out.
     close_ctl(t);
     t->my_onion[0] = '\0';

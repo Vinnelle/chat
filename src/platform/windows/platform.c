@@ -13,6 +13,7 @@
 
 #include <winsock2.h>
 #include <windows.h>
+#include <aclapi.h>
 #include <wincrypt.h>
 #include <iphlpapi.h>
 #include <shellapi.h>
@@ -31,6 +32,15 @@
 #ifndef PROC_THREAD_ATTRIBUTE_JOB_LIST
 #define PROC_THREAD_ATTRIBUTE_JOB_LIST 0x0002000D
 #endif
+#ifndef SECURITY_CREATOR_OWNER_RIGHTS_RID
+#define SECURITY_CREATOR_OWNER_RIGHTS_RID 0x00000004L
+#endif
+#ifndef PROCESS_QUERY_LIMITED_INFORMATION
+#define PROCESS_QUERY_LIMITED_INFORMATION 0x1000
+#endif
+#ifndef THREAD_QUERY_LIMITED_INFORMATION
+#define THREAD_QUERY_LIMITED_INFORMATION 0x0800
+#endif
 
 #ifndef PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY_DEFINED
 typedef struct { DWORD Flags; } chat_extension_point_policy_t;
@@ -47,7 +57,44 @@ static LONG WINAPI die_quietly(EXCEPTION_POINTERS *info) {
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
-void platform_harden_process(void) {
+// Other programs, even ones running as this user, can only see that chat runs, wait for it and end
+// it: not read or change its memory, run code in it, suspend its threads or copy its handles. The
+// ACE is for OWNER RIGHTS, which also takes away what an owner otherwise always keeps, the right
+// to rewrite the DACL. Administrators with the debug privilege, and SYSTEM, are still let in.
+static DWORD g_thread_acl[16];
+static SECURITY_DESCRIPTOR g_thread_sd;
+static SECURITY_ATTRIBUTES g_thread_sa;
+
+static int owner_only_acl(DWORD *acl, DWORD cap, DWORD rights) {
+    SID_IDENTIFIER_AUTHORITY creator = SECURITY_CREATOR_SID_AUTHORITY;
+    PSID owner_rights = NULL;
+    if (!AllocateAndInitializeSid(&creator, 1, SECURITY_CREATOR_OWNER_RIGHTS_RID, 0, 0, 0, 0, 0, 0, 0, &owner_rights))
+        return -1;
+    BOOL ok = InitializeAcl((PACL)acl, cap, ACL_REVISION) && AddAccessAllowedAce((PACL)acl, ACL_REVISION, rights, owner_rights);
+    FreeSid(owner_rights);
+    return ok ? 0 : -1;
+}
+
+// The threads chat starts are made with that DACL, rather than given it once they run.
+static SECURITY_ATTRIBUTES *thread_sa(void) { return g_thread_sa.nLength ? &g_thread_sa : NULL; }
+
+#define SECRET_ENV_MAX 4
+
+static struct { const char *name; int set; char value[512]; } g_secret_env[SECRET_ENV_MAX];
+
+static int env_take_now(const char *name, char *out, size_t outlen) {
+    char *v = getenv(name);
+    if (!v) { if (outlen) out[0] = '\0'; return -1; }
+    copy_str(out, v, outlen);
+    volatile char *p = v;
+    while (*p) *p++ = 0;
+    char buf[256];
+    snprintf(buf, sizeof buf, "%s=", name);
+    _putenv(buf);
+    return 0;
+}
+
+void platform_harden_process(const char *const secret_env[]) {
 
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
     SetUnhandledExceptionFilter(die_quietly);
@@ -61,18 +108,56 @@ void platform_harden_process(void) {
             set_policy(CHAT_ProcessExtensionPointDisablePolicy, &pol, sizeof pol);
         }
     }
+
+    // VirtualLock locks no more than the minimum working set, about 200 KB by default: too little
+    // for the keys and conversation crypto_lock keeps out of the page file.
+    SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)32 << 20, (SIZE_T)128 << 20);
+
+    DWORD acl[16];
+    if (owner_only_acl(acl, sizeof acl, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE) == 0)
+        SetSecurityInfo(GetCurrentProcess(), SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, (PACL)acl, NULL);
+    if (owner_only_acl(g_thread_acl, sizeof g_thread_acl, THREAD_QUERY_LIMITED_INFORMATION | SYNCHRONIZE) == 0
+        && InitializeSecurityDescriptor(&g_thread_sd, SECURITY_DESCRIPTOR_REVISION)
+        && SetSecurityDescriptorDacl(&g_thread_sd, TRUE, (PACL)g_thread_acl, FALSE)) {
+        g_thread_sa.nLength = sizeof g_thread_sa;
+        g_thread_sa.lpSecurityDescriptor = &g_thread_sd;
+        g_thread_sa.bInheritHandle = FALSE;
+        SetSecurityInfo(GetCurrentThread(), SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, (PACL)g_thread_acl, NULL);
+    }
+
+    crypto_lock(g_secret_env, sizeof g_secret_env);
+    for (int i = 0; i < SECRET_ENV_MAX && secret_env && secret_env[i]; i++) {
+        g_secret_env[i].name = secret_env[i];
+        g_secret_env[i].set = env_take_now(secret_env[i], g_secret_env[i].value, sizeof g_secret_env[i].value) == 0;
+    }
 }
 
 int platform_env_take(const char *name, char *out, size_t outlen) {
-    char *v = getenv(name);
-    if (!v) { if (outlen) out[0] = '\0'; return -1; }
-    copy_str(out, v, outlen);
-    volatile char *p = v;
-    while (*p) *p++ = 0;
-    char buf[256];
-    snprintf(buf, sizeof buf, "%s=", name);
-    _putenv(buf);
-    return 0;
+    for (int i = 0; i < SECRET_ENV_MAX && g_secret_env[i].name; i++) {
+        if (strcmp(g_secret_env[i].name, name) != 0) continue;
+        int set = g_secret_env[i].set;
+        if (set) copy_str(out, g_secret_env[i].value, outlen);
+        else if (outlen) out[0] = '\0';
+        crypto_wipe(g_secret_env[i].value, sizeof g_secret_env[i].value);
+        g_secret_env[i].set = 0;
+        return set ? 0 : -1;
+    }
+    return env_take_now(name, out, outlen);
+}
+
+// Task Manager and the like read the command line from this process's own copy, the one
+// GetCommandLineW returns, so overwriting it blanks it for them.
+void platform_hide_args(int argc, char **argv) {
+    for (int i = 1; i < argc; i++) {
+        volatile char *p = argv[i];
+        while (*p) *p++ = 0;
+    }
+    wchar_t *w = GetCommandLineW();
+    if (!w) return;
+    // Past the program's name, quoted or not.
+    if (*w == L'"') { w++; while (*w && *w != L'"') w++; if (*w) w++; }
+    else while (*w && *w != L' ' && *w != L'\t') w++;
+    for (volatile wchar_t *q = w; *q; q++) *q = L' ';
 }
 
 static HANDLE hin(void) { return GetStdHandle(STD_INPUT_HANDLE); }
@@ -160,7 +245,7 @@ static int notify_start(void) {
     g_notify_state = -1;
     HANDLE ready = CreateEventW(NULL, TRUE, FALSE, NULL);
     if (!ready) return 0;
-    HANDLE th = CreateThread(NULL, 0, notify_thread, ready, 0, NULL);
+    HANDLE th = CreateThread(thread_sa(), 0, notify_thread, ready, 0, NULL);
     if (th) {
         WaitForSingleObject(ready, 5000);
         CloseHandle(th);
@@ -426,7 +511,7 @@ stdin_reader_t *stdin_reader_start(void) {
     stdin_reader_t *r = calloc(1, sizeof *r);
     if (!r) return NULL;
     mutex_init(&r->lock);
-    uintptr_t th = _beginthreadex(NULL, 0, reader_main, r, 0, NULL);
+    uintptr_t th = _beginthreadex(thread_sa(), 0, reader_main, r, 0, NULL);
     if (!th) { free(r); return NULL; }
     CloseHandle((HANDLE)th);
     return r;
@@ -658,7 +743,7 @@ int platform_spawn_thread(void (*fn)(void *), void *arg) {
     thread_boot_t *b = malloc(sizeof *b);
     if (!b) return -1;
     b->fn = fn; b->arg = arg;
-    HANDLE h = CreateThread(NULL, 0, thread_tramp, b, 0, NULL);
+    HANDLE h = CreateThread(thread_sa(), 0, thread_tramp, b, 0, NULL);
     if (!h) { free(b); return -1; }
     CloseHandle(h);
     return 0;

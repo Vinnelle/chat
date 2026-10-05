@@ -13,11 +13,14 @@
 #include "crypto/age.h"
 #include "crypto/pgp.h"
 #include "platform/platform.h"
+#include "common/qr.h"
+#include "app/install.h"
 #include <sodium.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #define LOG_LINES 512
@@ -789,11 +792,12 @@ static void test_device_lock(double *t) {
     other[0] ^= 1;
     pass_lock_t lk, dev, again, wrong;
     CHECK(pass_lock_new("correct horse", &lk) == 0
-          && pass_seal(&lk, settings, sizeof settings, plain, sizeof plain, &n) == 0 && !pass_needs_device(plain, n),
+          && pass_seal(&lk, settings, sizeof settings, plain, sizeof plain, &n) == 0 && !pass_needs(plain, n),
           "a lock without a device said it needed one");
     dev = lk;
-    pass_lock_device(&dev, secret);
-    CHECK(pass_seal(&dev, settings, sizeof settings, locked, sizeof locked, &ln) == 0 && pass_needs_device(locked, ln)
+    pass_lock_set(&dev, PASS_NEEDS_DEVICE, secret, NULL);
+    CHECK(pass_seal(&dev, settings, sizeof settings, locked, sizeof locked, &ln) == 0
+          && pass_needs(locked, ln) == PASS_NEEDS_DEVICE && memcmp(locked, "chatdev1", 8) == 0
           && memcmp(locked + 8, plain + 8, PASS_HEADER_LEN - 8) == 0,
           "a device lock's header didn't say so, or didn't keep the limits and salt");
     CHECK(pass_unseal(&lk, locked, ln, opened, sizeof opened, &got) == PASS_WRONG
@@ -804,9 +808,9 @@ static void test_device_lock(double *t) {
           && pass_seal(&again, settings, sizeof settings, scratch, sizeof scratch, &sn) == PASS_FORMAT,
           "the passphrase alone opened or sealed something under a device lock (%d)", rc);
     wrong = again;
-    pass_lock_device(&wrong, other);
+    pass_lock_set(&wrong, PASS_NEEDS_DEVICE, other, NULL);
     CHECK(pass_unseal(&wrong, locked, ln, opened, sizeof opened, &got) == PASS_WRONG, "another device's secret opened it");
-    pass_lock_device(&again, secret);
+    pass_lock_set(&again, PASS_NEEDS_DEVICE, secret, NULL);
     rc = pass_unseal(&again, locked, ln, opened, sizeof opened, &got);
     CHECK(rc == 0 && got == sizeof settings && memcmp(opened, settings, sizeof settings) == 0,
           "the passphrase and the device's secret didn't open it (%d)", rc);
@@ -816,10 +820,310 @@ static void test_device_lock(double *t) {
           && pass_unseal(&wrong, scratch, ln, opened, sizeof opened, &got) == PASS_WRONG
           && pass_unseal(&again, scratch, ln, opened, sizeof opened, &got) == PASS_WRONG,
           "a device-locked file opened once its header said it needed no device");
-    pass_lock_portable(&again);
+    pass_lock_set(&again, 0, NULL, NULL);
     rc = pass_unseal(&again, plain, n, opened, sizeof opened, &got);
     CHECK(rc == 0 && memcmp(again.header, plain, PASS_HEADER_LEN) == 0,
           "unlocked again, it wasn't the passphrase's own lock (%d)", rc);
+}
+
+// Every mix of a device, a security key and a code seals under a key of its own, the passphrase
+// alone opens none of them, and a header can't be changed to need less.
+static void test_factor_locks(double *t) {
+    (void)t;
+    static const char settings[] = "[profile]\nnick = \"alice\"\n";
+    uint8_t device[PASS_DEVICE_SECRET_LEN], key[PASS_KEY_SECRET_LEN], other[PASS_KEY_SECRET_LEN], opened[sizeof settings];
+    uint8_t sealed[8][sizeof settings + PASS_SEAL_OVERHEAD], scratch[sizeof settings + PASS_SEAL_OVERHEAD];
+    size_t len[8], got = 0;
+    gen_random(device, sizeof device);
+    gen_random(key, sizeof key);
+    memcpy(other, key, sizeof other);
+    other[5] ^= 1;
+    pass_lock_t base, lk[8], again;
+    CHECK(pass_lock_new("correct horse", &base) == 0, "making a lock failed");
+    for (unsigned f = 0; f < 8; f++) {
+        lk[f] = base;
+        pass_lock_set(&lk[f], f, device, key);
+        CHECK(pass_seal(&lk[f], settings, sizeof settings, sealed[f], sizeof sealed[f], &len[f]) == 0
+              && pass_needs(sealed[f], len[f]) == f, "a lock needing %u didn't say so", f);
+    }
+    for (unsigned f = 0; f < 8; f++)
+        for (unsigned g = 0; g < 8; g++)
+            CHECK((pass_unseal(&lk[g], sealed[f], len[f], opened, sizeof opened, &got) == 0) == (f == g),
+                  "the lock needing %u opened what the one needing %u sealed, or its own didn't", g, f);
+    for (unsigned f = 1; f < 8; f++) {
+        int rc = pass_lock_of("correct horse", sealed[f], len[f], &again);
+        CHECK(rc == 0 && pass_unseal(&again, sealed[f], len[f], opened, sizeof opened, &got) == PASS_WRONG
+              && pass_seal(&again, settings, sizeof settings, scratch, sizeof scratch, &got) == PASS_FORMAT,
+              "the passphrase alone opened or sealed something needing %u (%d)", f, rc);
+        pass_lock_set(&again, f, device, key);
+        rc = pass_unseal(&again, sealed[f], len[f], opened, sizeof opened, &got);
+        CHECK(rc == 0 && got == sizeof settings && memcmp(opened, settings, sizeof settings) == 0,
+              "the passphrase and what it needs didn't open what needed %u (%d)", f, rc);
+    }
+    again = base;
+    pass_lock_set(&again, PASS_NEEDS_KEY, device, other);
+    CHECK(pass_unseal(&again, sealed[PASS_NEEDS_KEY], len[PASS_NEEDS_KEY], opened, sizeof opened, &got) == PASS_WRONG,
+          "another security key's secret opened it");
+    CHECK(memcmp(sealed[PASS_NEEDS_DEVICE], "chatdev1", 8) == 0 && memcmp(sealed[PASS_NEEDS_KEY], "chatmfa\x02", 8) == 0,
+          "a device alone didn't keep the device lock's header, or a security key didn't get its own");
+    unsigned both = PASS_NEEDS_KEY | PASS_NEEDS_CODE;
+    memcpy(scratch, sealed[both], len[both]);
+    scratch[7] = PASS_NEEDS_KEY;
+    CHECK(pass_needs(scratch, len[both]) == PASS_NEEDS_KEY
+          && pass_unseal(&lk[PASS_NEEDS_KEY], scratch, len[both], opened, sizeof opened, &got) == PASS_WRONG,
+          "a header changed to leave the code out still opened");
+    memcpy(scratch, sealed[PASS_NEEDS_CODE], len[PASS_NEEDS_CODE]);
+    memcpy(scratch, "chatkey1", 8);
+    CHECK(pass_unseal(&lk[0], scratch, len[PASS_NEEDS_CODE], opened, sizeof opened, &got) == PASS_WRONG,
+          "a header changed to need nothing opened what needed a code");
+    memcpy(scratch, sealed[PASS_NEEDS_DEVICE], len[PASS_NEEDS_DEVICE]);
+    memcpy(scratch, "chatmfa\x01", 8);
+    CHECK(pass_needs(scratch, len[PASS_NEEDS_DEVICE]) == 0
+          && pass_unseal(&lk[PASS_NEEDS_DEVICE], scratch, len[PASS_NEEDS_DEVICE], opened, sizeof opened, &got) == PASS_FORMAT,
+          "a second header for the device alone was taken");
+}
+
+// RFC 6238's SHA-1 values, cut to 6 digits, and RFC 4648's base32.
+static void test_totp(double *t) {
+    (void)t;
+    static const uint8_t secret[20] = { '1', '2', '3', '4', '5', '6', '7', '8', '9', '0',
+                                        '1', '2', '3', '4', '5', '6', '7', '8', '9', '0' };
+    static const struct { uint64_t time; uint32_t code; } V[] = {
+        { 59, 287082 }, { 1111111109, 81804 }, { 1111111111, 50471 }, { 1234567890, 5924 },
+        { 2000000000, 279037 }, { 20000000000ull, 353130 },
+    };
+    for (size_t i = 0; i < sizeof V / sizeof V[0]; i++) {
+        uint32_t got = totp_code(secret, sizeof secret, V[i].time / TOTP_PERIOD);
+        CHECK(got == V[i].code, "the code at %llu was %06u, want %06u", (unsigned long long)V[i].time, (unsigned)got,
+              (unsigned)V[i].code);
+    }
+    static const char *const B32[][2] = {
+        { "", "" }, { "f", "MY" }, { "fo", "MZXQ" }, { "foo", "MZXW6" }, { "foob", "MZXW6YQ" }, { "fooba", "MZXW6YTB" },
+        { "foobar", "MZXW6YTBOI" },
+    };
+    for (size_t i = 0; i < sizeof B32 / sizeof B32[0]; i++) {
+        char out[16];
+        base32_encode((const uint8_t *)B32[i][0], strlen(B32[i][0]), out);
+        CHECK(strcmp(out, B32[i][1]) == 0, "base32 of \"%s\" was %s, want %s", B32[i][0], out, B32[i][1]);
+    }
+}
+
+static int qr_at(const uint8_t *m, int size, int x, int y) { return m[y * size + x]; }
+
+// A QR code, by its structure: the version a length needs, the finders and their separators, the
+// timing patterns, and format information that's the same in both copies and a valid BCH code.
+static void test_qr(double *t) {
+    (void)t;
+    static uint8_t m[QR_MAX_SIZE * QR_MAX_SIZE];
+    char text[256];
+    // Byte mode at level M holds 14 bytes in version 1, 106 in version 6, 213 in version 10.
+    static const struct { size_t len; int size; } SIZES[] = { { 14, 21 }, { 15, 25 }, { 106, 41 }, { 107, 45 }, { 213, 57 } };
+    for (size_t i = 0; i < sizeof SIZES / sizeof SIZES[0]; i++) {
+        memset(text, 'a', SIZES[i].len);
+        text[SIZES[i].len] = '\0';
+        int s = qr_encode(text, m);
+        CHECK(s == SIZES[i].size, "%zu bytes made a QR code of %d modules, want %d", SIZES[i].len, s, SIZES[i].size);
+    }
+    memset(text, 'a', 214);
+    text[214] = '\0';
+    CHECK(qr_encode(text, m) == -1, "214 bytes didn't fail");
+    int s = qr_encode("otpauth://totp/chat:default?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=chat", m);
+    CHECK(s == 37, "an otpauth link made a QR code of %d modules, want 37", s);
+    if (s != 37) return;
+    const int corner[3][2] = { { 3, 3 }, { s - 4, 3 }, { 3, s - 4 } };
+    int finders = 1;
+    for (int f = 0; f < 3; f++)
+        for (int dy = -4; dy <= 4; dy++)
+            for (int dx = -4; dx <= 4; dx++) {
+                int x = corner[f][0] + dx, y = corner[f][1] + dy, d = abs(dx) > abs(dy) ? abs(dx) : abs(dy);
+                if (x >= 0 && x < s && y >= 0 && y < s && qr_at(m, s, x, y) != (d != 2 && d != 4)) finders = 0;
+            }
+    CHECK(finders, "a finder or its separator is wrong");
+    int timing = 1;
+    for (int i = 8; i < s - 8; i++)
+        if (qr_at(m, s, i, 6) != (i % 2 == 0) || qr_at(m, s, 6, i) != (i % 2 == 0)) timing = 0;
+    CHECK(timing && qr_at(m, s, 8, s - 8), "the timing patterns or the dark module are wrong");
+    int a = 0, b = 0;
+    for (int i = 0; i <= 5; i++) a |= qr_at(m, s, 8, i) << i;
+    a |= qr_at(m, s, 8, 7) << 6 | qr_at(m, s, 8, 8) << 7 | qr_at(m, s, 7, 8) << 8;
+    for (int i = 9; i < 15; i++) a |= qr_at(m, s, 14 - i, 8) << i;
+    for (int i = 0; i < 8; i++) b |= qr_at(m, s, s - 1 - i, 8) << i;
+    for (int i = 8; i < 15; i++) b |= qr_at(m, s, 8, s - 15 + i) << i;
+    int bits = a ^ 0x5412, data = bits >> 10, rem = data;
+    for (int i = 0; i < 10; i++) rem = (rem << 1) ^ ((rem >> 9) * 0x537);
+    CHECK(a == b && (rem & 0x3ff) == (bits & 0x3ff) && (data >> 3) == 0,
+          "the format information is wrong (%04x and %04x)", (unsigned)a, (unsigned)b);
+}
+
+// ---- a device and a security key of the test's own, for app/install.c ----
+
+static uint8_t g_fake_key[32];
+
+device_kind_t platform_device_kind(char *why, size_t why_cap) { (void)why; (void)why_cap; return DEVICE_TPM; }
+
+device_kind_t platform_device_sealed_kind(const uint8_t *sealed, size_t len) {
+    return len == 4 + DEVICE_SECRET_LEN && memcmp(sealed, "TEST", 4) == 0 ? DEVICE_TPM : DEVICE_NONE;
+}
+
+const char *platform_device_uses(device_kind_t kind) { (void)kind; return "the test's device"; }
+
+int platform_device_losses(device_kind_t kind, const char **out, int max) { (void)kind; (void)out; (void)max; return 0; }
+
+long platform_device_seal(const uint8_t secret[DEVICE_SECRET_LEN], uint8_t *out, size_t cap, char *why, size_t why_cap) {
+    (void)why; (void)why_cap;
+    if (cap < 4 + DEVICE_SECRET_LEN) return -1;
+    memcpy(out, "TEST", 4);
+    for (int i = 0; i < DEVICE_SECRET_LEN; i++) out[4 + i] = secret[i] ^ 0x5a;
+    return 4 + DEVICE_SECRET_LEN;
+}
+
+int platform_device_unseal(const uint8_t *sealed, size_t len, uint8_t secret[DEVICE_SECRET_LEN], char *why, size_t why_cap) {
+    (void)why; (void)why_cap;
+    if (platform_device_sealed_kind(sealed, len) != DEVICE_TPM) return -1;
+    for (int i = 0; i < DEVICE_SECRET_LEN; i++) secret[i] = sealed[4 + i] ^ 0x5a;
+    return 0;
+}
+
+void platform_device_forget(const uint8_t *sealed, size_t len) { (void)sealed; (void)len; }
+
+int platform_seckey_usable(char *why, size_t why_cap) { (void)why; (void)why_cap; return 0; }
+
+// Like hmac-secret: a secret for the credential and salt that only this "key" can make.
+static void fake_secret(const uint8_t *cred, size_t n, const uint8_t salt[SECKEY_SALT_LEN], uint8_t out[SECKEY_SECRET_LEN]) {
+    uint8_t msg[SECKEY_CRED_MAX + SECKEY_SALT_LEN];
+    memcpy(msg, cred, n);
+    memcpy(msg + n, salt, SECKEY_SALT_LEN);
+    hmac_sha256(g_fake_key, sizeof g_fake_key, msg, n + SECKEY_SALT_LEN, out);
+}
+
+int platform_seckey_make(const uint8_t salt[SECKEY_SALT_LEN], const char *pin, uint8_t cred[SECKEY_CRED_MAX],
+                         size_t *cred_len, int *uv, uint8_t secret[SECKEY_SECRET_LEN], seckey_wait_t *w, char *why,
+                         size_t why_cap) {
+    (void)pin; (void)why; (void)why_cap;
+    gen_random(cred, 16);
+    *cred_len = 16;
+    *uv = 0;
+    fake_secret(cred, 16, salt, secret);
+    __atomic_add_fetch(&w->touches, 2, __ATOMIC_RELEASE);
+    return 0;
+}
+
+int platform_seckey_secret(const uint8_t *const *creds, const size_t *lens, const int *uv, int n,
+                           const uint8_t salt[SECKEY_SALT_LEN], const char *pin, uint8_t secret[SECKEY_SECRET_LEN],
+                           seckey_wait_t *w, char *why, size_t why_cap) {
+    (void)uv; (void)pin; (void)why; (void)why_cap;
+    if (n < 1) return SECKEY_NO_CRED;
+    fake_secret(creds[0], lens[0], salt, secret);
+    __atomic_add_fetch(&w->touches, 1, __ATOMIC_RELEASE);
+    return 0;
+}
+
+static int b32_value(char c) { return c >= 'A' && c <= 'Z' ? c - 'A' : c >= '2' && c <= '7' ? c - '2' + 26 : -1; }
+
+// The code an app with this base32 secret shows now.
+static void app_code(const char *b32, char out[8]) {
+    uint8_t secret[TOTP_SECRET_LEN] = { 0 };
+    uint32_t acc = 0;
+    int bits = 0;
+    size_t n = 0;
+    for (const char *p = b32; *p && n < sizeof secret; p++) {
+        acc = acc << 5 | (uint32_t)b32_value(*p);
+        bits += 5;
+        if (bits >= 8) { secret[n++] = (uint8_t)(acc >> (bits - 8)); bits -= 8; }
+    }
+    snprintf(out, 8, "%06u", (unsigned)totp_code(secret, sizeof secret, (uint64_t)time(NULL) / TOTP_PERIOD));
+}
+
+static install_key_state_t wait_key(void) {
+    install_key_state_t st;
+    double until = now_seconds() + 10;
+    while ((st = install_key_poll(NULL, NULL)) == INSTALL_KEY_RUNNING && now_seconds() < until) platform_sleep_ms(2);
+    return st;
+}
+
+static int save_file_exists(const char *config, const char *file) {
+    char path[600];
+    struct stat st;
+    snprintf(path, sizeof path, "%s/chat/saves/factors/%s", config, file);
+    return stat(path, &st) == 0;
+}
+
+// A save end to end, through app/install.c: the security key before anything opens, the code
+// before the save is used, factors taken away leaving no files behind, and a save left part way
+// through a change finished with everything any of its files needs.
+static void test_save_factors(double *t) {
+    (void)t;
+    static char config[] = "/tmp/chat-saves-XXXXXX";
+    CHECK(mkdtemp(config) != NULL, "no temporary folder");
+    setenv("XDG_CONFIG_HOME", config, 1);
+    gen_random(g_fake_key, sizeof g_fake_key);
+    static const char settings[] = "[profile]\nnick = \"alice\"\n";
+    static char buf[INSTALL_SETTINGS_MAX];
+    char b32[40], uri[160], code[8];
+    const unsigned key = INSTALL_FACTOR_KEY, otp = INSTALL_FACTOR_CODE;
+
+    install_use("factors");
+    CHECK(install_lock_new("factors", "pw", key) == -1, "a save needing a security key was made without one");
+    CHECK(install_key_make(NULL) == 0 && wait_key() == INSTALL_KEY_DONE, "registering the security key failed: %s",
+          install_key_why());
+    install_code_new("factors", b32, sizeof b32, uri, sizeof uri);
+    CHECK(strlen(b32) == 32 && strncmp(uri, "otpauth://totp/chat:factors?secret=", 35) == 0,
+          "the authenticator's secret or link is wrong: %s", uri);
+    CHECK(install_lock_new("factors", "pw", key | otp) == -1, "a save asking for a code was made before one was checked");
+    CHECK(install_code_try("12 34") == PASS_FORMAT, "a code that isn't 6 digits was taken");
+    app_code(b32, code);
+    CHECK(install_code_try(code) == 0, "the app's code wasn't taken");
+    CHECK(install_lock_new("factors", "pw", key | otp) == 0 && install_write_settings(settings) == 0
+          && install_write_verified("") == 0, "the save wasn't made: %s", install_why());
+    CHECK(install_factors("factors") == (key | otp) && install_open_factors() == (key | otp)
+          && save_file_exists(config, "securitykey") && save_file_exists(config, "authenticator"),
+          "the new save doesn't need what it was made with (%u)", install_factors("factors"));
+    install_forget();
+
+    CHECK(install_unlock("factors", "pw") == INSTALL_KEY, "it opened without its security key");
+    CHECK(install_key_open("factors", NULL) == 0 && wait_key() == INSTALL_KEY_DONE && install_key_ready("factors"),
+          "its security key's secret wasn't read: %s", install_key_why());
+    CHECK(install_unlock("factors", "wrong") == PASS_WRONG && install_key_ready("factors"),
+          "a wrong passphrase opened it, or the security key's secret wasn't kept for another try");
+    CHECK(install_unlock("factors", "pw") == 0 && install_code_pending() && !install_open_factors()
+          && install_read_settings(buf, sizeof buf) < 0, "waiting for its code, the save was used");
+    CHECK(install_check_code("1234567") == PASS_FORMAT, "7 digits were taken as a code");
+    app_code(b32, code);
+    CHECK(install_check_code(code) == 0 && !install_code_pending()
+          && install_read_settings(buf, sizeof buf) == (long)strlen(settings), "the right code didn't open it");
+    install_forget();
+
+    uint8_t mine[sizeof g_fake_key];
+    memcpy(mine, g_fake_key, sizeof mine);
+    g_fake_key[0] ^= 1;
+    CHECK(install_key_open("factors", NULL) == 0 && wait_key() == INSTALL_KEY_FAILED && !install_key_ready("factors"),
+          "another security key's secret was taken");
+    memcpy(g_fake_key, mine, sizeof g_fake_key);
+
+    CHECK(install_key_open("factors", NULL) == 0 && wait_key() == INSTALL_KEY_DONE && install_unlock("factors", "pw") == 0,
+          "it didn't open again");
+    app_code(b32, code);
+    CHECK(install_check_code(code) == 0, "the code didn't open it again");
+    CHECK(install_set_factor(otp, 0) == 0 && install_factors("factors") == key && !save_file_exists(config, "authenticator"),
+          "turning the code off left it needed, or its file behind: %s", install_why());
+    CHECK(install_set_factor(key, 0) == 0 && install_factors("factors") == 0 && !save_file_exists(config, "securitykey"),
+          "turning the security key off left it needed, or its file behind: %s", install_why());
+    install_forget();
+    CHECK(install_unlock("factors", "pw") == 0 && !install_code_pending()
+          && install_read_settings(buf, sizeof buf) == (long)strlen(settings), "with neither, the passphrase didn't open it");
+
+    // An old copy of the settings, from before the device lock, put back over the locked ones.
+    static uint8_t old[INSTALL_SETTINGS_MAX + PASS_SEAL_OVERHEAD];
+    char path[600];
+    snprintf(path, sizeof path, "%s/chat/saves/factors/settings", config);
+    long old_n = platform_read_file(path, old, sizeof old);
+    CHECK(old_n > 0 && install_set_factor(INSTALL_FACTOR_DEVICE, 1) == 0
+          && install_factors("factors") == INSTALL_FACTOR_DEVICE, "locking it to the device failed: %s", install_why());
+    CHECK(platform_write_private(path, old, (size_t)old_n) == 0, "the old settings couldn't be put back");
+    install_forget();
+    CHECK(install_unlock("factors", "pw") == 0 && install_relocked() == 1 && install_factors("factors") == INSTALL_FACTOR_DEVICE
+          && install_device_lock() != DEVICE_NONE, "a save part locked wasn't locked again when it opened");
+    CHECK(install_remove("factors") == 0 && !save_file_exists(config, "device"), "it wasn't uninstalled");
 }
 
 static void test_identity_keys(double *t) {
@@ -1617,7 +1921,8 @@ int main(int argc, char **argv) {
         { "junk", test_junk }, { "lookalike nick", test_lookalike_nick },
         { "third peer", test_third_peer }, { "candidates settle", test_candidates_settle }, { "builds", test_builds },
         { "parsers", test_parsers }, { "toml", test_toml }, { "dht keys", test_dht_keys }, { "dht", test_dht }, { "read file", test_read_file },
-        { "identity keys", test_identity_keys }, { "passphrase seal", test_passphrase_seal }, { "device lock", test_device_lock }, { "images", test_images }, { "file names", test_file_names }, { "files", test_files },
+        { "identity keys", test_identity_keys }, { "passphrase seal", test_passphrase_seal }, { "device lock", test_device_lock },
+        { "factor locks", test_factor_locks }, { "totp", test_totp }, { "qr", test_qr }, { "save factors", test_save_factors }, { "images", test_images }, { "file names", test_file_names }, { "files", test_files },
         { "verified keys", test_trust },
     };
     size_t n_tests = sizeof tests / sizeof tests[0];

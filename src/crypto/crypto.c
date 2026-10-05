@@ -4,6 +4,7 @@
 #include "common/util.h"
 #include <sodium.h>
 #include <oqs/kem_ml_kem.h>
+#include <mbedtls/md.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -406,19 +407,29 @@ int identity_from_password(const char *password, const char *device_id, identity
     return 0;
 }
 
-// The header: "chatkey1" ("chatdev1" for a lock that needs a device), Argon2id's opslimit and
-// memlimit (KiB, big-endian), salt. Then each secret sealed: the header, a nonce, the sealed secret.
+// The header: "chatkey1" for the passphrase alone, "chatdev1" for it and a device, otherwise "chatmfa"
+// and a byte of the factors it needs; then Argon2id's opslimit and memlimit (KiB, big-endian), salt.
+// Then each secret sealed: the header, a nonce, the sealed secret.
 #define PASS_MAGIC "chatkey1"
 #define PASS_DEVICE_MAGIC "chatdev1"
+#define PASS_FACTORS_MAGIC "chatmfa"
 
-static int known_magic(const uint8_t *h) {
-    return memcmp(h, PASS_MAGIC, 8) == 0 || memcmp(h, PASS_DEVICE_MAGIC, 8) == 0;
+// The factors a header needs, or -1 if chat didn't write it. A device alone is always "chatdev1", so
+// each set of factors has the one header.
+static int header_needs(const uint8_t *h) {
+    if (memcmp(h, PASS_MAGIC, 8) == 0) return 0;
+    if (memcmp(h, PASS_DEVICE_MAGIC, 8) == 0) return (int)PASS_NEEDS_DEVICE;
+    if (memcmp(h, PASS_FACTORS_MAGIC, 7) != 0 || (h[7] & ~PASS_NEEDS_ALL) || !(h[7] & (PASS_NEEDS_KEY | PASS_NEEDS_CODE)))
+        return -1;
+    return h[7];
 }
 
-// A lock that needs a device seals and opens nothing until it has the device's secret.
+static int known_magic(const uint8_t *h) { return header_needs(h) >= 0; }
+
+// A lock that needs more than the passphrase seals and opens nothing until it has their secrets.
 static int lock_ready(const pass_lock_t *lk) {
-    if (memcmp(lk->header, PASS_MAGIC, 8) == 0) return !lk->device;
-    return memcmp(lk->header, PASS_DEVICE_MAGIC, 8) == 0 && lk->device;
+    int needs = header_needs(lk->header);
+    return needs >= 0 && (unsigned)needs == lk->needs;
 }
 
 // Limits above these mean a tampered file, which could otherwise ask for any amount of memory.
@@ -427,7 +438,7 @@ static int derive_lock_key(const char *passphrase, pass_lock_t *lk) {
     uint32_t ops = (uint32_t)h[8] << 24 | (uint32_t)h[9] << 16 | (uint32_t)h[10] << 8 | h[11];
     uint32_t mem_kib = (uint32_t)h[12] << 24 | (uint32_t)h[13] << 16 | (uint32_t)h[14] << 8 | h[15];
     if (ops < 1 || ops > 16 || mem_kib < 8 || mem_kib > 1024u * 1024u) return PASS_FORMAT;
-    lk->device = 0;
+    lk->needs = 0;
     sodium_memzero(lk->key, sizeof lk->key);
     if (crypto_pwhash(lk->base, sizeof lk->base, passphrase, strlen(passphrase), h + 16, ops, (size_t)mem_kib * 1024u,
                       crypto_pwhash_ALG_ARGON2ID13) != 0) return PASS_NOMEM;
@@ -435,28 +446,40 @@ static int derive_lock_key(const char *passphrase, pass_lock_t *lk) {
     return 0;
 }
 
-int pass_needs_device(const uint8_t *sealed, size_t len) {
-    return len >= 8 && memcmp(sealed, PASS_DEVICE_MAGIC, 8) == 0;
+unsigned pass_needs(const uint8_t *sealed, size_t len) {
+    int needs = len >= 8 ? header_needs(sealed) : -1;
+    return needs > 0 ? (unsigned)needs : 0;
 }
 
-void pass_lock_device(pass_lock_t *lk, const uint8_t secret[PASS_DEVICE_SECRET_LEN]) {
-    static const char LABEL[] = "chat device lock v1";
-    memcpy(lk->header, PASS_DEVICE_MAGIC, 8);
-    // Keyed with the passphrase's key: without either one, the key can't be worked out.
+// Keyed with the passphrase's key: without it, or any of the secrets, the key can't be worked out.
+void pass_lock_set(pass_lock_t *lk, unsigned needs, const uint8_t device[PASS_DEVICE_SECRET_LEN],
+                   const uint8_t key[PASS_KEY_SECRET_LEN]) {
+    needs &= PASS_NEEDS_ALL;
+    lk->needs = needs;
+    if (!needs) {
+        memcpy(lk->header, PASS_MAGIC, 8);
+        memcpy(lk->key, lk->base, sizeof lk->key);
+        return;
+    }
     crypto_generichash_state st;
     crypto_generichash_init(&st, lk->base, sizeof lk->base, sizeof lk->key);
-    crypto_generichash_update(&st, (const unsigned char *)LABEL, sizeof LABEL - 1);
-    crypto_generichash_update(&st, lk->header + 8, PASS_HEADER_LEN - 8);
-    crypto_generichash_update(&st, secret, PASS_DEVICE_SECRET_LEN);
+    if (needs == PASS_NEEDS_DEVICE) {
+        // As the device lock was first written, so saves locked then still open.
+        static const char LABEL[] = "chat device lock v1";
+        memcpy(lk->header, PASS_DEVICE_MAGIC, 8);
+        crypto_generichash_update(&st, (const unsigned char *)LABEL, sizeof LABEL - 1);
+        crypto_generichash_update(&st, lk->header + 8, PASS_HEADER_LEN - 8);
+    } else {
+        static const char LABEL[] = "chat factors v1";
+        memcpy(lk->header, PASS_FACTORS_MAGIC, 7);
+        lk->header[7] = (uint8_t)needs;
+        crypto_generichash_update(&st, (const unsigned char *)LABEL, sizeof LABEL - 1);
+        crypto_generichash_update(&st, lk->header, PASS_HEADER_LEN);
+    }
+    if (needs & PASS_NEEDS_DEVICE) crypto_generichash_update(&st, device, PASS_DEVICE_SECRET_LEN);
+    if (needs & PASS_NEEDS_KEY) crypto_generichash_update(&st, key, PASS_KEY_SECRET_LEN);
     crypto_generichash_final(&st, lk->key, sizeof lk->key);
     sodium_memzero(&st, sizeof st);
-    lk->device = 1;
-}
-
-void pass_lock_portable(pass_lock_t *lk) {
-    memcpy(lk->header, PASS_MAGIC, 8);
-    memcpy(lk->key, lk->base, sizeof lk->key);
-    lk->device = 0;
 }
 
 int pass_lock_new(const char *passphrase, pass_lock_t *lk) {
@@ -500,6 +523,40 @@ int pass_unseal(const pass_lock_t *lk, const uint8_t *in, size_t len, void *plai
         return PASS_WRONG;
     *plain_len = (size_t)n;
     return 0;
+}
+
+static void wrap_key(const uint8_t kek[32], uint8_t key[32]) {
+    static const char LABEL[] = "chat secret wrap v1";
+    crypto_generichash(key, 32, (const unsigned char *)LABEL, sizeof LABEL - 1, kek, 32);
+}
+
+void secret_wrap(const uint8_t kek[32], const uint8_t *ad, size_t ad_len, const uint8_t secret[32], uint8_t out[WRAP_LEN]) {
+    uint8_t key[32];
+    wrap_key(kek, key);
+    randombytes_buf(out, AEAD_NONCE_LEN);
+    crypto_aead_xchacha20poly1305_ietf_encrypt(out + AEAD_NONCE_LEN, NULL, secret, 32, ad, ad_len, NULL, out, key);
+    sodium_memzero(key, sizeof key);
+}
+
+int secret_unwrap(const uint8_t kek[32], const uint8_t *ad, size_t ad_len, const uint8_t in[WRAP_LEN], uint8_t secret[32]) {
+    uint8_t key[32];
+    wrap_key(kek, key);
+    int rc = crypto_aead_xchacha20poly1305_ietf_decrypt(secret, NULL, NULL, in + AEAD_NONCE_LEN, 32 + AEAD_TAG_LEN, ad,
+                                                        ad_len, in, key);
+    sodium_memzero(key, sizeof key);
+    return rc == 0 ? 0 : -1;
+}
+
+// 1000000, which no code is, if HMAC-SHA1 can't be worked out.
+uint32_t totp_code(const uint8_t *secret, size_t len, uint64_t step) {
+    uint8_t msg[8], mac[20];
+    for (int i = 0; i < 8; i++) msg[i] = (uint8_t)(step >> (56 - 8 * i));
+    const mbedtls_md_info_t *sha1 = mbedtls_md_info_from_type(MBEDTLS_MD_SHA1);
+    if (!sha1 || mbedtls_md_hmac(sha1, secret, len, msg, sizeof msg, mac) != 0) return 1000000;
+    int off = mac[19] & 15;
+    uint32_t bin = (uint32_t)(mac[off] & 0x7f) << 24 | (uint32_t)mac[off + 1] << 16 | (uint32_t)mac[off + 2] << 8 | mac[off + 3];
+    sodium_memzero(mac, sizeof mac);
+    return bin % 1000000;
 }
 
 int identity_from_x25519(const uint8_t secret[32], identity_keypair_t *idkp) {

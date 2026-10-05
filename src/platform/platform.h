@@ -7,9 +7,18 @@
 #include <stdint.h>
 #include "platform/net.h"
 
-void platform_harden_process(void);
+// Called first. Other programs, even ones running as this user, can't read chat's memory or
+// attach to it, and it's never dumped. The variables named in secret_env (passwords) leave the
+// environment straight away, so the programs chat runs never inherit them; platform_env_take
+// hands each one out once.
+void platform_harden_process(const char *const secret_env[]);
 
 int platform_env_take(const char *name, char *out, size_t outlen);
+
+// Blanks the arguments where other programs read a process's command line (ps, /proc, Task
+// Manager), so a session id, peer or save named there doesn't stay readable. argv's strings are
+// wiped: copy them first.
+void platform_hide_args(int argc, char **argv);
 
 int term_is_tty(void);
 int term_stdout_is_tty(void);
@@ -94,6 +103,39 @@ long platform_device_seal(const uint8_t secret[DEVICE_SECRET_LEN], uint8_t *out,
 int platform_device_unseal(const uint8_t *sealed, size_t len, uint8_t secret[DEVICE_SECRET_LEN], char *why, size_t why_cap);
 // Destroys what this device keeps for it (on Windows, its TPM key), so it can't be unsealed again.
 void platform_device_forget(const uint8_t *sealed, size_t len);
+
+// A FIDO2 security key, for a save that needs one. Its credential's secret never leaves it: after a
+// touch, it gives back an HMAC of a salt (CTAP's hmac-secret). These wait for a key to be plugged in
+// and then touched, for up to SECKEY_WAIT_S, so they run on a thread of their own: w->stage says
+// what they're waiting for, and setting w->cancel stops them. On Linux chat speaks CTAP itself, over
+// /dev/hidraw; on Windows it asks Windows (webauthn.dll), whose own window takes the PIN and touch.
+#define SECKEY_CRED_MAX 1024
+#define SECKEY_SALT_LEN 32
+#define SECKEY_SECRET_LEN 32
+#define SECKEY_PIN -2         // it needs its PIN, or the one given is wrong
+#define SECKEY_NO_CRED -3     // the security key plugged in isn't one the credentials are on
+#define SECKEY_CANCELLED -4
+#define SECKEY_WAIT_S 60
+typedef enum { SECKEY_LOOKING, SECKEY_BUSY, SECKEY_TOUCH } seckey_stage_t;
+typedef struct {
+    int cancel;    // set by the caller, read with __atomic builtins
+    int stage;     // seckey_stage_t, set as it goes
+    int touches;   // touches it has had
+} seckey_wait_t;
+// 0 if security keys can be used here, or -1 with why.
+int platform_seckey_usable(char *why, size_t why_cap);
+// A credential the security key keeps nothing of, then its secret for salt: two touches. uv gets
+// whether the secret needed the PIN, as it will each time. 0, SECKEY_PIN, SECKEY_CANCELLED or -1,
+// with why set.
+int platform_seckey_make(const uint8_t salt[SECKEY_SALT_LEN], const char *pin, uint8_t cred[SECKEY_CRED_MAX],
+                         size_t *cred_len, int *uv, uint8_t secret[SECKEY_SECRET_LEN], seckey_wait_t *w, char *why,
+                         size_t why_cap);
+// The secret for salt from whichever of the credentials the security key plugged in has: a touch.
+// uv, for each, as platform_seckey_make gave it. Returns that credential's index, or SECKEY_PIN,
+// SECKEY_NO_CRED, SECKEY_CANCELLED or -1, with why set.
+int platform_seckey_secret(const uint8_t *const *creds, const size_t *lens, const int *uv, int n,
+                           const uint8_t salt[SECKEY_SALT_LEN], const char *pin, uint8_t secret[SECKEY_SECRET_LEN],
+                           seckey_wait_t *w, char *why, size_t why_cap);
 
 int platform_spawn_thread(void (*fn)(void *), void *arg);
 

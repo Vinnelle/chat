@@ -25,6 +25,7 @@ set(CHAT_CORE_SOURCES
     ${PROJECT_SOURCE_DIR}/src/common/json.c
     ${PROJECT_SOURCE_DIR}/src/common/toml.c
     ${PROJECT_SOURCE_DIR}/src/common/image.c
+    ${PROJECT_SOURCE_DIR}/src/common/qr.c
     ${PROJECT_SOURCE_DIR}/src/platform/${CHAT_OS}/platform.c
     ${CMAKE_CURRENT_SOURCE_DIR}/fake_net.c
 )
@@ -41,7 +42,8 @@ function(chat_test_executable name)
     target_compile_options(${name} PRIVATE -Wall -Wextra)
 endfunction()
 
-chat_test_executable(engine_test engine_test.c)
+# The saves' code, with a device and a security key of the test's own in engine_test.c.
+chat_test_executable(engine_test engine_test.c ${PROJECT_SOURCE_DIR}/src/app/install.c)
 add_test(NAME engine COMMAND engine_test)
 
 if(CHAT_FUZZ)

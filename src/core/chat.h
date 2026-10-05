@@ -636,8 +636,9 @@ const char *chat_start_error(const chat_t *c);
 // Applies changed routing toggles to a running session. The mode and the Tor settings only apply
 // to sessions opened afterwards. Returns 1 if those differ from this session's.
 int chat_apply_routing(chat_t *c, const routing_t *r);
-// Moves a Tor session to the tor at these ports (the one chat started, or found running).
-void chat_tor_set_ports(chat_t *c, const char *socks, const char *control);
+// Moves a Tor session to the tor at these ports (the one chat started, or found running). password
+// is what chat's own tor takes; NULL for a running tor, which takes the session's torpassword.
+void chat_tor_set_ports(chat_t *c, const char *socks, const char *control, const char *password);
 // That tor has connected to the Tor network, so relays that failed while it was connecting are retried.
 void chat_tor_connected(chat_t *c);
 int chat_online_count(const chat_t *c);

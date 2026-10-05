@@ -26,6 +26,21 @@ size_t base64_encode(const uint8_t *in, size_t n, char *out) {
     return o;
 }
 
+size_t base32_encode(const uint8_t *in, size_t n, char *out) {
+    static const char B32CH[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    size_t o = 0;
+    uint32_t acc = 0;
+    int bits = 0;
+    for (size_t i = 0; i < n; i++) {
+        acc = acc << 8 | in[i];
+        bits += 8;
+        while (bits >= 5) { out[o++] = B32CH[(acc >> (bits - 5)) & 31]; bits -= 5; }
+    }
+    if (bits > 0) out[o++] = B32CH[(acc << (5 - bits)) & 31];
+    out[o] = '\0';
+    return o;
+}
+
 long base64_decode_strict(const char *in, size_t inlen, uint8_t *out, size_t cap) {
     if (inlen % 4 != 0) return -1;
     size_t o = 0;

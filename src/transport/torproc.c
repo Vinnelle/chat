@@ -4,6 +4,8 @@
 #include "platform/net.h"
 #include "platform/platform.h"
 #include "common/util.h"
+#include "crypto/crypto.h"
+#include <mbedtls/sha1.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,8 +15,9 @@
 struct torproc {
     platform_proc_t *proc;
     char dir[1024];
-    char torrc[1100], data[1100], port_file[1100], cookie[1100], log[1100];
+    char torrc[1100], data[1100], port_file[1100], log[1100];
     char socks[32], control[32];
+    char password[65];
     char version[80];
     char problem[200], last_line[200];
     int code;
@@ -38,6 +41,35 @@ static int path_in(char *out, size_t cap, const char *dir, const char *name) {
     return n > 0 && (size_t)n < cap ? 0 : -1;
 }
 
+// HashedControlPassword for password, as `tor --hash-password` makes it: OpenPGP's salted and
+// iterated S2K over SHA-1, written "16:" then in hex the 8 byte salt, the count byte 0x60 (64 KiB
+// hashed) and the hash. out needs 62 bytes.
+static int hash_password(const char *password, char *out, size_t cap) {
+    uint8_t spec[9 + 20], salted[8 + 64];
+    size_t plen = strlen(password);
+    if (plen > 64 || cap < 3 + 2 * sizeof spec + 1) return -1;
+    gen_random(spec, 8);
+    spec[8] = 0x60;
+    memcpy(salted, spec, 8);
+    memcpy(salted + 8, password, plen);
+    size_t chunk = 8 + plen, left = (size_t)(16 + (spec[8] & 15)) << ((spec[8] >> 4) + 6);
+    mbedtls_sha1_context ctx;
+    mbedtls_sha1_init(&ctx);
+    int rc = mbedtls_sha1_starts(&ctx);
+    while (rc == 0 && left > 0) {
+        size_t n = left < chunk ? left : chunk;
+        rc = mbedtls_sha1_update(&ctx, salted, n);
+        left -= n;
+    }
+    if (rc == 0) rc = mbedtls_sha1_finish(&ctx, spec + 9);
+    mbedtls_sha1_free(&ctx);
+    crypto_wipe(salted, sizeof salted);
+    if (rc != 0) return -1;
+    memcpy(out, "16:", 3);
+    hex_encode(spec, sizeof spec, out + 3);
+    return 0;
+}
+
 torproc_t *torproc_start(const char *program, char *err, size_t cap) {
     torproc_t *p = calloc(1, sizeof *p);
     if (!p) { copy_str(err, "out of memory", cap); return NULL; }
@@ -52,7 +84,6 @@ torproc_t *torproc_start(const char *program, char *err, size_t cap) {
     }
     if (path_in(p->torrc, sizeof p->torrc, p->dir, "torrc") || path_in(p->data, sizeof p->data, p->dir, "data")
         || path_in(p->port_file, sizeof p->port_file, p->dir, "control-port")
-        || path_in(p->cookie, sizeof p->cookie, p->dir, "control_auth_cookie")
         || path_in(p->log, sizeof p->log, p->dir, "tor.log")) {
         copy_str(err, "the temporary folder's path is too long", cap);
         torproc_stop(p);
@@ -71,6 +102,16 @@ torproc_t *torproc_start(const char *program, char *err, size_t cap) {
     }
     snprintf(p->socks, sizeof p->socks, "127.0.0.1:%u", (unsigned)socks_port);
     snprintf(p->control, sizeof p->control, "127.0.0.1:%u", (unsigned)control_port);
+    uint8_t secret[32];
+    char hashed[64];
+    gen_random(secret, sizeof secret);
+    hex_encode(secret, sizeof secret, p->password);
+    crypto_wipe(secret, sizeof secret);
+    if (hash_password(p->password, hashed, sizeof hashed) != 0) {
+        copy_str(err, "couldn't make a password for tor's control port", cap);
+        torproc_stop(p);
+        return NULL;
+    }
     char owner[24];
     snprintf(owner, sizeof owner, "%ld", platform_pid());
     const char *argv[] = {
@@ -81,8 +122,9 @@ torproc_t *torproc_start(const char *program, char *err, size_t cap) {
         "--SocksPort", p->socks,
         "--ControlPort", p->control,
         "--ControlPortWriteToFile", p->port_file,
-        "--CookieAuthentication", "1",
-        "--CookieAuthFile", p->cookie,
+        // Only the hash is on tor's command line, which anyone can read; the password stays in chat.
+        "--HashedControlPassword", hashed,
+        "--CookieAuthentication", "0",
         // tor exits by itself once chat's process is gone, crash or not.
         "--__OwningControllerProcess", owner,
         "--Log", "notice stdout",
@@ -152,6 +194,7 @@ torproc_state_t torproc_poll(torproc_t *p) {
 
 const char *torproc_socks(const torproc_t *p) { return p->socks; }
 const char *torproc_control(const torproc_t *p) { return p->control; }
+const char *torproc_password(const torproc_t *p) { return p->password; }
 int torproc_bootstrap(torproc_t *p) { read_log(p); return p->boot; }
 const char *torproc_version(torproc_t *p) { read_log(p); return p->version; }
 void torproc_problem(torproc_t *p, char *out, size_t cap) {
@@ -164,5 +207,6 @@ void torproc_stop(torproc_t *p) {
     if (!p) return;
     platform_proc_stop(p->proc, 3000);
     if (p->dir[0]) platform_remove_tree(p->dir);
+    crypto_wipe(p->password, sizeof p->password);
     free(p);
 }

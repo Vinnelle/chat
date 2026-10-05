@@ -3388,11 +3388,12 @@ int chat_apply_routing(chat_t *c, const routing_t *r) {
     return later;
 }
 
-void chat_tor_set_ports(chat_t *c, const char *socks, const char *control) {
+void chat_tor_set_ports(chat_t *c, const char *socks, const char *control, const char *password) {
     if (!c->tor) return;
     copy_str(c->route.tor.socks, socks, sizeof c->route.tor.socks);
     copy_str(c->route.tor.control, control, sizeof c->route.tor.control);
-    tor_set_ports(c->tor, socks, control);
+    // c->route keeps the password set for a running tor, which chat_apply_routing compares.
+    tor_set_ports(c->tor, socks, control, password ? password : c->route.tor.password);
     if (c->nostr) nostr_set_proxy(c->nostr, socks);
 }
 

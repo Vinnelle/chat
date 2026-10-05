@@ -200,33 +200,54 @@ int identity_from_password(const char *password, const char *device_id, identity
 // key, with the header as associated data. Everything sealed under a lock includes its header, so
 // one Argon2id run opens all of it, and sealing more doesn't need another run.
 //
-// A lock can also need a device: its header's format says so, and its key is then the passphrase's
-// key mixed with a secret only that device can give back. Without that secret the passphrase opens
-// nothing, and since the header is associated data, it can't be changed to say otherwise.
+// A lock can also need other factors: a device, a security key, an authenticator app's code. Its
+// header's format says which, and its key is then the passphrase's key mixed with the device's
+// secret and the security key's, for those it needs. Without them the passphrase opens nothing, and
+// since the header is associated data, it can't be changed to say otherwise. The code adds no
+// secret: chat checks it once the files are open (see app/install.h).
 #define PASS_HEADER_LEN 32
 #define PASS_SEAL_OVERHEAD (PASS_HEADER_LEN + AEAD_NONCE_LEN + AEAD_TAG_LEN)
 #define PASS_WRONG  -1   // or sealed under another lock, or changed since it was sealed
 #define PASS_NOMEM  -2
 #define PASS_FORMAT -3
 #define PASS_DEVICE_SECRET_LEN 32
+#define PASS_KEY_SECRET_LEN 32
+#define PASS_NEEDS_DEVICE 1u
+#define PASS_NEEDS_KEY    2u
+#define PASS_NEEDS_CODE   4u
+#define PASS_NEEDS_ALL    7u
 typedef struct {
     uint8_t header[PASS_HEADER_LEN];
     uint8_t key[32];
     uint8_t base[32];   // the passphrase's key alone
-    int device;         // key has the device's secret in it
+    unsigned needs;     // the factors key has in it (PASS_NEEDS_)
 } pass_lock_t;
 // A new lock with its own salt: 0 or PASS_NOMEM.
 int pass_lock_new(const char *passphrase, pass_lock_t *lk);
 // The lock that sealed was sealed under, if passphrase is the right one (only pass_unseal can
-// tell): 0, PASS_FORMAT or PASS_NOMEM. If it needs a device, nothing opens until pass_lock_device.
+// tell): 0, PASS_FORMAT or PASS_NOMEM. If it needs more factors, nothing opens until pass_lock_set.
 int pass_lock_of(const char *passphrase, const uint8_t *sealed, size_t len, pass_lock_t *lk);
-// Whether sealed was sealed under a lock that needs a device.
-int pass_needs_device(const uint8_t *sealed, size_t len);
-// The same passphrase and salt, needing the device whose secret this is as well, or no device.
-void pass_lock_device(pass_lock_t *lk, const uint8_t secret[PASS_DEVICE_SECRET_LEN]);
-void pass_lock_portable(pass_lock_t *lk);
+// The factors sealed was sealed under a lock needing (PASS_NEEDS_), or 0 for the passphrase alone.
+unsigned pass_needs(const uint8_t *sealed, size_t len);
+// The same passphrase and salt, needing these factors: device and key are their secrets, read only
+// for the factors needs has.
+void pass_lock_set(pass_lock_t *lk, unsigned needs, const uint8_t device[PASS_DEVICE_SECRET_LEN],
+                   const uint8_t key[PASS_KEY_SECRET_LEN]);
 int pass_seal(const pass_lock_t *lk, const void *plain, size_t len, uint8_t *out, size_t cap, size_t *out_len);
 int pass_unseal(const pass_lock_t *lk, const uint8_t *in, size_t len, void *plain, size_t cap, size_t *plain_len);
+
+// A 32-byte secret sealed under a key from elsewhere (a security key's hmac-secret), with ad bound to
+// it: out is a nonce, then the sealed secret. unwrap returns 0, or -1 for another key or other ad.
+#define WRAP_LEN (AEAD_NONCE_LEN + 32 + AEAD_TAG_LEN)
+void secret_wrap(const uint8_t kek[32], const uint8_t *ad, size_t ad_len, const uint8_t secret[32], uint8_t out[WRAP_LEN]);
+int secret_unwrap(const uint8_t kek[32], const uint8_t *ad, size_t ad_len, const uint8_t in[WRAP_LEN], uint8_t secret[32]);
+
+// RFC 6238's codes, as authenticator apps make them: HMAC-SHA1 over the count of 30-second steps
+// since 1970, cut to 6 digits.
+#define TOTP_SECRET_LEN 20
+#define TOTP_PERIOD 30
+#define TOTP_DIGITS 6
+uint32_t totp_code(const uint8_t *secret, size_t len, uint64_t step);
 
 // An X25519 secret (an AGE key's) as an Ed25519 identity. The public key converts back to the same
 // X25519 public key, so the AGE recipient shown is the key's own. idkp is only changed on success.

@@ -26,6 +26,44 @@
   the machine id is made anew at each boot, it says a restart would lose the save. For a new save,
   `:install` shows this box before asking for a passphrase. It says to turn the lock off before
   any of these you can see coming, and the console says so again once a save is locked.
+- A security key for saves. `:set securitykey on` (the **Security key** row) makes a save need a
+  FIDO2 security key with hmac-secret (a YubiKey 5, say) as well as its passphrase: registering it
+  takes two touches, and opening the save one more each time. The secret the key gives for the
+  save's salt goes into the key its files are sealed with, so without the security key the
+  passphrase opens nothing, wherever the files are, and a guess at it can't be checked. On Linux
+  chat speaks CTAP 2 itself over `/dev/hidraw`, with the secret encrypted on the bus (PIN/UV auth
+  protocol 2, or 1), the PIN asked for only where the key wants it, and only the key with the
+  save's credential blinking. On Windows, Windows asks for the touch and PIN in its own window
+  (WebAuthn API 4 or later). Before it's turned on, a box lists what loses the save for good: the
+  key lost, broken or reset, or the save's `securitykey` file deleted.
+- An authenticator app for saves. `:set authenticator on` (the **Authenticator app** row) shows a
+  QR code and the secret to add to any TOTP app, checks a code from it, and from then on opening
+  the save asks for the code it shows. The box and the help say what it is: a check chat makes,
+  since the codes' secret has to be kept in the save (sealed with it), so it stops someone who
+  knows the passphrase opening the save in chat, not someone reading the files with their own
+  program. A wrong code waits a moment before the next.
+- A save can need any mix of the device lock, the security key and a code. The list of saves says
+  which, the unlock box asks for each in turn (in the terminal with `--simple`), and a save left
+  part way through a change to them is finished with all of them when it opens.
+  `CHAT_INSTALL_PASSWORD` gives the passphrase of a save that needs a security key or a code, and
+  those are still asked for. Older versions of chat can't open a save that needs either.
+
+### Changed
+- The command line is blanked once chat has read it, so a session id, `--peer` address, nick or
+  save named there no longer stays readable in `ps`, `/proc` or Task Manager.
+  `CHAT_PASSWORD`, `CHAT_INSTALL_PASSWORD` and `CHAT_SIGN_PASSWORD` leave the environment as chat
+  starts, so tor and curl never inherit them.
+- chat's own tor takes a control port password chat makes when it starts it, and tor only gets
+  its hash. It used to write a cookie file that any program running as you could read, and then
+  log in to tor with and see which onion services chat publishes and connects to.
+- On Linux, notifications go to the desktop over D-Bus from chat itself instead of through
+  notify-send, which put their title and text on a command line every user can read. notify-send
+  is no longer used.
+- On Windows, other programs, even ones running as you, can no longer read chat's memory, run code
+  in it or open its threads: its process and threads only let them see it, wait for it and end
+  it. chat also raises its working set, so the keys and conversation it locks in memory stay out
+  of the page file (before, the default was too small for most of them).
+- Reading a save no longer updates its access time (Linux).
 
 ## 0.4.0
 

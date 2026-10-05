@@ -136,6 +136,8 @@ size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out);
 // colours are exact, but once the terminal has reported its background they're adjusted to be
 // readable on it.
 void tui_set_background(const uint8_t rgb[3]);
+// Whether the background it reported is light. 0 until it has.
+int tui_background_light(void);
 
 typedef enum { TUI_IMODE_INSERT = 0, TUI_IMODE_NORMAL, TUI_IMODE_COMMAND } tui_input_mode_t;
 
@@ -365,9 +367,10 @@ int tui_nav_text_cols(int cols);
 // (indented by level, with hanging lines), quotes, code lines (cut off, never wrapped) and rules.
 // *scroll is how many rows down from the top it starts, clamped to what the page can scroll.
 // Returns the most it can scroll.
+// TUI_P_ART is kept as it is, like code, but in the terminal's own foreground (a QR code).
 typedef enum {
     TUI_P_TEXT = 0, TUI_P_HEADING, TUI_P_SUBHEADING, TUI_P_BULLET, TUI_P_NUMBERED, TUI_P_QUOTE, TUI_P_CODE,
-    TUI_P_RULE, TUI_P_BLANK
+    TUI_P_RULE, TUI_P_BLANK, TUI_P_ART
 } tui_para_kind_t;
 struct tui_para {
     tui_para_kind_t kind;

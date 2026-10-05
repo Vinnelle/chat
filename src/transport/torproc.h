@@ -6,11 +6,11 @@
 #include <stddef.h>
 
 // A tor of chat's own, for Tor mode when no usable tor is running. It runs from a private
-// temporary folder (its data, cookie and log) with an empty configuration, so nothing from
+// temporary folder (its data and log) with an empty configuration, so nothing from
 // /etc/tor/torrc applies. It listens for SOCKS and control connections on random ports on
-// 127.0.0.1 only, and takes control logins only with the cookie in that folder. It quits if chat
-// dies (tor watches chat's process id; on Windows a job object ends it), and chat deletes the
-// folder when it stops it.
+// 127.0.0.1 only, and takes control logins only with a password chat makes as it starts it, which
+// tor is given only the hash of. It quits if chat dies (tor watches chat's process id; on Windows
+// a job object ends it), and chat deletes the folder when it stops it.
 
 typedef struct torproc torproc_t;
 
@@ -21,6 +21,9 @@ torproc_t *torproc_start(const char *program, char *err, size_t cap);
 torproc_state_t torproc_poll(torproc_t *p);
 const char *torproc_socks(const torproc_t *p);
 const char *torproc_control(const torproc_t *p);
+// The control port's password. Never on disk: the control port shows which onion services chat
+// publishes and connects to, and a cookie file could be read by any program running as this user.
+const char *torproc_password(const torproc_t *p);
 // Bootstrap progress in percent from tor's log, or -1 before the first report.
 int torproc_bootstrap(torproc_t *p);
 // tor's version line ("" until it has logged one), and the last warning or error it logged.

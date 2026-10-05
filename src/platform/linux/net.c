@@ -32,8 +32,8 @@ static void set_nonblock(sock_t s) {
     fcntl(s, F_SETFL, flags | O_NONBLOCK);
 }
 
-// Close-on-exec, so curl and notify-send don't inherit the session's sockets. SOCK_CLOEXEC
-// closes the gap between socket() and fcntl() where another thread could spawn one of them.
+// Close-on-exec, so curl and tor don't inherit the session's sockets. SOCK_CLOEXEC closes the
+// gap between socket() and fcntl() where another thread could spawn one of them.
 static sock_t open_socket(int family) {
     sock_t s;
 #ifdef SOCK_CLOEXEC

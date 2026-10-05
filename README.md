@@ -109,12 +109,35 @@ example), is marked **modified**. You get a warning after it joins, the sidebar 
 peers against them. 0.3.0 can't read the list, so it shows newer peers' builds as unknown.
 
 Keys, and the conversation on screen, are locked in memory so they don't go to swap, as far as
-the system's memory lock limit allows. Core dumps are off, and on Windows a crash ends chat
-before Windows Error Reporting can dump its memory. Desktop notifications only say a message
-came in, unless **Notification preview** (`:set preview nick` or `message`) is set to show who
-sent it, or who and what. Desktops keep notifications (Windows writes them to disk), so it's
-off by default. A notification never names the session, since the id is all you need to join
-one with a blank password.
+the system's memory lock limit allows (on Windows, chat raises its working set so they fit).
+Core dumps are off, and on Windows a crash ends chat before Windows Error Reporting can dump its
+memory. Desktop notifications only say a message came in, unless **Notification preview**
+(`:set preview nick` or `message`) is set to show who sent it, or who and what. Desktops keep
+notifications (Windows writes them to disk), so it's off by default. A notification never names
+the session, since the id is all you need to join one with a blank password.
+
+**Other programs on the computer** are kept from seeing what chat is doing, as far as a program
+can keep them out:
+
+- They can't read or change chat's memory, even ones running as you. On Linux, nothing without
+  root can attach a debugger to chat, or read its memory, environment, open files or I/O through
+  `/proc`. On Windows, chat's process and threads let other programs see that it runs, wait for
+  it and end it, and nothing more.
+- The command line is blanked once chat has read it, so a session id, `--peer` address, nick or
+  save named there doesn't stay in `ps` or Task Manager. It can be read for the moment chat
+  starts, and your shell keeps it in its history, so it's safer to type a session id into chat.
+- `CHAT_PASSWORD`, `CHAT_INSTALL_PASSWORD` and `CHAT_SIGN_PASSWORD` leave the environment as chat
+  starts, so tor and curl never inherit them.
+- chat's own tor only lets chat log in to its control port (see [Routing](#routing)).
+- On Linux, notifications go to the desktop over D-Bus from chat itself. notify-send would have
+  started a process with their text on its command line, which every user can read.
+- Reading a save doesn't change its access time (Linux).
+
+What chat can't hide: root and administrators can read any program's memory. Anyone on the
+computer can see that chat is running, how much CPU time and memory it uses, and its network
+connections (in Tor mode, those only reach Tor relays, never a peer). Your terminal holds what's
+on screen, and the desktop's notification service gets each notification. Programs running as
+you can watch chat's files change, and can replace chat or tor before you next start them.
 
 > **Note:** the cryptography here has not been independently audited.
 
@@ -207,8 +230,10 @@ chat uses depends on `--tor-launch`, or **Start chat's own tor** in settings:
 chat's own tor is whatever `tor` is on `PATH` or in the usual folders, or what you give
 `--tor-path`. chat refuses to run one that anyone other than root or you could have replaced.
 It runs with an empty config, so nothing in `/etc/tor/torrc` applies. Its SOCKS and control
-ports are random ports on 127.0.0.1, and the control port only accepts the cookie in its own
-folder. That folder holds its data and log. On Linux it's under `$XDG_RUNTIME_DIR`, which is
+ports are random ports on 127.0.0.1, and the control port only accepts a password chat makes
+when it starts tor. tor only gets the password's hash, and there's no cookie file for another
+program to log in with (the control port shows which onion services chat uses). tor has a
+private folder for its data and log. On Linux it's under `$XDG_RUNTIME_DIR`, which is
 only yours and kept in memory. Otherwise it's a new 0700 folder in `/tmp`, or your temp folder
 on Windows. chat deletes the folder when it stops tor. If chat crashes, tor notices and quits
 within a few seconds, and on Windows a job object ends it straight away. The next run of chat
@@ -393,7 +418,10 @@ messages, peers and files are never saved.
 `settings` and `key` are the only files chat writes there (and the same two in `saves/NAME` for
 a save made with `:install NAME`, see [More than one save](#more-than-one-save)), and both are always sealed, as is
 `verified`. A save locked to the device also has a `device` file, sealed by the device instead
-(see [Locking a save to this device](#locking-a-save-to-this-device)). chat
+(see [Locking a save to this device](#locking-a-save-to-this-device)). One that needs a security key
+has a `securitykey` file, with the key's credential and the save's secret wrapped under the key's,
+and one that asks for an authenticator code has an `authenticator` file, sealed like the rest (see
+[A security key and an authenticator app](#a-security-key-and-an-authenticator-app)). chat
 never writes your settings in plain text, as `settings.toml` or anything else. The TOML above
 only exists inside the sealed file. If there's a plain text file in that folder, like a
 `settings.toml`, it didn't come from chat. chat doesn't read it, update it or delete it, and
@@ -539,6 +567,70 @@ off` first, and lock it again after. The box that locks a save lists all of this
 `:install` shows it before asking for the passphrase), and the console says it again once it's
 locked. Keep a key you can't lose somewhere else too. Versions of chat from before the device lock
 can't open a locked save at all (they say it's damaged).
+
+#### A security key and an authenticator app
+
+`:set securitykey on` (the **Security key** row on the settings page) makes a save need your FIDO2
+security key as well as its passphrase, and `:set authenticator on` (the **Authenticator app**
+row) makes it ask for the 6-digit code an authenticator app shows. A save can have one, the other,
+both or neither, with the device lock or without. Like the device lock, with no save open they
+apply to the next save `:install` makes, which sets them up before it asks for the passphrase. For
+the open save, a box says what it means and asks first, then seals it again. The list of saves
+says which ones need them.
+
+**The security key** is any FIDO2 key with the `hmac-secret` extension, which most have: YubiKey 5,
+Nitrokey 3, SoloKey 2, Google Titan, Token2 and others. Registering it takes two touches. The first
+makes a credential for chat, of which the key keeps nothing: what it needs to use it again is in
+the save's `securitykey` file. The second reads the secret that credential gives for a random salt.
+That secret never crosses USB in the clear: for each request chat agrees a key with the security
+key (ECDH on P-256, by CTAP's PIN/UV auth protocol 2, or 1 for older keys), and it comes back
+encrypted under that. A random 32-byte secret for the save is wrapped under it
+(XChaCha20-Poly1305) in the `securitykey` file, and goes into the key the save's files are sealed
+with, together with the key Argon2id makes from the passphrase, and the device's secret if it's
+locked to the device. Without the security key the passphrase opens nothing, wherever the files
+are copied, and a guess at the passphrase can't even be checked. Opening the save asks for a touch
+each time, after the passphrase. chat only asks for the key's PIN where the key wants it: a key
+that wants it to make a credential gets it when it's registered, and one that wants it for
+everything (`alwaysUv`) each time.
+
+On Linux chat speaks CTAP itself, through `/dev/hidraw*`, which udev opens to whoever is at the
+screen (systemd's rule for security keys, or libfido2's `70-u2f.rules`). With more than one
+security key plugged in, only the one with the save's credential blinks, and one is registered
+only while it's the only one plugged in. On Windows, which lets only administrators open a security
+key directly, chat asks Windows (`webauthn.dll`), and its own window asks for the touch and any
+PIN. Reading `hmac-secret` with a salt of chat's own needs its WebAuthn API version 4, which newer
+versions of Windows have: where it's older, the row is greyed out and says so.
+
+**The save is gone for good, with no way back, and so is a signing key only saved in it, if the
+security key is lost or broken, if it's reset** (a FIDO reset, from its maker's app or with `ykman
+fido reset`, wipes what it needs to give the secret back), **or if the save's `securitykey` file
+is deleted** (a backup of the save needs that file too). `:set securitykey off` first, before you
+reset the key or stop using it: it seals the save again without one. Turning on "always require
+user verification" (`alwaysUv`) on the key after it's registered also changes the secret it gives,
+so turn the security key off in chat before that too.
+
+**The authenticator app** is a check chat makes, not a lock on the files. Turning it on shows a QR
+code (an `otpauth://` link) and the secret in base32: scan it, or type it into the app, then type
+the code the app shows, to be sure it has it. From then on, opening the save asks for the code
+after the passphrase (and the touch). A code from 30 seconds before or after is taken too, for a
+clock that's a little out, and after a wrong one chat waits a moment before it takes another. The
+codes are standard TOTP (RFC 6238: HMAC-SHA1, 6 digits, 30 seconds), so any authenticator app works.
+
+To check them, chat has to keep the secret they come from with the save, sealed in its
+`authenticator` file under the same key as the rest. So whoever can open the save's files (with its
+passphrase, and the device and the security key if those are on) can make the codes too: it stops
+someone who knows your passphrase from opening the save in chat without your phone, but not someone
+who copies the files and reads them with a program of their own. The security key and the device
+lock protect the files themselves. Each file's header says the save asks for a code, sealed with
+the file, so it can't be changed to say it doesn't. Lose the app's entry and chat won't open the
+save: keep a copy of the secret somewhere safe, or `:set authenticator off` first.
+
+Turning either on or off seals the save's files again in the same crash-safe order as the device
+lock, and a save found part way through a change when it opens is finished with everything any of
+its files needs. `CHAT_INSTALL_PASSWORD` gives the passphrase of a save that needs a security key or
+a code, and chat still asks for those. With more than one save and no `--save`, it's only tried on
+saves that need neither. Versions of chat from before these can't open a save that needs them
+(they say it's damaged).
 
 ## Build
 
@@ -753,6 +845,9 @@ after a name. Under each row's help, the page shows the `:set` command that does
 | `nick`, `colour` | a name; a colour name or `#RRGGBB` |
 | `sign` | `off`, an `age` or `pgp` key made from a password typed on the page, or `age:PATH` / `pgp:PATH` for a key file; a pasted key is picked on the page |
 | `autosave` | `on` (once installed, a setting or verified key you change is saved straight away), `off` (it's kept until `:save`) |
+| `devicelock` | `on` (the save only opens on this device), `off` |
+| `securitykey` | `on` (the save needs your FIDO2 security key too), `off` |
+| `authenticator` | `on` (the save asks for an authenticator app's code too), `off` |
 | `verify` | `required` (nothing goes to a peer until you've compared its code), `optional` |
 | `filelimit` | the biggest file fetched without `anyway`: `8M`, `500K`, `1G` |
 | `fastfiles` | `on` (what you send goes in quick bursts; through the relays, as fast as they allow), `off` (chat's regular slots) |

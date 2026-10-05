@@ -41,9 +41,9 @@ tor_t *tor_new(const tor_opts_t *o, const uint8_t room_keys[TOR_ROOM_SLOTS][64],
                const uint8_t room_pubs[TOR_ROOM_SLOTS][32], tor_deliver_fn deliver, tor_log_fn log, void *ctx);
 void tor_free(tor_t *t);
 
-// Points a session at another tor: the one chat started, or one it found running. An empty
-// control address means none yet; the session waits.
-void tor_set_ports(tor_t *t, const char *socks, const char *control);
+// Points a session at another tor, and the password its control port takes: the one chat
+// started, or one it found running. An empty control address means none yet; the session waits.
+void tor_set_ports(tor_t *t, const char *socks, const char *control, const char *password);
 
 // Checks whether a running tor is one chat can use: its control port answers and lets chat log
 // in (onion services need that). Nothing is published. tor_probe_result: 1 usable (the ports

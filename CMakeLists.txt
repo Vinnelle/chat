@@ -178,9 +178,11 @@ add_executable(chat
     src/common/bencode.c
     src/common/json.c
     src/common/image.c
+    src/common/qr.c
     src/platform/${CHAT_OS}/net.c
     src/platform/${CHAT_OS}/platform.c
     src/platform/${CHAT_OS}/device.c
+    src/platform/${CHAT_OS}/seckey.c
 )
 
 add_custom_target(build_stamp ALL
@@ -238,8 +240,9 @@ if(WIN32)
     target_link_libraries(chat PRIVATE ws2_32 bcrypt ncrypt advapi32 shell32 user32 crypt32 iphlpapi)
     target_link_options(chat PRIVATE -static)
 else()
-    # A device lock without systemd's credential service speaks to the TPM itself.
-    target_sources(chat PRIVATE src/platform/linux/tpm2.c)
+    # A device lock without systemd's credential service speaks to the TPM itself, and chat speaks
+    # CTAP to a security key itself.
+    target_sources(chat PRIVATE src/platform/linux/tpm2.c src/platform/linux/ctap2.c)
     find_package(Threads REQUIRED)
     target_link_libraries(chat PRIVATE Threads::Threads m)
 endif()

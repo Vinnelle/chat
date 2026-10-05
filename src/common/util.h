@@ -24,6 +24,9 @@ size_t base64_encode(const uint8_t *in, size_t n, char *out);
 // Strict: padded standard alphabet only. Returns the decoded length, or -1.
 long base64_decode_strict(const char *in, size_t inlen, uint8_t *out, size_t cap);
 
+// RFC 4648's base32, unpadded, as authenticator apps take a secret. out needs (n * 8 + 4) / 5 + 1.
+size_t base32_encode(const uint8_t *in, size_t n, char *out);
+
 // Code point at s[i] (n = length of s). *adv gets its length in bytes. A malformed byte is returned as is.
 uint32_t utf8_decode(const char *s, size_t n, size_t i, size_t *adv);
 // Writes cp as UTF-8 (1-4 bytes) and returns the length.

@@ -635,6 +635,8 @@ static void readable(const uint8_t in[3], uint8_t out[3]) {
         for (int k = 0; k < 3; k++) out[k] = (uint8_t)(out[k] + (toward - out[k]) / 5);
 }
 
+int tui_background_light(void) { return g_have_bg && lum(g_bg) >= 0.25; }
+
 void tui_set_background(const uint8_t rgb[3]) {
     memcpy(g_bg, rgb, 3);
     g_have_bg = 1;
@@ -2312,7 +2314,8 @@ static int para_hang(const tui_para_t *pa) {
         case TUI_P_BULLET:   return 2 + 2 * lvl;
         case TUI_P_NUMBERED: return (int)strlen(pa->marker) + 1 + 2 * lvl;
         case TUI_P_QUOTE:    return 2;
-        case TUI_P_CODE:     return 2;
+        case TUI_P_CODE:
+        case TUI_P_ART:      return 2;
         default:             return 0;
     }
 }
@@ -2329,12 +2332,12 @@ static int layout_text(const tui_para_t *paras, int n, int w, text_row_fn row, v
             continue;
         }
         int hang = para_hang(pa);
-        if (pa->kind == TUI_P_CODE) {
+        if (pa->kind == TUI_P_CODE || pa->kind == TUI_P_ART) {
             // Code keeps its spaces and lines: one row each, cut off at the edge.
             size_t len = strlen(pa->text) < sizeof plain - 1 ? strlen(pa->text) : sizeof plain - 1;
             memcpy(plain, pa->text, len);
             plain[len] = '\0';
-            memset(attr, A_CODE, len);
+            memset(attr, pa->kind == TUI_P_CODE ? A_CODE : 0, len);
             if (row) row(ctx, v, pa, plain, attr, 0, len, 1);
             v++;
             continue;
