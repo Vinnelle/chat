@@ -406,7 +406,8 @@ not the key's public half, so neither file can be linked to the fingerprint peer
   notify = "all"
   ```
 
-  The tables are the settings page's sections, and the keys are the names `:set` takes. A
+  The keys are the names `:set` takes: the routing, Tor and relay ones in `[network]`, `nick`,
+  `colour` and `autosave` in `[profile]`, and the rest in `[chat]`. A
   switch is `true` or `false`, `port` is a number, `relays` is a list, and the rest are strings,
   written the way `:set` takes them. A key chat can't use is skipped, and the console says so.
 - `~/.config/chat/key`: your signing key, what kind it is and where it came from.
@@ -857,9 +858,13 @@ after a name. Under each row's help, the page shows the `:set` command that does
 | `net` | `normal`, `verbose` (every handshake packet, relay and Tor event) |
 | `port` | the UDP port for new sessions (`0` picks a free one) |
 
-The settings page, the pages under it (the signing identity picker and the key file browser)
-and the help page all use the same keys: `j`/`k` move, `g`/`G` go to the top/bottom, `Tab` /
-`Shift+Tab` go to the next / previous section, `Enter` picks, `h`/`l` change a value or go out
+The settings page shows one section at a time (Network, Profile, Security and Chat, listed on
+the left), with its rows grouped under headings, and **Done** at the end of each. `j`/`k` go on
+from one section into the next. The settings page, the pages under it (the signing identity
+picker and the key file browser) and the help page all use the same keys: `j`/`k` move, `g`/`G` go to the top/bottom, `Tab` /
+`Shift+Tab` (or `PgDn` / `PgUp`) go to the next / previous section, round from the last to the
+first, and `1`-`9` go to a section by its place in the list. On the settings page that's the row
+you were on there last. `Enter` picks, `h`/`l` change a value or go out
 of / into a page, `Esc` goes back and `q` closes the page. In the file browser, `~` goes to the
 home folder, and in the key file browser `/` types a path instead.
 

@@ -50,6 +50,17 @@
   those are still asked for. Older versions of chat can't open a save that needs either.
 
 ### Changed
+- The settings page shows one section at a time, picked in the list on the left, with its rows
+  grouped under headings: Network (DHT or Tor, Relays, Advanced), Profile (Keys), a new Security
+  section for autosave and what a save needs to open (Unlocking, Duress), and Chat (Files). The
+  network log and the UDP port for new sessions moved to Network. Each section ends with **Done**
+  (**Start chatting** on startup), and `j`/`k` go on into the next one. `Tab` / `Shift+Tab` (or
+  `PgDn` / `PgUp`) go straight to the next / previous section, round from the last to the first,
+  back to the row you were on there, and `1`-`4` go to a section by its place in the list. The
+  settings file is the same as before.
+- On the help page, `Shift+Tab` goes straight to the previous section instead of to the top of
+  this one first, `Tab` / `Shift+Tab` go round from the last section to the first, and `PgDn` /
+  `PgUp` and `1`-`9` go to a section too.
 - The command line is blanked once chat has read it, so a session id, `--peer` address, nick or
   save named there no longer stays readable in `ps`, `/proc` or Task Manager.
   `CHAT_PASSWORD`, `CHAT_INSTALL_PASSWORD` and `CHAT_SIGN_PASSWORD` leave the environment as chat

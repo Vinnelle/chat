@@ -314,6 +314,8 @@ typedef struct {
     int net_verbose;
     uint16_t default_port;
     int settings_sel;
+    int settings_page;   // the section shown: settings_sel's, or the one whose Done button it is
+    int settings_rows[8];   // each section's row selected last, which Tab goes back to
     int help_sel;
     int changelog_scroll, changelog_most;
     char message[200];   // the bottom bar's result of the last action, until the next key
@@ -1309,18 +1311,21 @@ static const char *route_label(void) {
 
 enum { K_TOGGLE, K_CHOICE, K_TEXT, K_SECRET, K_ACTION };
 
+// In the order of the settings file's tables (setting_table).
 typedef enum {
     SET_ROUTING, SET_DHT4, SET_DHT6, SET_PORTMAP, SET_LAN,
     SET_TOR_LAUNCH, SET_TOR_PATH, SET_TOR_SOCKS, SET_TOR_CONTROL, SET_TOR_PASSWORD,
     SET_NOSTR, SET_RELAYS,
     SET_NICK, SET_COLOUR, SET_SIGN, SET_AGE_RECIPIENT, SET_PGP_PUBKEY, SET_AUTOSAVE, SET_DEVICE_LOCK,
     SET_SECURITY_KEY, SET_AUTHENTICATOR, SET_DESTROY, SET_SHADOW,
-    SET_VERIFY, SET_FILE_LIMIT, SET_FAST_FILES, SET_NOTIFY, SET_PREVIEW, SET_NET, SET_PORT
+    SET_VERIFY, SET_FILE_LIMIT, SET_FAST_FILES, SET_NOTIFY, SET_PREVIEW, SET_NET, SET_PORT,
+    N_SETTING_IDS
 } setting_id_t;
 
 typedef struct {
     setting_id_t id;
-    const char *section;
+    const char *section;  // starts a section, which has a page of its own
+    const char *group;    // starts a group within the section, under this heading
     const char *key;      // its name after :set
     const char *label;
     int kind;
@@ -1329,114 +1334,110 @@ typedef struct {
 } setting_def_t;
 
 static const setting_def_t SETTINGS[] = {
-    { SET_ROUTING, "Network", "routing", "Routing", K_CHOICE, "dht|tor",
+    { SET_ROUTING, "Network", NULL, "routing", "Routing", K_CHOICE, "dht|tor",
       "dht: UDP directly between peers, found using the options below. tor: onion services, plus the Nostr "
       "relays through Tor to meet DHT members. Hides your IP address from everyone. Uses a running tor or "
       "starts chat's own, and connecting takes longer. Applies to sessions you open from now on." },
-    { SET_DHT4, NULL, "dht", "BitTorrent DHT (IPv4)", K_TOGGLE, "on|off",
+    { SET_DHT4, NULL, "DHT", "dht", "BitTorrent DHT (IPv4)", K_TOGGLE, "on|off",
       "Finds peers on the internet through the public BitTorrent DHT. DHT nodes see your IP address next to a "
       "lookup key only room members can work out, and a node id that changes with it every hour." },
-    { SET_DHT6, NULL, "dht6", "IPv6 DHT", K_TOGGLE, "on|off",
+    { SET_DHT6, NULL, NULL, "dht6", "IPv6 DHT", K_TOGGLE, "on|off",
       "Also looks for peers on the IPv6 DHT (BEP 32). IPv6 usually has no NAT to punch through, so peers there "
       "connect more reliably." },
-    { SET_PORTMAP, NULL, "portmap", "Router port mapping", K_TOGGLE, "on|off",
+    { SET_PORTMAP, NULL, NULL, "portmap", "Router port mapping", K_TOGGLE, "on|off",
       "Asks your router to forward this session's UDP port (PCP, NAT-PMP or UPnP-IGD), so peers behind NATs that "
       "can't be hole punched can still reach you. Removed when the session ends. The router may log it." },
-    { SET_LAN, NULL, "lan", "LAN discovery", K_TOGGLE, "on|off",
+    { SET_LAN, NULL, NULL, "lan", "LAN discovery", K_TOGGLE, "on|off",
       "Broadcasts an encrypted beacon on your local network, so room members on it can find you without the "
       "internet." },
-    { SET_TOR_LAUNCH, NULL, "torlaunch", "Start chat's own tor", K_CHOICE, "auto|always|never",
+    { SET_TOR_LAUNCH, NULL, "Tor", "torlaunch", "Start chat's own tor", K_CHOICE, "auto|always|never",
       "auto: use a tor that's already running if its control port lets chat log in (it keeps its entry guards "
       "and any bridges), otherwise start chat's own. always: chat's own, separate from any other tor, but with "
       "new entry guards each run and nothing from your torrc. never: only a running tor. Chat's own tor uses "
       "random 127.0.0.1 ports, a cookie login and a private temporary folder deleted on exit." },
-    { SET_TOR_PATH, NULL, "torpath", "Tor program", K_TEXT, "PATH",
+    { SET_TOR_PATH, NULL, NULL, "torpath", "Tor program", K_TEXT, "PATH",
       "The tor program chat starts: a full path, or empty for tor on PATH or in the usual folders. It must be a "
       "program that only root or you can change." },
-    { SET_TOR_SOCKS, NULL, "torsocks", "Tor SOCKS port", K_TEXT, "HOST:PORT",
+    { SET_TOR_SOCKS, NULL, NULL, "torsocks", "Tor SOCKS port", K_TEXT, "HOST:PORT",
       "Where to look for a running tor's SOCKS port (host:port). With the defaults, Tor Browser's "
       "127.0.0.1:9150 is tried too. Applies to sessions you open from now on." },
-    { SET_TOR_CONTROL, NULL, "torcontrol", "Tor control port", K_TEXT, "HOST:PORT",
+    { SET_TOR_CONTROL, NULL, NULL, "torcontrol", "Tor control port", K_TEXT, "HOST:PORT",
       "Where to look for a running tor's control port (host:port). It needs ControlPort on, and chat has to be "
       "able to read its cookie file (or have its password). Applies to sessions you open from now on." },
-    { SET_TOR_PASSWORD, NULL, "torpassword", "Tor control password", K_SECRET, NULL,
+    { SET_TOR_PASSWORD, NULL, NULL, "torpassword", "Tor control password", K_SECRET, NULL,
       "Only for a tor set up with HashedControlPassword. Kept in memory only. Applies to sessions you open from now on." },
-    // Last in the section: the relays apply in both modes, so they stay put when the mode changes.
-    { SET_NOSTR, NULL, "nostr", "Nostr relays", K_CHOICE, "off|on|always",
+    // After both modes' rows: the relays apply in both, so they stay put when the mode changes.
+    { SET_NOSTR, NULL, "Relays", "nostr", "Nostr relays", K_CHOICE, "off|on|always",
       "on: DHT routing only connects to the relays while it needs them (nobody reached yet, or a peer UDP can't"
       " reach) and disconnects a minute after. always: stays connected, so Tor members can find a room whose "
       "members all reach each other directly (they only meet on the relays). Tor routing reaches them through "
       "Tor and always stays connected. Each event has a one-off key, a random kind, a fixed size and fresh "
       "encryption, under a tag that changes every 10 minutes, with a new connection for each tag." },
-    { SET_RELAYS, NULL, "relays", "Relay list", K_TEXT, "wss://URL ... (up to 6)",
+    { SET_RELAYS, NULL, NULL, "relays", "Relay list", K_TEXT, "wss://URL ... (up to 6)",
       "The relays the fallback uses: up to 6 wss:// URLs, separated by spaces or commas." },
-    { SET_NICK, "Profile", "nick", "Nickname", K_TEXT, "NAME", "Your name in every session." },
-    { SET_COLOUR, NULL, "colour", "Colour", K_TEXT, "NAME|#RRGGBB",
+    { SET_PORT, NULL, "Advanced", "port", "UDP port for new sessions", K_TEXT, "N",
+      "The UDP port new sessions listen on. 0 picks a free one each time. :port moves an open session to another." },
+    { SET_NET, NULL, NULL, "net", "Network log", K_CHOICE, "normal|verbose",
+      "How much of the network the console shows, in every session. verbose adds every handshake packet, relay "
+      "and Tor event." },
+    { SET_NICK, "Profile", NULL, "nick", "Nickname", K_TEXT, "NAME", "Your name in every session." },
+    { SET_COLOUR, NULL, NULL, "colour", "Colour", K_TEXT, "NAME|#RRGGBB",
       "Your colour in every session. h/l step through the palette, and Enter takes a name or #RRGGBB." },
-    { SET_SIGN, NULL, "sign", "Signing identity", K_ACTION, "off|age|pgp|age:PATH|pgp:PATH",
+    { SET_SIGN, NULL, "Keys", "sign", "Signing identity", K_ACTION, "off|age|pgp|age:PATH|pgp:PATH",
       "A key that signs your handshakes so peers can check it's you. Either an AGE or PGP key made here from a "
       "password, or your own key from a file or pasted in. Enter picks one, replaces it or turns signing off. "
       "Kept in memory only, unless :install saves it: a key file's path, or any other key sealed to disk." },
-    { SET_AGE_RECIPIENT, NULL, "agerecipient", "AGE recipient", K_ACTION, NULL,
+    { SET_AGE_RECIPIENT, NULL, NULL, "agerecipient", "AGE recipient", K_ACTION, NULL,
       "The age1... string others give to age -r to encrypt files to you. Enter copies it to the clipboard." },
-    { SET_PGP_PUBKEY, NULL, "pgpkey", "PGP public key", K_ACTION, NULL,
+    { SET_PGP_PUBKEY, NULL, NULL, "pgpkey", "PGP public key", K_ACTION, NULL,
       "The public half of the PGP key made here, shown by its fingerprint, for others to gpg --import. Enter "
       "copies it to the clipboard. It's in the console too." },
-    { SET_AUTOSAVE, NULL, "autosave", "Autosave", K_TOGGLE, "on|off",
+    { SET_AUTOSAVE, "Security", NULL, "autosave", "Autosave", K_TOGGLE, "on|off",
       "Once chat is installed: on saves a setting you change, and a key you verify or forget, as you change it. "
       "off keeps changes until chat exits, unless :save saves them. The signing key is only saved by :save or "
       ":install either way, so a key you're trying out isn't kept by accident." },
-    { SET_DEVICE_LOCK, NULL, "devicelock", "Device lock", K_TOGGLE, "on|off",
-      "on: what :install saves only opens here, even with the passphrase: its key also needs a secret this device "
-      "keeps (in its TPM, where there's one). If the TPM is cleared (some firmware updates do it), the motherboard "
-      "replaced or the OS reinstalled, it's gone for good: turn this off first. off: the passphrase alone opens it." },
-    { SET_SECURITY_KEY, NULL, "securitykey", "Security key", K_TOGGLE, "on|off",
-      "on: what :install saves also needs your FIDO2 security key (a YubiKey, say) to open: a touch each time, and "
-      "its PIN if it always wants one. Its secret goes into the key the files are sealed with, so without the "
-      "security key the passphrase opens nothing, wherever the files are. Lose the key or reset it and the save is "
-      "gone for good: turn this off first. off: no security key." },
-    { SET_AUTHENTICATOR, NULL, "authenticator", "Authenticator app", K_TOGGLE, "on|off",
-      "on: what :install saves also asks for the 6-digit code an authenticator app (Aegis, Google Authenticator, "
-      "2FAS...) shows, each time it opens. A check chat makes: the secret the codes come from is kept with the save, "
-      "sealed in it, so it stops someone who knows your passphrase opening it in chat, not someone reading the "
-      "files with a program of their own. The security key or the device lock protect the files themselves." },
-    { SET_DESTROY, NULL, "destroy", "Self-destruct", K_CHOICE, "off|3|5|10",
+    { SET_DEVICE_LOCK, NULL, "Unlocking", "devicelock", "Device lock", K_TOGGLE, "on|off",
+      "Requires a secret this device keeps (in its TPM, where there's one) to unlock the save, so it can't be "
+      "unlocked anywhere else." },
+    { SET_SECURITY_KEY, NULL, NULL, "securitykey", "Security key", K_TOGGLE, "on|off",
+      "Requires your FIDO2 security key (a YubiKey, say) to unlock the save: a touch each time, and its PIN if it "
+      "has one." },
+    { SET_AUTHENTICATOR, NULL, NULL, "authenticator", "Authenticator app", K_TOGGLE, "on|off",
+      "Requires the 6-digit code from an authenticator app (Aegis, Google Authenticator, 2FAS...) to unlock the "
+      "save." },
+    { SET_DESTROY, NULL, "Duress", "destroy", "Self-destruct", K_CHOICE, "off|3|5|10",
       "Deletes what :install saves for good after this many wrong passphrases in a row, so a found or taken "
       "device can't be guessed at forever. The count is kept next to the save, not sealed (it has to be read "
       "before the passphrase opens anything), so someone who copies the files first can reset it: this stops "
       "guessing at the keyboard, not a forensic copy. A right passphrase clears the count." },
-    { SET_SHADOW, NULL, "shadow", "Shadow password", K_ACTION, "on|off",
+    { SET_SHADOW, NULL, NULL, "shadow", "Shadow password", K_ACTION, "on|off",
       "A second passphrase that opens a decoy instead of the real save, and deletes the real save first, for "
       "good. Afterwards only the decoy is there, so there's nothing left to be forced to hand over. The decoy "
       "needs the same security key, device and code, so opening it looks the same. Enter sets or removes it. "
       "Only while a save is open, and it needs the save's own factors to hand." },
-    { SET_VERIFY, "Chat", "verify", "Compare verify codes", K_CHOICE, "required|optional",
+    { SET_VERIFY, "Chat", NULL, "verify", "Compare verify codes", K_CHOICE, "required|optional",
       "Anyone with a session's id and password could sit between two members and read what they say. When a peer "
       "joins, chat shows a code to compare with them over another channel. It only matches on both ends if "
       "nobody is in the middle. required: nothing you send goes to a peer until you mark it as matching "
       "(:verify NICK ok). optional: messages go to everyone, compared or not." },
-    { SET_FILE_LIMIT, NULL, "filelimit", "File size limit", K_TEXT, "SIZE (8M, 500K, 1G)",
+    { SET_NOTIFY, NULL, NULL, "notify", "Notifications", K_CHOICE, "all|mentions|none",
+      "Desktop notifications, for open and new sessions: every message, mentions of your nick, or none." },
+    { SET_PREVIEW, NULL, NULL, "preview", "Notification preview", K_CHOICE, "off|nick|message",
+      "What a notification shows. off: only that a message came in. nick: who it's from. message: who, and what "
+      "they said. Desktops keep notifications (Windows writes them to disk), so what they show can outlast chat. "
+      "The session is never shown, since its id is all someone needs to join one with a blank password." },
+    { SET_FILE_LIMIT, NULL, "Files", "filelimit", "File size limit", K_TEXT, "SIZE (8M, 500K, 1G)",
       "The largest file chat fetches when you ask. An offer over the limit says so, and :download N anyway (or "
       ":show N anyway) fetches it regardless. Nothing is fetched until you ask. Files can be up to 1 GB." },
-    { SET_FAST_FILES, NULL, "fastfiles", "Fast file transfers", K_TOGGLE, "on|off",
+    { SET_FAST_FILES, NULL, NULL, "fastfiles", "Fast file transfers", K_TOGGLE, "on|off",
       "off: files are sent in chat's regular slots, so a transfer doesn't show up on the network, but it's slow: "
       "about 25 KB a minute, half that through the relays (where Tor and DHT members meet). on: while you send a "
       "file, your slots to that peer come every few milliseconds. It takes seconds instead of minutes, but anyone "
       "watching the network sees a burst about the size of the file. Through the relays it goes as often as they "
       "allow, about twice the normal rate, and the relays can see that. Only the sender's setting matters." },
-    { SET_NOTIFY, NULL, "notify", "Notifications", K_CHOICE, "all|mentions|none",
-      "Desktop notifications, for open and new sessions: every message, mentions of your nick, or none." },
-    { SET_PREVIEW, NULL, "preview", "Notification preview", K_CHOICE, "off|nick|message",
-      "What a notification shows. off: only that a message came in. nick: who it's from. message: who, and what "
-      "they said. Desktops keep notifications (Windows writes them to disk), so what they show can outlast chat. "
-      "The session is never shown, since its id is all someone needs to join one with a blank password." },
-    { SET_NET, NULL, "net", "Network log", K_CHOICE, "normal|verbose",
-      "How much of the network the console shows, in every session. verbose adds every handshake packet, relay "
-      "and Tor event." },
-    { SET_PORT, NULL, "port", "UDP port for new sessions", K_TEXT, "N",
-      "The UDP port new sessions listen on. 0 picks a free one each time. :port moves an open session to another." },
 };
 #define N_SETTINGS ((int)(sizeof SETTINGS / sizeof SETTINGS[0]))
+_Static_assert(N_SETTINGS == N_SETTING_IDS, "every setting has a row");
 
 static const char *const NOTIFY_NAMES[] = { "none", "mentions", "all" };
 static const char *const PREVIEW_NAMES[] = { "off", "nick", "message" };
@@ -1672,11 +1673,9 @@ static void note_settings_seen(void) {
     memset(g_unsaved_rows, 0, sizeof g_unsaved_rows);
 }
 
-static void row_table(int i, char *out, size_t cap) {
-    while (i > 0 && !SETTINGS[i].section) i--;
-    size_t n = 0;
-    for (const char *c = SETTINGS[i].section; *c && n + 1 < cap; c++) out[n++] = (char)tolower((unsigned char)*c);
-    out[n] = '\0';
+// Rows that have moved to another section keep their table, so files saved before still load.
+static const char *setting_table(setting_id_t id) {
+    return id < SET_NICK ? "network" : id < SET_VERIFY ? "profile" : "chat";
 }
 
 static size_t put_text(char *out, size_t p, size_t cap, const char *s) {
@@ -1704,17 +1703,17 @@ static size_t put_row_value(int i, const char *v, char *out, size_t p, size_t ca
 // -1 if it doesn't fit.
 static int settings_text(char *out, size_t cap) {
     size_t p = 0;
-    char table[16] = "";
+    const char *table = "";
     out[0] = '\0';
-    for (int i = 0; i < N_SETTINGS; i++) {
+    for (int id = 0; id < N_SETTING_IDS; id++) {
+        int i = settings_index((setting_id_t)id);
         if (strcmp(g_saved_rows[i], g_setting_defaults[i]) == 0) continue;
-        char t[16];
-        row_table(i, t, sizeof t);
+        const char *t = setting_table((setting_id_t)id);
         if (strcmp(t, table) != 0) {
             p = put_text(out, p, cap, p ? "\n[" : "[");
             p = put_text(out, p, cap, t);
             p = put_text(out, p, cap, "]\n");
-            copy_str(table, t, sizeof table);
+            table = t;
         }
         p = put_text(out, p, cap, SETTINGS[i].key);
         p = put_text(out, p, cap, " = ");
@@ -2026,52 +2025,99 @@ static void commit_setting_edit(void) {
     crypto_wipe(text, sizeof text);
 }
 
-#define SETTINGS_DONE N_SETTINGS   // settings_sel of the Done button, after the last setting
+// The page shows one section at a time, its listed rows and then a Done button.
+#define SETTINGS_DONE N_SETTINGS   // settings_sel of the Done button, on g_app.settings_page
 
-// The next listed row from the selected one in direction dir: the Done button after the last, and
-// the same row again before the first.
-static int settings_step_sel(int dir) {
-    for (int i = g_app.settings_sel + dir; i >= 0 && i < N_SETTINGS; i += dir)
+// The settings' sections, for the list on the left of the pages.
+static int settings_sections(const char **out, int cap) {
+    int n = 0;
+    for (int i = 0; i < N_SETTINGS && n < cap; i++) if (SETTINGS[i].section) out[n++] = SETTINGS[i].section;
+    return n;
+}
+
+static int settings_section_index(setting_id_t id) {
+    int n = -1;
+    for (int i = 0; i < N_SETTINGS; i++) {
+        if (SETTINGS[i].section) n++;
+        if (SETTINGS[i].id == id) return n;
+    }
+    return n;
+}
+
+// Section s's first row, or N_SETTINGS after the last section.
+static int section_begin(int s) {
+    for (int i = 0, n = 0; i < N_SETTINGS; i++)
+        if (SETTINGS[i].section && n++ == s) return i;
+    return N_SETTINGS;
+}
+
+// Section s's first listed row, or its last for dir < 0, or the Done button if none is listed.
+static int section_row(int s, int dir) {
+    int a = section_begin(s), b = section_begin(s + 1);
+    for (int i = dir > 0 ? a : b - 1; i >= a && i < b; i += dir)
         if (setting_shown(SETTINGS[i].id)) return i;
-    return dir > 0 ? SETTINGS_DONE : g_app.settings_sel;
-}
-
-// Moves the selection off a row that stopped being listed.
-static void settings_fix_sel(void) {
-    if (g_app.settings_sel >= N_SETTINGS || setting_shown(SETTINGS[g_app.settings_sel].id)) return;
-    int up = settings_step_sel(-1);
-    g_app.settings_sel = up != g_app.settings_sel ? up : settings_step_sel(1);
-}
-
-static int first_shown_from(int i) {
-    for (; i < N_SETTINGS; i++) if (setting_shown(SETTINGS[i].id)) return i;
     return SETTINGS_DONE;
 }
 
-static int section_start(int i) {
-    if (i >= N_SETTINGS) i = N_SETTINGS - 1;
-    while (i > 0 && !SETTINGS[i].section) i--;
-    return i;
+static int settings_n_sections(void) {
+    int n = 0;
+    while (section_begin(n) < N_SETTINGS) n++;
+    return n;
 }
 
-// Tab: the next section's first row, or the Done button after the last. Shift+Tab: this section's
-// first row, or if already there, the previous section's.
-static int settings_section_step(int dir) {
-    int sel = g_app.settings_sel;
-    if (dir > 0) {
-        for (int i = sel + 1; i < N_SETTINGS; i++) if (SETTINGS[i].section) return first_shown_from(i);
-        return SETTINGS_DONE;
+static void settings_select(int sel) {
+    g_app.settings_sel = sel;
+    if (sel >= N_SETTINGS) return;
+    g_app.settings_page = settings_section_index(SETTINGS[sel].id);
+    g_app.settings_rows[g_app.settings_page] = sel;
+}
+
+// Section s, on the row selected there last if it's still listed, otherwise its first.
+static void settings_go_section(int s) {
+    int i = g_app.settings_rows[s];
+    if (i < section_begin(s) || i >= section_begin(s + 1) || !setting_shown(SETTINGS[i].id)) i = section_row(s, 1);
+    g_app.settings_page = s;
+    settings_select(i);
+}
+
+// j/k go through the sections in turn, each one's listed rows and then its Done button.
+static void settings_step(int dir) {
+    int sel = g_app.settings_sel, s = g_app.settings_page;
+    int a = section_begin(s), b = section_begin(s + 1);
+    if (sel == SETTINGS_DONE) {
+        if (dir < 0) settings_select(section_row(s, -1));
+        else if (b < N_SETTINGS) settings_select(section_row(s + 1, 1));
+        return;
     }
-    int start = section_start(sel), first = first_shown_from(start);
-    if (sel == SETTINGS_DONE || first < sel) return first;
-    return start > 0 ? first_shown_from(section_start(start - 1)) : first;
+    for (int i = sel + dir; i >= a && i < b; i += dir)
+        if (setting_shown(SETTINGS[i].id)) { settings_select(i); return; }
+    if (dir < 0 && s == 0) return;
+    if (dir < 0) g_app.settings_page = s - 1;
+    g_app.settings_sel = SETTINGS_DONE;
+}
+
+// Moves the selection off a row that stopped being listed, to the next one up in its section, or
+// down.
+static void settings_fix_sel(void) {
+    int sel = g_app.settings_sel;
+    if (sel >= N_SETTINGS || setting_shown(SETTINGS[sel].id)) return;
+    int s = settings_section_index(SETTINGS[sel].id), a = section_begin(s), b = section_begin(s + 1), i = sel - 1;
+    while (i >= a && !setting_shown(SETTINGS[i].id)) i--;
+    if (i < a) for (i = sel + 1; i < b && !setting_shown(SETTINGS[i].id); i++) {}
+    settings_select(i >= a && i < b ? i : SETTINGS_DONE);
+}
+
+// Tab and Shift+Tab: the next or previous section, round from the last to the first.
+static void settings_section_step(int dir) {
+    int n = settings_n_sections();
+    settings_go_section((g_app.settings_page + dir + n) % n);
 }
 
 static void begin_settings(void) {
     if (g_app.mode != MODE_CHAT) return;
     device_check();
     g_app.mode = MODE_SETTINGS;
-    if (g_app.settings_sel == SETTINGS_DONE) g_app.settings_sel = 0;
+    if (g_app.settings_sel == SETTINGS_DONE) settings_go_section(g_app.settings_page);
     settings_fix_sel();
     g_app.dirty = 1;
 }
@@ -2079,7 +2125,7 @@ static void begin_settings(void) {
 // Opens the page on a row, or says why the row isn't on it right now.
 static void settings_open_at(setting_id_t id) {
     begin_settings();
-    if (setting_shown(id)) g_app.settings_sel = settings_index(id);
+    if (setting_shown(id)) settings_select(settings_index(id));
     else note("%s isn't on the page right now: %s", setting_def(id)->label, setting_hidden_why(id));
 }
 
@@ -2110,8 +2156,8 @@ static const char *settings_hint(void) {
     else if (row_greyed(d->id)) act = NULL;
     else act = "h/l change";
     static char hint[160];
-    snprintf(hint, sizeof hint, "%s%sj/k move \xc2\xb7 tab section \xc2\xb7 esc %s", act ? act : "",
-             act ? " \xc2\xb7 " : "", g_app.onboarding ? "start" : "done");
+    snprintf(hint, sizeof hint, "%s%sj/k move \xc2\xb7 tab/1-%d section \xc2\xb7 esc %s", act ? act : "",
+             act ? " \xc2\xb7 " : "", settings_n_sections(), g_app.onboarding ? "start" : "done");
     return hint;
 }
 
@@ -2467,16 +2513,19 @@ typedef enum {
 } list_key_t;
 
 // The keys every list page shares: j/k or up/down move, g/G or Home/End go to the ends,
-// Tab/Shift+Tab go to the next or previous section, Enter or space chooses, h/l or left/right go
-// sideways (Backspace too, like vim's h), Esc goes back a level, and q or Ctrl+S closes the page.
+// Tab/Shift+Tab or PgDn/PgUp go to the next or previous section, Enter or space chooses, h/l or
+// left/right go sideways (Backspace too, like vim's h), Esc goes back a level, and q or Ctrl+S
+// closes the page.
 static list_key_t list_key(const tui_key_t *key) {
     switch (key->type) {
         case TUI_KEY_UP:        return LIST_UP;
         case TUI_KEY_DOWN:      return LIST_DOWN;
         case TUI_KEY_HOME:      return LIST_FIRST;
         case TUI_KEY_END:       return LIST_LAST;
-        case TUI_KEY_TAB:       return LIST_NEXT_SECTION;
-        case TUI_KEY_BACKTAB:   return LIST_PREV_SECTION;
+        case TUI_KEY_TAB:
+        case TUI_KEY_PAGE_DOWN: return LIST_NEXT_SECTION;
+        case TUI_KEY_BACKTAB:
+        case TUI_KEY_PAGE_UP:   return LIST_PREV_SECTION;
         case TUI_KEY_ENTER:     return LIST_CHOOSE;
         case TUI_KEY_LEFT:
         case TUI_KEY_BACKSPACE: return LIST_LEFT;
@@ -2500,6 +2549,12 @@ static list_key_t list_key(const tui_key_t *key) {
     }
 }
 
+// 1 to 9 on a page with sections: the section, from 0, or -1 for any other key.
+static int section_digit(const tui_key_t *key) {
+    if (key->type != TUI_KEY_CHAR || key->ch_len != 1 || key->ch[0] < '1' || key->ch[0] > '9') return -1;
+    return key->ch[0] - '1';
+}
+
 static void list_move(list_key_t k, int *sel, int n) {
     if (k == LIST_UP && *sel > 0) (*sel)--;
     else if (k == LIST_DOWN && *sel < n - 1) (*sel)++;
@@ -2513,13 +2568,16 @@ static void settings_key(const tui_key_t *key) {
     const char *const *names;
     int n;
     int steps = d && (setting_options(d->id, &names, &n) >= 0 || d->id == SET_COLOUR);
+    int s = section_digit(key);
+    if (s >= 0 && s < settings_n_sections()) settings_go_section(s);
+    if (s >= 0) { g_app.dirty = 1; return; }
     switch (list_key(key)) {
-        case LIST_UP:    g_app.settings_sel = settings_step_sel(-1); break;
-        case LIST_DOWN:  g_app.settings_sel = settings_step_sel(1); break;
-        case LIST_FIRST: g_app.settings_sel = 0; break;
+        case LIST_UP:    settings_step(-1); break;
+        case LIST_DOWN:  settings_step(1); break;
+        case LIST_FIRST: settings_select(section_row(g_app.settings_page, 1)); break;
         case LIST_LAST:  g_app.settings_sel = SETTINGS_DONE; break;
-        case LIST_NEXT_SECTION: g_app.settings_sel = settings_section_step(1); break;
-        case LIST_PREV_SECTION: g_app.settings_sel = settings_section_step(-1); break;
+        case LIST_NEXT_SECTION: settings_section_step(1); break;
+        case LIST_PREV_SECTION: settings_section_step(-1); break;
         case LIST_LEFT:  if (steps) setting_step(d->id, -1); break;
         case LIST_RIGHT:
             if (steps) setting_step(d->id, 1);
@@ -2761,38 +2819,32 @@ static void paste_key(const tui_key_t *key) {
 
 #define CRUMB " \xe2\x80\xba "   // between the levels of a page's title
 
-// The settings' sections, for the list on the left of the pages under them.
-static int settings_sections(const char **out, int cap) {
-    int n = 0;
-    for (int i = 0; i < N_SETTINGS && n < cap; i++) if (SETTINGS[i].section) out[n++] = SETTINGS[i].section;
-    return n;
-}
-
-static int settings_section_index(setting_id_t id) {
-    int n = -1;
-    for (int i = 0; i < N_SETTINGS; i++) {
-        if (SETTINGS[i].section) n++;
-        if (SETTINGS[i].id == id) return n;
-    }
-    return n;
+// Under its group's heading, a label doesn't repeat it: "Tor SOCKS port" under Tor is "SOCKS port".
+static const char *page_label(const char *label, const char *group, char *out, size_t cap) {
+    size_t n = group ? strlen(group) : 0;
+    if (!n || strncmp(label, group, n) != 0 || label[n] != ' ') return label;
+    copy_str(out, label + n + 1, cap);
+    out[0] = (char)toupper((unsigned char)out[0]);
+    return out;
 }
 
 static void render_settings(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar) {
     tui_row_t rows[N_SETTINGS];
-    char values[N_SETTINGS][160];
-    int n_rows = 0, sel_row = -1;
-    const char *section = NULL;
-    for (int i = 0; i < N_SETTINGS; i++) {
+    char values[N_SETTINGS][160], labels[N_SETTINGS][64];
+    int n_rows = 0, sel_row = -1, s = g_app.settings_page, end = section_begin(s + 1);
+    const char *group = NULL, *heading = NULL;
+    for (int i = section_begin(s); i < end; i++) {
         const setting_def_t *d = &SETTINGS[i];
-        if (d->section) section = d->section;   // the heading goes on its section's first listed row
+        if (d->group) group = heading = d->group;   // the heading goes on its group's first listed row
         if (!setting_shown(d->id)) continue;
         if (i == g_app.settings_sel) sel_row = n_rows;
         setting_value(d->id, values[n_rows], sizeof values[n_rows]);
         int greyed = row_greyed(d->id);
         if (greyed) copy_str(values[n_rows], "can't be used here", sizeof values[n_rows]);
-        rows[n_rows] = (tui_row_t){ section, d->label, values[n_rows], setting_kind(d),
-                                    d->id == SET_COLOUR ? g_app.color : NULL, NULL, 0, greyed };
-        section = NULL;
+        rows[n_rows] = (tui_row_t){ heading, page_label(d->label, group, labels[n_rows], sizeof labels[n_rows]),
+                                    values[n_rows], setting_kind(d), d->id == SET_COLOUR ? g_app.color : NULL,
+                                    NULL, 0, greyed };
+        heading = NULL;
         n_rows++;
     }
     if (g_app.settings_sel == SETTINGS_DONE) sel_row = n_rows;   // the Done button
@@ -2822,8 +2874,8 @@ static void render_settings(int rows_n, int cols_n, const char *clock, const tui
             snprintf(help, sizeof help, "Can't be used here: %s. A security key's secret is only given after a touch, "
                      "and chat needs a way to ask it for one.", g_app.seckey_why);
         else if (greyed)
-            snprintf(help, sizeof help, "Can't be used here: %s. The device lock makes what :install saves open only "
-                     "on this device, by sealing a secret with something the device keeps to itself: its TPM, on Linux "
+            snprintf(help, sizeof help, "Can't be used here: %s. The device lock makes the save unlock only on this "
+                     "device, by sealing a secret with something the device keeps to itself: its TPM, on Linux "
                      "through systemd's credential service or /dev/tpmrm0. Without that, there's nothing to seal it "
                      "with.",
                      g_app.device_why);
@@ -2832,13 +2884,17 @@ static void render_settings(int rows_n, int cols_n, const char *clock, const tui
         if (d->values && !greyed) snprintf(usage, sizeof usage, ":set %s %s", d->key, d->values);
         else if (d->kind == K_SECRET) snprintf(usage, sizeof usage, ":set %s", d->key);
     }
+    const char *nav[8];
+    char title[64];
+    snprintf(title, sizeof title, "Settings" CRUMB "%s", SETTINGS[section_begin(s)].section);
     tui_page_t page = {
-        .title = "Settings",
+        .title = title,
         .clock = clock,
         .intro = g_app.onboarding
             ? "chat is an end-to-end encrypted chat with no server. Check how it reaches peers, then press "
               "Start chatting. Nothing goes on the network before that."
             : NULL,
+        .nav = nav, .n_nav = settings_sections(nav, 8), .nav_sel = s,
         .rows = rows, .n_rows = n_rows, .selected = sel_row,
         .help = help, .usage = usage[0] ? usage : NULL,
         .button = g_app.onboarding ? "Start chatting" : "Done",
@@ -2860,7 +2916,7 @@ static void render_sign_picker(int rows_n, int cols_n, const char *clock, const 
     if (SET[g_app.sign_sel]) snprintf(usage, sizeof usage, ":set sign %s", SET[g_app.sign_sel]);
     const char *nav[8];
     tui_page_t page = {
-        .title = "Settings" CRUMB "Signing identity",
+        .title = "Settings" CRUMB "Profile" CRUMB "Signing identity",
         .clock = clock,
         .nav = nav, .n_nav = settings_sections(nav, 8), .nav_sel = settings_section_index(SET_SIGN),
         .rows = rows, .n_rows = N_PICKS, .selected = g_app.sign_sel,
@@ -3103,8 +3159,8 @@ static void render_browser(int rows_n, int cols_n, const char *clock, const tui_
     const char *nav[INFO_LINES];
     int n_nav = browser_info(b, g_app.load_kind, nav);
     tui_page_t page = {
-        .title = age ? "Settings" CRUMB "Signing identity" CRUMB "AGE key file"
-                     : "Settings" CRUMB "Signing identity" CRUMB "PGP key file",
+        .title = age ? "Settings" CRUMB "Profile" CRUMB "Signing identity" CRUMB "AGE key file"
+                     : "Settings" CRUMB "Profile" CRUMB "Signing identity" CRUMB "PGP key file",
         .clock = clock,
         .intro = intro,
         .nav = nav, .n_nav = n_nav, .nav_sel = 0,
@@ -3908,7 +3964,8 @@ static const struct { const char *section, *keys, *what; } HELP_KEYS[] = {
     { NULL,          "j  k",            "on a picture: the next / previous one" },
     { "Pages",       "j  k  g  G",      "move, to the first / last" },
     { NULL,          "h  l  enter",     "change a value, go in, choose" },
-    { NULL,          "tab  shift+tab",  "next / previous section" },
+    { NULL,          "tab  shift+tab",  "next / previous section (pgdn / pgup too)" },
+    { NULL,          "1 - 9",           "the first to ninth section" },
     { NULL,          "esc  q",          "back / close" },
 };
 #define N_HELP_KEYS ((int)(sizeof HELP_KEYS / sizeof HELP_KEYS[0]))
@@ -4068,17 +4125,20 @@ static void changelog_key(const tui_key_t *key) {
     g_app.dirty = 1;
 }
 
-// Tab and Shift+Tab: the first row of the next section, or of this one (then the previous one).
+// Tab and Shift+Tab: the first row of the next or previous section, round from the last to the first.
 static int page_section_step(const tui_row_t *rows, int n, int sel, int dir) {
-    if (dir > 0) {
-        for (int i = sel + 1; i < n; i++) if (rows[i].section) return i;
-        return sel;
+    while (sel > 0 && !rows[sel].section) sel--;
+    for (int k = 1; k < n; k++) {
+        int i = ((sel + dir * k) % n + n) % n;
+        if (rows[i].section) return i;
     }
-    int start = sel;
-    while (start > 0 && !rows[start].section) start--;
-    if (start < sel) return start;
-    for (int i = start - 1; i >= 0; i--) if (rows[i].section) return i;
-    return start;
+    return sel;
+}
+
+// The first row of the nth section, or -1 if there aren't that many.
+static int page_section_nth(const tui_row_t *rows, int n, int nth) {
+    for (int i = 0; i < n; i++) if (rows[i].section && nth-- == 0) return i;
+    return -1;
 }
 
 // ---- :install, and what it saved ----
@@ -4144,9 +4204,8 @@ typedef struct { char where[920]; } loading_t;
 static void load_setting(void *ctx, const char *table, const char *key, const toml_value *tv) {
     loading_t *l = ctx;
     const setting_def_t *d = setting_by_key(key);
-    char t[16] = "", value[ROW_TEXT_MAX], before[ROW_TEXT_MAX], now[ROW_TEXT_MAX];
-    if (d) row_table(settings_index(d->id), t, sizeof t);
-    if (!d || strcmp(t, table) != 0 || !setting_text(d->id, before, sizeof before)) {
+    char value[ROW_TEXT_MAX], before[ROW_TEXT_MAX], now[ROW_TEXT_MAX];
+    if (!d || strcmp(setting_table(d->id), table) != 0 || !setting_text(d->id, before, sizeof before)) {
         saved_note("* %s: [%.20s] %.40s isn't a setting this chat saves - left out", l->where, table, key);
         return;
     }
@@ -5773,6 +5832,13 @@ static void help_key(const tui_key_t *key) {
     tui_row_t rows[MAX_HELP_ROWS];
     const command_t *cmds[MAX_HELP_ROWS];
     int n = help_rows(rows, cmds);
+    int s = section_digit(key);
+    if (s >= 0) {
+        int i = page_section_nth(rows, n, s);
+        if (i >= 0) g_app.help_sel = i;
+        g_app.dirty = 1;
+        return;
+    }
     list_key_t k = list_key(key);
     if (key->type == TUI_KEY_HELP || (key->type == TUI_KEY_CHAR && key->ch[0] == '?')) k = LIST_CLOSE;
     switch (k) {
@@ -7494,7 +7560,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
     // Everything is set up on the settings page first, and its button starts chat. If installed, the
     // saved settings are used, so chat starts straight away.
     g_app.onboarding = 1;
-    g_app.settings_sel = 0;
+    settings_select(0);
     g_app.mode = MODE_SETTINGS;
     if (g_app.unlock_at_start) {
         begin_prompt(save_to_pick() ? MODE_SAVES : MODE_UNLOCK);
