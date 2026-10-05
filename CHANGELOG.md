@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0-beta.1
 
 ### Added
 - A device lock for saves. `:set devicelock on` (the **Device lock** row) locks a save to the
