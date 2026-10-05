@@ -23,8 +23,9 @@
 // systemd's credential service runs as root, so it can use the TPM for users who can't open
 // /dev/tpmrm0 (only the tss group can, on most systems). A user-scoped credential also takes in
 // this user's id and name and the machine id, and the service only unseals it for that user. It
-// binds to no PCRs, so firmware and kernel updates don't lose it, and since systemd 262 it pins
-// the TPM's storage key, so a chip spliced onto the bus can't pose as the TPM. Without the service
+// binds to no PCRs (unless a UKI's signed PCR key is installed, which systemd then adds), so
+// firmware and kernel updates don't lose it, and since systemd 262 it pins the TPM's storage key,
+// so a chip spliced onto the bus can't pose as the TPM. Without the service
 // (runit, OpenRC, s6, systemd before 256), chat speaks to the TPM itself: see tpm2.h.
 #define CREDS_SOCKET "/run/systemd/io.systemd.Credentials"
 #define CRED_NAME "chat-save"
@@ -283,9 +284,11 @@ static long systemd_seal(int tpm, const uint8_t secret[DEVICE_SECRET_LEN], uint8
                          size_t why_cap) {
     char data[64];
     base64_encode(secret, DEVICE_SECRET_LEN, data);
-    // A user-scoped credential always takes systemd's own key, and the TPM is added where there's one.
+    // No withKey: given one, even "auto", systemd 262 seals for the whole system whatever the scope, and
+    // unsealing for this user then fails with BadScope. Left to itself, a user-scoped credential takes
+    // systemd's own key, and the TPM where systemd can use one.
     snprintf(g_request, sizeof g_request, "{\"method\":\"io.systemd.Credentials.Encrypt\",\"parameters\":{\"name\":\"" CRED_NAME
-             "\",\"data\":\"%s\",\"scope\":\"user\",\"withKey\":\"%s\"}}", data, tpm ? "host_tpm2" : "host");
+             "\",\"data\":\"%s\",\"scope\":\"user\"}}", data);
     crypto_wipe(data, sizeof data);
     long got = creds_call(g_request, g_reply, sizeof g_reply, why, why_cap);
     crypto_wipe(g_request, sizeof g_request);

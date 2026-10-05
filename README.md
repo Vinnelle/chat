@@ -507,10 +507,11 @@ too. What holds the secret is something the device never lets out:
   secret with the computer's TPM 2.0 and systemd's own key in `/var/lib/systemd/credential.secret`,
   which only root can read, for your user only: your user id and name and the machine id go into
   its key, and it only unseals it for you. You don't need to be in the `tss` group. It binds to no
-  PCRs, so firmware, bootloader and kernel updates don't lose it, and from systemd 262 on it pins
-  the TPM's storage key, so a chip spliced onto the TPM's bus can't pose as it. Without a TPM 2.0,
-  it's systemd's key alone: then root, or anyone with a copy of the whole disk, could get past the
-  device part, and only the passphrase would be left.
+  PCRs, so firmware, bootloader and kernel updates don't lose it (unless you boot a signed UKI and
+  its PCR public key is installed: then systemd binds it to that signed policy too), and from
+  systemd 262 on it pins the TPM's storage key, so a chip spliced onto the TPM's bus can't pose as
+  it. Without a TPM 2.0, it's systemd's key alone: then root, or anyone with a copy of the whole
+  disk, could get past the device part, and only the passphrase would be left.
 - **Linux without systemd's credential service** (runit, OpenRC, s6, or systemd before 256): chat
   speaks to the TPM 2.0 itself, through `/dev/tpmrm0`, the kernel's resource manager. The secret
   is sealed under the TPM's storage key, which the TPM makes again from its owner seed each time
