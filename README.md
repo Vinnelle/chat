@@ -334,7 +334,21 @@ fetching it and who it has gone to in full. The reply to `:download`, `:show`, `
 
 ## Download
 
-Prebuilt Linux and Windows x86_64 binaries are on the
+To try chat without keeping it, use the runner at [chat.vin.moe](https://chat.vin.moe). It
+downloads the latest release, checks its signature and hash the same way as below, runs it, and
+deletes it when chat exits:
+
+```sh
+curl -fsSL https://chat.vin.moe | sh     # Linux
+irm https://chat.vin.moe | iex           # Windows PowerShell
+```
+
+You can read the scripts before running them at
+[chat.vin.moe/chat.sh](https://chat.vin.moe/chat.sh) and
+[chat.vin.moe/chat.ps1](https://chat.vin.moe/chat.ps1). The page lists each one's SHA-256 to
+compare with what your shell would get.
+
+To keep a copy, prebuilt Linux and Windows x86_64 binaries are on the
 [releases page](https://github.com/Vinnelle/chat/releases), with a `SHA256SUMS` file and its
 [minisign](https://jedisct1.github.io/minisign/) signature. Check the signature against
 [`minisign.pub`](minisign.pub), then the hashes:
