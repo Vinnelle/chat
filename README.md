@@ -747,7 +747,7 @@ release, which is never a pre-release, so testers download a beta themselves, an
 takes them on to `0.5.0` once it's out. `just release` then folds the Unreleased section and
 every beta's since the last release into one `## 0.5.0`: oldest first, each `###` heading once.
 It keeps every line, so if a later beta fixed something an earlier one added, tidy those sections
-first.
+first. Once the release is published, it deletes the betas' GitHub releases, keeping their tags.
 
 It signs twice, so minisign asks for the key's password twice. First it signs the list of the
 release's binaries (`dist/BUILDS`) and appends it to each binary, so peers can check builds.

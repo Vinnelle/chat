@@ -268,7 +268,8 @@ release what="" *args: _can-release
 
 # A beta is for testers: tagged vVERSION-beta.N, signed and published like a release, but as a
 # GitHub pre-release, which :update never offers. Testers download it, and :update takes them on
-# to VERSION once it's released. VERSION defaults to the one `just release` would release next, and
+# to VERSION once it's released. Releasing VERSION deletes its betas' GitHub releases, but not
+# their tags. VERSION defaults to the one `just release` would release next, and
 # N counts up from 1 (or picks up a beta whose publishing failed). "## Unreleased" becomes
 # "## VERSION-beta.N" and CMakeLists.txt gets the version, with "-beta.N" as CHAT_PRERELEASE.
 # Build, sign and publish a beta of the next release, or of VERSION
@@ -409,3 +410,9 @@ _publish version:
     case "$v" in *-*) pre=--prerelease ;; *) pre= ;; esac
     gh release create "v$v" --title "v$v" --notes-file dist/notes.md --verify-tag ${pre:+"$pre"} \
         dist/chat-linux-x86_64 dist/chat-windows-x86_64.exe dist/SHA256SUMS dist/SHA256SUMS.minisig
+    # The release replaces its betas as a download. Their tags stay, as the history of the release.
+    if [ -z "$pre" ]; then
+        for t in $(git tag -l "v$v-beta.*"); do
+            if gh release view "$t" >/dev/null 2>&1; then gh release delete "$t" --yes; fi
+        done
+    fi

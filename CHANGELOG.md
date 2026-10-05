@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- `just release` deletes the GitHub releases of the version's betas once the release is
+  published, so the release is the one left to download. The betas' tags stay.
+
 ## 0.5.0-beta.2
 
 ### Added
