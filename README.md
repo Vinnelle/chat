@@ -514,12 +514,13 @@ it fits. With only one save, there's no list.
 `:set devicelock on` (the **Device lock** row on the settings page) locks a save to the device
 it's on. Its key then needs a secret only this device can unseal, as well as the passphrase, so
 its files don't open anywhere else: not from a backup, a synced folder, a copy of the disk or a
-stolen drive, even with the passphrase. With no save open, it applies to the next save `:install`
-makes, and the box `:install` opens says so. For the open save, a box says what it means and asks
-first, then seals it again. `:set devicelock off`, on this device, seals it with the passphrase
-alone again. When chat starts, the list of saves says which ones are locked to a device. Where
-the device can't lock a save at all (on Linux without systemd's credential service, below), the
-row is greyed out, and its help on the settings page says why.
+stolen drive, even with the passphrase. With no save open, turning it on asks to install first:
+yes goes through `:install`, which locks the new save as it makes it, or asks to lock the save it
+opens. No leaves it off. For the open save, a box says what it means and asks first, then seals it
+again. `:set devicelock off`, on this device, seals it with the passphrase alone again. When chat
+starts, the list of saves says which ones are locked to a device. Where the device can't lock a
+save at all (on Linux without systemd's credential service, below), the row is greyed out, and its
+help on the settings page says why.
 
 Ids like the machine id don't help here: anything that can read the save's files can read those
 too. What holds the secret is something the device never lets out:
@@ -595,10 +596,10 @@ can't open a locked save at all (they say it's damaged).
 `:set securitykey on` (the **Security key** row on the settings page) makes a save need your FIDO2
 security key as well as its passphrase, and `:set authenticator on` (the **Authenticator app**
 row) makes it ask for the 6-digit code an authenticator app shows. A save can have one, the other,
-both or neither, with the device lock or without. Like the device lock, with no save open they
-apply to the next save `:install` makes, which sets them up before it asks for the passphrase. For
-the open save, a box says what it means and asks first, then seals it again. The list of saves
-says which ones need them.
+both or neither, with the device lock or without. Like the device lock, turning one on with no save
+open asks to install first: yes goes through `:install`, which sets it up for the new save before it
+asks for the passphrase, or asks to set it up for the save it opens. For the open save, a box says
+what it means and asks first, then seals it again. The list of saves says which ones need them.
 
 **The security key** is any FIDO2 key with the `hmac-secret` extension, which most have: YubiKey 5,
 Nitrokey 3, SoloKey 2, Google Titan, Token2 and others. Registering it takes two touches. The first

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- Turning on **Device lock**, **Security key** or **Authenticator app** with no save open no
+  longer just flips the row on, waiting for a later `:install`: a box says it needs chat installed
+  first (or a save open, if there are saves here) and asks to install now. Yes goes through
+  `:install`, which sets it up for the new save as it makes it (the device lock's box, the key's
+  two touches, the QR code), or asks to set it up for a save it opens instead. No, or cancelling
+  `:install` part way, leaves the row off. Started from the settings page, `:install`'s boxes stay
+  over it and go back to it. `:uninstall` of the open save turns the three rows off too.
+
 ## 0.5.0-beta.1
 
 ### Added

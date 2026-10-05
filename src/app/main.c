@@ -260,6 +260,7 @@ typedef enum {
     MODE_INSTALL_PICK,
     MODE_INSTALL_OVERWRITE,
     MODE_INSTALL_NAME,
+    MODE_INSTALL_FIRST,
     MODE_UNINSTALL,
     MODE_SAVES,
     MODE_UNLOCK,
@@ -332,8 +333,9 @@ typedef struct {
     uint64_t file_cap;   // 0: the default
     int fast_files;
     int autosave;   // what's changed is saved as it changes, while installed
-    // Locked to this device: the open save, or with none open, the next one :install makes.
-    // device_want is what the DEVICE LOCK box asks to change it to, and device_back where it goes back to.
+    // Locked to this device: the open save, or with none open, the new one :install is making for it
+    // (install_for). device_want is what the DEVICE LOCK box asks to change it to, and device_back
+    // where it goes back to.
     // device_new: the box is for the new save :install is making, before its passphrase.
     int device_lock, device_want, device_new;
     app_mode_t device_back;
@@ -341,10 +343,15 @@ typedef struct {
     // start, and again whenever something that shows it opens.
     device_kind_t device_kind;
     char device_why[200];
-    // A security key and an authenticator code, like the device lock: for the open save, or with
-    // none open, the next one :install makes. seckey_ok: security keys work here (seckey_why if not).
+    // A security key and an authenticator code, like the device lock. seckey_ok: security keys work
+    // here (seckey_why if not).
     int key_factor, code_factor, seckey_ok;
     char seckey_why[200];
+    // One of those turned on with no save open asks to :install first, and install_for is the factor
+    // (INSTALL_FACTOR_) that :install then sets up. install_back: the page :install's boxes are over
+    // and go back to, the chat or the settings page.
+    unsigned install_for;
+    app_mode_t install_back;
     // The open save deletes itself after this many wrong passphrases (0 off); with none open, what
     // the next save :install makes starts with. Mirrored to the save's unsealed tries file.
     int destroy_limit;
@@ -4413,6 +4420,16 @@ static void factors_in_use(void) {
     g_app.code_factor = (f & INSTALL_FACTOR_CODE) != 0;
 }
 
+static int *factor_flag(unsigned factor) {
+    return factor == INSTALL_FACTOR_DEVICE ? &g_app.device_lock
+         : factor == INSTALL_FACTOR_KEY ? &g_app.key_factor : &g_app.code_factor;
+}
+
+static const char *factor_label(unsigned factor) {
+    return factor == INSTALL_FACTOR_DEVICE ? "Device lock"
+         : factor == INSTALL_FACTOR_KEY ? "Security key" : "Authenticator app";
+}
+
 // What f needs, for a sentence: "this device and the security key".
 static void factors_text(unsigned f, char *out, size_t cap) {
     const char *part[3];
@@ -4636,8 +4653,7 @@ static void finish_install(const char *passphrase) {
                          | (g_app.code_factor ? INSTALL_FACTOR_CODE : 0);
         int rc = install_lock_new(g_app.save_target, passphrase, factors);
         if (rc == INSTALL_DEVICE) {
-            push_log("* not installed: it can't be locked to this device - %s. :set devicelock off installs it "
-                     "without the device lock", install_why());
+            push_log("* not installed: it can't be locked to this device - %s", install_why());
             note("not installed: it can't be locked to this device - %s", install_why());
             install_setup_forget();
             return;
@@ -4720,11 +4736,26 @@ static void pick_random_save_name(void) {
 // :install for the save that's open and installed already only saves what's in use to it.
 static int install_resaves(void) { return g_app.installed && is_current_save(g_app.save_target); }
 
+// :install is over, whether or not it made or opened a save, and its boxes go. A new save has the
+// factor it was for set up already; a save it opened is asked about it now; with nothing open, the
+// row is off again.
+static void install_ended(void) {
+    unsigned f = g_app.install_for;
+    g_app.install_for = 0;
+    if (g_app.install_back == MODE_SETTINGS && g_app.mode == MODE_CHAT) g_app.mode = MODE_SETTINGS;
+    if (!f) return;
+    if (!g_app.installed) *factor_flag(f) = 0;
+    else if (install_open_factors() & f) return;
+    else if (f == INSTALL_FACTOR_DEVICE) device_lock_choose(1);
+    else factor_choose(f, 1);
+}
+
 static void cancel_install(void) {
     crypto_wipe(g_app.install_pass, sizeof g_app.install_pass);
     install_setup_forget();
     end_prompt();
     note(install_resaves() ? "not saved - nothing was written" : "not installed - nothing was written");
+    install_ended();
 }
 
 static void to_install_mode(app_mode_t mode) {
@@ -4738,6 +4769,7 @@ static void not_installed(const char *fmt, const char *why) {
     install_setup_forget();
     end_prompt();
     note(fmt, why);
+    install_ended();
 }
 
 // What a new save needs is set up before its passphrase, one box after another: the device lock's,
@@ -4749,23 +4781,21 @@ static void install_step(int after) {
     if (after < STEP_DEVICE && g_app.device_lock) {
         device_check();
         if (g_app.device_kind == DEVICE_NONE) {
-            not_installed("not installed: it can't be locked to this device - %s. :set devicelock off installs it "
-                          "without the lock", g_app.device_why);
+            not_installed("not installed: it can't be locked to this device - %s", g_app.device_why);
             return;
         }
         g_app.device_want = g_app.device_new = 1;
-        g_app.device_back = MODE_CHAT;
+        g_app.device_back = g_app.install_back;
         g_app.mode = MODE_DEVICE_LOCK;
         g_app.dirty = 1;
         return;
     }
     g_app.factor_want = g_app.factor_new = 1;
-    g_app.factor_back = MODE_CHAT;
+    g_app.factor_back = g_app.install_back;
     if (after < STEP_KEY && g_app.key_factor) {
         device_check();
         if (!g_app.seckey_ok) {
-            not_installed("not installed: a security key can't be used here - %s. :set securitykey off installs it "
-                          "without one", g_app.seckey_why);
+            not_installed("not installed: a security key can't be used here - %s", g_app.seckey_why);
             return;
         }
         g_app.factor = INSTALL_FACTOR_KEY;
@@ -4787,6 +4817,7 @@ static void install_confirmed(void) {
     if (install_resaves()) {
         end_prompt();
         finish_install(NULL);
+        install_ended();
         return;
     }
     install_step(STEP_START);
@@ -4885,6 +4916,7 @@ static void commit_install_pass2(void) {
     end_prompt();
     finish_install(pw);
     crypto_wipe(pw, sizeof pw);
+    install_ended();
 }
 
 // The save :install just opened is used from now on, as if it had been opened at the start, with
@@ -4983,9 +5015,10 @@ static void install_unlock_done(int rc) {
     if (rc != 0) {
         if (rc == INSTALL_NO_FILE && is_current_save(g_app.save_target)) g_app.locked = 0;
         note("%s: %s", g_app.install_overwrite ? "not installed" : "not opened", open_error(rc));
+        install_ended();
         return;
     }
-    if (!g_app.install_overwrite) { use_save_now(); return; }
+    if (!g_app.install_overwrite) { use_save_now(); install_ended(); return; }
     g_app.saved_key_known = 0;
     g_app.saved_key_path[0] = '\0';
     open_saved_key(0);
@@ -4993,6 +5026,7 @@ static void install_unlock_done(int rc) {
     load_saved_verified();
     say_saved_notes();
     finish_install(NULL);
+    install_ended();
 }
 
 // The passphrase is in install_pass, and the save's security key has given its secret, if it needs one.
@@ -5031,6 +5065,7 @@ static void uninstall_confirmed(void) {
         return;
     }
     g_app.installed = g_app.locked = 0;
+    factors_in_use();
     verified_saving(0);
     g_n_uninstalled_keys = 0;
     for (int i = 0; i < trust_count(); i++)
@@ -5127,13 +5162,42 @@ static void cancel_uninstall(void) {
     note("nothing was deleted");
 }
 
-// With no save open, the next one :install makes. The open save is sealed again, after a box asks.
+// ---- a factor turned on with no save open ----
+//
+// It's for a save, so a box asks to :install first. Yes turns it on for the new save :install makes,
+// which sets it up before the passphrase, and install_ended sets it up for a save :install opens.
+
+static int begin_install(const char *arg);
+
+static void install_first(unsigned factor) {
+    g_app.install_for = factor;
+    g_app.install_back = g_app.mode == MODE_SETTINGS ? MODE_SETTINGS : MODE_CHAT;
+    g_app.n_saves = install_list(g_app.saves, INSTALL_SAVES_MAX);
+    begin_prompt(MODE_INSTALL_FIRST);
+}
+
+static void install_first_yes(void) {
+    end_prompt();
+    if (g_app.install_back == MODE_SETTINGS) g_app.mode = MODE_SETTINGS;
+    *factor_flag(g_app.install_for) = 1;
+    if (begin_install(NULL) != 0) install_ended();
+}
+
+static void install_first_no(void) {
+    const char *label = factor_label(g_app.install_for);
+    end_prompt();
+    install_ended();
+    note("%s: off - nothing was installed", label);
+}
+
+// The open save is sealed again, after a box asks.
 static void device_lock_choose(int on) {
     device_check();
     if (on && g_app.device_kind == DEVICE_NONE) { note("Device lock: can't be used here - %s", g_app.device_why); return; }
+    if (!g_app.installed && on) { install_first(INSTALL_FACTOR_DEVICE); return; }
     if (!g_app.installed) {
-        g_app.device_lock = on;
-        note(on ? "Device lock: on - the save :install makes next only opens on this device" : "Device lock: off");
+        g_app.device_lock = 0;
+        note("Device lock: off");
         return;
     }
     if (!on == !g_app.device_lock) {
@@ -5203,12 +5267,8 @@ static void device_lock_no(void) {
 
 // ---- the security key and the authenticator app ----
 //
-// Like the device lock: with no save open, the rows say what the next save :install makes needs,
-// and :install sets them up. For the open save, a box asks first, and the save is sealed again.
-
-static const char *factor_label(unsigned factor) {
-    return factor == INSTALL_FACTOR_KEY ? "Security key" : "Authenticator app";
-}
+// Like the device lock: with no save open, turning one on asks to :install first. For the open
+// save, a box asks first, and the save is sealed again.
 
 static void key_start(key_purpose_t why);
 static void key_ended(install_key_state_t st);
@@ -5223,16 +5283,16 @@ static void factor_close(void) {
 
 static void factor_choose(unsigned factor, int on) {
     const char *label = factor_label(factor);
-    int *flag = factor == INSTALL_FACTOR_KEY ? &g_app.key_factor : &g_app.code_factor;
+    int *flag = factor_flag(factor);
     device_check();
     if (on && factor == INSTALL_FACTOR_KEY && !g_app.seckey_ok) {
         note("Security key: can't be used here - %s", g_app.seckey_why);
         return;
     }
+    if (!g_app.installed && on) { install_first(factor); return; }
     if (!g_app.installed) {
-        *flag = on;
-        if (on) note("%s: on - the save :install makes next needs it too", label);
-        else note("%s: off", label);
+        *flag = 0;
+        note("%s: off", label);
         return;
     }
     if (!on == !*flag) {
@@ -5418,7 +5478,7 @@ static void cancel_shadow_pass(void) {
 static void key_start(key_purpose_t why) {
     const char *pin = g_app.key_pin[0] ? g_app.key_pin : NULL;
     g_app.key_purpose = why;
-    if (why != KP_FACTOR) g_app.factor_back = MODE_CHAT;
+    if (why != KP_FACTOR) g_app.factor_back = why == KP_UNLOCK ? MODE_CHAT : g_app.install_back;
     int rc = why == KP_FACTOR || why == KP_NEW_SAVE
         ? install_key_make(pin)
         : install_key_open(why == KP_INSTALL_UNLOCK ? g_app.save_target : install_current(), pin);
@@ -5660,12 +5720,12 @@ static int pick_save_target(const char *arg) {
     return 0;
 }
 
-static cmd_result_t app_install(void *ctx, const char *arg) {
-    (void)ctx;
-    if (pick_save_target(arg) != 0) return CMD_OK;
+// 0 once its first box is open.
+static int begin_install(const char *arg) {
+    if (pick_save_target(arg) != 0) return -1;
     device_check();
     char where[900];
-    if (install_where(g_app.save_target, where, sizeof where) != 0) { note("there's nowhere to install to - no home folder"); return CMD_OK; }
+    if (install_where(g_app.save_target, where, sizeof where) != 0) { note("there's nowhere to install to - no home folder"); return -1; }
     g_app.n_saves = install_list(g_app.saves, INSTALL_SAVES_MAX);
     const char *t = g_app.save_target;
     int named = g_app.save_named || g_opts.save[0];
@@ -5687,7 +5747,15 @@ static cmd_result_t app_install(void *ctx, const char *arg) {
         pick_random_save_name();
         mode = MODE_INSTALL_NAME;
     }
+    g_app.install_back = g_app.mode == MODE_SETTINGS ? MODE_SETTINGS : MODE_CHAT;
     begin_prompt(mode);
+    return 0;
+}
+
+static cmd_result_t app_install(void *ctx, const char *arg) {
+    (void)ctx;
+    g_app.install_for = 0;
+    begin_install(arg);
     return CMD_OK;
 }
 
@@ -6403,6 +6471,7 @@ static void handle_key(const tui_key_t *key) {
         case MODE_INSTALL_PICK:      install_pick_key(key); return;
         case MODE_INSTALL_OVERWRITE: confirm_key(key, install_overwrite_yes, cancel_install); return;
         case MODE_INSTALL_NAME:   field_key(key, commit_install_name, back_from_install_name); return;
+        case MODE_INSTALL_FIRST:  confirm_key(key, install_first_yes, install_first_no); return;
         case MODE_UNINSTALL:      confirm_key(key, uninstall_confirmed, cancel_uninstall); return;
         case MODE_SAVES:          saves_key(key); return;
         case MODE_UNLOCK:         field_key(key, commit_unlock, back_from_unlock); return;
@@ -6465,11 +6534,24 @@ static void handle_key(const tui_key_t *key) {
     }
 }
 
-static int on_chat_screen(void) {
-    switch (g_app.mode) {
-        case MODE_CHAT: case MODE_NEW_PASSWORD: case MODE_JOIN_ID: case MODE_JOIN_PASSWORD:
+// :install's own boxes, over the page install_back says.
+static int install_mode(app_mode_t m) {
+    switch (m) {
         case MODE_INSTALL: case MODE_INSTALL_PASS: case MODE_INSTALL_PASS2: case MODE_INSTALL_UNLOCK:
         case MODE_INSTALL_EXISTING: case MODE_INSTALL_PICK: case MODE_INSTALL_OVERWRITE: case MODE_INSTALL_NAME:
+        case MODE_INSTALL_FIRST:
+            return 1;
+        case MODE_UNLOCK_CODE:
+            return g_app.key_purpose == KP_INSTALL_UNLOCK;
+        default:
+            return 0;
+    }
+}
+
+static int on_chat_screen(void) {
+    if (install_mode(g_app.mode)) return g_app.install_back == MODE_CHAT;
+    switch (g_app.mode) {
+        case MODE_CHAT: case MODE_NEW_PASSWORD: case MODE_JOIN_ID: case MODE_JOIN_PASSWORD:
         case MODE_UNINSTALL: case MODE_SAVES: case MODE_UNLOCK: case MODE_UPDATE: case MODE_UNLOCK_CODE:
             return 1;
         case MODE_DEVICE_LOCK:
@@ -6670,14 +6752,13 @@ static int install_paras(tui_para_t *p) {
     device[0] = '\0';
     if (!exists && g_app.device_lock && g_app.device_kind == DEVICE_NONE)
         copy_str(device, "**Device lock is on**, but this device can't lock anything now, so installing stops there and "
-                 "says why. `:set devicelock off` installs it without the lock.", sizeof device);
+                 "says why.", sizeof device);
     else if (!exists && g_app.device_lock)
         copy_str(device, "**Locked to this device** as well: its files won't open anywhere else, even with the "
-                 "passphrase. The next box says what would lose it for good. `:set devicelock off` installs it "
-                 "without the lock.", sizeof device);
+                 "passphrase. The next box says what would lose it for good.", sizeof device);
     else if (!exists && g_app.device_kind != DEVICE_NONE)
         copy_str(device, "Not locked to this device: a copy of the files opens anywhere with the passphrase. "
-                 "`:set devicelock on` locks it to this device as well.", sizeof device);
+                 "`:set devicelock on` locks it to this device as well, once it's installed.", sizeof device);
     else if (!exists)
         snprintf(device, sizeof device, "Not locked to this device, which can't lock a save to it: %s.",
                  g_app.device_why);
@@ -6703,6 +6784,24 @@ static int install_paras(tui_para_t *p) {
              : "Autosave is off: what you change from then on lasts until you `:save` again (`:set autosave on` saves "
                "it as you go).");
     return add_para(p, n, TUI_P_TEXT, outro);
+}
+
+static int install_first_paras(tui_para_t *p) {
+    static char text[500];
+    unsigned f = g_app.install_for;
+    const char *what = f == INSTALL_FACTOR_DEVICE ? "The device lock"
+                     : f == INSTALL_FACTOR_KEY ? "A security key" : "An authenticator app";
+    const char *then = f == INSTALL_FACTOR_DEVICE ? "locks it to this device"
+                     : f == INSTALL_FACTOR_KEY ? "registers your security key for it, with two touches"
+                     : "shows a QR code that adds it to your authenticator app";
+    if (g_app.n_saves > 0)
+        snprintf(text, sizeof text, "**%s needs a save open first**, and none is. Install now? Yes goes through "
+                 "`:install`, which opens a save here or makes a new one, and %s.", what, then);
+    else
+        snprintf(text, sizeof text, "**%s needs chat installed first.** Until `:install` saves your settings, sealed "
+                 "with a passphrase, chat keeps nothing on disk. Install now? Yes goes through `:install`, which makes "
+                 "a save and %s.", what, then);
+    return add_para(p, 0, TUI_P_TEXT, text);
 }
 
 // What would lose the save comes straight after the intro, since a box too tall for the screen
@@ -7056,6 +7155,13 @@ static const tui_dialog_t *current_dialog(void) {
             d.input = NULL;
             d.keys = install_resaves() ? "y save \xc2\xb7 n cancel" : "y install \xc2\xb7 n cancel";
             break;
+        case MODE_INSTALL_FIRST:
+            d.title = g_app.install_for == INSTALL_FACTOR_DEVICE ? "DEVICE LOCK"
+                    : g_app.install_for == INSTALL_FACTOR_KEY ? "SECURITY KEY" : "AUTHENTICATOR APP";
+            d.n_text = install_first_paras(paras);
+            d.input = NULL;
+            d.keys = "y install \xc2\xb7 n cancel";
+            break;
         case MODE_INSTALL_PASS:
         case MODE_INSTALL_PASS2: {
             int first = g_app.mode == MODE_INSTALL_PASS;
@@ -7349,7 +7455,7 @@ static tui_bar_t current_bar(void) {
         case MODE_UNLOCK_CODE: {
             int unlocking = g_app.mode == MODE_UNLOCK_CODE || g_app.mode == MODE_KEY_WAIT || g_app.mode == MODE_KEY_PIN;
             key_purpose_t why = unlocking ? g_app.key_purpose : g_app.factor_new ? KP_NEW_SAVE : KP_FACTOR;
-            if (g_app.mode == MODE_UNLOCK_CODE || g_app.factor_back == MODE_CHAT) chat_input(&b, &g_app.saved_input);
+            if (on_chat_screen()) chat_input(&b, &g_app.saved_input);
             b.chip = why == KP_UNLOCK ? "UNLOCK" : why == KP_FACTOR ? "SETTINGS" : "INSTALL";
             b.tone = TUI_TONE_PROMPT;
             break;
@@ -7376,9 +7482,10 @@ static tui_bar_t current_bar(void) {
         case MODE_INSTALL_PICK:
         case MODE_INSTALL_OVERWRITE:
         case MODE_INSTALL_NAME:
+        case MODE_INSTALL_FIRST:
         case MODE_UNINSTALL:
         case MODE_UPDATE:
-            chat_input(&b, &g_app.saved_input);
+            if (on_chat_screen()) chat_input(&b, &g_app.saved_input);
             b.chip = g_app.mode == MODE_NEW_PASSWORD ? "NEW"
                    : g_app.mode == MODE_JOIN_ID || g_app.mode == MODE_JOIN_PASSWORD ? "JOIN"
                    : g_app.mode == MODE_UNLOCK || g_app.mode == MODE_SAVES ? "UNLOCK"
@@ -7466,6 +7573,7 @@ static void render(void) {
     tui_bar_t bar = current_bar();
     char hhmm[6]; current_hhmm(hhmm);
 
+    if (install_mode(g_app.mode) && g_app.install_back == MODE_SETTINGS) { render_settings(rows_n, cols_n, hhmm, &bar); return; }
     switch (g_app.mode) {
         case MODE_HELP:            render_help(rows_n, cols_n, hhmm, &bar); return;
         case MODE_CHANGELOG:       render_changelog(rows_n, cols_n, hhmm, &bar); return;
