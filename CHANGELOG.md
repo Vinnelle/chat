@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0-beta.2
 
 ### Added
 - `just release beta` releases the Unreleased section as a beta of the next version,
