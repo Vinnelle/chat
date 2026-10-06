@@ -6043,12 +6043,13 @@ typedef struct {
     const char *typed;
     int *nth;
     tui_suggestion_t *out;
+    const char *after;  // " " when another argument can follow, so Tab brings up its menu
 } arg_menu_t;
 
 // The next item in the menu: the line up to at, then text. 1 if it's the one asked for, with out
 // filled in but for help. One the line can't hold isn't listed.
 static int arg_item(arg_menu_t *m, const char *at, const char *text, const char *name, const char *group) {
-    int n = snprintf(m->out->line, sizeof m->out->line, "%.*s%s", (int)(at - m->typed), m->typed, text);
+    int n = snprintf(m->out->line, sizeof m->out->line, "%.*s%s%s", (int)(at - m->typed), m->typed, text, m->after);
     if (n < 0 || (size_t)n >= sizeof m->out->line || (*m->nth)-- > 0) return 0;
     copy_str(m->out->name, name, sizeof m->out->name);
     copy_str(m->out->group, group, sizeof m->out->group);
@@ -6226,6 +6227,7 @@ static const char *arg_end(const command_t *c, int kind, const char *rest) {
 static int arg_suggest(arg_menu_t *m, const int *args, const char *rest) {
     int a = args[0], k = a & A_KIND, found = 0;
     if (!a) return 0;
+    m->after = args[1] ? " " : "";
     switch (k) {
         case A_NICK: found = arg_nicks(m, rest); break;
         case A_WORD: found = arg_words(m, rest); break;
@@ -6256,7 +6258,7 @@ static int suggest_command(const char *typed, int nth, tui_suggestion_t *out) {
         const command_t *c = find_command(word);
         for (size_t i = 0; c && i < sizeof COMMAND_ARGS / sizeof *COMMAND_ARGS; i++) {
             if (strcmp(COMMAND_ARGS[i].cmd, c->name) != 0) continue;
-            arg_menu_t m = { c, typed, &nth, out };
+            arg_menu_t m = { c, typed, &nth, out, "" };
             return arg_suggest(&m, COMMAND_ARGS[i].args, typed + wn + 1);
         }
     }
@@ -6379,6 +6381,10 @@ static void submit_chat_line(void) {
         tui_suggestion_t s;
         size_t n = strlen(line);
         if ((n > 0 || input->menu_sel > 0) && tui_input_completion(input, &s)) copy_str(line, s.line, sizeof line);
+        // Completing an argument leaves a space for the next one, which ":verify NICK " would take as
+        // part of the nick.
+        n = strlen(line);
+        while (n > 0 && line[n - 1] == ' ') line[--n] = '\0';
         // If opened by typing '/', a line that turns out not to be a command is the start of a message.
         // It goes back in the input as text, for Enter to send.
         char word[CMD_WORD_MAX];

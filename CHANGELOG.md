@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- Tab on an argument in the command line's menu adds a space after it when another argument can
+  follow, so that one's menu comes up straight away, as it already did after a command's name:
+  `:verify NICK` lists `ok` and `no`, `:verified forget` the verified nicks, `:download N` `anyway`
+  and folders, and `:show N` and `:saveto N` `anyway`. Enter still runs the line without them.
+
 ## 0.5.0-beta.3
 
 ### Added
