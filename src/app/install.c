@@ -34,6 +34,11 @@
 // when the save's factors change.
 #define SPARE_LOCK_PLAIN_LEN (2 + PASS_HEADER_LEN + 32)
 #define SPARE_LOCK_FILE_LEN (SPARE_LOCK_PLAIN_LEN + PASS_SEAL_OVERHEAD)
+// A session's history: this, then its id in hex. As many as the folder has, up to HISTORIES_MAX.
+#define HISTORY_PREFIX "history-"
+#define HISTORY_NAME_LEN (sizeof HISTORY_PREFIX - 1 + INSTALL_HISTORY_ID_LEN * 2)
+#define HISTORY_FILE_MAX (INSTALL_HISTORY_MAX + PASS_SEAL_OVERHEAD)
+#define HISTORIES_MAX 1024
 #define SETTINGS_FILE_MAX (INSTALL_SETTINGS_MAX + PASS_SEAL_OVERHEAD)
 #define KEY_FILE_MAX (INSTALL_KEY_MAX + PASS_SEAL_OVERHEAD)
 #define VERIFIED_FILE_MAX (INSTALL_VERIFIED_MAX + PASS_SEAL_OVERHEAD)
@@ -238,9 +243,28 @@ static void remove_file(const char *name, const char *file) {
 int install_has_settings(const char *name) { return has(name, SETTINGS_NAME); }
 int install_has_key(const char *name) { return has(name, KEY_NAME); }
 
+static int is_history(const char *file) { return strncmp(file, HISTORY_PREFIX, sizeof HISTORY_PREFIX - 1) == 0; }
+
 static size_t file_max(const char *file) {
     return strcmp(file, SETTINGS_NAME) == 0 ? SETTINGS_FILE_MAX : strcmp(file, KEY_NAME) == 0 ? KEY_FILE_MAX
-         : strcmp(file, CODE_NAME) == 0 ? CODE_FILE_MAX : VERIFIED_FILE_MAX;
+         : strcmp(file, CODE_NAME) == 0 ? CODE_FILE_MAX : is_history(file) ? HISTORY_FILE_MAX : VERIFIED_FILE_MAX;
+}
+
+typedef struct { char names[HISTORIES_MAX][HISTORY_NAME_LEN + 1]; int n; } history_list_t;
+
+static void add_history(void *ctx, const char *name, int is_dir) {
+    history_list_t *l = ctx;
+    if (!is_dir && is_history(name) && strlen(name) == HISTORY_NAME_LEN && l->n < HISTORIES_MAX)
+        copy_str(l->names[l->n++], name, sizeof l->names[0]);
+}
+
+// The histories in a save's folder.
+static history_list_t *list_histories(const char *name) {
+    static history_list_t l;
+    char dir[960];
+    l.n = 0;
+    if (save_dir(name, dir, sizeof dir, 0) == 0) platform_list_dir(dir, add_history, &l);
+    return &l;
 }
 
 static unsigned file_needs(const char *name, const char *file) {
@@ -494,7 +518,7 @@ static int unseal(const uint8_t *sealed, size_t n, void *plain, size_t cap, size
 
 static int write_sealed_to(const char *name, const pass_lock_t *lk, const char *file, const void *plain, size_t len) {
     char path[1000];
-    static uint8_t sealed[VERIFIED_FILE_MAX];
+    static uint8_t sealed[HISTORY_FILE_MAX];
     size_t n;
     if (save_path(name, file, path, sizeof path, 1) != 0) return -1;
     if (pass_seal(lk, plain, len, sealed, sizeof sealed, &n) != 0) return -1;
@@ -648,16 +672,20 @@ static int spare_fit(const char *name, const held_t *h, unsigned needs) {
     return out;
 }
 
+static void rewrite(const char *name, const char *file) {
+    static uint8_t buf[HISTORY_FILE_MAX + 1];
+    char path[1000];
+    if (save_path(name, file, path, sizeof path, 0) != 0) return;
+    long n = platform_read_file(path, buf, sizeof buf);
+    if (n > 0 && (size_t)n <= HISTORY_FILE_MAX) platform_write_private(path, buf, (size_t)n);
+}
+
 // Opened with its own passphrase, a save is written just as when its decoy takes its place: every
 // sealed file and the spare, so the files' times don't say which passphrase opened it.
 static void refresh(const char *name, const held_t *h) {
-    static uint8_t buf[VERIFIED_FILE_MAX + 1];
-    char path[1000];
-    for (size_t i = 0; i < N_SEALED; i++) {
-        if (save_path(name, SEALED[i], path, sizeof path, 0) != 0) continue;
-        long n = platform_read_file(path, buf, sizeof buf);
-        if (n > 0 && (size_t)n <= VERIFIED_FILE_MAX) platform_write_private(path, buf, (size_t)n);
-    }
+    for (size_t i = 0; i < N_SEALED; i++) rewrite(name, SEALED[i]);
+    history_list_t *hl = list_histories(name);
+    for (int i = 0; i < hl->n; i++) rewrite(name, hl->names[i]);
     // A decoy the betas made can't be sealed again without its passphrase, so it stays as it is.
     if (!old_decoy(name) && spare_fit(name, h, h->lock.needs) < 0) g_decoy_lost = 1;
 }
@@ -684,6 +712,8 @@ static void promote(const char *name, const pass_lock_t *sl, const uint8_t *spar
         if (spare_plain[1]) write_code_to(name, sl, spare_plain + 2);
         else remove_file(name, CODE_NAME);
     }
+    history_list_t *hl = list_histories(name);
+    for (int i = 0; i < hl->n; i++) remove_file(name, hl->names[i]);
     write_spare_lock(name, sl, NULL);
     write_chaff(name, sl->needs);
     remove_old_decoy(name);
@@ -970,12 +1000,52 @@ int install_read_key(void *secret, size_t cap, size_t *len) {
     return rc;
 }
 
+// ---- histories ----
+
+static void history_name(const uint8_t id[INSTALL_HISTORY_ID_LEN], char out[HISTORY_NAME_LEN + 1]) {
+    memcpy(out, HISTORY_PREFIX, sizeof HISTORY_PREFIX - 1);
+    hex_encode(id, INSTALL_HISTORY_ID_LEN, out + sizeof HISTORY_PREFIX - 1);
+}
+
+long install_read_history(const uint8_t id[INSTALL_HISTORY_ID_LEN], char *buf, size_t cap) {
+    static uint8_t sealed[HISTORY_FILE_MAX + 1];
+    char file[HISTORY_NAME_LEN + 1];
+    size_t n = 0, len = 0;
+    if (!g_open) return INSTALL_NO_FILE;
+    history_name(id, file);
+    int rc = read_sealed(g_name, file, sealed, HISTORY_FILE_MAX, &n);
+    if (rc == 0) rc = unseal(sealed, n, buf, cap, &len);
+    return rc == 0 ? (long)len : rc;
+}
+
+int install_write_history(const uint8_t id[INSTALL_HISTORY_ID_LEN], const char *text, size_t len) {
+    char file[HISTORY_NAME_LEN + 1];
+    if (len > INSTALL_HISTORY_MAX) return -1;
+    history_name(id, file);
+    return write_sealed(file, text, len);
+}
+
+int install_forget_history(const uint8_t *id) {
+    if (!g_open) return -1;
+    if (id) {
+        char file[HISTORY_NAME_LEN + 1];
+        history_name(id, file);
+        remove_file(g_name, file);
+        return 0;
+    }
+    history_list_t *hl = list_histories(g_name);
+    for (int i = 0; i < hl->n; i++) remove_file(g_name, hl->names[i]);
+    return 0;
+}
+
+int install_histories(void) { return g_open ? list_histories(g_name)->n : 0; }
+
 // ---- changing the factors ----
 
 // One of the open save's files sealed again under lk. 0 once it is (or if there's no such file),
 // 1 if it can't be read and stays as it was, -1 if it can't be written.
 static int reseal(const char *file, const pass_lock_t *lk) {
-    static uint8_t sealed[VERIFIED_FILE_MAX + 1], plain[VERIFIED_FILE_MAX];
+    static uint8_t sealed[HISTORY_FILE_MAX + 1], plain[HISTORY_FILE_MAX];
     size_t n = 0, len = 0;
     int rc = read_sealed(g_name, file, sealed, file_max(file), &n);
     if (rc == INSTALL_NO_FILE || (rc == 0 && n >= PASS_HEADER_LEN && memcmp(sealed, lk->header, PASS_HEADER_LEN) == 0))
@@ -1015,6 +1085,12 @@ static int set_lock(unsigned target) {
     for (size_t i = 0; i < N_SEALED && rc == 0; i++) {
         if (strcmp(SEALED[i], first) == 0 || (strcmp(SEALED[i], CODE_NAME) == 0 && !(target & F_CODE))) continue;
         int r = reseal(SEALED[i], &next);
+        if (r > 0) skipped++;
+        else rc = r;
+    }
+    history_list_t *hl = list_histories(g_name);
+    for (int i = 0; i < hl->n && rc == 0; i++) {
+        int r = reseal(hl->names[i], &next);
         if (r > 0) skipped++;
         else rc = r;
     }
@@ -1343,7 +1419,7 @@ int install_shadow_clear(void) {
 
 // Anything not chat's, and in the default save's folder, the saves folder if it has a save in it.
 static void count_others(void *ctx, const char *name, int is_dir) {
-    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return;
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0 || is_history(name)) return;
     for (size_t i = 0; i < N_FILES; i++) if (strcmp(name, FILES[i]) == 0) return;
     (void)is_dir;
     (*(int *)ctx)++;
@@ -1373,6 +1449,11 @@ int install_remove(const char *name) {
     for (size_t i = 0; i < N_FILES; i++) {
         if (strcmp(FILES[i], DEVICE_NAME) == 0) continue;
         snprintf(path, sizeof path, "%s/%s", dir, FILES[i]);
+        if (platform_remove(path) != 0 && path_exists(path)) left = 1;
+    }
+    history_list_t *hl = list_histories(name);
+    for (int i = 0; i < hl->n; i++) {
+        snprintf(path, sizeof path, "%s/%s", dir, hl->names[i]);
         if (platform_remove(path) != 0 && path_exists(path)) left = 1;
     }
     // The device's part goes last, once nothing sealed with it is left.

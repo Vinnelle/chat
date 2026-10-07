@@ -730,6 +730,13 @@ void current_hhmm(char out[6]) {
     snprintf(out, 6, "%02d:%02d", tmv.tm_hour, tmv.tm_min);
 }
 
+void current_stamp(char out[17]) {
+    time_t t = time(NULL);
+    struct tm tmv;
+    localtime_s(&tmv, &t);
+    if (strftime(out, 17, "%Y-%m-%d %H:%M", &tmv) != 16) out[0] = '\0';
+}
+
 typedef struct { void (*fn)(void *); void *arg; } thread_boot_t;
 
 static DWORD WINAPI thread_tramp(LPVOID p) {

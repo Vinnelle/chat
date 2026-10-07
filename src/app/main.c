@@ -203,7 +203,8 @@ static const char *USAGE =
     "\n"
     "Encryption: X25519 + ML-KEM-768 (hybrid, post-quantum), XChaCha20-Poly1305, and a\n"
     "ratchet per message for forward secrecy. Nothing is written to disk unless you ask\n"
-    "for it with :install or :download. Messages are never saved.\n";
+    "for it with :install or :download. Messages are only kept with :set history on, sealed\n"
+    "in a save, and everyone in the session is told.\n";
 
 #define MAX_SESSIONS 12
 #define MAX_PEER_ARGS 16
@@ -236,6 +237,12 @@ typedef struct {
     int initialising;
     int scroll;   // the newest messages hidden below the chat after scrolling back
     char name[MAX_SESSION_NAME + 1];
+    // While its history is kept: the lines so far (HISTORY_LINE's), in locked memory, the save they're
+    // kept in, and whether they've changed since they were written there.
+    char *hist;
+    size_t hist_len;
+    int hist_dirty;
+    char hist_save[INSTALL_NAME_MAX + 1];
 } session_slot_t;
 
 typedef enum {
@@ -338,6 +345,7 @@ typedef struct {
     uint64_t file_cap;   // 0: the default
     int fast_files;
     int betas;
+    int history;    // keep each session's history, sealed in the save open
     int autosave;   // what's changed is saved as it changes, while installed
     // Locked to this device: the open save, or with none open, the new one :install is making for it
     // (install_for). device_want is what the DEVICE LOCK box asks to change it to, and device_back
@@ -514,9 +522,12 @@ static void push_log(const char *fmt, ...) {
 // a file action, which would otherwise only reach a console that may be hidden, or not on screen.
 static int g_echo;
 
+static void history_add(session_slot_t *s, const char *text, const uint8_t *rgb, int mention, int color_len);
+
 static void session_print(void *ui, const char *hhmm, const char *text, const uint8_t *rgb,
                           unsigned flags, int color_len, int file) {
     session_slot_t *s = (session_slot_t *)ui;
+    if ((flags & LINE_CHAT) && s->hist) history_add(s, text, rgb, (flags & LINE_MENTION) != 0, color_len);
     if (g_echo == 1 && !(flags & LINE_CHAT) && s == g_app.selected) {
         copy_str(g_app.message, strncmp(text, "* ", 2) == 0 ? text + 2 : text, sizeof g_app.message);
         g_echo = 2;
@@ -751,10 +762,13 @@ static session_slot_t *first_session(void) {
 
 static void view_forget(const session_slot_t *s);
 
+static void history_stop(session_slot_t *s, int write);
+
 static void close_session(session_slot_t *s) {
     if (!s) return;
     int idx = slot_index(s);
     view_forget(s);
+    history_stop(s, 1);
     chat_shutdown(&s->engine);
     pics_free(s);
     release_scrollbacks(s);
@@ -783,6 +797,140 @@ static void console_note(session_slot_t *s, const char *fmt, ...) {
     char hhmm[6]; current_hhmm(hhmm);
     tui_scrollback_push(&s->console, hhmm, msg, NULL, 0, 0);
     g_app.dirty = 1;
+}
+
+// ---- history ----
+
+// A line of a session's history, for each line of its chat: when (local time), the colour of what
+// comes before the message, or "-", how many bytes that is, whether it mentions you, then the line
+// as shown, each after a tab.
+#define HISTORY_LINE_MAX (TUI_LINE_MAX + 40)
+#define HISTORY_WRITE_EVERY 30.0
+
+// Only the full-screen UI keeps one, in the save that's open.
+static int history_possible(void) { return g_app.installed && !g_app.locked && !g_plain; }
+
+static void history_add(session_slot_t *s, const char *text, const uint8_t *rgb, int mention, int color_len) {
+    char line[HISTORY_LINE_MAX], when[17], col[8] = "-";
+    current_stamp(when);
+    if (rgb) snprintf(col, sizeof col, "%02x%02x%02x", rgb[0], rgb[1], rgb[2]);
+    int n = snprintf(line, sizeof line, "%s\t%s\t%d\t%d\t%s\n", when, col, color_len, mention != 0, text);
+    if (n <= 0 || (size_t)n >= sizeof line) return;
+    // The oldest lines make room.
+    size_t drop = 0;
+    while (s->hist_len - drop + (size_t)n > INSTALL_HISTORY_MAX) {
+        const char *nl = memchr(s->hist + drop, '\n', s->hist_len - drop);
+        drop = nl ? (size_t)(nl - s->hist) + 1 : s->hist_len;
+    }
+    if (drop) {
+        memmove(s->hist, s->hist + drop, s->hist_len - drop);
+        s->hist_len -= drop;
+    }
+    memcpy(s->hist + s->hist_len, line, (size_t)n);
+    s->hist_len += (size_t)n;
+    s->hist_dirty = 1;
+    crypto_wipe(line, sizeof line);
+}
+
+static void history_write(session_slot_t *s) {
+    if (!s->hist || !s->hist_dirty || !history_possible() || strcmp(s->hist_save, install_current()) != 0) return;
+    uint8_t id[CHAT_HISTORY_ID_LEN];
+    chat_history_id(&s->engine, id);
+    if (install_write_history(id, s->hist, s->hist_len) == 0) s->hist_dirty = 0;
+    else console_note(s, "couldn't write this session's history to the save - it's tried again in a moment");
+}
+
+// Before another save is opened, or this one closed.
+static void histories_write(void) {
+    for (int i = 0; i < MAX_SESSIONS; i++) if (g_app.used[i]) history_write(&g_app.sessions[i]);
+}
+
+// The lines kept from before, above the session's own.
+static void history_show(session_slot_t *s) {
+    char day[11] = "", line[HISTORY_LINE_MAX];
+    size_t pos = 0;
+    int shown = 0;
+    while (pos < s->hist_len) {
+        const char *nl = memchr(s->hist + pos, '\n', s->hist_len - pos);
+        size_t end = nl ? (size_t)(nl - s->hist) : s->hist_len, len = end - pos;
+        if (len >= sizeof line) len = sizeof line - 1;
+        memcpy(line, s->hist + pos, len);
+        line[len] = '\0';
+        pos = end + 1;
+        char *f[5], *q = line;
+        int n = 0;
+        for (; n < 4; n++) {
+            char *tab = strchr(q, '\t');
+            if (!tab) break;
+            *tab = '\0';
+            f[n] = q;
+            q = tab + 1;
+        }
+        f[4] = q;
+        if (n < 4 || strlen(f[0]) != 16) continue;
+        if (!shown++)
+            tui_scrollback_push(&s->sb, "", "* kept from before, sealed in your save (:history forget deletes it):", NULL, 0, 0);
+        if (strncmp(f[0], day, 10) != 0) {
+            char sep[24];
+            memcpy(day, f[0], 10);
+            day[10] = '\0';
+            snprintf(sep, sizeof sep, "* %s", day);
+            tui_scrollback_push(&s->sb, "", sep, NULL, 0, 0);
+        }
+        uint8_t rgb[3];
+        int has_rgb = strlen(f[1]) == 6 && hex_decode(f[1], 6, rgb) == 0;
+        char hhmm[6];
+        memcpy(hhmm, f[0] + 11, 5);
+        hhmm[5] = '\0';
+        tui_scrollback_push(&s->sb, hhmm, f[4], has_rgb ? rgb : NULL, f[3][0] == '1', atoi(f[2]));
+    }
+    if (shown) tui_scrollback_push(&s->sb, "", "* new from here", NULL, 0, 0);
+    crypto_wipe(line, sizeof line);
+}
+
+static void history_start(session_slot_t *s, int show) {
+    if (s->hist || s->initialising || !(s->hist = malloc(INSTALL_HISTORY_MAX))) return;
+    crypto_lock(s->hist, INSTALL_HISTORY_MAX);
+    s->hist_len = 0;
+    s->hist_dirty = 0;
+    copy_str(s->hist_save, install_current(), sizeof s->hist_save);
+    uint8_t id[CHAT_HISTORY_ID_LEN];
+    chat_history_id(&s->engine, id);
+    long n = install_read_history(id, s->hist, INSTALL_HISTORY_MAX);
+    if (n > 0) s->hist_len = (size_t)n;
+    else if (n != 0 && n != INSTALL_NO_FILE)
+        console_note(s, "this session's history in the save can't be read - it's kept again from here");
+    if (show) history_show(s);
+}
+
+static void history_stop(session_slot_t *s, int write) {
+    if (!s->hist) return;
+    if (write) history_write(s);
+    crypto_unlock(s->hist, INSTALL_HISTORY_MAX);
+    free(s->hist);
+    s->hist = NULL;
+    s->hist_len = 0;
+    s->hist_dirty = 0;
+}
+
+// Each open session keeps its history while the setting's on and a save is open, in that save, and
+// peers are told whenever that changes. Written every HISTORY_WRITE_EVERY seconds.
+static void history_sync(double now) {
+    static double written;
+    int want = g_app.history && history_possible();
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        session_slot_t *s = &g_app.sessions[i];
+        if (!g_app.used[i] || s->initialising) continue;
+        // Another save is open: this one's lines were written to the last before it opened.
+        if (s->hist && strcmp(s->hist_save, install_current()) != 0) history_stop(s, 0);
+        if (want && !s->hist) history_start(s, 0);
+        else if (!want && s->hist) history_stop(s, 1);
+        chat_set_history(&s->engine, s->hist != NULL);
+    }
+    if (now - written >= HISTORY_WRITE_EVERY) {
+        written = now;
+        histories_write();
+    }
 }
 
 // The result of the user's last action, on the bottom bar until their next key. Reports and
@@ -1067,6 +1215,9 @@ static session_slot_t *start_session(const char *session_name, const char *passw
     s->engine.net_verbose = g_app.net_verbose;
     s->initialising = 0;
     g_app.dirty = 1;
+    // Before anyone can connect, so peers hear of it in the handshake.
+    if (g_app.history && history_possible()) history_start(s, 1);
+    chat_set_history(&s->engine, s->hist != NULL);
 
     char idhex[9]; hex_encode(s->engine.my_id, 4, idhex);
     if (created) {
@@ -1335,7 +1486,7 @@ typedef enum {
     SET_NOSTR, SET_RELAYS,
     SET_NICK, SET_COLOUR, SET_SIGN, SET_AGE_RECIPIENT, SET_PGP_PUBKEY, SET_AUTOSAVE, SET_DEVICE_LOCK,
     SET_SECURITY_KEY, SET_AUTHENTICATOR, SET_DESTROY, SET_SHADOW,
-    SET_VERIFY, SET_FILE_LIMIT, SET_FAST_FILES, SET_NOTIFY, SET_PREVIEW, SET_NET, SET_PORT, SET_BETAS,
+    SET_VERIFY, SET_FILE_LIMIT, SET_FAST_FILES, SET_NOTIFY, SET_PREVIEW, SET_HISTORY, SET_NET, SET_PORT, SET_BETAS,
     N_SETTING_IDS
 } setting_id_t;
 
@@ -1447,6 +1598,11 @@ static const setting_def_t SETTINGS[] = {
       "What a notification shows. off: only that a message came in. nick: who it's from. message: who, and what "
       "they said. Desktops keep notifications (Windows writes them to disk), so what they show can outlast chat. "
       "The session is never shown, since its id is all someone needs to join one with a blank password." },
+    { SET_HISTORY, NULL, "History", "history", "Keep history", K_TOGGLE, "on|off",
+      "Keeps each session's messages, sealed in the save that's open (so it needs :install), and shows them when "
+      "you join that session again with the same id and password. Everyone in the session is told while you keep "
+      "it, and you're told when they do. Only the full-screen UI keeps it. :history forget deletes this "
+      "session's, :history forget all every session's." },
     { SET_FILE_LIMIT, NULL, "Files", "filelimit", "File size limit", K_TEXT, "SIZE (8M, 500K, 1G)",
       "The largest file chat fetches when you ask. An offer over the limit says so, and :download N anyway (or "
       ":show N anyway) fetches it regardless. Nothing is fetched until you ask. Files can be up to 1 GB." },
@@ -1534,6 +1690,7 @@ static int setting_options(setting_id_t id, const char *const **names, int *n) {
         case SET_NOSTR:      *names = NOSTR_NAMES; *n = 3; return r->nostr;
         case SET_VERIFY:     *names = VERIFY_NAMES; return g_app.verify_optional != 0;
         case SET_FAST_FILES: return g_app.fast_files != 0;
+        case SET_HISTORY:    return g_app.history != 0;
         case SET_BETAS:      return g_app.betas != 0;
         case SET_AUTOSAVE:   return g_app.autosave != 0;
         case SET_DEVICE_LOCK: return g_app.device_lock != 0;
@@ -1861,6 +2018,19 @@ static int row_greyed(setting_id_t id) {
     return (id == SET_DEVICE_LOCK && device_lock_greyed()) || (id == SET_SECURITY_KEY && security_key_greyed());
 }
 
+// It's sealed in a save, so without one open there's nowhere to keep it.
+static void history_choose(int on) {
+    if (on && (!g_app.installed || g_app.locked)) {
+        note("Keep history: it's kept sealed in a save, so it needs one open - :install makes one");
+        return;
+    }
+    g_app.history = on;
+    history_sync(now_seconds());
+    if (on) note("Keep history: on - each session's is sealed in the save %s, and everyone in it is told",
+                 install_shown_name(install_current()));
+    else note("Keep history: off - what was kept stays in the save until :history forget");
+}
+
 static void setting_choose(setting_id_t id, int i) {
     routing_t *r = &g_app.route;
     switch (id) {
@@ -1911,6 +2081,7 @@ static void setting_choose(setting_id_t id, int i) {
         case SET_SECURITY_KEY: factor_choose(INSTALL_FACTOR_KEY, i); return;
         case SET_AUTHENTICATOR: factor_choose(INSTALL_FACTOR_CODE, i); return;
         case SET_DESTROY: destroy_choose(DESTROY_VALS[i]); return;
+        case SET_HISTORY: history_choose(i); return;
         default: return;
     }
     char v[32]; setting_value(id, v, sizeof v);
@@ -4693,6 +4864,7 @@ static void finish_install(const char *passphrase) {
         // security key and the code set up for it.
         unsigned factors = (g_app.device_lock ? INSTALL_FACTOR_DEVICE : 0) | (g_app.key_factor ? INSTALL_FACTOR_KEY : 0)
                          | (g_app.code_factor ? INSTALL_FACTOR_CODE : 0);
+        histories_write();
         int rc = install_lock_new(g_app.save_target, passphrase, factors);
         if (rc == INSTALL_DEVICE) {
             push_log("* not installed: it can't be locked to this device - %s", install_why());
@@ -5617,6 +5789,7 @@ static void unlock_go(key_purpose_t why) {
     if (why == KP_INSTALL_UNLOCK) note("opening the save %s...", install_shown_name(name));
     else note("opening what :install saved...");
     render();
+    histories_write();
     int rc = install_unlock(name, g_app.install_pass);
     crypto_wipe(g_app.install_pass, sizeof g_app.install_pass);
     if (why == KP_INSTALL_UNLOCK) install_unlock_result(rc);
@@ -5826,6 +5999,51 @@ static cmd_result_t app_uninstall(void *ctx, const char *arg) {
     return CMD_OK;
 }
 
+// ":history" says whether this session's is kept, ":history forget" deletes it, and ":history forget
+// all" every session's in the save.
+static cmd_result_t app_history(void *ctx, const char *arg) {
+    (void)ctx;
+    session_slot_t *s = g_app.selected && !g_app.selected->initialising ? g_app.selected : NULL;
+    char word[CMD_WORD_MAX], what[CMD_WORD_MAX];
+    cmd_parse(cmd_parse(arg ? arg : "", word), what);
+    const char *shown = install_shown_name(install_current());
+    if (strcmp(word, "forget") == 0) {
+        if (!g_app.installed || g_app.locked) { note("no save is open, so none is kept"); return CMD_OK; }
+        if (strcmp(what, "all") == 0) {
+            install_forget_history(NULL);
+            for (int i = 0; i < MAX_SESSIONS; i++) {
+                session_slot_t *o = &g_app.sessions[i];
+                if (g_app.used[i] && o->hist) { crypto_wipe(o->hist, o->hist_len); o->hist_len = 0; o->hist_dirty = 0; }
+            }
+            push_log("* history: every session's history in the save %s is deleted", shown);
+            note("deleted every session's history%s", g_app.history ? " - each is kept again from here" : "");
+            return CMD_OK;
+        }
+        if (what[0]) { note("history forget takes all, or nothing for this session's"); return CMD_OK; }
+        if (!s) { note("open a session first - :history forget all deletes every session's"); return CMD_OK; }
+        uint8_t id[CHAT_HISTORY_ID_LEN];
+        chat_history_id(&s->engine, id);
+        install_forget_history(id);
+        if (s->hist) { crypto_wipe(s->hist, s->hist_len); s->hist_len = 0; s->hist_dirty = 0; }
+        note("deleted this session's history%s", g_app.history ? " - it's kept again from here" : "");
+        return CMD_OK;
+    }
+    if (word[0]) { note("history takes forget, or forget all"); return CMD_OK; }
+    int kept = g_app.installed && !g_app.locked ? install_histories() : 0;
+    if (!g_app.installed || g_app.locked) note("history: off - it's kept sealed in a save, so it needs one open (:install)");
+    else if (!g_app.history) note("history: off - :set history on keeps it in the save %s (%d session%s there)", shown, kept,
+                                  kept == 1 ? " has one" : "s have one");
+    else if (s && s->hist) {
+        int lines = 0;
+        for (size_t i = 0; i < s->hist_len; i++) lines += s->hist[i] == '\n';
+        note("history: on - %d line%s kept for this session in the save %s, and everyone here is told", lines,
+             lines == 1 ? "" : "s", shown);
+    } else {
+        note("history: on - in the save %s (%d session%s there)", shown, kept, kept == 1 ? " has one" : "s have one");
+    }
+    return CMD_OK;
+}
+
 // Checked before CHAT_COMMANDS, so entries here shadow the per-session ones of the same name.
 static const command_t APP_COMMANDS[] = {
     { "help",    NULL,                  NULL,     "list all commands and keybinds (F1)",          app_help },
@@ -5839,6 +6057,7 @@ static const command_t APP_COMMANDS[] = {
     { "install", NULL,                  "[NAME]", "save your settings and signing key on this computer (NAME: as a save of that name)", app_install },
     { "save",    NULL,                  NULL,     "save what's in use now to the open save, after asking (or :install it)", app_save },
     { "uninstall", NULL,                "[NAME]", "delete what :install saved (NAME: that save)",    app_uninstall },
+    { "history", NULL,                  "[forget [all]]", "whether this session's history is kept; forget deletes it (all: every session's)", app_history },
     { "changelog", "news",              NULL,     "show changelog",                    app_changelog },
     { "files",   NULL,                  NULL,     "the files offered here: show, save or stop them (Ctrl+F)", app_files },
     { "show",    NULL,                  "N [anyway]", "show picture N in the chat, where it was offered", app_show },
@@ -7673,6 +7892,7 @@ static void render(void) {
         copy_str(me->nick, e->nick, sizeof me->nick);
         memcpy(me->color, e->my_color, 3);
         me->you = 1;
+        me->history = e->persist;
         for (int i = 0; i < MAX_PEERS + MAX_PENDING_PEERS && n_peers < MAX_PEERS + MAX_PENDING_PEERS + 1; i++) {
             peer_t *p = &e->peers[i];
             if (!p->used || !p->ok) continue;
@@ -7688,6 +7908,7 @@ static void render(void) {
             r->verify = (int)p->identity_state;
             r->code = chat_code_state(e, p);
             r->modified = p->build_state == BUILD_MODIFIED;
+            r->history = p->persists;
         }
     }
 
@@ -7798,6 +8019,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
             if (ready[i]) chat_on_socket_readable(&owner[i]->engine, socks[i], now);
         for (int i = 0; i < MAX_SESSIONS; i++)
             if (g_app.used[i]) chat_tick(&g_app.sessions[i].engine, now_seconds());
+        history_sync(now);
 
         if (!g_app.onboarding) {
             tor_link_ensure(now);

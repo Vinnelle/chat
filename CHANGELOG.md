@@ -14,6 +14,15 @@
   decoy the betas made still opens, and when its save opens chat says how to move it to the spare.
 
 ### Added
+- History, off unless you turn it on: `:set history on` (Chat > History) keeps each session's
+  messages, sealed in the save that's open, and shows them when you join that session again with the
+  same id and password. Each session's is a file of its own named from its id and password, so the
+  name doesn't say which session it is, up to 256 KB of it, sealed again with the rest when the
+  save's device lock, security key or code changes, and deleted with the save or by a decoy taking
+  its place. Everyone in the session is told while you keep it (`[keeps history]` when you join, a
+  warning in the chat, the sidebar and `:peers`), straight away when you turn it on or off, and you're
+  told the same of them. `:history` says whether it's kept, and `:history forget` (or `forget all`)
+  deletes it. Only the full-screen UI keeps it.
 - A message can be 880 bytes long, up from 250: as much as one frame holds, so nothing about how
   messages travel changes. A peer on 0.5.0's betas or older only reads 250 bytes of one (its `k`
   doesn't have the new `l`), so a longer message goes to it in parts, cut between words, each a
@@ -31,6 +40,8 @@
   what they can't do: deleting isn't erasing, and the count is kept unsealed next to the save.
 
 ### Changed
+- The engine's unused plain-text session log is gone. Its flag in the handshake now says a peer
+  keeps a history, which 0.4.0 and the betas show as `[logging chat locally]`.
 - Tab on an argument in the command line's menu adds a space after it when another argument can
   follow, so that one's menu comes up straight away, as it already did after a command's name:
   `:verify NICK` lists `ok` and `no`, `:verified forget` the verified nicks, `:download N` `anyway`

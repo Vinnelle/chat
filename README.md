@@ -387,9 +387,6 @@ sudo chat --update
 
 This depends on your system, and doesn't matter if you never plan on updating.
 
-I might add opt-in **chat history** later, where the other members of the session are told
-you're saving it. It would be off unless you turn it on.
-
 ### Installing
 
 `:install`, in the full screen UI, saves your settings, your signing key and the verified keys
@@ -435,7 +432,7 @@ not the key's public half, so neither file can be linked to the fingerprint peer
 
 Only you can open the folder and the files (`0700`, `0600`). Each file is written in full and
 then renamed into place, so a crash can't leave half a file. Sessions, their ids and passwords,
-messages, peers and files are never saved.
+peers and files are never saved, and messages only with history on (see [History](#history)).
 
 `settings` and `key` are the only files chat writes there (and the same two in `~/.config/chat`
 itself for the save called `default`, see [More than one save](#more-than-one-save)), and both are always sealed, as is
@@ -445,7 +442,8 @@ has a `securitykey` file, with the key's credential and the save's secret wrappe
 and one that asks for an authenticator code has an `authenticator` file, sealed like the rest (see
 [A security key and an authenticator app](#a-security-key-and-an-authenticator-app)). Every save
 also has a `spare` and a `spare-lock` file, and one that deletes itself after wrong passphrases a
-`tries` file (see [A shadow passphrase, and self-destruct](#a-shadow-passphrase-and-self-destruct)). chat
+`tries` file (see [A shadow passphrase, and self-destruct](#a-shadow-passphrase-and-self-destruct)).
+With history on, there's a `history-...` file for each session it's kept for, sealed too. chat
 never writes your settings in plain text, as `settings.toml` or anything else. The TOML above
 only exists inside the sealed file. If there's a plain text file in that folder, like a
 `settings.toml`, it didn't come from chat. chat doesn't read it, update it or delete it, and
@@ -663,11 +661,31 @@ a code, and chat still asks for those. With more than one save and no `--save`, 
 saves that need neither. Versions of chat from before these can't open a save that needs them
 (they say it's damaged).
 
+#### History
+
+Messages aren't kept unless you turn history on: `:set history on` (the **Keep history** row on the
+settings page, under Chat). It needs a save open, since that's where it's kept: each session's
+history is sealed with the save's other files, in a `history-...` file named from the session's id
+and password, so the name doesn't say which session it is. Joining the same session again (the same
+id and password) shows what was kept, above the new messages, under the day each came on. Up to 256
+KB of each session's are kept, the oldest going first, written every 30 seconds and when the
+session closes.
+
+Everyone in the session is told while you keep it: they see `[keeps history]` when you join, and a
+warning in the chat, and the sidebar and `:peers` say so. Turning it on or off tells them straight
+away. You're told the same when someone else keeps one. Versions before 0.5.0 show it as
+`[logging chat locally]`. What they keep, and how, is up to their copy of chat: you only have their
+word for it, either way.
+
+`:history` says whether this session's is kept, `:history forget` deletes it, and `:history forget
+all` deletes every session's in the save. Turning history off keeps what was kept until you forget
+it. Only the full-screen UI keeps history, not `--simple`.
+
 #### A shadow passphrase, and self-destruct
 
 `:set shadow on` (the **Shadow password** row on the settings page) gives the open save a second
 passphrase, for when you're made to open it. Typed in place of the real one, it opens a decoy: a
-clean save with chat's defaults, no signing key and no verified keys, that needs the same device,
+clean save with chat's defaults, no signing key, verified keys or history, that needs the same device,
 security key and code as the real one. The decoy takes the real save's place: the real save's
 files are replaced or deleted, and from then on its passphrase opens nothing. The shadow
 passphrase can't be the save's own, and `:set shadow off` removes the decoy.
@@ -908,6 +926,7 @@ puts it on the command line.
 | `:install [NAME]` | save your settings and signing key on this computer, after telling you what that leaves on disk; a new save asks for its name (blank picks a random one), and with NAME it's a save of that name (see [Installing](#installing)) |
 | `:save` | save what's in use now to the save that's open, after asking (`:install` if none is) |
 | `:uninstall [NAME]` | delete what `:install` saved (the save in use, or the one called NAME) |
+| `:history [forget [all]]` | whether this session's history is kept; `forget` deletes it, `forget all` every session's (see [History](#history)) |
 | `:changelog` | show changelog (`:news`); built in, so it works offline |
 | `:send [PATH]` | offer a file, or pick one in a file browser without PATH (see [Files and pictures](#files-and-pictures)) |
 | `:files` | the files page (`Ctrl+F`): the files offered here and yours, to show, save or stop; with `--simple`, a list |
@@ -945,6 +964,7 @@ after a name. Under each row's help, the page shows the `:set` command that does
 | `fastfiles` | `on` (what you send goes in quick bursts; through the relays, as fast as they allow), `off` (chat's regular slots) |
 | `notify` | `all`, `mentions`, `none` |
 | `preview` | what a notification shows: `off` (only that a message came), `nick` (who from), `message` (who, and what); never the session |
+| `history` | `on` (each session's messages are kept, sealed in the save that's open, and everyone in it is told), `off` |
 | `net` | `normal`, `verbose` (every handshake packet, relay and Tor event) |
 | `port` | the UDP port for new sessions (`0` picks a free one) |
 | `betas` | `on` (`:update` installs betas too), `off` (only releases) |

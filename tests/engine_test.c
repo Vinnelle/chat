@@ -39,6 +39,7 @@ typedef struct {
     int withdrawn;         // "NICK no longer offers file N"
     int key_warnings;      // a peer with a verified nick signs with another key
     int known_keys;        // a peer signs with a key verified before
+    int histories;         // "* NICK keeps a history of this chat"
 } log_t;
 
 static chat_t A, B, C;
@@ -68,6 +69,7 @@ static void on_print(void *ui, const char *hhmm, const char *text, const uint8_t
         if (strstr(text, " no longer offers file ")) l->withdrawn++;
         if ((flags & LINE_WARN) && strstr(text, "does not sign with the key you verified for")) l->key_warnings++;
         if (strstr(text, "signs with the key you verified")) l->known_keys++;
+        if ((flags & LINE_WARN) && strstr(text, " keeps a history of this chat")) l->histories++;
         if (strncmp(text, "* joining: peer ", 16) == 0) l->joining++;
         else if (strstr(text, " joined (")) { if (l->joining > 0) l->joining--; else l->unheralded_joins++; }
         return;
@@ -1292,6 +1294,47 @@ static void test_duress(double *t) {
     CHECK(install_remove("o") == 0, "it wasn't uninstalled");
 }
 
+// A session's history: named the same by every member, sealed in the open save, read back as
+// written, sealed again when the save's factors change, deleted by forget, by a decoy taking over
+// and with the save. A peer is told when someone starts keeping one, and when they stop.
+static void test_history(double *t) {
+    static char config[256];
+    CHECK(test_temp_dir("history", config, sizeof config) == 0, "no temporary folder");
+    test_set_env(TEST_CONFIG_VAR, config);
+    static char buf[INSTALL_HISTORY_MAX];
+    static const char lines[] = "2026-10-07 19:25\t-\t0\t0\tbob: hello\n";
+    uint8_t id[CHAT_HISTORY_ID_LEN], theirs[CHAT_HISTORY_ID_LEN], other[CHAT_HISTORY_ID_LEN];
+    chat_history_id(&A, id);
+    chat_history_id(&B, theirs);
+    memset(other, 7, sizeof other);
+    CHECK(memcmp(id, theirs, sizeof id) == 0, "two members of one session name its history differently");
+
+    install_use("h");
+    CHECK(install_lock_new("h", "pw", 0) == 0 && install_write_settings("") == 0, "the save wasn't made: %s", install_why());
+    CHECK(install_write_history(id, lines, strlen(lines)) == 0 && install_write_history(other, lines, 3) == 0
+          && install_histories() == 2, "two histories weren't written");
+    CHECK(install_set_factor(INSTALL_FACTOR_DEVICE, 1) == 0, "locking it to the device failed: %s", install_why());
+    install_forget();
+    CHECK(install_unlock("h", "pw") == 0 && install_read_history(id, buf, sizeof buf) == (long)strlen(lines)
+          && memcmp(buf, lines, strlen(lines)) == 0, "a history didn't open once the save was locked to the device");
+    CHECK(install_forget_history(other) == 0 && install_histories() == 1
+          && install_read_history(other, buf, sizeof buf) == INSTALL_NO_FILE, "forgetting a history left it");
+    CHECK(install_shadow_set("decoy") == 0, "the shadow passphrase wasn't set: %s", install_why());
+    install_forget();
+    CHECK(install_unlock("h", "decoy") == 0 && install_histories() == 0, "the decoy kept the real save's history");
+    CHECK(install_write_history(id, lines, strlen(lines)) == 0 && install_remove("h") == 0
+          && save_size(config, "h", "settings") < 0, "uninstalling left the save, or its history");
+
+    peer_t *pa = peer_named(&B, "alice");
+    int warned = log_b.histories;
+    chat_set_history(&A, 1);
+    RUN_UNTIL(t, 20, pa && pa->persists);
+    CHECK(pa && pa->persists && log_b.histories == warned + 1, "bob wasn't told alice keeps a history");
+    chat_set_history(&A, 0);
+    RUN_UNTIL(t, 20, pa && !pa->persists);
+    CHECK(pa && !pa->persists, "bob wasn't told alice stopped keeping one");
+}
+
 static void test_identity_keys(double *t) {
     (void)t;
     // An identity file age-keygen wrote, and the recipient it gave for it.
@@ -2099,7 +2142,7 @@ int main(int argc, char **argv) {
         { "third peer", test_third_peer }, { "candidates settle", test_candidates_settle }, { "builds", test_builds },
         { "parsers", test_parsers }, { "toml", test_toml }, { "dht keys", test_dht_keys }, { "dht", test_dht }, { "read file", test_read_file },
         { "identity keys", test_identity_keys }, { "passphrase seal", test_passphrase_seal }, { "device lock", test_device_lock },
-        { "factor locks", test_factor_locks }, { "totp", test_totp }, { "bytewords", test_bytewords }, { "qr", test_qr }, { "save factors", test_save_factors }, { "duress", test_duress }, { "images", test_images }, { "file names", test_file_names }, { "files", test_files },
+        { "factor locks", test_factor_locks }, { "totp", test_totp }, { "bytewords", test_bytewords }, { "qr", test_qr }, { "save factors", test_save_factors }, { "duress", test_duress }, { "history", test_history }, { "images", test_images }, { "file names", test_file_names }, { "files", test_files },
         { "verified keys", test_trust },
     };
     size_t n_tests = sizeof tests / sizeof tests[0];

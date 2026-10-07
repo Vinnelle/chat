@@ -1100,9 +1100,15 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         memcpy(had_pub, p->identity_pub, ID_SIGN_PUB_LEN);
         uint8_t rgb[3];
         if (parse_color(f[2], rgb) == 0) memcpy(p->color, rgb, 3);
-        // f[3] is the logging flag, then capability letters older builds ignore: "r" = sends rk,
+        // f[3] is the history flag, then capability letters older builds ignore: "r" = sends rk,
         // "b" = reads records joined by newlines, "l" = reads messages up to MAX_TEXT.
+        int had_history = p->persists;
         p->persists = (f[3][0] == '1');
+        if (p->announced && had_history != p->persists) {
+            char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
+            if (p->persists) ui_warn(c, "* %s keeps a history of this chat now", name);
+            else ui_print(c, "* %s stopped keeping a history of this chat", name);
+        }
         p->announces_rekey = strchr(f[3], 'r') != NULL;
         p->batches = strchr(f[3], 'b') != NULL;
         p->long_text = strchr(f[3], 'l') != NULL;
@@ -1507,7 +1513,8 @@ static void announce_join(chat_t *c, peer_t *p) {
     }
     char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
     ui_print_colored(c, p->color, "* %s%s%s joined (%d online)", name, idlabel,
-                      p->persists ? " [logging chat locally]" : "", live_count(c) + 1);
+                      p->persists ? " [keeps history]" : "", live_count(c) + 1);
+    if (p->persists) ui_warn(c, "* %s keeps a history of this chat", name);
     // A peer that dropped and came back did a fresh handshake, with nothing linking it to the one
     // that may have been verified. Someone who forced the drop could be in the middle of it.
     for (size_t g = 0; g < sizeof c->gone / sizeof c->gone[0]; g++) {
@@ -2052,6 +2059,23 @@ void chat_set_colour(chat_t *c, const uint8_t rgb[3]) {
     send_to_live_peers(c, msg);
 }
 
+void chat_set_history(chat_t *c, int on) {
+    if (!c->persist == !on) return;
+    c->persist = on != 0;
+    for (int i = 0; i < c->peer_hi; i++)
+        if (c->peers[i].used && c->peers[i].ok) send_k_now(c, &c->peers[i]);
+    if (live_count(c) > 0) ui_print(c, "* everyone here is told you %s", on ? "keep a history of this chat now" : "stopped keeping a history of it");
+}
+
+// From the session's key, so only its members can tell which history is this session's.
+void chat_history_id(const chat_t *c, uint8_t out[CHAT_HISTORY_ID_LEN]) {
+    static const char LABEL[] = "chat history v1";
+    uint8_t h[32];
+    hmac_sha256(c->master, MASTER_LEN, (const uint8_t *)LABEL, sizeof LABEL - 1, h);
+    memcpy(out, h, CHAT_HISTORY_ID_LEN);
+    crypto_wipe(h, sizeof h);
+}
+
 void chat_set_identity(chat_t *c, identity_source_t source, const identity_keypair_t *idkp) {
     c->identity_source = source;
     if (source != IDENT_NONE) c->identity = *idkp;
@@ -2083,7 +2107,7 @@ static cmd_result_t cmd_peers(void *ctx, const char *arg) {
         char build[64]; chat_build_label(p, build, sizeof build);
         static const char *const CODE[] = { "", ", code not compared", ", code compared", ", CODES DIFFER", ", KEY CHANGED" };
         ui_print(c, "*   %s#%s (verify %s%s, %s, %s%s)", p->nick, idhex, vfyhex, CODE[chat_code_state(c, p)],
-                 chat_verify_label(p->identity_state), build, p->persists ? ", logging" : "");
+                 chat_verify_label(p->identity_state), build, p->persists ? ", keeps history" : "");
     }
     if (n == 0) ui_print(c, "* nobody else yet");
     return CMD_OK;
@@ -3543,11 +3567,6 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
     c->n_static = n_static;
 
     c->persist = o->persist;
-    if (c->persist) {
-
-        c->log_fp = platform_fopen_private(o->log_path, "a");
-        if (!c->log_fp) { ui_print(c, "* could not open %s for logging - continuing without it", o->log_path); c->persist = 0; }
-    }
     c->start = now_seconds();
     c->next_rekey = c->start + REKEY_INTERVAL + jitter(REKEY_INTERVAL * 0.2);
     c->probe_tokens = PROBE_BURST;
@@ -3569,7 +3588,6 @@ void chat_shutdown(chat_t *c) {
     net_close(c->lan_sock);
     // Files we offered are closed, and downloads in progress don't leave half-written files behind.
     for (int i = 0; i < FILE_OFFERS_MAX; i++) if (c->files[i].used) file_free(&c->files[i]);
-    if (c->log_fp) fclose(c->log_fp);
 
     crypto_unlock((uint8_t *)c + SECRETS_OFFSET, SECRETS_LEN);
     crypto_unlock(c->peers, sizeof c->peers);
@@ -3583,12 +3601,10 @@ void chat_shutdown(chat_t *c) {
 static void emit_line_file(chat_t *c, const char *hhmm, const char *text, const uint8_t *rgb, unsigned flags, int color_len,
                            int file) {
     c->print(c->ui, hhmm, text, rgb, flags, color_len, file);
-    if (c->log_fp) { fprintf(c->log_fp, "[%s] %s\n", hhmm, text); fflush(c->log_fp); }
 }
 
 static void emit_line(chat_t *c, const char *hhmm, const char *text, const uint8_t *rgb, unsigned flags, int color_len) {
     c->print(c->ui, hhmm, text, rgb, flags, color_len, 0);
-    if (c->log_fp) { fprintf(c->log_fp, "[%s] %s\n", hhmm, text); fflush(c->log_fp); }
 }
 
 static void ui_print(chat_t *c, const char *fmt, ...) {

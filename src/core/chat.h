@@ -459,8 +459,8 @@ typedef struct {
     identity_source_t identity_source;
     identity_keypair_t identity;
 
+    // We keep a history of this session, which our "k" tells peers.
     int persist;
-    FILE *log_fp;
 
     notify_mode_t notify_mode;
     notify_preview_t notify_preview;
@@ -557,8 +557,7 @@ typedef struct {
     notify_preview_t notify_preview;
     // Send to peers whose verify code wasn't compared (the default is not to).
     int verify_optional;
-    int persist;
-    char log_path[512];
+    int persist;   // keeps a history (chat_set_history)
 
     identity_source_t identity_source;
     identity_keypair_t identity;
@@ -632,6 +631,13 @@ void chat_nick_skeleton(const char *nick, char *out, size_t cap);
 void chat_peer_name(const chat_t *c, const peer_t *p, char out[CHAT_NAME_LEN]);
 
 void chat_set_identity(chat_t *c, identity_source_t source, const identity_keypair_t *idkp);
+
+// Whether we keep a history of the session: peers' "k" is sent again so they're told straight away.
+void chat_set_history(chat_t *c, int on);
+// What names the session's history: from its key, the same each time it's joined with the same id
+// and password, and nothing anyone else can work out.
+#define CHAT_HISTORY_ID_LEN 16
+void chat_history_id(const chat_t *c, uint8_t out[CHAT_HISTORY_ID_LEN]);
 
 #define CHAT_MAX_SOCKS 12
 int chat_sockets(chat_t *c, sock_t out[CHAT_MAX_SOCKS]);

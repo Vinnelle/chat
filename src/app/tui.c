@@ -1418,8 +1418,9 @@ static void session_line(pen_t *p, const tui_session_row_t *s, int sel) {
     ptext(p, S_FAINT, count);
 }
 
-// The verify state and a modified client in words while they fit next to the nick, then the verify
-// state alone in words, then both as symbols. The nick is cut to make room for them, never the other way.
+// A history kept, a modified client and the verify state in words while they fit next to the nick,
+// then the first, the second and the third as symbols in turn. The nick is cut to make room for them,
+// never the other way.
 static void peer_line(pen_t *p, const tui_peer_row_t *pr) {
     const char *word, *glyph;
     style_t st;
@@ -1434,19 +1435,24 @@ static void peer_line(pen_t *p, const tui_peer_row_t *pr) {
     else if (pr->verify == 1) { word = G_CHECK " verified"; glyph = G_CHECK; st = S_GREEN; }
     else { word = "unverified"; glyph = "?"; st = S_FAINT; }
     const char *mod_word = pr->modified ? "modified " : "", *mod_glyph = pr->modified ? "! " : "";
+    const char *hist_word = pr->history ? "history " : "", *hist_glyph = pr->history ? "h " : "";
     int tag_w = utf8_str_cols(pr->tag);
     int nick_w = utf8_str_cols(pr->nick);
     int room = p->room - 2 - tag_w - 1, want = nick_w < 6 ? nick_w : 6;
-    const char *m = mod_word, *v = word;
-    if (room - utf8_str_cols(m) - utf8_str_cols(v) < want) m = mod_glyph;
-    if (room - utf8_str_cols(m) - utf8_str_cols(v) < want) v = glyph;
-    int right = utf8_str_cols(m) + utf8_str_cols(v);
+    const char *h = hist_word, *m = mod_word, *v = word;
+#define RIGHT_COLS (utf8_str_cols(h) + utf8_str_cols(m) + utf8_str_cols(v))
+    if (room - RIGHT_COLS < want) h = hist_glyph;
+    if (room - RIGHT_COLS < want) m = mod_glyph;
+    if (room - RIGHT_COLS < want) v = glyph;
+    int right = RIGHT_COLS;
+#undef RIGHT_COLS
     sty_rgb(p->w, pr->color, 0, 0);
     p->used += wapp_trunc(p->w, G_DOT " ", p->room - p->used);
     int nick_room = p->room - p->used - tag_w - right - 1;
     prgb(p, pr->color, pr->you, pr->nick, nick_room < 1 ? 1 : nick_room);
     ptext(p, S_FAINT, pr->tag);
     pspace(p, p->room - right);
+    ptext(p, S_YELLOW_BOLD, h);
     ptext(p, S_RED_BOLD, m);
     ptext(p, st, v);
 }

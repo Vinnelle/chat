@@ -74,6 +74,7 @@ typedef struct {
     int code;          // its verify code: 0 nothing to do, 1 to be compared, 2 compared, 3 different,
                        // 4 to be compared: another key than the one verified for its nick
     int modified;      // runs a modified client
+    int history;       // keeps a history of the session
 } tui_peer_row_t;
 
 // A label and its value, as the sidebar's network section lists them.

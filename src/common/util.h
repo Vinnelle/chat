@@ -49,5 +49,7 @@ double now_seconds(void);
 void copy_str(char *dst, const char *src, size_t dstsize);
 
 void current_hhmm(char out[6]);
+// "YYYY-MM-DD HH:MM", local time.
+void current_stamp(char out[17]);
 
 #endif

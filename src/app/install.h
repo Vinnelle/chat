@@ -135,6 +135,18 @@ int install_read_key(void *secret, size_t cap, size_t *len);
 long install_read_verified(char *buf, size_t cap);
 int install_write_verified(const char *text);
 
+// A session's history, in the open save: sealed with its other files, in a file named by id (from
+// the session's key, core/chat.h chat_history_id), so the name doesn't say which session it's for.
+// Read: the length, INSTALL_NO_FILE if there's none, or a PASS_ code. buf holds INSTALL_HISTORY_MAX.
+#define INSTALL_HISTORY_MAX (256 * 1024)
+#define INSTALL_HISTORY_ID_LEN 16
+long install_read_history(const uint8_t id[INSTALL_HISTORY_ID_LEN], char *buf, size_t cap);
+int install_write_history(const uint8_t id[INSTALL_HISTORY_ID_LEN], const char *text, size_t len);
+// One session's, or with NULL, every one's.
+int install_forget_history(const uint8_t *id);
+// How many sessions have one.
+int install_histories(void);
+
 // Deletes a save's files, what this device keeps for it if it's locked to it, then its folder and
 // the folders above it that nothing else is in. If it's the save in use, its passphrase is forgotten.
 int install_remove(const char *name);
