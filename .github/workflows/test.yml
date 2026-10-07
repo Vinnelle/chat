@@ -32,7 +32,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [bencode, json, pgp, text, engine, image]
+        target: [bencode, json, pgp, text, engine, image, toml]
     steps:
       - uses: actions/checkout@v7
 
