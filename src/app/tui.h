@@ -7,7 +7,7 @@
 #include <stddef.h>
 
 #define TUI_SCROLLBACK 400
-#define TUI_LINE_MAX 320
+#define TUI_LINE_MAX 1024
 
 typedef struct {
     char hhmm[6];
@@ -158,7 +158,7 @@ typedef const char *(*tui_complete_fn)(const char *typed);
 typedef int (*tui_command_fn)(const char *word, int whole);
 
 typedef struct {
-    char buf[600];
+    char buf[1024];
     int len;
     int cursor;
     tui_input_mode_t mode;

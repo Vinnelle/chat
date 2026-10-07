@@ -28,7 +28,7 @@
 
 typedef struct {
     const char *who;
-    char lines[LOG_LINES][320];
+    char lines[LOG_LINES][1024];
     int n;
     int modified_warnings;
     int anon_joins;   // "* anon ... joined": a peer announced before its nick came
@@ -289,6 +289,44 @@ static int watch_rate(void *ctx, addr_t from, addr_t to, const void *data, size_
 
 // Messages don't change when datagrams go or how big they are: every one is a cell, in a slot,
 // and slots come no closer together than COVER_INTERVAL, messages or no messages.
+// A message as long as MAX_TEXT goes whole to a peer whose k says it reads that much ("l"). To one
+// that doesn't, as older versions don't, it goes in parts no longer than OLD_MAX_TEXT, cut between
+// words, which together are the message.
+static void test_long_message(double *t) {
+    static char text[MAX_TEXT + 1];
+    size_t n = 0;
+    for (unsigned w = 1; ; w++) {
+        char word[24];
+        int wl = snprintf(word, sizeof word, "%sw%x", n ? " " : "", (w * 2654435761u) % (16u << (w % 12)));
+        if (n + (size_t)wl > MAX_TEXT) break;
+        memcpy(text + n, word, (size_t)wl + 1);
+        n += (size_t)wl;
+    }
+    peer_t *pb = peer_named(&A, "bob");
+    CHECK(pb && pb->long_text, "bob's k didn't say it reads long messages");
+    if (!pb) return;
+    int before = log_b.n;
+    chat_send_text(&A, text, *t);
+    RUN_UNTIL(t, 20, log_b.n > before);
+    CHECK(log_b.n == before + 1 && strstr(log_b.lines[before], text) != NULL, "a %zu-byte message didn't arrive whole", n);
+    // As though bob were an older version.
+    pb->long_text = 0;
+    before = log_b.n;
+    chat_send_text(&A, text, *t);
+    RUN_UNTIL(t, 60, log_b.n >= before + 2 && pending_msgs(&A) == 0);
+    static char joined[MAX_TEXT + 64];
+    size_t jl = 0;
+    int ok = log_b.n - before >= 2;
+    for (int i = before; i < log_b.n && ok; i++) {
+        const char *part = strstr(log_b.lines[i], ": ");
+        ok = part && strlen(part + 2) <= OLD_MAX_TEXT;
+        if (ok) jl += (size_t)snprintf(joined + jl, sizeof joined - jl, "%s%s", jl ? " " : "", part + 2);
+    }
+    CHECK(ok && strcmp(joined, text) == 0, "an older peer's parts were too long, or weren't the message (%d of them)",
+          log_b.n - before);
+    pb->long_text = 1;
+}
+
 static void test_constant_rate(double *t) {
     rate_t r = { 0, 0, 0.0, 1e9 };
     fake_net_filter = watch_rate;
@@ -2053,6 +2091,7 @@ int main(int argc, char **argv) {
 
     struct { const char *name; void (*fn)(double *); } tests[] = {
         { "connect", test_connect }, { "verify gate", test_verify_gate }, { "message", test_message },
+        { "long message", test_long_message },
         { "constant rate", test_constant_rate }, { "lost message", test_lost_message },
         { "rekey", test_rekey }, { "rekey mid-message", test_message_across_rekey }, { "cookie rate", test_cookie_rate },
         { "udp masked", test_udp_masked },

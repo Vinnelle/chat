@@ -14,6 +14,11 @@
   decoy the betas made still opens, and when its save opens chat says how to move it to the spare.
 
 ### Added
+- A message can be 880 bytes long, up from 250: as much as one frame holds, so nothing about how
+  messages travel changes. A peer on 0.5.0's betas or older only reads 250 bytes of one (its `k`
+  doesn't have the new `l`), so a longer message goes to it in parts, cut between words, each a
+  message of its own. A part a peer like that passes on is shown once, even to someone who got the
+  whole message.
 - Verify codes come as words to read out over a call: 16 four-letter words, one for each byte of the
   code, from Bytewords (a list made to be hard to mishear), like `iron when sets good · deli axis road
   exam · ...`. The prompt to compare codes when a peer joins and `:verify NICK` show them, with the

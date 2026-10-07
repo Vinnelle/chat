@@ -871,8 +871,10 @@ files). `i`/`a`/`I`/`A` go to INSERT, where Enter sends, `Ctrl+W` deletes the wo
 cursor and `Ctrl+U`
 everything before it, and `Esc` goes back to NORMAL. The input box border is the mode's colour,
 and the box grows a row at a time as what you type wraps, up to six rows (fewer on a short
-terminal). The count under it goes red once a message is over 250 bytes, and `Enter` then
-leaves it in the box instead of sending it cut off. Anything chat asks for (a password, a
+terminal), then scrolls. The count under it goes red once a message is over 880 bytes, and `Enter`
+then leaves it in the box instead of sending it cut off. A peer on 0.5.0's betas or older only
+reads 250 bytes of a message, so a longer one goes to them in parts, cut between words, each a
+message of its own. Anything chat asks for (a password, a
 session id, a new setting value, whether to carry on) comes up in a box over the screen, titled
 with what it's for and with its keys on the bottom edge. `Enter` confirms, `Esc` cancels, and
 your draft comes back after. Yes/no questions take `y` or `n`.

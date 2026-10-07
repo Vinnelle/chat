@@ -19,7 +19,11 @@
 #define MAX_CANDS 64
 #define MAX_PENDING_MSGS 128
 #define MAX_NICK 24
-#define MAX_TEXT 250
+#define MAX_TEXT 880
+// What a peer without "l" in its "k" reads of a message: older versions cut a longer one off there,
+// so it goes to them in parts, each a message of its own, at most MAX_TEXT_PARTS of them.
+#define OLD_MAX_TEXT 250
+#define MAX_TEXT_PARTS 8
 #define MAX_SESSION_NAME 64
 // A peer that has sent nothing for this long gets a hi, in case it has lost the session.
 #define KEEPALIVE 10.0
@@ -307,6 +311,8 @@ typedef struct {
     double next_rehello;   // when a hi may go to it again (keepalive, or a re-handshake stuck)
     // Its k says it reads several records in one frame, joined by newlines ("b").
     int batches;
+    // Its k says it reads a message up to MAX_TEXT long ("l"), not just OLD_MAX_TEXT.
+    int long_text;
 
     // The result of the user comparing the verify code with this peer over another channel: 0 not
     // yet, 1 the same, -1 different. When comparing is required, only 1 gets what's sent.

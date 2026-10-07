@@ -656,8 +656,8 @@ static void build_k_message(chat_t *c, peer_t *p, char *out, size_t out_cap) {
         hex_encode(sig, ID_SIGN_LEN, sighex);
     }
     // After the logging flag, features this build has that older ones don't: "r" announces rekeys,
-    // "b" reads several records per frame.
-    snprintf(out, out_cap, "k\t%s\t%s\t%drb\t%d\t%s\t%s", c->nick, colorhex, c->persist, idtype, idpubhex, sighex);
+    // "b" reads several records per frame, "l" reads messages up to MAX_TEXT.
+    snprintf(out, out_cap, "k\t%s\t%s\t%drbl\t%d\t%s\t%s", c->nick, colorhex, c->persist, idtype, idpubhex, sighex);
 }
 
 // "v": our version, our executable's hash, and our release's signed list of binaries (empty
@@ -771,6 +771,7 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
         slot->next_cover = carry.next_cover;
         slot->announces_rekey = carry.announces_rekey;
         slot->batches = carry.batches;
+        slot->long_text = carry.long_text;
         // A file it's fetching from us continues from where it was, so a rekey doesn't stall it.
         slot->serving = carry.serving;
         memcpy(slot->serve_fid, carry.serve_fid, FILE_ID_LEN);
@@ -1026,6 +1027,67 @@ static void check_build(chat_t *c, peer_t *p, const char *version, const uint8_t
     tell_build(c, p);
 }
 
+_Static_assert(2 + 8 + 1 + ID_LEN * 2 + 1 + MAX_NICK + 1 + MAX_TEXT <= RECORD_MAX, "a message's record fits one frame");
+
+// A part's id, the same whoever splits the message, so a part passed on by more than one peer is
+// still only shown once.
+static void part_mid(const char *mid, int i, char out[9]) {
+    char in[16];
+    uint8_t h[32];
+    int n = snprintf(in, sizeof in, "%s/%d", mid, i);
+    sha256_hash(in, (size_t)n, h);
+    hex_encode(h, 4, out);
+}
+
+// How much of text goes in a part of at most max bytes: up to a space in its second half if there's
+// one, so a word isn't split, otherwise to the end of a character.
+static size_t part_len(const char *text, size_t len, size_t max) {
+    if (len <= max) return len;
+    size_t cut = max;
+    while (cut > 0 && ((unsigned char)text[cut] & 0xc0) == 0x80) cut--;
+    for (size_t i = cut; i > max / 2; i--)
+        if (text[i] == ' ') return i;
+    return cut;
+}
+
+// With every retry slot taken a message still goes out once, just without retries.
+static void track_message(chat_t *c, peer_t *p, const char *mid, const char *record, double now) {
+    for (int s = 0; s < MAX_PENDING_MSGS; s++) {
+        pending_msg_t *pm = &c->pending[s];
+        if (pm->used) continue;
+        pm->used = 1;
+        copy_str(pm->mid, mid, sizeof pm->mid);
+        pm->peer_slot = peer_slot(c, p);
+        copy_str(pm->text, record, sizeof pm->text);
+        pm->tries = 1;
+        pm->next_retry = now + resend_delay(c, p);
+        return;
+    }
+}
+
+// An "m" to q: the text whole, or for a peer that reads no more than OLD_MAX_TEXT, in parts, each a
+// message with an id of its own. track: each is kept for retries until q acks it. 1 if any went.
+static int send_message(chat_t *c, peer_t *q, const char *mid, const char *idhex, const char *nick, const char *text,
+                        int track, double now) {
+    char record[MSG_LINE_LEN];
+    size_t len = strlen(text), pos = 0;
+    int sent = 0;
+    for (int i = 0; i < MAX_TEXT_PARTS && pos < len; i++) {
+        size_t n = q->long_text ? len : part_len(text + pos, len - pos, OLD_MAX_TEXT);
+        char pmid[9];
+        if (n == len) copy_str(pmid, mid, sizeof pmid);
+        else part_mid(mid, i, pmid);
+        snprintf(record, sizeof record, "m\t%s\t%s\t%s\t%.*s", pmid, idhex, nick, (int)n, text + pos);
+        if (send_peer(c, q, record) == 0) {
+            sent = 1;
+            if (track) track_message(c, q, pmid, record, now);
+        }
+        pos += n;
+        while (pos < len && text[pos] == ' ') pos++;
+    }
+    return sent;
+}
+
 static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
     char *f[MAX_FIELDS];
     int n = split_tabs(plain, f, MAX_FIELDS);
@@ -1039,10 +1101,11 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         uint8_t rgb[3];
         if (parse_color(f[2], rgb) == 0) memcpy(p->color, rgb, 3);
         // f[3] is the logging flag, then capability letters older builds ignore: "r" = sends rk,
-        // "b" = reads records joined by newlines.
+        // "b" = reads records joined by newlines, "l" = reads messages up to MAX_TEXT.
         p->persists = (f[3][0] == '1');
         p->announces_rekey = strchr(f[3], 'r') != NULL;
         p->batches = strchr(f[3], 'b') != NULL;
+        p->long_text = strchr(f[3], 'l') != NULL;
         int idtype = atoi(f[4]);
         size_t idpub_len = strlen(f[5]), sig_len = strlen(f[6]);
         if (idtype > IDENT_NONE && idtype <= IDENT_PGP && idpub_len == 64 && sig_len == 128) {
@@ -1137,6 +1200,13 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         }
         if (seen_has(c, f[1])) return;
         seen_add(c, f[1]);
+        // Its parts, should a peer that only takes short messages pass them on from the origin later.
+        if (strlen(f[4]) > OLD_MAX_TEXT)
+            for (int i = 0; i < MAX_TEXT_PARTS; i++) {
+                char pmid[9];
+                part_mid(f[1], i, pmid);
+                seen_add(c, pmid);
+            }
         char nick[MAX_NICK + 1], text[MAX_TEXT + 1], via[CHAT_NAME_LEN];
         if (direct) copy_str(nick, p->nick, sizeof nick);
         else chat_clean_nick(f[3], nick);
@@ -1154,14 +1224,12 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         if (c->notify && (c->notify_mode == NOTIFY_ALL || (c->notify_mode == NOTIFY_MENTIONS && mentioned)))
             c->notify(c->ui, c->notify_preview >= PREVIEW_NICK ? shown : NULL,
                       c->notify_preview == PREVIEW_MESSAGE ? text : NULL, mentioned);
-        char rejoin[MSG_LINE_LEN];
-        snprintf(rejoin, sizeof rejoin, "m\t%s\t%s\t%s\t%s", f[1], f[2], nick, text);
         for (int i = 0; i < c->peer_hi; i++) {
             peer_t *q = &c->peers[i];
             if (!q->used || !q->ok || q == p || memcmp(q->id, origin, ID_LEN) == 0) continue;
             // Only passed on to peers our own messages would go to.
             if (q->code_ok < 0 || (c->verify_required && q->code_ok != 1)) continue;
-            send_peer(c, q, rejoin);
+            send_message(c, q, f[1], f[2], nick, text, 0, now);
         }
     } else if (n == 2 && strcmp(f[0], "a") == 0) {
         for (int i = 0; i < MAX_PENDING_MSGS; i++)
@@ -3247,11 +3315,9 @@ void chat_send_text(chat_t *c, const char *text_in, double now) {
     char mid[9]; gen_mid(mid);
     seen_add(c, mid);
     char myidhex[33]; hex_encode(c->my_id, ID_LEN, myidhex);
-    char text[MSG_LINE_LEN];
-    snprintf(text, sizeof text, "m\t%s\t%s\t%s\t%s", mid, myidhex, c->nick, line);
     char who[MAX_NICK + 8]; snprintf(who, sizeof who, "%s (you)", c->nick);
     ui_chat(c, c->my_color, 0, who, line);
-    int sent = 0, s = 0, held = 0;
+    int sent = 0, held = 0;
     char held_names[3 * CHAT_NAME_LEN] = "";
     for (int i = 0; i < c->peer_hi; i++) {
         peer_t *p = &c->peers[i];
@@ -3263,18 +3329,7 @@ void chat_send_text(chat_t *c, const char *text_in, double now) {
             held++;
             continue;
         }
-        if (send_peer(c, p, text) != 0) continue;
-        sent++;
-        // With every retry slot taken the message still goes out once, just without retries.
-        while (s < MAX_PENDING_MSGS && c->pending[s].used) s++;
-        if (s == MAX_PENDING_MSGS) continue;
-        pending_msg_t *pm = &c->pending[s];
-        pm->used = 1;
-        memcpy(pm->mid, mid, sizeof pm->mid);
-        pm->peer_slot = i;
-        copy_str(pm->text, text, sizeof pm->text);
-        pm->tries = 1;
-        pm->next_retry = now + resend_delay(c, p);
+        sent += send_message(c, p, mid, myidhex, c->nick, line, 1, now);
     }
     if (held)
         ui_print(c, "* not sent to %s%s: compare verify codes first (:peers lists them, :verify NICK ok once they match)",

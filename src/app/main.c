@@ -207,6 +207,9 @@ static const char *USAGE =
 
 #define MAX_SESSIONS 12
 #define MAX_PEER_ARGS 16
+
+// A message is shown on one line, after who sent it: "nick#1a2b3c4d (via nick (code not compared)): ".
+_Static_assert(TUI_LINE_MAX >= MAX_TEXT + 2 * CHAT_NAME_LEN + 48, "a whole message fits a line on screen");
 #define PEER_ARG_LEN 256
 
 // A picture fetched to show: its thumbnail, drawn under the line that offered it while shown, or
