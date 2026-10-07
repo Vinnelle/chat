@@ -125,7 +125,7 @@ static const char *USAGE =
     "goes into the key), and :set authenticator on asks for an authenticator app's code each time\n"
     "it opens (a check chat makes: the code's secret is kept in the save). One, the other or both.\n"
     ":set destroy N deletes a save after N wrong passphrases in a row, and :set shadow on adds a\n"
-    "second passphrase that opens a decoy and deletes the real save for good.\n"
+    "second passphrase that opens a decoy in its place and deletes the real save's files.\n"
     "\n"
     "  --save      open the save with this name, without the list\n"
     "              (default is the one in ~/.config/chat itself). If there's no save\n"
@@ -1420,15 +1420,19 @@ static const setting_def_t SETTINGS[] = {
       "Requires the 6-digit code from an authenticator app (Aegis, Google Authenticator, 2FAS...) to unlock the "
       "save." },
     { SET_DESTROY, NULL, "Duress", "destroy", "Self-destruct", K_CHOICE, "off|3|5|10",
-      "Deletes what :install saves for good after this many wrong passphrases in a row, so a found or taken "
-      "device can't be guessed at forever. The count is kept next to the save, not sealed (it has to be read "
-      "before the passphrase opens anything), so someone who copies the files first can reset it: this stops "
-      "guessing at the keyboard, not a forensic copy. A right passphrase clears the count." },
+      "Deletes what :install saves after this many wrong passphrases in a row, so a found or taken device can't "
+      "be guessed at forever. The count and the limit are kept next to the save, not sealed (they have to be read "
+      "before the passphrase opens anything), so anyone who can read the files sees them, and someone who copies "
+      "the files first can reset the count: this stops guessing at the keyboard, not a forensic copy. A right "
+      "passphrase clears the count." },
     { SET_SHADOW, NULL, NULL, "shadow", "Shadow password", K_ACTION, "on|off",
-      "A second passphrase that opens a decoy instead of the real save, and deletes the real save first, for "
-      "good. Afterwards only the decoy is there, so there's nothing left to be forced to hand over. The decoy "
-      "needs the same security key, device and code, so opening it looks the same. Enter sets or removes it. "
-      "Only while a save is open, and it needs the save's own factors to hand." },
+      "A second passphrase that opens a decoy, a clean save with no key or verified peers, in place of the real "
+      "one, whose files it replaces or deletes. The decoy needs the same security key, device and code, every "
+      "passphrase takes as long, and every save has a decoy's file, filled with random bytes when there's no "
+      "decoy, so neither the files nor the time it takes say which passphrase opened it. Deleting isn't erasing: "
+      "a copy made before, a backup or the disk itself can still hold the real save, sealed under its own "
+      "passphrase. Enter sets or removes it. Only while a save is open, and it needs the save's own factors to "
+      "hand." },
     { SET_VERIFY, "Chat", NULL, "verify", "Compare verify codes", K_CHOICE, "required|optional",
       "Anyone with a session's id and password could sit between two members and read what they say. When a peer "
       "joins, chat shows a code to compare with them over another channel. It only matches on both ends if "
@@ -1632,7 +1636,7 @@ static void setting_value(setting_id_t id, char *out, size_t cap) {
             else snprintf(out, cap, "0 (a free one)");
             break;
         case SET_SHADOW:
-            snprintf(out, cap, "%s", g_app.installed && install_has_shadow(install_current()) ? "on" : "off");
+            snprintf(out, cap, "%s", g_app.installed && !g_app.locked && install_has_shadow() ? "on" : "off");
             break;
         default:
             out[0] = '\0';
@@ -4457,6 +4461,25 @@ static void factors_text(unsigned f, char *out, size_t cap) {
     }
 }
 
+// What there is to say about the open save's decoy, or NULL.
+static const char *shadow_news(void) {
+    static char text[320];
+    const char *shown = install_shown_name(install_current());
+    switch (install_shadow_news()) {
+        case INSTALL_SHADOW_OLD:
+            snprintf(text, sizeof text, "* the save %s's shadow password was set by a beta of chat, which kept its decoy "
+                     "in files only a save with a decoy has. It still works, but :set shadow off, then :set shadow on, "
+                     "sets it again in the files every save has", shown);
+            return text;
+        case INSTALL_SHADOW_LOST:
+            snprintf(text, sizeof text, "* the save %s's decoy couldn't be kept, so its shadow passphrase opens nothing "
+                     "now - :set shadow on sets one again", shown);
+            return text;
+        default:
+            return NULL;
+    }
+}
+
 // The save just opened is the one in use from now on: its settings, then the command line options
 // again so they still override them, then the key unless --identity chose another. Rows its
 // settings don't have keep their value. loaded, if given, gets each row's value before the options
@@ -4475,6 +4498,8 @@ static void use_opened_save(char (*loaded)[ROW_TEXT_MAX]) {
     else if (install_relocked() < 0)
         saved_note("* the save %s is only part way through a change to what it needs, and couldn't be sealed again: %s",
                    install_shown_name(install_current()), install_why());
+    const char *news = shadow_news();
+    if (news) saved_note("%s", news);
     memcpy(g_saved_rows, g_setting_defaults, sizeof g_saved_rows);
     load_saved_settings();
     for (int i = 0; loaded && i < N_SETTINGS; i++)
@@ -4532,11 +4557,12 @@ static int code_in_terminal(void) {
 }
 
 // 0, or the reason it stayed sealed. Before the screen is up, so a security key is waited for, and a
-// code typed, in the terminal.
-static int open_saved(const char *name, const char *passphrase) {
+// code typed, in the terminal. probe: the passphrase may be another save's, so it's tried with
+// install_probe.
+static int open_saved(const char *name, const char *passphrase, int probe) {
     if ((install_factors(name) & INSTALL_FACTOR_KEY) && !install_key_ready(name) && key_in_terminal(name) != 0)
         return INSTALL_KEY;
-    int rc = install_unlock(name, passphrase);
+    int rc = probe ? install_probe(name, passphrase) : install_unlock(name, passphrase);
     if (rc != 0) return rc;
     if (install_code_pending() && code_in_terminal() != 0) {
         install_code_cancel();
@@ -4602,10 +4628,11 @@ static void unlock_at_start(int in_box) {
     }
     if (from_env) {
         int rc = PASS_WRONG, elsewhere = 0;
-        if (!save_to_pick()) rc = open_saved(install_current(), pw);
+        if (!save_to_pick()) rc = open_saved(install_current(), pw, 0);
         else for (int i = 0; i < g_app.n_saves && (rc == PASS_WRONG || rc == INSTALL_DEVICE); i++) {
             if (g_app.saves[i].factors & more) continue;
-            rc = open_saved(g_app.saves[i].name, pw);
+            // Saves it doesn't fit aren't counted towards self-destruct, and no decoy opens.
+            rc = open_saved(g_app.saves[i].name, pw, 1);
             elsewhere |= rc == INSTALL_DEVICE;
         }
         crypto_wipe(pw, sizeof pw);
@@ -4623,7 +4650,7 @@ static void unlock_at_start(int in_box) {
                  g_app.n_saves > 1 ? "the save " : "what :install saved",
                  g_app.n_saves > 1 ? install_shown_name(install_current()) : "");
         if (term_read_password(prompt, pw, sizeof pw) != 0 || !pw[0]) break;
-        int rc = open_saved(install_current(), pw);
+        int rc = open_saved(install_current(), pw, 0);
         crypto_wipe(pw, sizeof pw);
         if (rc == 0) return;
         fprintf(stderr, "chat: %s\n", open_error(rc));
@@ -5264,6 +5291,8 @@ static void device_lock_yes(void) {
                  "are", shown, where);
     }
     if (also[0]) push_log("* device lock: %s", also);
+    const char *news = shadow_news();
+    if (news) push_log("%s", news);
     note(on ? "Device lock: on - %s only opens on this device" : "Device lock: off - %s opens on any device", shown);
 }
 
@@ -5359,6 +5388,8 @@ static void factor_apply(void) {
                  "its entry from your app", shown);
     }
     if (also[0]) push_log("* %s", also);
+    const char *news = shadow_news();
+    if (news) push_log("%s", news);
     note("%s: %s for %s", factor_label(factor), on ? "on" : "off", shown);
 }
 
@@ -5429,14 +5460,23 @@ static void destroy_choose(int limit) {
 // The decoy is a clean save with no signing key or verified peers: it looks like a fresh install.
 static void shadow_set_decoy(void) {
     const char *shown = install_shown_name(install_current());
-    int rc = install_shadow_set(g_app.shadow_pass, "", NULL, 0, "");
+    int rc = install_shadow_set(g_app.shadow_pass);
     crypto_wipe(g_app.shadow_pass, sizeof g_app.shadow_pass);
     factor_close();
     if (rc == PASS_NOMEM) { note("Shadow password: setting it up needs 512 MiB of free memory for a moment"); return; }
     if (rc != 0) { note("Shadow password: couldn't set it - %s", install_why()); return; }
-    push_log("* shadow password: the save %s now has a decoy. Opening it with the shadow passphrase deletes the real "
-             "save for good and keeps only the decoy. Don't forget which passphrase is which", shown);
+    push_log("* shadow password: the save %s now has a decoy. Opening it with the shadow passphrase puts the decoy in "
+             "the real save's place and deletes the real save's files. Don't forget which passphrase is which", shown);
     note("Shadow password: on for %s", shown);
+}
+
+static void shadow_off(void) {
+    if (install_shadow_clear() != 0) {
+        note("Shadow password: couldn't remove it - %s", install_why());
+        return;
+    }
+    push_log("* shadow password: removed for the save %s - there's no decoy now", install_shown_name(install_current()));
+    note("Shadow password: off");
 }
 
 static void begin_shadow(void) {
@@ -5444,11 +5484,8 @@ static void begin_shadow(void) {
         note("Shadow password: open a save first - :install, then set it while the save is open");
         return;
     }
-    const char *shown = install_shown_name(install_current());
-    if (install_has_shadow(install_current())) {
-        install_shadow_clear(install_current());
-        push_log("* shadow password: removed for the save %s - there's no decoy now", shown);
-        note("Shadow password: off");
+    if (install_has_shadow()) {
+        shadow_off();
         return;
     }
     crypto_wipe(g_app.shadow_pass, sizeof g_app.shadow_pass);
@@ -5671,13 +5708,10 @@ static cmd_result_t app_set(void *ctx, const char *arg) {
             break;
     }
     if (d->id == SET_SHADOW) {
-        int on = g_app.installed && install_has_shadow(install_current());
+        int on = g_app.installed && !g_app.locked && install_has_shadow();
         if (strcmp(value, "off") == 0) {
             if (!on) { note("Shadow password: off already"); return CMD_OK; }
-            install_shadow_clear(install_current());
-            push_log("* shadow password: removed for the save %s - there's no decoy now",
-                     install_shown_name(install_current()));
-            note("Shadow password: off");
+            shadow_off();
         } else if (strcmp(value, "on") == 0) {
             if (on) note("Shadow password: on already - :set shadow off removes it");
             else begin_shadow();
@@ -7403,9 +7437,9 @@ static const tui_dialog_t *current_dialog(void) {
             int first = g_app.mode == MODE_SHADOW_PASS;
             d.title = "SHADOW PASSWORD";
             d.n_text = add_para(paras, 0, TUI_P_TEXT, first
-                ? "A second passphrase for this save. Opening the save with it deletes the real save for good and "
-                  "leaves only a decoy - a clean, empty account that needs the same security key, device and code. "
-                  "Make it different from the real one, and don't forget which is which."
+                ? "A second passphrase for this save. Opening the save with it puts a decoy in the real save's place "
+                  "and deletes the real save's files - a clean, empty account that needs the same security key, "
+                  "device and code. Make it different from the real one, and don't forget which is which."
                 : "Type the shadow passphrase again, to be sure of it.");
             d.placeholder = first ? "shadow passphrase" : "the same passphrase";
             d.keys = first ? "enter next \xc2\xb7 esc cancel" : "enter set \xc2\xb7 esc cancel";

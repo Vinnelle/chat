@@ -235,6 +235,11 @@ void pass_lock_set(pass_lock_t *lk, unsigned needs, const uint8_t device[PASS_DE
                    const uint8_t key[PASS_KEY_SECRET_LEN]);
 int pass_seal(const pass_lock_t *lk, const void *plain, size_t len, uint8_t *out, size_t cap, size_t *out_len);
 int pass_unseal(const pass_lock_t *lk, const uint8_t *in, size_t len, void *plain, size_t cap, size_t *plain_len);
+// Random bytes the shape of plain_len sealed under a new lock needing needs, header and all, into
+// out (plain_len + PASS_SEAL_OVERHEAD): without the passphrase, nothing tells it from the real thing.
+void pass_chaff(unsigned needs, size_t plain_len, uint8_t *out);
+// How many times Argon2id has run for a lock.
+unsigned long pass_derivations(void);
 
 // A 32-byte secret sealed under a key from elsewhere (a security key's hmac-secret), with ad bound to
 // it: out is a nonce, then the sealed secret. unwrap returns 0, or -1 for another key or other ad.

@@ -16,11 +16,24 @@
 #define DEVICE_NAME "device"
 #define SECKEY_NAME "securitykey"
 #define TRIES_NAME "tries"
-#define SHADOW_SETTINGS "shadow-settings"
-#define SHADOW_KEY "shadow-key"
-#define SHADOW_VERIFIED "shadow-verified"
-#define SHADOW_CODE "shadow-authenticator"
+#define SPARE_NAME "spare"
+#define SPARE_LOCK_NAME "spare-lock"
+// A decoy as 0.5.0's betas made it, in files only a save with a decoy had: still opened, until the
+// shadow passphrase is set again.
+#define OLD_DECOY_SETTINGS "shadow-settings"
+#define OLD_DECOY_KEY "shadow-key"
+#define OLD_DECOY_VERIFIED "shadow-verified"
+#define OLD_DECOY_CODE "shadow-authenticator"
 #define TRIES_MAGIC "CT1"   // then one byte each: the limit, the count so far
+// The spare: 1, whether the decoy asks for a code, and the code's secret, sealed under the decoy's
+// lock. Without a decoy it's chaff: random bytes with the same size and header.
+#define SPARE_PLAIN_LEN (2 + TOTP_SECRET_LEN)
+#define SPARE_FILE_LEN (SPARE_PLAIN_LEN + PASS_SEAL_OVERHEAD)
+// The spare's lock, sealed with the save's other files: 1, whether there's a decoy, then the decoy
+// lock's header and the key its passphrase made (or random bytes), so the decoy can be sealed again
+// when the save's factors change.
+#define SPARE_LOCK_PLAIN_LEN (2 + PASS_HEADER_LEN + 32)
+#define SPARE_LOCK_FILE_LEN (SPARE_LOCK_PLAIN_LEN + PASS_SEAL_OVERHEAD)
 #define SETTINGS_FILE_MAX (INSTALL_SETTINGS_MAX + PASS_SEAL_OVERHEAD)
 #define KEY_FILE_MAX (INSTALL_KEY_MAX + PASS_SEAL_OVERHEAD)
 #define VERIFIED_FILE_MAX (INSTALL_VERIFIED_MAX + PASS_SEAL_OVERHEAD)
@@ -43,13 +56,17 @@ _Static_assert(SECKEY_SECRET_LEN == 32 && PASS_KEY_SECRET_LEN == 32, "a security
 
 // Also removes any .new files left by a crash while writing.
 static const char *const FILES[] = { SETTINGS_NAME, KEY_NAME, VERIFIED_NAME, CODE_NAME, SECKEY_NAME,
-                                     TRIES_NAME, SHADOW_SETTINGS, SHADOW_KEY, SHADOW_VERIFIED, SHADOW_CODE,
+                                     TRIES_NAME, SPARE_NAME, SPARE_LOCK_NAME, OLD_DECOY_SETTINGS, OLD_DECOY_KEY,
+                                     OLD_DECOY_VERIFIED, OLD_DECOY_CODE,
                                      SETTINGS_NAME ".new", KEY_NAME ".new", VERIFIED_NAME ".new", CODE_NAME ".new",
-                                     SECKEY_NAME ".new", TRIES_NAME ".new", SHADOW_SETTINGS ".new", SHADOW_KEY ".new",
-                                     SHADOW_VERIFIED ".new", SHADOW_CODE ".new", DEVICE_NAME ".new", DEVICE_NAME };
+                                     SECKEY_NAME ".new", TRIES_NAME ".new", SPARE_NAME ".new", SPARE_LOCK_NAME ".new",
+                                     OLD_DECOY_SETTINGS ".new", OLD_DECOY_KEY ".new", OLD_DECOY_VERIFIED ".new",
+                                     OLD_DECOY_CODE ".new", DEVICE_NAME ".new", DEVICE_NAME };
 #define N_FILES (sizeof FILES / sizeof FILES[0])
-static const char *const SEALED[] = { SETTINGS_NAME, KEY_NAME, VERIFIED_NAME, CODE_NAME };
+static const char *const SEALED[] = { SETTINGS_NAME, KEY_NAME, VERIFIED_NAME, CODE_NAME, SPARE_LOCK_NAME };
 #define N_SEALED (sizeof SEALED / sizeof SEALED[0])
+static const char *const OLD_DECOY[] = { OLD_DECOY_SETTINGS, OLD_DECOY_KEY, OLD_DECOY_VERIFIED, OLD_DECOY_CODE };
+#define N_OLD_DECOY (sizeof OLD_DECOY / sizeof OLD_DECOY[0])
 
 #define SAVES_DIR "saves"
 
@@ -80,6 +97,9 @@ static uint8_t g_code[TOTP_SECRET_LEN];
 static unsigned g_pend_all;
 static char g_why[256];
 static int g_relocked;
+static pass_lock_t g_spare_lock;
+static int g_decoy_state = -1;   // whether the open save has a decoy, -1 until it's read
+static int g_decoy_lost;
 
 // A save's securitykey file: one salt, then each security key's credential, whether it needs the
 // key's PIN, and the save's security key secret wrapped under that key's hmac-secret. Any one of the
@@ -136,6 +156,7 @@ static void pin_secrets(void) {
     crypto_lock(&g_new_key, sizeof g_new_key);
     crypto_lock(&g_new_code, sizeof g_new_code);
     crypto_lock(&g_job, sizeof g_job);
+    crypto_lock(&g_spare_lock, sizeof g_spare_lock);
     pinned = 1;
 }
 
@@ -324,6 +345,7 @@ static void hold(const char *name, const held_t *h) {
     copy_str(g_name, stored_name(name), sizeof g_name);
     g_held = *h;
     g_open = 1;
+    g_decoy_state = -1;
 }
 
 static long read_device(const char *name, uint8_t buf[DEVICE_SEALED_MAX + 1]) {
@@ -470,26 +492,30 @@ static int unseal(const uint8_t *sealed, size_t n, void *plain, size_t cap, size
     return g_open ? unseal_with(&g_held, sealed, n, plain, cap, len) : PASS_WRONG;
 }
 
-static int write_sealed_with(const pass_lock_t *lk, const char *file, const void *plain, size_t len) {
+static int write_sealed_to(const char *name, const pass_lock_t *lk, const char *file, const void *plain, size_t len) {
     char path[1000];
     static uint8_t sealed[VERIFIED_FILE_MAX];
     size_t n;
-    if (!g_open || save_path(g_name, file, path, sizeof path, 1) != 0) return -1;
+    if (save_path(name, file, path, sizeof path, 1) != 0) return -1;
     if (pass_seal(lk, plain, len, sealed, sizeof sealed, &n) != 0) return -1;
     return platform_write_private(path, sealed, n);
 }
 
-static int write_code_to(const pass_lock_t *lk, const char *file, const uint8_t secret[TOTP_SECRET_LEN]) {
+static int write_sealed_with(const pass_lock_t *lk, const char *file, const void *plain, size_t len) {
+    return g_open ? write_sealed_to(g_name, lk, file, plain, len) : -1;
+}
+
+static int write_code_to(const char *name, const pass_lock_t *lk, const uint8_t secret[TOTP_SECRET_LEN]) {
     uint8_t plain[CODE_PLAIN_LEN];
     plain[0] = 1;
     memcpy(plain + 1, secret, TOTP_SECRET_LEN);
-    int rc = write_sealed_with(lk, file, plain, sizeof plain);
+    int rc = write_sealed_to(name, lk, CODE_NAME, plain, sizeof plain);
     crypto_wipe(plain, sizeof plain);
     return rc;
 }
 
 static int write_code(const pass_lock_t *lk, const uint8_t secret[TOTP_SECRET_LEN]) {
-    return write_code_to(lk, CODE_NAME, secret);
+    return g_open ? write_code_to(g_name, lk, secret) : -1;
 }
 
 static int read_code(const char *name, const held_t *h, uint8_t secret[TOTP_SECRET_LEN]) {
@@ -545,64 +571,126 @@ int install_arm_destroy(const char *name, unsigned limit) {
     return write_tries(name, limit, 0);
 }
 
-int install_has_shadow(const char *name) { return has(name, SHADOW_SETTINGS); }
+// ---- the spare: a decoy, or chaff the same shape ----
 
-int install_shadow_clear(const char *name) {
-    remove_file(name, SHADOW_SETTINGS);
-    remove_file(name, SHADOW_KEY);
-    remove_file(name, SHADOW_VERIFIED);
-    remove_file(name, SHADOW_CODE);
-    return 0;
+static int old_decoy(const char *name) { return has(name, OLD_DECOY_SETTINGS); }
+
+static void remove_old_decoy(const char *name) {
+    for (size_t i = 0; i < N_OLD_DECOY; i++) remove_file(name, OLD_DECOY[i]);
 }
 
-// The decoy's files become the save's own: the real sealed files and the strike count go, and the
-// device and securitykey files stay, since the decoy is sealed to share them.
-static int promote_decoy(const char *name) {
-    static const char *const map[][2] = {
-        { SHADOW_SETTINGS, SETTINGS_NAME }, { SHADOW_KEY, KEY_NAME },
-        { SHADOW_VERIFIED, VERIFIED_NAME }, { SHADOW_CODE, CODE_NAME },
-    };
-    static uint8_t buf[VERIFIED_FILE_MAX + 1];
-    char from[1000], to[1000];
-    remove_file(name, SETTINGS_NAME);
-    remove_file(name, KEY_NAME);
-    remove_file(name, VERIFIED_NAME);
-    remove_file(name, CODE_NAME);
-    remove_file(name, TRIES_NAME);
-    for (size_t i = 0; i < sizeof map / sizeof map[0]; i++) {
-        if (save_path(name, map[i][0], from, sizeof from, 0) != 0) continue;
-        long n = platform_read_file(from, buf, sizeof buf);
-        if (n > 0 && (size_t)n <= VERIFIED_FILE_MAX && save_path(name, map[i][1], to, sizeof to, 1) == 0)
-            platform_write_private(to, buf, (size_t)n);
-        platform_remove(from);
+static int write_spare_lock(const char *name, const pass_lock_t *lk, const pass_lock_t *decoy) {
+    uint8_t plain[SPARE_LOCK_PLAIN_LEN];
+    plain[0] = 1;
+    plain[1] = decoy != NULL;
+    if (decoy) {
+        memcpy(plain + 2, decoy->header, PASS_HEADER_LEN);
+        memcpy(plain + 2 + PASS_HEADER_LEN, decoy->base, sizeof decoy->base);
+    } else {
+        gen_random(plain + 2, sizeof plain - 2);
     }
-    crypto_wipe(buf, sizeof buf);
-    return 0;
+    int rc = write_sealed_to(name, lk, SPARE_LOCK_NAME, plain, sizeof plain);
+    crypto_wipe(plain, sizeof plain);
+    return rc;
 }
 
-// A passphrase that didn't open the save. 1 if it was the shadow passphrase (the decoy is now the
-// save, so install_unlock opens it again), INSTALL_DESTROYED if too many wrong tries deleted the
-// save, or PASS_WRONG. h holds the factor secrets, which the shadow lock shares.
-#define WRONG_RETRY 1
-static int wrong_pass(const char *name, const char *passphrase, const held_t *h) {
-    if (install_has_shadow(name)) {
-        static uint8_t sealed[SETTINGS_FILE_MAX + 1], plain[SETTINGS_FILE_MAX];
-        size_t n = 0, got = 0;
-        if (read_sealed(name, SHADOW_SETTINGS, sealed, SETTINGS_FILE_MAX, &n) == 0) {
-            pass_lock_t sl;
-            int rc = pass_lock_of(passphrase, sealed, n, &sl);
-            if (rc == 0) pass_lock_set(&sl, pass_needs(sealed, n), h->device, h->key);
-            if (rc == 0) rc = pass_unseal(&sl, sealed, n, plain, sizeof plain, &got);
-            crypto_wipe(&sl, sizeof sl);
-            crypto_wipe(plain, sizeof plain);
-            if (rc == 0) {
-                unsigned limit = (unsigned)install_destroy_limit(name);
-                promote_decoy(name);
-                if (limit) write_tries(name, limit, 0);
-                return WRONG_RETRY;
-            }
+// 1, with the decoy's lock (its factors still to be set) in decoy, if the save has a decoy; 0 if it
+// hasn't; -1 if its spare-lock file is missing or damaged.
+static int read_spare_lock(const char *name, const held_t *h, pass_lock_t *decoy) {
+    uint8_t sealed[SPARE_LOCK_FILE_LEN + 1], plain[SPARE_LOCK_PLAIN_LEN];
+    size_t n = 0, len = 0;
+    int out = -1, rc = read_sealed(name, SPARE_LOCK_NAME, sealed, SPARE_LOCK_FILE_LEN, &n);
+    if (rc == 0) rc = unseal_with(h, sealed, n, plain, sizeof plain, &len);
+    if (rc == 0 && len == sizeof plain && plain[0] == 1 && plain[1] <= 1) {
+        out = plain[1];
+        memset(decoy, 0, sizeof *decoy);
+        if (out) {
+            memcpy(decoy->header, plain + 2, PASS_HEADER_LEN);
+            memcpy(decoy->base, plain + 2 + PASS_HEADER_LEN, sizeof decoy->base);
         }
     }
+    crypto_wipe(plain, sizeof plain);
+    return out;
+}
+
+static int write_chaff(const char *name, unsigned needs) {
+    uint8_t buf[SPARE_FILE_LEN];
+    char path[1000];
+    pass_chaff(needs, SPARE_PLAIN_LEN, buf);
+    return save_path(name, SPARE_NAME, path, sizeof path, 1) == 0 ? platform_write_private(path, buf, sizeof buf) : -1;
+}
+
+static int write_decoy(const char *name, const pass_lock_t *sl, const uint8_t *code) {
+    uint8_t plain[SPARE_PLAIN_LEN] = { 1, code != NULL };
+    if (code) memcpy(plain + 2, code, TOTP_SECRET_LEN);
+    int rc = write_sealed_to(name, sl, SPARE_NAME, plain, sizeof plain);
+    crypto_wipe(plain, sizeof plain);
+    return rc;
+}
+
+// The spare made to need what the save needs: a decoy sealed again with the key its passphrase made,
+// which the spare's lock keeps, and with the save's code if it asks for one; otherwise new chaff.
+// 1 if the save has a decoy, 0 if not, -1 if it had one that couldn't be kept.
+static int spare_fit(const char *name, const held_t *h, unsigned needs) {
+    pass_lock_t *sl = &g_spare_lock;
+    uint8_t code[TOTP_SECRET_LEN];
+    int had = read_spare_lock(name, h, sl), out = 0;
+    if (had == 1) {
+        int with_code = (needs & F_CODE) && read_code(name, h, code) == 0;
+        pass_lock_set(sl, needs, h->device, h->key);
+        out = (with_code || !(needs & F_CODE)) && write_decoy(name, sl, with_code ? code : NULL) == 0 ? 1 : -1;
+    }
+    crypto_wipe(code, sizeof code);
+    crypto_wipe(sl, sizeof *sl);
+    if (out == 1) return 1;
+    write_chaff(name, needs);
+    if (had != 0) write_spare_lock(name, &h->lock, NULL);
+    return out;
+}
+
+// Opened with its own passphrase, a save is written just as when its decoy takes its place: every
+// sealed file and the spare, so the files' times don't say which passphrase opened it.
+static void refresh(const char *name, const held_t *h) {
+    static uint8_t buf[VERIFIED_FILE_MAX + 1];
+    char path[1000];
+    for (size_t i = 0; i < N_SEALED; i++) {
+        if (save_path(name, SEALED[i], path, sizeof path, 0) != 0) continue;
+        long n = platform_read_file(path, buf, sizeof buf);
+        if (n > 0 && (size_t)n <= VERIFIED_FILE_MAX) platform_write_private(path, buf, (size_t)n);
+    }
+    // A decoy the betas made can't be sealed again without its passphrase, so it stays as it is.
+    if (!old_decoy(name) && spare_fit(name, h, h->lock.needs) < 0) g_decoy_lost = 1;
+}
+
+// The decoy takes the save's place, settings first, so from then on the real passphrase opens
+// nothing. The save's key goes. Its device and securitykey files stay, since the decoy needs them
+// too. Then it gets a spare of chaff, as a save without a decoy has.
+static void promote(const char *name, const pass_lock_t *sl, const uint8_t *spare_plain, int old) {
+    if (old) {
+        static const char *const to[] = { SETTINGS_NAME, KEY_NAME, VERIFIED_NAME, CODE_NAME };
+        static uint8_t buf[VERIFIED_FILE_MAX + 1];
+        char path[1000];
+        for (size_t i = 0; i < N_OLD_DECOY; i++) {
+            long n = save_path(name, OLD_DECOY[i], path, sizeof path, 0) == 0 ? platform_read_file(path, buf, sizeof buf) : -1;
+            if (n > 0 && (size_t)n <= VERIFIED_FILE_MAX && save_path(name, to[i], path, sizeof path, 1) == 0)
+                platform_write_private(path, buf, (size_t)n);
+            else
+                remove_file(name, to[i]);
+        }
+    } else {
+        write_sealed_to(name, sl, SETTINGS_NAME, "", 0);
+        remove_file(name, KEY_NAME);
+        write_sealed_to(name, sl, VERIFIED_NAME, "", 0);
+        if (spare_plain[1]) write_code_to(name, sl, spare_plain + 2);
+        else remove_file(name, CODE_NAME);
+    }
+    write_spare_lock(name, sl, NULL);
+    write_chaff(name, sl->needs);
+    remove_old_decoy(name);
+}
+
+// A wrong passphrase: PASS_WRONG, or INSTALL_DESTROYED if it was one too many.
+static int wrong_pass(const char *name) {
     unsigned limit = 0, count = 0;
     if (read_tries(name, &limit, &count) != 0 || limit == 0) return PASS_WRONG;
     count++;
@@ -654,6 +742,13 @@ int install_lock_new(const char *name, const char *passphrase, unsigned factors)
             rc = -1;
         }
     }
+    // Every save has a spare from the start, so having one says nothing. One that can't be written
+    // now is when the save is next opened.
+    if (rc == 0) {
+        g_decoy_lost = 0;
+        write_spare_lock(name, &g_held.lock, NULL);
+        write_chaff(name, factors);
+    }
     // A save that can't be made with all its factors leaves nothing behind.
     if (rc != 0 && wrote_key) remove_file(name, SECKEY_NAME);
     if (rc != 0 && wrote_device) forget_device(name);
@@ -671,12 +766,15 @@ static void finish_open(unsigned all) {
 // Tried on the settings file, which exists whenever the key file does, unless writing it failed.
 // A save locked to the device needs it before anything else: elsewhere no passphrase can open it,
 // so none is tried. A save may still have files a crash left locked to it. A security key that any
-// file needs is needed first too, so nothing is ever sealed again without it.
-int install_unlock(const char *name, const char *passphrase) {
-    static uint8_t sealed[SETTINGS_FILE_MAX + 1], plain[SETTINGS_FILE_MAX];
+// file needs is needed first too, so nothing is ever sealed again without it. act: a wrong
+// passphrase counts towards self-destruct, and the shadow passphrase opens the decoy.
+static int unlock(const char *name, const char *passphrase, int act) {
+    static uint8_t sealed[SETTINGS_FILE_MAX + 1], plain[SETTINGS_FILE_MAX], spare[SETTINGS_FILE_MAX + 1];
     held_t *h = &g_opening;
-    size_t n = 0, got;
+    pass_lock_t *sl = &g_spare_lock;
+    size_t n = 0, sn = 0, got;
     g_relocked = 0;
+    g_decoy_lost = 0;
     g_why[0] = '\0';
     int rc = read_sealed(name, SETTINGS_NAME, sealed, SETTINGS_FILE_MAX, &n);
     if (rc == INSTALL_NO_FILE) rc = read_sealed(name, KEY_NAME, sealed, KEY_FILE_MAX, &n);
@@ -699,18 +797,47 @@ int install_unlock(const char *name, const char *passphrase) {
         memcpy(h->key, g_try_key, sizeof h->key);
         h->have_key = 1;
     }
+    int old = 0, sr = read_sealed(name, SPARE_NAME, spare, SETTINGS_FILE_MAX, &sn);
+    if (sr == INSTALL_NO_FILE) {
+        sr = read_sealed(name, OLD_DECOY_SETTINGS, spare, SETTINGS_FILE_MAX, &sn);
+        old = sr == 0;
+    }
     rc = pass_lock_of(passphrase, sealed, n, &h->lock);
+    // Argon2id runs for the spare on every try, decoy or chaff, or on a new salt for a save without
+    // one, so how long a passphrase takes doesn't say what it opened.
+    if (sr == 0) sr = pass_lock_of(passphrase, spare, sn, sl);
+    if (sr != 0 && sr != PASS_NOMEM) sr = pass_lock_new(passphrase, sl) == PASS_NOMEM ? PASS_NOMEM : -1;
+    if (rc == 0 && sr == PASS_NOMEM) rc = PASS_NOMEM;
     if (rc == 0) pass_lock_set(&h->lock, locked, h->device, h->key);
     if (rc == 0) rc = pass_unseal(&h->lock, sealed, n, plain, sizeof plain, &got);
-    crypto_wipe(plain, sizeof plain);
-    if (rc != 0) {
-        int w = rc == PASS_WRONG ? wrong_pass(name, passphrase, h) : rc;
+    int decoy = 0;
+    if (rc == PASS_WRONG && sr == 0) {
+        unsigned sneeds = pass_needs(spare, sn);
+        if ((!(sneeds & F_DEVICE) || h->have_device) && (!(sneeds & F_KEY) || h->have_key)) {
+            pass_lock_set(sl, sneeds, h->device, h->key);
+            decoy = pass_unseal(sl, spare, sn, plain, sizeof plain, &got) == 0
+                 && (old || (got == SPARE_PLAIN_LEN && plain[0] == 1 && plain[1] <= 1));
+        }
+    }
+    if (rc != 0 && !(decoy && act)) {
+        crypto_wipe(plain, sizeof plain);
+        crypto_wipe(sl, sizeof *sl);
+        int w = rc == PASS_WRONG && act ? wrong_pass(name) : rc;
         crypto_wipe(h, sizeof *h);
-        // The shadow passphrase opened: the decoy is now the save, so open it the ordinary way.
-        return w == WRONG_RETRY ? install_unlock(name, passphrase) : w;
+        return w;
     }
     forget_try_key();
-    { unsigned l = 0, c = 0; if (read_tries(name, &l, &c) == 0 && c != 0) write_tries(name, l, 0); }
+    if (decoy) {
+        promote(name, sl, plain, old);
+        h->lock = *sl;
+        locked = sl->needs;
+        all = locked | install_factors(name);
+    } else {
+        refresh(name, h);
+    }
+    crypto_wipe(plain, sizeof plain);
+    crypto_wipe(sl, sizeof *sl);
+    { unsigned l = 0, c = 0; if (read_tries(name, &l, &c) == 0 && l) write_tries(name, l, 0); }
     if (!h->have_device) h->device_kind = DEVICE_NONE;
     unsigned usable = all & ~(h->have_device ? 0u : F_DEVICE);
     if (all & F_CODE) {
@@ -733,6 +860,10 @@ int install_unlock(const char *name, const char *passphrase) {
     finish_open(usable);
     return 0;
 }
+
+int install_unlock(const char *name, const char *passphrase) { return unlock(name, passphrase, 1); }
+
+int install_probe(const char *name, const char *passphrase) { return unlock(name, passphrase, 0); }
 
 int install_code_pending(void) { return g_pending; }
 
@@ -790,6 +921,8 @@ void install_forget(void) {
     forget_try_key();
     install_code_cancel();
     g_open = 0;
+    g_decoy_state = -1;
+    g_decoy_lost = 0;
 }
 
 unsigned install_open_factors(void) { return g_open ? g_held.lock.needs : 0; }
@@ -888,6 +1021,10 @@ static int set_lock(unsigned target) {
     if (rc == 0 && !fewer) rc = reseal_lock_file(first, &next);
     crypto_wipe(&next, sizeof next);
     if (rc != 0) return -1;
+    // While the secrets of factors going away are still held. A decoy the betas made can't be
+    // sealed again without its passphrase.
+    if (!old_decoy(g_name) && spare_fit(g_name, &g_held, target) < 0) g_decoy_lost = 1;
+    g_decoy_state = -1;
     if (target & F_CODE) crypto_wipe(&g_new_code, sizeof g_new_code);
     // A factor's own file only goes once no file that couldn't be sealed again still needs it.
     if (!(target & F_CODE) && !(needs_but(g_name, CODE_NAME) & F_CODE)) remove_file(g_name, CODE_NAME);
@@ -1125,10 +1262,31 @@ void install_setup_forget(void) {
     crypto_wipe(&g_new_code, sizeof g_new_code);
 }
 
-// The decoy is sealed under its own passphrase but the save's own factor secrets, so it needs the
-// same device, security key and code, and so looks the same when it's opened.
-int install_shadow_set(const char *passphrase, const char *settings, const void *key, size_t key_len,
-                       const char *verified) {
+// ---- the shadow passphrase ----
+
+int install_has_shadow(void) {
+    if (!g_open) return 0;
+    if (g_decoy_state < 0) {
+        g_decoy_state = old_decoy(g_name) || read_spare_lock(g_name, &g_held, &g_spare_lock) == 1;
+        crypto_wipe(&g_spare_lock, sizeof g_spare_lock);
+    }
+    return g_decoy_state;
+}
+
+int install_shadow_news(void) {
+    if (!g_open) return INSTALL_SHADOW_OK;
+    if (g_decoy_lost) {
+        g_decoy_lost = 0;
+        return INSTALL_SHADOW_LOST;
+    }
+    return old_decoy(g_name) ? INSTALL_SHADOW_OLD : INSTALL_SHADOW_OK;
+}
+
+// The decoy is sealed under its own passphrase and the save's own factor secrets, so it needs the
+// same device, security key and code. Its spare is written first: until the spare's lock says so,
+// the save doesn't count as having a decoy. The save's own passphrase would only ever open the save.
+int install_shadow_set(const char *passphrase) {
+    static uint8_t sealed[SETTINGS_FILE_MAX + 1];
     g_why[0] = '\0';
     if (!g_open) { copy_str(g_why, "no save is open", sizeof g_why); return -1; }
     unsigned needs = g_held.lock.needs;
@@ -1136,37 +1294,49 @@ int install_shadow_set(const char *passphrase, const char *settings, const void 
         copy_str(g_why, "the save's own factors aren't all available", sizeof g_why);
         return -1;
     }
-    if (key_len > INSTALL_KEY_MAX || strlen(settings) > INSTALL_SETTINGS_MAX || strlen(verified) > INSTALL_VERIFIED_MAX) {
-        copy_str(g_why, "the decoy is too big", sizeof g_why);
-        return -1;
-    }
     pin_secrets();
-    pass_lock_t sl;
-    int rc = pass_lock_new(passphrase, &sl);
-    if (rc != 0) { crypto_wipe(&sl, sizeof sl); return rc; }
-    pass_lock_set(&sl, needs, g_held.device, g_held.key);
-    int ok = write_sealed_with(&sl, SHADOW_SETTINGS, settings, strlen(settings)) == 0;
-    if (ok) {
-        if (key_len) ok = write_sealed_with(&sl, SHADOW_KEY, key, key_len) == 0;
-        else remove_file(g_name, SHADOW_KEY);
+    pass_lock_t *sl = &g_spare_lock;
+    uint8_t code[TOTP_SECRET_LEN];
+    const char *lf = lock_file(g_name);
+    size_t n = 0;
+    int with_code = 0, rc = read_sealed(g_name, lf, sealed, file_max(lf), &n);
+    if (rc == 0) rc = pass_lock_of(passphrase, sealed, n, sl);
+    if (rc == 0 && crypto_equal(sl->base, g_held.lock.base, sizeof sl->base) == 0) {
+        copy_str(g_why, "that's the save's own passphrase", sizeof g_why);
+        rc = -1;
     }
-    if (ok) ok = write_sealed_with(&sl, SHADOW_VERIFIED, verified, strlen(verified)) == 0;
-    if (ok) {
-        if (needs & F_CODE) {
-            uint8_t sec[TOTP_SECRET_LEN];
-            ok = read_code(g_name, &g_held, sec) == 0 && write_code_to(&sl, SHADOW_CODE, sec) == 0;
-            crypto_wipe(sec, sizeof sec);
-        } else {
-            remove_file(g_name, SHADOW_CODE);
+    if (rc == 0) rc = pass_lock_new(passphrase, sl);
+    if (rc == 0) {
+        pass_lock_set(sl, needs, g_held.device, g_held.key);
+        with_code = (needs & F_CODE) && read_code(g_name, &g_held, code) == 0;
+        if ((needs & F_CODE) && !with_code) {
+            copy_str(g_why, "its authenticator file can't be read", sizeof g_why);
+            rc = -1;
         }
     }
-    crypto_wipe(&sl, sizeof sl);
-    if (!ok) {
-        install_shadow_clear(g_name);
-        if (!g_why[0]) copy_str(g_why, "couldn't write the decoy's files", sizeof g_why);
-        return -1;
+    if (rc == 0 && (write_decoy(g_name, sl, with_code ? code : NULL) != 0 || write_spare_lock(g_name, &g_held.lock, sl) != 0)) {
+        write_chaff(g_name, needs);
+        copy_str(g_why, "couldn't write the decoy's files", sizeof g_why);
+        rc = -1;
     }
-    return 0;
+    crypto_wipe(code, sizeof code);
+    crypto_wipe(sl, sizeof *sl);
+    if (rc == 0) remove_old_decoy(g_name);
+    else if (rc != PASS_NOMEM && !g_why[0]) copy_str(g_why, "the save's files can't be read", sizeof g_why);
+    g_decoy_state = -1;
+    return rc;
+}
+
+// The decoy goes before the spare's lock says there's none, so a passphrase the save is said not to
+// have never opens one.
+int install_shadow_clear(void) {
+    g_why[0] = '\0';
+    if (!g_open) { copy_str(g_why, "no save is open", sizeof g_why); return -1; }
+    int rc = write_chaff(g_name, g_held.lock.needs) == 0 && write_spare_lock(g_name, &g_held.lock, NULL) == 0 ? 0 : -1;
+    if (rc == 0) remove_old_decoy(g_name);
+    else copy_str(g_why, "couldn't write the spare's files", sizeof g_why);
+    g_decoy_state = -1;
+    return rc;
 }
 
 // ---- uninstalling ----

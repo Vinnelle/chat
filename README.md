@@ -439,7 +439,9 @@ itself for the save called `default`, see [More than one save](#more-than-one-sa
 (see [Locking a save to this device](#locking-a-save-to-this-device)). One that needs a security key
 has a `securitykey` file, with the key's credential and the save's secret wrapped under the key's,
 and one that asks for an authenticator code has an `authenticator` file, sealed like the rest (see
-[A security key and an authenticator app](#a-security-key-and-an-authenticator-app)). chat
+[A security key and an authenticator app](#a-security-key-and-an-authenticator-app)). Every save
+also has a `spare` and a `spare-lock` file, and one that deletes itself after wrong passphrases a
+`tries` file (see [A shadow passphrase, and self-destruct](#a-shadow-passphrase-and-self-destruct)). chat
 never writes your settings in plain text, as `settings.toml` or anything else. The TOML above
 only exists inside the sealed file. If there's a plain text file in that folder, like a
 `settings.toml`, it didn't come from chat. chat doesn't read it, update it or delete it, and
@@ -502,12 +504,14 @@ whether to use it, as above. From then on that save is the one in use. `:uninsta
 deletes that save, and `:uninstall` alone deletes the one in use.
 
 With more than one save, chat lists them when it starts: each one's name, whether it has
-settings, a key or both, and when it was last saved. Pick one with `j`/`k` and `Enter`, and chat
-asks for that save's passphrase. `Esc` on the passphrase goes back to the list, and `Esc` on the
-list starts without any of them. With `--simple` or `--update` the list is printed in the
+settings, a key or both, and when it was last opened or saved. Pick one with `j`/`k` and `Enter`,
+and chat asks for that save's passphrase. `Esc` on the passphrase goes back to the list, and `Esc`
+on the list starts without any of them. With `--simple` or `--update` the list is printed in the
 terminal and you type a number or a name. `--save NAME` skips the list and opens that save.
 Without `--save`, `CHAT_INSTALL_PASSWORD` is tried on each save in turn and opens the first one
-it fits. With only one save, there's no list.
+it fits. A save it doesn't fit doesn't count it as a wrong passphrase, and it never opens a decoy
+(see [A shadow passphrase, and self-destruct](#a-shadow-passphrase-and-self-destruct)). With only
+one save, there's no list.
 
 #### Locking a save to this device
 
@@ -654,6 +658,46 @@ its files needs. `CHAT_INSTALL_PASSWORD` gives the passphrase of a save that nee
 a code, and chat still asks for those. With more than one save and no `--save`, it's only tried on
 saves that need neither. Versions of chat from before these can't open a save that needs them
 (they say it's damaged).
+
+#### A shadow passphrase, and self-destruct
+
+`:set shadow on` (the **Shadow password** row on the settings page) gives the open save a second
+passphrase, for when you're made to open it. Typed in place of the real one, it opens a decoy: a
+clean save with chat's defaults, no signing key and no verified keys, that needs the same device,
+security key and code as the real one. The decoy takes the real save's place: the real save's
+files are replaced or deleted, and from then on its passphrase opens nothing. The shadow
+passphrase can't be the save's own, and `:set shadow off` removes the decoy.
+
+As far as chat can manage, nothing on disk or on screen says whether a save has a decoy:
+
+- Every save has a `spare` file of the same size, with the same header as its other files: the
+  decoy, sealed under the shadow passphrase, or random bytes when there's no decoy. Its
+  `spare-lock` file, sealed with the rest, says which, and keeps what chat needs to seal the decoy
+  again when the save's device lock, security key or code changes, so the decoy always needs what
+  the save does.
+- Every passphrase typed runs Argon2id twice, once for the save and once for its spare, so the
+  real passphrase, the shadow one and a wrong one all take as long.
+- A save that opens is written the same way whichever passphrase opened it: its sealed files and
+  its spare are written again, so their times don't say which. That's why the list of saves says
+  when each was last opened.
+
+What it can't do: deleting isn't erasing. A copy of the folder made before (a backup, a synced
+folder, a copy of the disk) or the disk itself can still hold the real save's files, sealed under
+the real passphrase, for anyone who later gets that passphrase too. And someone who knows chat has
+decoys can wonder whether a save with no key and no verified keys is one.
+
+`:set destroy 3` (or `5` or `10`, the **Self-destruct** row) deletes the save after that many
+wrong passphrases in a row. The right passphrase, or the shadow one, starts the count again. The
+count and the limit are in a `tries` file next to the save, not sealed, since chat has to read them
+before any passphrase opens anything: anyone who can read the folder sees the limit, and anyone who
+can copy or change it can put the count back. So it stops someone guessing at the keyboard, not
+someone with a copy of the files. A save locked to the device on Windows can't be opened from a copy
+either once it's deleted, since its TPM key goes with it. On Linux the device keeps nothing for a
+save itself, so a copy that includes its `device` file still opens on that computer.
+
+Saves made by the betas of 0.5.0 kept a decoy in files only a save with a decoy has. chat still
+opens those, and says so when the save opens: `:set shadow off`, then `:set shadow on`, moves the
+decoy to the `spare`.
 
 ## Build
 
@@ -882,6 +926,8 @@ after a name. Under each row's help, the page shows the `:set` command that does
 | `devicelock` | `on` (the save only opens on this device), `off` |
 | `securitykey` | `on` (the save needs your FIDO2 security key too), `off` |
 | `authenticator` | `on` (the save asks for an authenticator app's code too), `off` |
+| `destroy` | `off`, `3`, `5`, `10` (the save is deleted after that many wrong passphrases in a row) |
+| `shadow` | `on` (asks for a second passphrase, which opens a decoy in the save's place), `off` |
 | `verify` | `required` (nothing goes to a peer until you've compared its code), `optional` |
 | `filelimit` | the biggest file fetched without `anyway`: `8M`, `500K`, `1G` |
 | `fastfiles` | `on` (what you send goes in quick bursts; through the relays, as fast as they allow), `off` (chat's regular slots) |

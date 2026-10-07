@@ -2,11 +2,38 @@
 
 ## Unreleased
 
+### Security
+- Nothing on disk or on screen says whether a save has a decoy any more. Every save has a `spare`
+  file: the decoy, sealed under the shadow passphrase, or random bytes with the same size and
+  header when there's no decoy, and a sealed `spare-lock` file says which. The betas kept a decoy in
+  `shadow-*` files that only a save with a decoy had. Every passphrase now runs Argon2id twice, for
+  the save and for its spare, where the betas ran it once for the real passphrase and three times
+  for the shadow one, and a save that opens is written the same way whichever passphrase opened it.
+  A decoy follows the save when its device lock, security key or code changes, where the betas' kept
+  needing what the save needed when it was set, and the shadow passphrase can't be the save's own. A
+  decoy the betas made still opens, and when its save opens chat says how to move it to the spare.
+
+### Added
+- The shadow passphrase and self-destruct, in 0.5.0's betas but not their notes. `:set shadow on`
+  (the **Shadow password** row) gives the open save a second passphrase that opens a decoy in its
+  place: a clean save with no key or verified keys, needing the same device, security key and code,
+  whose files replace or delete the real save's. `:set destroy 3` (or `5` or `10`, the
+  **Self-destruct** row) deletes a save after that many wrong passphrases in a row. The README says
+  what they can't do: deleting isn't erasing, and the count is kept unsealed next to the save.
+
 ### Changed
 - Tab on an argument in the command line's menu adds a space after it when another argument can
   follow, so that one's menu comes up straight away, as it already did after a command's name:
   `:verify NICK` lists `ok` and `no`, `:verified forget` the verified nicks, `:download N` `anyway`
   and folders, and `:show N` and `:saveto N` `anyway`. Enter still runs the line without them.
+- The list of saves says when each was last opened or saved, since opening a save now writes its
+  files again.
+
+### Fixed
+- With more than one save and no `--save`, `CHAT_INSTALL_PASSWORD` is tried on each save in turn,
+  and each save it didn't open counted it as a wrong passphrase: a few runs could delete a save set
+  to self-destruct that it was never meant for, and a save whose shadow passphrase it happened to be
+  lost its real save to the decoy. Saves it's tried on that way no longer count it, or open a decoy.
 
 ## 0.5.0-beta.3
 

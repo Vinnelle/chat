@@ -68,9 +68,12 @@ unsigned install_factors(const char *name);
 // PASS_NOMEM, INSTALL_DEVICE, or -1 with install_why.
 int install_lock_new(const char *name, const char *passphrase, unsigned factors);
 // The passphrase of the files there: 0, INSTALL_NO_FILE, INSTALL_DEVICE, INSTALL_KEY, INSTALL_LOST,
-// or a PASS_ code. A save that needs a code waits for install_check_code to take one before it's the
-// save in use, and the save open before stays as it was until then.
+// INSTALL_DESTROYED or a PASS_ code. A save that needs a code waits for install_check_code to take one
+// before it's the save in use, and the save open before stays as it was until then.
 int install_unlock(const char *name, const char *passphrase);
+// install_unlock for a passphrase that may be another save's: a wrong one isn't counted towards
+// self-destruct, and the save's shadow passphrase opens nothing (PASS_WRONG) instead of its decoy.
+int install_probe(const char *name, const char *passphrase);
 // After install_unlock: whether a save waits for its authenticator code.
 int install_code_pending(void);
 // 0 for the code the authenticator app shows now (or 30 seconds before or after), PASS_WRONG for
@@ -140,21 +143,29 @@ int install_remove(const char *name);
 //
 // A save can be set to delete itself after a number of wrong passphrases. The count and the limit
 // live in an unsealed "tries" file next to the save, since they have to be read before any
-// passphrase opens anything, so someone who can copy the files can roll the count back: this stops
-// forced or casual guessing at the keyboard, not a forensic copy. install_unlock does the counting
-// and the deleting, and returns INSTALL_DESTROYED when it deletes.
+// passphrase opens anything, so anyone who can read the files sees the limit, and someone who can
+// copy them can roll the count back: this stops forced or casual guessing at the keyboard, not a
+// forensic copy. install_unlock does the counting and the deleting, and returns INSTALL_DESTROYED
+// when it deletes.
 int install_destroy_limit(const char *name);    // 0 if off, else the limit
 int install_tries_left(const char *name);       // tries before deletion, -1 if off
 int install_arm_destroy(const char *name, unsigned limit);   // set the limit (0 off), reset the count
 
-// A shadow (duress) passphrase opens a decoy instead of the real save, and deletes the real save
-// first, for good: afterwards only the decoy is there. The decoy is sealed under the shadow
-// passphrase and needs the save's same factors, so opening it looks the same. install_shadow_set
-// needs the save open, with its factor secrets held; the caller gives the decoy's settings (always),
-// signing key (len 0 for none) and verified keys, which are sealed the same way the real ones are.
-int install_has_shadow(const char *name);
-int install_shadow_clear(const char *name);
-int install_shadow_set(const char *passphrase, const char *settings, const void *key, size_t key_len,
-                       const char *verified);
+// A shadow (duress) passphrase opens a decoy instead of the real save, a clean save with no key or
+// verified peers, which takes the real one's place: the real save's files are replaced or deleted.
+// Every save has a spare file, the decoy sealed under the shadow passphrase or, without one, chaff
+// of the same size and header, so its files don't say whether it has a decoy. Every passphrase tried
+// runs Argon2id for the save and for its spare, and a save that opens is written the same way
+// whichever opened it. The decoy needs the save's factors, and follows them when they change.
+// These need the save open, with its factor secrets held.
+int install_has_shadow(void);
+// 0, PASS_NOMEM, or -1 with install_why (the save's own passphrase isn't taken).
+int install_shadow_set(const char *passphrase);
+int install_shadow_clear(void);
+#define INSTALL_SHADOW_OK   0
+#define INSTALL_SHADOW_OLD  1   // its decoy was made by a 0.5.0 beta, in files that show it's there
+#define INSTALL_SHADOW_LOST 2   // its decoy couldn't be kept when it opened or changed: the shadow passphrase is gone
+// What there is to say about the open save's decoy: LOST once, after it happened.
+int install_shadow_news(void);
 
 #endif

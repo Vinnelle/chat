@@ -1126,6 +1126,116 @@ static void test_save_factors(double *t) {
     CHECK(install_remove("factors") == 0 && !save_file_exists(config, "device"), "it wasn't uninstalled");
 }
 
+static long save_size(const char *config, const char *save, const char *file) {
+    char path[600];
+    struct stat st;
+    snprintf(path, sizeof path, "%s/chat/saves/%s/%s", config, save, file);
+    return stat(path, &st) == 0 ? (long)st.st_size : -1;
+}
+
+static long read_save_file(const char *config, const char *save, const char *file, uint8_t *buf, size_t cap) {
+    char path[600];
+    snprintf(path, sizeof path, "%s/chat/saves/%s/%s", config, save, file);
+    return platform_read_file(path, buf, cap);
+}
+
+// The shadow passphrase and self-destruct, through app/install.c: every save has a spare of one
+// shape, decoy or chaff; every passphrase runs Argon2id for the save and its spare; the shadow
+// passphrase puts the decoy in the save's place, needing the same factors, which it follows when
+// they change; a passphrase tried on every save neither counts nor opens a decoy; too many wrong
+// ones delete the save; and a decoy as the betas kept it still opens.
+static void test_duress(double *t) {
+    (void)t;
+    static char config[] = "/tmp/chat-duress-XXXXXX";
+    CHECK(mkdtemp(config) != NULL, "no temporary folder");
+    setenv("XDG_CONFIG_HOME", config, 1);
+    gen_random(g_fake_key, sizeof g_fake_key);
+    static const char settings[] = "[profile]\nnick = \"alice\"\n";
+    static const uint8_t key[] = "a signing key";
+    static char buf[INSTALL_SETTINGS_MAX];
+    uint8_t chaff[256], spare[256];
+
+    install_use("d");
+    CHECK(install_lock_new("d", "real", 0) == 0 && install_write_settings(settings) == 0 && install_write_verified("") == 0
+          && install_write_key(key, sizeof key) == 0, "the save wasn't made: %s", install_why());
+    long size = read_save_file(config, "d", "spare", chaff, sizeof chaff);
+    CHECK(size > 0 && save_size(config, "d", "spare-lock") > 0 && !install_has_shadow(),
+          "a new save has no spare, or says it has a decoy");
+    CHECK(install_shadow_set("real") == -1 && !install_has_shadow(), "the save's own passphrase was taken as its shadow one");
+    CHECK(install_shadow_set("decoy") == 0 && install_has_shadow(), "the shadow passphrase wasn't set: %s", install_why());
+    CHECK(read_save_file(config, "d", "spare", spare, sizeof spare) == size && memcmp(spare, chaff, 16) == 0
+          && memcmp(spare + 16, chaff + 16, 16) != 0, "the decoy's spare isn't the shape chaff is");
+    install_forget();
+
+    unsigned long runs = pass_derivations();
+    CHECK(install_unlock("d", "wrong") == PASS_WRONG && pass_derivations() - runs == 2,
+          "a wrong passphrase didn't run Argon2id twice");
+    runs = pass_derivations();
+    CHECK(install_unlock("d", "real") == 0 && pass_derivations() - runs == 2 && install_has_shadow()
+          && install_read_settings(buf, sizeof buf) == (long)strlen(settings),
+          "the real passphrase didn't open the save, or not with the same work");
+    install_forget();
+
+    install_arm_destroy("d", 3);
+    CHECK(install_probe("d", "decoy") == PASS_WRONG && install_probe("d", "nope") == PASS_WRONG
+          && install_tries_left("d") == 3 && save_size(config, "d", "key") > 0,
+          "a passphrase tried on every save opened the decoy, or counted towards self-destruct");
+    runs = pass_derivations();
+    CHECK(install_unlock("d", "decoy") == 0 && pass_derivations() - runs == 2 && !install_has_shadow()
+          && install_read_settings(buf, sizeof buf) == 0, "the shadow passphrase didn't open the decoy the same way");
+    CHECK(save_size(config, "d", "key") < 0 && save_size(config, "d", "spare") == size && install_tries_left("d") == 3,
+          "the decoy kept the real save's key, has no spare, or left self-destruct counting");
+    install_forget();
+    CHECK(install_unlock("d", "real") == PASS_WRONG && install_tries_left("d") == 2, "the real passphrase still opened it");
+    CHECK(install_unlock("d", "x") == PASS_WRONG && install_unlock("d", "y") == INSTALL_DESTROYED
+          && save_size(config, "d", "settings") < 0 && save_size(config, "d", "spare") < 0,
+          "too many wrong passphrases didn't delete the save");
+
+    // With a security key and a code, the decoy needs them too, and the device lock once it's on.
+    const unsigned all = INSTALL_FACTOR_DEVICE | INSTALL_FACTOR_KEY | INSTALL_FACTOR_CODE;
+    char b32[40], uri[160], code[8];
+    install_use("f");
+    CHECK(install_key_make(NULL) == 0 && wait_key() == INSTALL_KEY_DONE, "registering the security key failed");
+    install_code_new("f", b32, sizeof b32, uri, sizeof uri);
+    app_code(b32, code);
+    CHECK(install_code_try(code) == 0 && install_lock_new("f", "real", INSTALL_FACTOR_KEY | INSTALL_FACTOR_CODE) == 0
+          && install_write_settings(settings) == 0 && install_shadow_set("decoy") == 0,
+          "the save or its decoy wasn't made: %s", install_why());
+    long n = read_save_file(config, "f", "spare", spare, sizeof spare);
+    CHECK(install_set_factor(INSTALL_FACTOR_DEVICE, 1) == 0 && install_has_shadow()
+          && read_save_file(config, "f", "spare", spare, sizeof spare) == n && pass_needs(spare, (size_t)n) == all,
+          "the decoy doesn't need the device lock turned on after it: %s", install_why());
+    install_forget();
+    CHECK(install_unlock("f", "decoy") == INSTALL_KEY, "the decoy was tried without the security key");
+    CHECK(install_key_open("f", NULL) == 0 && wait_key() == INSTALL_KEY_DONE && install_unlock("f", "decoy") == 0
+          && install_code_pending(), "the decoy didn't ask for the code");
+    app_code(b32, code);
+    CHECK(install_check_code(code) == 0 && install_open_factors() == all && install_read_settings(buf, sizeof buf) == 0
+          && !install_has_shadow(), "the decoy didn't open needing everything the save needed");
+    CHECK(install_remove("f") == 0, "it wasn't uninstalled");
+
+    // A decoy as the betas kept it: in files of its own, sealed under the shadow passphrase alone.
+    install_use("o");
+    CHECK(install_lock_new("o", "real", 0) == 0 && install_write_settings(settings) == 0, "the save wasn't made");
+    pass_lock_t old;
+    uint8_t sealed[PASS_SEAL_OVERHEAD];
+    size_t len = 0;
+    char path[600];
+    CHECK(pass_lock_new("decoy", &old) == 0 && pass_seal(&old, "", 0, sealed, sizeof sealed, &len) == 0, "no old decoy");
+    snprintf(path, sizeof path, "%s/chat/saves/o/shadow-settings", config);
+    platform_write_private(path, sealed, len);
+    snprintf(path, sizeof path, "%s/chat/saves/o/spare", config);
+    platform_remove(path);
+    install_forget();
+    CHECK(install_unlock("o", "real") == 0 && install_has_shadow() && install_shadow_news() == INSTALL_SHADOW_OLD
+          && save_size(config, "o", "spare") < 0, "opening the save didn't keep the betas' decoy, or say so");
+    install_forget();
+    CHECK(install_unlock("o", "decoy") == 0 && install_read_settings(buf, sizeof buf) == 0
+          && save_size(config, "o", "shadow-settings") < 0 && save_size(config, "o", "spare") == size,
+          "the betas' decoy didn't open in the save's place");
+    CHECK(install_remove("o") == 0, "it wasn't uninstalled");
+}
+
 static void test_identity_keys(double *t) {
     (void)t;
     // An identity file age-keygen wrote, and the recipient it gave for it.
@@ -1922,7 +2032,7 @@ int main(int argc, char **argv) {
         { "third peer", test_third_peer }, { "candidates settle", test_candidates_settle }, { "builds", test_builds },
         { "parsers", test_parsers }, { "toml", test_toml }, { "dht keys", test_dht_keys }, { "dht", test_dht }, { "read file", test_read_file },
         { "identity keys", test_identity_keys }, { "passphrase seal", test_passphrase_seal }, { "device lock", test_device_lock },
-        { "factor locks", test_factor_locks }, { "totp", test_totp }, { "qr", test_qr }, { "save factors", test_save_factors }, { "images", test_images }, { "file names", test_file_names }, { "files", test_files },
+        { "factor locks", test_factor_locks }, { "totp", test_totp }, { "qr", test_qr }, { "save factors", test_save_factors }, { "duress", test_duress }, { "images", test_images }, { "file names", test_file_names }, { "files", test_files },
         { "verified keys", test_trust },
     };
     size_t n_tests = sizeof tests / sizeof tests[0];

@@ -426,6 +426,31 @@ static int header_needs(const uint8_t *h) {
 
 static int known_magic(const uint8_t *h) { return header_needs(h) >= 0; }
 
+static void set_magic(uint8_t h[PASS_HEADER_LEN], unsigned needs) {
+    if (!needs) {
+        memcpy(h, PASS_MAGIC, 8);
+    } else if (needs == PASS_NEEDS_DEVICE) {
+        memcpy(h, PASS_DEVICE_MAGIC, 8);
+    } else {
+        memcpy(h, PASS_FACTORS_MAGIC, 7);
+        h[7] = (uint8_t)needs;
+    }
+}
+
+static void new_header(uint8_t h[PASS_HEADER_LEN]) {
+    memcpy(h, PASS_MAGIC, 8);
+    const uint32_t ops = KDF_OPSLIMIT, mem_kib = KDF_MEMLIMIT / 1024u;
+    for (int i = 0; i < 4; i++) {
+        h[8 + i] = (uint8_t)(ops >> (24 - 8 * i));
+        h[12 + i] = (uint8_t)(mem_kib >> (24 - 8 * i));
+    }
+    randombytes_buf(h + 16, PASS_HEADER_LEN - 16);
+}
+
+static unsigned long g_derivations;
+
+unsigned long pass_derivations(void) { return g_derivations; }
+
 // A lock that needs more than the passphrase seals and opens nothing until it has their secrets.
 static int lock_ready(const pass_lock_t *lk) {
     int needs = header_needs(lk->header);
@@ -440,6 +465,7 @@ static int derive_lock_key(const char *passphrase, pass_lock_t *lk) {
     if (ops < 1 || ops > 16 || mem_kib < 8 || mem_kib > 1024u * 1024u) return PASS_FORMAT;
     lk->needs = 0;
     sodium_memzero(lk->key, sizeof lk->key);
+    g_derivations++;
     if (crypto_pwhash(lk->base, sizeof lk->base, passphrase, strlen(passphrase), h + 16, ops, (size_t)mem_kib * 1024u,
                       crypto_pwhash_ALG_ARGON2ID13) != 0) return PASS_NOMEM;
     if (memcmp(h, PASS_MAGIC, 8) == 0) memcpy(lk->key, lk->base, sizeof lk->key);
@@ -456,8 +482,8 @@ void pass_lock_set(pass_lock_t *lk, unsigned needs, const uint8_t device[PASS_DE
                    const uint8_t key[PASS_KEY_SECRET_LEN]) {
     needs &= PASS_NEEDS_ALL;
     lk->needs = needs;
+    set_magic(lk->header, needs);
     if (!needs) {
-        memcpy(lk->header, PASS_MAGIC, 8);
         memcpy(lk->key, lk->base, sizeof lk->key);
         return;
     }
@@ -466,13 +492,10 @@ void pass_lock_set(pass_lock_t *lk, unsigned needs, const uint8_t device[PASS_DE
     if (needs == PASS_NEEDS_DEVICE) {
         // As the device lock was first written, so saves locked then still open.
         static const char LABEL[] = "chat device lock v1";
-        memcpy(lk->header, PASS_DEVICE_MAGIC, 8);
         crypto_generichash_update(&st, (const unsigned char *)LABEL, sizeof LABEL - 1);
         crypto_generichash_update(&st, lk->header + 8, PASS_HEADER_LEN - 8);
     } else {
         static const char LABEL[] = "chat factors v1";
-        memcpy(lk->header, PASS_FACTORS_MAGIC, 7);
-        lk->header[7] = (uint8_t)needs;
         crypto_generichash_update(&st, (const unsigned char *)LABEL, sizeof LABEL - 1);
         crypto_generichash_update(&st, lk->header, PASS_HEADER_LEN);
     }
@@ -483,14 +506,14 @@ void pass_lock_set(pass_lock_t *lk, unsigned needs, const uint8_t device[PASS_DE
 }
 
 int pass_lock_new(const char *passphrase, pass_lock_t *lk) {
-    memcpy(lk->header, PASS_MAGIC, 8);
-    const uint32_t ops = KDF_OPSLIMIT, mem_kib = KDF_MEMLIMIT / 1024u;
-    for (int i = 0; i < 4; i++) {
-        lk->header[8 + i] = (uint8_t)(ops >> (24 - 8 * i));
-        lk->header[12 + i] = (uint8_t)(mem_kib >> (24 - 8 * i));
-    }
-    randombytes_buf(lk->header + 16, PASS_HEADER_LEN - 16);
+    new_header(lk->header);
     return derive_lock_key(passphrase, lk);
+}
+
+void pass_chaff(unsigned needs, size_t plain_len, uint8_t *out) {
+    new_header(out);
+    set_magic(out, needs & PASS_NEEDS_ALL);
+    randombytes_buf(out + PASS_HEADER_LEN, PASS_SEAL_OVERHEAD - PASS_HEADER_LEN + plain_len);
 }
 
 int pass_lock_of(const char *passphrase, const uint8_t *sealed, size_t len, pass_lock_t *lk) {
