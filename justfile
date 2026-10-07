@@ -138,7 +138,7 @@ run *args: build
 # Remove build directories, test builds and release output
 [group('build')]
 clean:
-    rm -rf build build-static build-win build-test build-fuzz build-asan test-builds dist
+    rm -rf build build-static build-win build-test build-fuzz build-asan build-win-test test-builds dist
 
 # ---------------------------------------------------------------------------------------------
 # Test

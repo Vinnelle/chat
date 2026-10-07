@@ -15,13 +15,13 @@
 #include "platform/platform.h"
 #include "common/qr.h"
 #include "app/install.h"
+#include "test_os.h"
 #include <sodium.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
-#include <unistd.h>
 
 #define LOG_LINES 512
 
@@ -562,27 +562,26 @@ static void test_dht(double *t) {
 }
 
 // Key files and Tor's cookie are read without blocking, and only from regular files: a FIFO
-// would otherwise hang chat.
+// would otherwise hang chat. Windows has no FIFOs in folders.
 static void test_read_file(double *t) {
     (void)t;
-    char dir[] = "/tmp/chat-test-XXXXXX";
-    if (!mkdtemp(dir)) { CHECK(0, "no temporary folder for the file test"); return; }
-    char fifo[64], file[64];
-    snprintf(fifo, sizeof fifo, "%s/fifo", dir);
+    char dir[256], file[300], buf[64];
+    if (test_temp_dir("test", dir, sizeof dir) != 0) { CHECK(0, "no temporary folder for the file test"); return; }
     snprintf(file, sizeof file, "%s/key", dir);
-    char buf[64];
+#ifndef _WIN32
+    char fifo[300];
+    snprintf(fifo, sizeof fifo, "%s/fifo", dir);
     CHECK(mkfifo(fifo, 0600) == 0, "couldn't make a FIFO");
     CHECK(platform_read_file(fifo, buf, sizeof buf) == -1, "a FIFO was read as a file");
+    identity_keypair_t id;
+    CHECK(age_import_secret_key(fifo, &id) != 0 && pgp_import_secret_key(fifo, &id) != 0, "a key loaded from a FIFO");
+#endif
     FILE *f = fopen(file, "wb");
     if (f) { fputs("hello", f); fclose(f); }
     CHECK(platform_read_file(file, buf, sizeof buf) == 5 && memcmp(buf, "hello", 5) == 0, "a regular file didn't read back");
     CHECK(platform_read_file(file, buf, 3) == 3, "a read past cap");
     CHECK(platform_read_file(dir, buf, sizeof buf) == -1, "a folder was read as a file");
-    identity_keypair_t id;
-    CHECK(age_import_secret_key(fifo, &id) != 0 && pgp_import_secret_key(fifo, &id) != 0, "a key loaded from a FIFO");
-    unlink(fifo);
-    unlink(file);
-    rmdir(dir);
+    platform_remove_tree(dir);
 }
 
 // Junk from outside the room, some of it sized like real frames or cells, and pieces of nothing
@@ -1053,9 +1052,9 @@ static int save_file_exists(const char *config, const char *file) {
 // through a change finished with everything any of its files needs.
 static void test_save_factors(double *t) {
     (void)t;
-    static char config[] = "/tmp/chat-saves-XXXXXX";
-    CHECK(mkdtemp(config) != NULL, "no temporary folder");
-    setenv("XDG_CONFIG_HOME", config, 1);
+    static char config[256];
+    CHECK(test_temp_dir("saves", config, sizeof config) == 0, "no temporary folder");
+    test_set_env(TEST_CONFIG_VAR, config);
     gen_random(g_fake_key, sizeof g_fake_key);
     static const char settings[] = "[profile]\nnick = \"alice\"\n";
     static char buf[INSTALL_SETTINGS_MAX];
@@ -1146,9 +1145,9 @@ static long read_save_file(const char *config, const char *save, const char *fil
 // ones delete the save; and a decoy as the betas kept it still opens.
 static void test_duress(double *t) {
     (void)t;
-    static char config[] = "/tmp/chat-duress-XXXXXX";
-    CHECK(mkdtemp(config) != NULL, "no temporary folder");
-    setenv("XDG_CONFIG_HOME", config, 1);
+    static char config[256];
+    CHECK(test_temp_dir("duress", config, sizeof config) == 0, "no temporary folder");
+    test_set_env(TEST_CONFIG_VAR, config);
     gen_random(g_fake_key, sizeof g_fake_key);
     static const char settings[] = "[profile]\nnick = \"alice\"\n";
     static const uint8_t key[] = "a signing key";
@@ -1469,9 +1468,9 @@ static void test_images(double *t) {
     image_thumb_free(&th);
     CHECK(image_thumbnail(JPEG_GREY, sizeof JPEG_GREY, 64, 48, bg, &th, why, sizeof why) == 0 && th.w == 8 && th.h == 8,
           "the grey JPEG: %s", why);
-    int far = 0;
-    for (int i = 0; th.rgb && i < 8 * 8 * 3; i++) far += th.rgb[i] < 198 || th.rgb[i] > 202;
-    CHECK(far == 0, "the grey JPEG came out %d samples off 200", far);
+    int off = 0;
+    for (int i = 0; th.rgb && i < 8 * 8 * 3; i++) off += th.rgb[i] < 198 || th.rgb[i] > 202;
+    CHECK(off == 0, "the grey JPEG came out %d samples off 200", off);
     image_thumb_free(&th);
 
     // Damage of every kind is refused with a reason, never read past.
@@ -1594,17 +1593,22 @@ static void f_flip(const char *path) {
     fclose(f);
 }
 
+static void count_part(void *ctx, const char *name, int is_dir) {
+    (void)is_dir;
+    if (strncmp(name, ".chat-", 6) == 0) (*(int *)ctx)++;
+}
+
 static int part_files_left(const char *dir) {
-    char cmd[700];
-    snprintf(cmd, sizeof cmd, "ls -a '%s' | grep -c '^\\.chat-' > /dev/null", dir);
-    return system(cmd) == 0;
+    int n = 0;
+    platform_list_dir(dir, count_part, &n);
+    return n > 0;
 }
 
 static void test_files(double *t) {
     // Downloads of the test's own.
-    static char home[] = "/tmp/chat-files-XXXXXX";
-    CHECK(mkdtemp(home) != NULL, "no temporary folder");
-    setenv("HOME", home, 1);
+    static char home[256];
+    CHECK(test_temp_dir("files", home, sizeof home) == 0, "no temporary folder");
+    test_set_env(TEST_HOME_VAR, home);
     char dl[600], path[600], cmd[700], want[700];
     snprintf(dl, sizeof dl, "%s/Downloads", home);
     A.file_view = B.file_view = on_view;
@@ -1636,7 +1640,7 @@ static void test_files(double *t) {
     CHECK(chat_file_fetch(&B, n, 0, 0, NULL) == 0 && dl_state(&B, n) == DL_DONE, "notes.txt was fetched again while saved");
     char other[400];
     snprintf(other, sizeof other, "%s/other", home);
-    mkdir(other, 0700);
+    platform_private_dir(other);
     CHECK(chat_file_fetch(&B, n, 0, 0, other) == 0 && dl_state(&B, n) == DL_DONE, "notes.txt wasn't copied to another folder");
     snprintf(path, sizeof path, "%s/notes.txt", other);
     CHECK(same_file(path, data, 5000) && strcmp(chat_file(&B, n)->saved, path) == 0, "the copy in another folder is wrong");
@@ -1732,6 +1736,11 @@ static void test_files(double *t) {
     RUN_UNTIL(t, 20, offer_named(&B, "changing.bin") > 0);
     n = offer_named(&B, "changing.bin");
     FILE *f = fopen(path, "r+b");
+#ifdef _WIN32
+    // Windows keeps a file chat has open, as it has one it offers, from being written to.
+    CHECK(!f, "a file being offered could be written to");
+    if (f) fclose(f);
+#else
     if (f) { fputc(data[0] ^ 1, f); fclose(f); }
     CHECK(chat_file_fetch(&B, n, 0, 0, NULL) == 0, "bob couldn't fetch changing.bin");
     RUN_UNTIL(t, 120, dl_over(&B, n));
@@ -1739,6 +1748,7 @@ static void test_files(double *t) {
     CHECK(dl_state(&B, n) == DL_FAILED && log_b.mismatched == 1
           && platform_read_file(want, data + 199000, 10) < 0 && !part_files_left(dl), "a changed file was kept");
     CHECK(n > 0 && strstr(chat_file(&B, n)->why, "didn't match") != NULL, "a changed file failed without saying why");
+#endif
 
     // Every fifth of alice's frames to bob lost while 20 KB comes: a run of chunks that didn't come
     // is asked for again as soon as the rest of its run has, so it comes whole, not long after.
@@ -1802,8 +1812,7 @@ static void test_files(double *t) {
     CHECK(dl_state(&B, n) == DL_FAILED && log_b.withdrawn == 1, "a withdrawn file wasn't refused");
     CHECK(strcmp(chat_file(&B, n)->why, "isn't offered any more") == 0, "a withdrawn file failed without saying why");
 
-    snprintf(cmd, sizeof cmd, "rm -rf '%s'", home);
-    if (system(cmd) != 0) printf("couldn't remove %s\n", home);
+    if (platform_remove_tree(home) != 0) printf("couldn't remove %s\n", home);
 }
 
 static void test_file_names(double *t) {

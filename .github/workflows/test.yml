@@ -45,6 +45,58 @@ jobs:
       - name: Engine test under AddressSanitizer and UndefinedBehaviorSanitizer
         run: ./build-asan/tests/engine_test
 
+  # Cross-built with zig, as releases are, then run on Windows itself.
+  windows-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up zig
+        env:
+          ZIG_VERSION: 0.16.0
+          ZIG_SHA256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+        run: |
+          name=zig-x86_64-linux-$ZIG_VERSION
+          curl -fsSL -o "$RUNNER_TEMP/$name.tar.xz" "https://ziglang.org/download/$ZIG_VERSION/$name.tar.xz"
+          echo "$ZIG_SHA256  $RUNNER_TEMP/$name.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/$name.tar.xz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/$name" >> "$GITHUB_PATH"
+
+      - name: Configure
+        run: cmake -B build-win-test -DCMAKE_TOOLCHAIN_FILE=cmake/zig-windows.cmake -DCHAT_TESTS=ON
+
+      - name: Build
+        run: cmake --build build-win-test -j "$(nproc)" --target engine_test chat
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-test-builds
+          path: |
+            build-win-test/tests/engine_test.exe
+            build-win-test/chat.exe
+          if-no-files-found: error
+
+  windows:
+    needs: windows-build
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows-test-builds
+          path: win
+
+      - name: Engine test
+        run: win/tests/engine_test.exe
+
+      # Its hardening runs first thing, before anything else it does.
+      - name: chat starts, opens a session and quits
+        run: |
+          win/chat.exe --version
+          printf ':quit\n' | win/chat.exe --simple --routing dht --nodht --nonostr --noportmap --nolan
+
   fuzz:
     runs-on: ubuntu-24.04
     strategy:

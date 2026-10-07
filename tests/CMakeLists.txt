@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Copyright (C) 2026 finlay@tuta.com
-# The engine test runs sessions against each other over fake_net.c instead of real sockets.
-# The fuzz targets need clang (libFuzzer): configure with -DCHAT_FUZZ=ON -DCMAKE_C_COMPILER=clang.
-if(WIN32)
-    message(FATAL_ERROR "chat: the tests build on Linux only")
+# The engine test runs sessions against each other over fake_net.c instead of real sockets, on
+# Linux or (cross-built with zig) Windows. The fuzz targets need clang (libFuzzer) and Linux:
+# configure with -DCHAT_FUZZ=ON -DCMAKE_C_COMPILER=clang.
+if(WIN32 AND CHAT_FUZZ)
+    message(FATAL_ERROR "chat: the fuzz targets build on Linux only")
 endif()
 
 set(CHAT_CORE_SOURCES
@@ -28,6 +29,7 @@ set(CHAT_CORE_SOURCES
     ${PROJECT_SOURCE_DIR}/src/common/qr.c
     ${PROJECT_SOURCE_DIR}/src/platform/${CHAT_OS}/platform.c
     ${CMAKE_CURRENT_SOURCE_DIR}/fake_net.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_os.c
 )
 
 function(chat_test_executable name)
@@ -38,7 +40,13 @@ function(chat_test_executable name)
                                ${PROJECT_SOURCE_DIR}/src/platform/${CHAT_OS} ${SODIUM_INCLUDE_DIRS} ${OQS_INCLUDE_DIRS}
                                ${MBEDTLS_INCLUDE_DIRS} ${SECP256K1_INCLUDE_DIRS})
     target_link_libraries(${name} PRIVATE ${SODIUM_STATIC_LIB} ${OQS_STATIC_LIB} ${MBEDTLS_STATIC_LIBS}
-                          ${SECP256K1_STATIC_LIB} Threads::Threads m)
+                          ${SECP256K1_STATIC_LIB})
+    if(WIN32)
+        target_compile_definitions(${name} PRIVATE SODIUM_STATIC=1 SECP256K1_STATIC=1 WIN32_LEAN_AND_MEAN)
+        target_link_libraries(${name} PRIVATE ws2_32 bcrypt ncrypt advapi32 shell32 user32 crypt32 iphlpapi)
+    else()
+        target_link_libraries(${name} PRIVATE Threads::Threads m)
+    endif()
     target_compile_options(${name} PRIVATE -Wall -Wextra)
     if(CHAT_SANITIZE)
         # Any report fails the test, not just a line in its output.

@@ -765,6 +765,8 @@ TPM answers (and the device file the TPM's sealed form is kept in), and everythi
 receives, including messages from a room member or a connected peer, and datagrams that unmask to
 anything at all. GitHub Actions runs the engine test, as built and again under AddressSanitizer
 and UndefinedBehaviorSanitizer, and each fuzz target for a minute, on every push and pull request.
+It also runs the engine test on Windows, cross-built with zig as releases are, and starts chat there
+to open a session and quit, so the Windows build's start-up runs on Windows itself.
 
 ```sh
 just test               # build and run the engine test

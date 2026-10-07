@@ -5,6 +5,7 @@
 /build-test/
 /build-fuzz/
 /build-asan/
+/build-win-test/
 /dist/
 /test-builds/
 build_stamp.h

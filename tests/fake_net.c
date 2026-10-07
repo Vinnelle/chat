@@ -4,17 +4,24 @@
 // 127.0.0.1:PORT; a datagram sent to that address waits in the queue until the socket's owner
 // reads it. The LAN beacon socket (the one opened with NET_REUSE) can't be opened, so sessions
 // only find each other through the peers they're given.
+#ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L
+#endif
 #include "platform/net.h"
 #include "fake_net.h"
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#endif
 
 // net_common.h also carries helpers for real sockets, which have no use here.
 #pragma GCC diagnostic push
