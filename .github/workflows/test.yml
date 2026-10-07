@@ -63,6 +63,15 @@ jobs:
       - name: Build
         run: cmake --build build-fuzz -j "$(nproc)" --target fuzz_${{ matrix.target }}
 
+      # Each run starts from the corpus the last one left, so a minute adds to what earlier runs
+      # found instead of starting again from the seeds.
+      - name: Restore the corpus
+        uses: actions/cache@v6
+        with:
+          path: corpus
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+
       - name: Fuzz for a minute
         env:
           ASAN_OPTIONS: detect_leaks=0
