@@ -85,8 +85,12 @@ the public key you show peers, so use a long one. A blank password gives a rando
 lasts until chat exits.
 
 `:verify NICK` shows a peer's verify code and identity fingerprint to compare out of band.
-Fingerprints and the verify codes in `:peers` are 128 bits, shown in groups of four hex digits.
-0.3.1 and older show the first 16 digits of the same codes.
+Verify codes and fingerprints are 128 bits. A verify code is shown as 16 words, one for each byte
+(from [Bytewords](https://developer.blockchaincommons.com/bytewords/), four letters each, chosen to
+be hard to mishear), so it can be read out over a call: `iron when sets good · deli axis road exam ·
+...`. The same code follows in groups of four hex digits, which `:peers` and fingerprints use too,
+and which is all 0.4.0 and older, and 0.5.0's betas, show. 0.3.1 and older show the first 16 hex
+digits.
 
 Each peer rekeys every few minutes. It sends its new key over the current encrypted session
 first, so a room member in the middle can't swap in their own key at a rekey. If a peer drops
@@ -1007,3 +1011,11 @@ Options given here override what `:install` saved, for that run.
 ## License
 
 [GPL-3.0-only](LICENSE). Copyright © 2026 finlay@tuta.com.
+
+The word list verify codes are read out with is [Bytewords](https://developer.blockchaincommons.com/bytewords/)
+(BCR-2020-012), Copyright © 2019 Blockchain Commons, LLC, under the
+[BSD-2-Clause Plus Patent License](https://spdx.org/licenses/BSD-2-Clause-Patent.html), whose
+full text is in [`src/common/bytewords.c`](src/common/bytewords.c). Releases also link
+[libsodium](https://libsodium.org) (ISC), [liboqs](https://openquantumsafe.org) (MIT),
+[Mbed TLS](https://www.trustedfirmware.org/projects/mbed-tls/) (Apache-2.0) and
+[libsecp256k1](https://github.com/bitcoin-core/secp256k1) (MIT), each under its own license.

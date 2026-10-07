@@ -3,6 +3,7 @@
 #include "core/chat.h"
 #include "core/trust.h"
 #include "common/util.h"
+#include "common/bytewords.h"
 #include "platform/platform.h"
 #include "common/image.h"
 #include <ctype.h>
@@ -1453,14 +1454,17 @@ static void announce_join(chat_t *c, peer_t *p) {
     check_trust(c, p);
     if (p->code_ok == 0) {
         char code[HEX_GROUPS_LEN(VERIFY_LEN)]; hex_groups(p->vfy, VERIFY_LEN, code);
+        char words[BYTEWORDS_LEN(VERIFY_LEN)]; bytewords(p->vfy, VERIFY_LEN, words);
         // The room's password only proves someone is a member, and any member could sit between two
-        // others. The code only matches on both ends if nobody is in the middle.
+        // others. The code only matches on both ends if nobody is in the middle. Older versions show
+        // it in hex only.
         if (c->verify_required)
-            ui_print(c, "* compare this code with %s over another channel (in person, a call): %s - then :verify %s ok, "
-                        "or :verify %s no if theirs differs. Until then nothing you send reaches them",
-                     name, code, name, name);
+            ui_print(c, "* compare this code with %s over another channel (in person, a call): %s (in hex %s) - then "
+                        ":verify %s ok, or :verify %s no if theirs differs. Until then nothing you send reaches them",
+                     name, words, code, name, name);
         else
-            ui_print(c, "* verify code with %s: %s - compare it over another channel, then :verify %s ok", name, code, name);
+            ui_print(c, "* verify code with %s: %s (in hex %s) - compare it over another channel, then :verify %s ok", name,
+                     words, code, name);
     }
     tell_build(c, p);
     file_offer_all(c, p);
@@ -2094,7 +2098,8 @@ static cmd_result_t cmd_verify(void *ctx, const char *arg) {
     } else {
         static const char *const STATE[] = { "", " - not compared yet", " - compared", " - you said it differs",
                                              " - not compared, and they sign with another key than the one verified for this nick" };
-        ui_print(c, "* %s: verify code %s%s", name, code, STATE[chat_code_state(c, p)]);
+        char words[BYTEWORDS_LEN(VERIFY_LEN)]; bytewords(p->vfy, VERIFY_LEN, words);
+        ui_print(c, "* %s: verify code %s (in hex %s)%s", name, words, code, STATE[chat_code_state(c, p)]);
         if (p->identity_source != IDENT_NONE) {
             char fphex[HEX_GROUPS_LEN(ID_FP_LEN)]; hex_groups(p->identity_fp, ID_FP_LEN, fphex);
             ui_print(c, "* %s: signing identity fingerprint %s (%s)", name, fphex, chat_verify_label(p->identity_state));

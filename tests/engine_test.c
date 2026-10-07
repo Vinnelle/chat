@@ -14,6 +14,7 @@
 #include "crypto/pgp.h"
 #include "platform/platform.h"
 #include "common/qr.h"
+#include "common/bytewords.h"
 #include "app/install.h"
 #include "test_os.h"
 #include <sodium.h>
@@ -880,6 +881,24 @@ static void test_factor_locks(double *t) {
     CHECK(pass_needs(scratch, len[PASS_NEEDS_DEVICE]) == 0
           && pass_unseal(&lk[PASS_NEEDS_DEVICE], scratch, len[PASS_NEEDS_DEVICE], opened, sizeof opened, &got) == PASS_FORMAT,
           "a second header for the device alone was taken");
+}
+
+// Bytewords' own example, a word for each byte of a 16-byte seed in groups of four, and every word.
+static void test_bytewords(double *t) {
+    (void)t;
+    static const uint8_t seed[16] = { 0xc7, 0x09, 0x85, 0x80, 0x12, 0x5e, 0x2a, 0xb0,
+                                      0x98, 0x12, 0x53, 0x46, 0x8b, 0x2d, 0xbc, 0x52 };
+    char out[BYTEWORDS_LEN(16)];
+    bytewords(seed, sizeof seed, out);
+    CHECK(strcmp(out, "slot axis limp lava \xc2\xb7 brag holy door puff \xc2\xb7 monk brag guru frog \xc2\xb7 luau drop roof grim") == 0,
+          "Bytewords' example came out as %s", out);
+    static uint8_t all[256];
+    static char every[BYTEWORDS_LEN(256)];
+    for (int i = 0; i < 256; i++) all[i] = (uint8_t)i;
+    bytewords(all, sizeof all, every);
+    size_t n = strlen(every);
+    CHECK(n == 256 * 4 + 192 + 63 * 4 && strncmp(every, "able acid also apex", 19) == 0 && strcmp(every + n - 4, "zoom") == 0,
+          "the 256 words came out wrong (%zu bytes)", n);
 }
 
 // RFC 6238's SHA-1 values, cut to 6 digits, and RFC 4648's base32.
@@ -2041,7 +2060,7 @@ int main(int argc, char **argv) {
         { "third peer", test_third_peer }, { "candidates settle", test_candidates_settle }, { "builds", test_builds },
         { "parsers", test_parsers }, { "toml", test_toml }, { "dht keys", test_dht_keys }, { "dht", test_dht }, { "read file", test_read_file },
         { "identity keys", test_identity_keys }, { "passphrase seal", test_passphrase_seal }, { "device lock", test_device_lock },
-        { "factor locks", test_factor_locks }, { "totp", test_totp }, { "qr", test_qr }, { "save factors", test_save_factors }, { "duress", test_duress }, { "images", test_images }, { "file names", test_file_names }, { "files", test_files },
+        { "factor locks", test_factor_locks }, { "totp", test_totp }, { "bytewords", test_bytewords }, { "qr", test_qr }, { "save factors", test_save_factors }, { "duress", test_duress }, { "images", test_images }, { "file names", test_file_names }, { "files", test_files },
         { "verified keys", test_trust },
     };
     size_t n_tests = sizeof tests / sizeof tests[0];

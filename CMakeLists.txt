@@ -179,6 +179,7 @@ add_executable(chat
     src/common/json.c
     src/common/image.c
     src/common/qr.c
+    src/common/bytewords.c
     src/platform/${CHAT_OS}/net.c
     src/platform/${CHAT_OS}/platform.c
     src/platform/${CHAT_OS}/device.c

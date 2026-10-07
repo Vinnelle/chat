@@ -27,6 +27,7 @@ set(CHAT_CORE_SOURCES
     ${PROJECT_SOURCE_DIR}/src/common/toml.c
     ${PROJECT_SOURCE_DIR}/src/common/image.c
     ${PROJECT_SOURCE_DIR}/src/common/qr.c
+    ${PROJECT_SOURCE_DIR}/src/common/bytewords.c
     ${PROJECT_SOURCE_DIR}/src/platform/${CHAT_OS}/platform.c
     ${CMAKE_CURRENT_SOURCE_DIR}/fake_net.c
     ${CMAKE_CURRENT_SOURCE_DIR}/test_os.c
