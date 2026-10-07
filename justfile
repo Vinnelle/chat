@@ -159,7 +159,7 @@ test-sanitized *flags:
     cmake --build build-asan -j {{num_cpus()}} --target engine_test
     ./build-asan/tests/engine_test "$@"
 
-# Fuzz one target (bencode, json, pgp, text, engine, image or toml) for a number of seconds (needs clang)
+# Fuzz one target (bencode, json, pgp, text, engine, image, toml, save, ctap2 or tpm2) for a number of seconds (needs clang)
 [group('test')]
 fuzz target="engine" seconds="300":
     cmake -B build-fuzz -DCHAT_FUZZ=ON -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Debug

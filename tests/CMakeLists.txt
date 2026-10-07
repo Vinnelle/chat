@@ -53,8 +53,15 @@ chat_test_executable(engine_test engine_test.c ${PROJECT_SOURCE_DIR}/src/app/ins
 add_test(NAME engine COMMAND engine_test)
 
 if(CHAT_FUZZ)
-    foreach(target fuzz_bencode fuzz_pgp fuzz_text fuzz_engine fuzz_json fuzz_image fuzz_toml)
-        chat_test_executable(${target} ${target}.c)
+    foreach(target fuzz_bencode fuzz_pgp fuzz_text fuzz_engine fuzz_json fuzz_image fuzz_toml fuzz_save fuzz_ctap2
+                   fuzz_tpm2)
+        set(extra)
+        if(target STREQUAL "fuzz_ctap2")
+            set(extra ${PROJECT_SOURCE_DIR}/src/platform/linux/ctap2.c)
+        elseif(target STREQUAL "fuzz_tpm2")
+            set(extra ${PROJECT_SOURCE_DIR}/src/platform/linux/tpm2.c)
+        endif()
+        chat_test_executable(${target} ${target}.c ${extra})
         target_compile_definitions(${target} PRIVATE FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION)
         target_compile_options(${target} PRIVATE -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -g)
         target_link_options(${target} PRIVATE -fsanitize=fuzzer,address,undefined)

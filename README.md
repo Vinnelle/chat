@@ -759,7 +759,9 @@ to whoever sent it, changed after being offered (thrown away, saying why), sent 
 by its sender, cancelled and withdrawn. The fuzz targets (libFuzzer, so clang) cover bencode and
 DHT replies (IPv4 and IPv6), relay JSON and UPnP gateway replies, PGP and AGE key import, PNG,
 JPEG and GIF images, text cleaning, file names, the input line, pictures drawn in the chat and on a
-page of their own, the settings file as a hand could have edited it, and everything a session
+page of their own, the settings file as a hand could have edited it, a save's securitykey file and
+sealed headers as anyone who can write to its folder could leave them, whatever a security key or a
+TPM answers (and the device file the TPM's sealed form is kept in), and everything a session
 receives, including messages from a room member or a connected peer, and datagrams that unmask to
 anything at all. GitHub Actions runs the engine test, as built and again under AddressSanitizer
 and UndefinedBehaviorSanitizer, and each fuzz target for a minute, on every push and pull request.
@@ -768,7 +770,7 @@ and UndefinedBehaviorSanitizer, and each fuzz target for a minute, on every push
 just test               # build and run the engine test
 just test -v            # the same, printing every session line and every check before the summary
 just test-sanitized     # the engine test under AddressSanitizer and UndefinedBehaviorSanitizer (needs clang)
-just fuzz engine 600    # fuzz one target (bencode, json, pgp, text, engine, image, toml) for 600 seconds
+just fuzz engine 600    # fuzz one target (bencode, json, pgp, text, engine, image, toml, save, ctap2, tpm2) for 600 seconds
 ```
 
 ### Releases

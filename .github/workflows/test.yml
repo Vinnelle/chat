@@ -50,7 +50,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [bencode, json, pgp, text, engine, image, toml]
+        target: [bencode, json, pgp, text, engine, image, toml, save, ctap2, tpm2]
     steps:
       - uses: actions/checkout@v7
 
