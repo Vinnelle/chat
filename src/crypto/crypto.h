@@ -64,7 +64,7 @@ void crypto_unlock(void *buf, size_t len);
 
 #define KDF_OPSLIMIT 4
 #define KDF_MEMLIMIT (512u * 1024u * 1024u)
-#define KDF_LABEL "chat-kdf-v2"
+#define CHAT_KDF_LABEL "chat-kdf-v2"
 // 0, or -1 if there isn't enough free memory.
 int derive_master(const char *password, const char *session_id, uint8_t master[MASTER_LEN]);
 void derive_room_key(const uint8_t master[MASTER_LEN], uint8_t room_key[ROOM_KEY_LEN]);

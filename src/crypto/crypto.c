@@ -51,7 +51,7 @@ int derive_master(const char *password, const char *session_id, uint8_t master[M
     uint8_t salt[crypto_pwhash_SALTBYTES];
     crypto_generichash_state st;
     crypto_generichash_init(&st, NULL, 0, sizeof salt);
-    crypto_generichash_update(&st, (const unsigned char *)KDF_LABEL, sizeof(KDF_LABEL) - 1);
+    crypto_generichash_update(&st, (const unsigned char *)CHAT_KDF_LABEL, sizeof(CHAT_KDF_LABEL) - 1);
     crypto_generichash_update(&st, (const unsigned char *)session_id, strlen(session_id));
     crypto_generichash_final(&st, salt, sizeof salt);
     sodium_memzero(&st, sizeof st);
