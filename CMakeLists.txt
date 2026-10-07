@@ -334,6 +334,7 @@ endif()
 
 option(CHAT_TESTS "Build the engine test (tests/)" OFF)
 option(CHAT_FUZZ "Also build the libFuzzer targets (needs clang)" OFF)
+option(CHAT_SANITIZE "Build the tests with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 if(CHAT_TESTS OR CHAT_FUZZ)
     enable_testing()
     add_subdirectory(tests)

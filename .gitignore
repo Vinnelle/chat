@@ -4,6 +4,7 @@
 /build-static/
 /build-test/
 /build-fuzz/
+/build-asan/
 /dist/
 /test-builds/
 build_stamp.h

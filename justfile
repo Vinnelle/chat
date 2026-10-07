@@ -138,7 +138,7 @@ run *args: build
 # Remove build directories, test builds and release output
 [group('build')]
 clean:
-    rm -rf build build-static build-win build-test build-fuzz test-builds dist
+    rm -rf build build-static build-win build-test build-fuzz build-asan test-builds dist
 
 # ---------------------------------------------------------------------------------------------
 # Test
@@ -151,6 +151,13 @@ test *flags:
     cmake -B build-test -DCHAT_TESTS=ON
     cmake --build build-test -j {{num_cpus()}} --target engine_test
     ./build-test/tests/engine_test "$@"
+
+# Build and run the engine test under AddressSanitizer and UndefinedBehaviorSanitizer (needs clang)
+[group('test')]
+test-sanitized *flags:
+    cmake -B build-asan -DCHAT_TESTS=ON -DCHAT_SANITIZE=ON -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Debug
+    cmake --build build-asan -j {{num_cpus()}} --target engine_test
+    ./build-asan/tests/engine_test "$@"
 
 # Fuzz one target (bencode, json, pgp, text, engine, image or toml) for a number of seconds (needs clang)
 [group('test')]

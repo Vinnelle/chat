@@ -40,6 +40,12 @@ function(chat_test_executable name)
     target_link_libraries(${name} PRIVATE ${SODIUM_STATIC_LIB} ${OQS_STATIC_LIB} ${MBEDTLS_STATIC_LIBS}
                           ${SECP256K1_STATIC_LIB} Threads::Threads m)
     target_compile_options(${name} PRIVATE -Wall -Wextra)
+    if(CHAT_SANITIZE)
+        # Any report fails the test, not just a line in its output.
+        target_compile_options(${name} PRIVATE -fsanitize=address,undefined -fno-sanitize-recover=all
+                               -fno-omit-frame-pointer -g)
+        target_link_options(${name} PRIVATE -fsanitize=address,undefined)
+    endif()
 endfunction()
 
 # The saves' code, with a device and a security key of the test's own in engine_test.c.

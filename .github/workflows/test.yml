@@ -1,7 +1,8 @@
 name: test
 
-# Runs the engine test on every push and pull request, and each fuzz target for a minute, so a
-# change that breaks a session or trips a sanitizer shows before a release is cut.
+# Runs the engine test on every push and pull request, as built and again under the sanitizers, and
+# each fuzz target for a minute, so a change that breaks a session or trips a sanitizer shows before
+# a release is cut.
 
 on:
   push:
@@ -26,6 +27,23 @@ jobs:
 
       - name: Engine test
         run: ./build-test/tests/engine_test
+
+  engine-sanitized:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the sanitizers' runtime
+        run: sudo apt-get update -q && sudo apt-get install -y -q clang-18 libclang-rt-18-dev
+
+      - name: Configure
+        run: cmake -B build-asan -DCHAT_TESTS=ON -DCHAT_SANITIZE=ON -DCMAKE_C_COMPILER=clang-18 -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build build-asan -j "$(nproc)" --target engine_test
+
+      - name: Engine test under AddressSanitizer and UndefinedBehaviorSanitizer
+        run: ./build-asan/tests/engine_test
 
   fuzz:
     runs-on: ubuntu-24.04
