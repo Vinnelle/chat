@@ -165,6 +165,13 @@ set(SECP256K1_STATIC_LIB ${SECP256K1_PREFIX}/install/lib/libsecp256k1.a)
 
 add_executable(chat
     src/app/main.c
+    src/app/history.c
+    src/app/torlink.c
+    src/app/settings.c
+    src/app/pages.c
+    src/app/saves.c
+    src/app/commands.c
+    src/app/screen.c
     src/app/tui.c
     src/app/update.c
     src/app/install.c
