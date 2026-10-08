@@ -38,6 +38,9 @@
   code, from Bytewords (a list made to be hard to mishear), like `iron when sets good · deli axis road
   exam · ...`. The prompt to compare codes when a peer joins and `:verify NICK` show them, with the
   same code in hex after them for a peer on an older version, which only shows hex.
+- `PROTOCOL.md` describes the wire protocol: the keys and what they're made from, the frames, the
+  handshake, rekeys, every record and the timers. `SECURITY.md` has the threat model and how to
+  report a vulnerability.
 - The shadow passphrase and self-destruct, in 0.5.0's betas but not their notes. `:set shadow on`
   (the **Shadow password** row) gives the open save a second passphrase that opens a decoy in its
   place: a clean save with no key or verified keys, needing the same device, security key and code,

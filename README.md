@@ -146,6 +146,10 @@ you can watch chat's files change, and can replace chat or tor before you next s
 
 > **Note:** the cryptography here has not been independently audited.
 
+[PROTOCOL.md](PROTOCOL.md) describes what chat sends over the network, byte by byte.
+[SECURITY.md](SECURITY.md) has the threat model (what chat protects, from whom, and where that
+stops) and how to report a vulnerability.
+
 ## Routing
 
 chat opens on its settings page, with **Routing** at the top. `--routing` presets it, and
