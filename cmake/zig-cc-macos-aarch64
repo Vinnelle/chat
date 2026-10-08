@@ -1,0 +1,10 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 finlay@tuta.com
+# zig-cc pinned to macOS 11 or later on aarch64, so libsodium's autotools get the target without an env var.
+# liboqs asks for -march=armv8-a+crypto, which zig doesn't take: its Apple CPUs have both anyway.
+for a do
+    shift
+    case $a in -march=armv8*) ;; *) set -- "$@" "$a" ;; esac
+done
+ZIG_TARGET=aarch64-macos.11.0 exec "$(dirname "$0")/zig-cc" "$@"

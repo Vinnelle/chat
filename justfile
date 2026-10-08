@@ -12,9 +12,10 @@ default:
 #   just build                       native binary in build/
 #   just build linux                 static musl Linux binary in build-static/ (needs zig)
 #   just build windows               Windows binary in build-win/ (needs zig; win works too)
+#   just build macos                 macOS binaries in build-macos-aarch64/ and -x86_64/ (needs zig)
 #   just build all                   native and Windows binaries
 #   just build test [system] [args]  test builds, see _build-test
-# Build chat: native (default), linux, windows, all, or test [all|linux|windows]
+# Build chat: native (default), linux, windows, macos, all, or test [all|linux|windows]
 [group('build')]
 build what="native" *args:
     #!/bin/sh
@@ -36,12 +37,18 @@ build what="native" *args:
             cmake -B build-win -DCMAKE_TOOLCHAIN_FILE=cmake/zig-windows.cmake
             cmake --build build-win -j {{num_cpus()}}
             ;;
+        macos|mac)
+            for arch in aarch64 x86_64; do
+                cmake -B build-macos-$arch -DCMAKE_TOOLCHAIN_FILE=cmake/zig-macos-$arch.cmake
+                cmake --build build-macos-$arch -j {{num_cpus()}}
+            done
+            ;;
         all)
             "$just" build
             "$just" build windows
             ;;
         test) exec "$just" _build-test "$@" ;;
-        *) echo "just build takes native, linux, windows, all or test, not $what" >&2; exit 1 ;;
+        *) echo "just build takes native, linux, windows, macos, all or test, not $what" >&2; exit 1 ;;
     esac
 
 # just build test [all|linux|windows] [chat args], all by default. This system's binary builds
@@ -138,7 +145,7 @@ run *args: build
 # Remove build directories, test builds and release output
 [group('build')]
 clean:
-    rm -rf build build-static build-win build-test build-fuzz build-asan build-win-test test-builds dist
+    rm -rf build build-static build-win build-macos-aarch64 build-macos-x86_64 build-test build-fuzz build-asan build-win-test test-builds dist
 
 # ---------------------------------------------------------------------------------------------
 # Test

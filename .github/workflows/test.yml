@@ -97,6 +97,57 @@ jobs:
           win/chat.exe --version
           printf ':quit\n' | win/chat.exe --simple --routing dht --nodht --nonostr --noportmap --nolan
 
+  # The same for macOS on Apple silicon, which zig cross-builds without Apple's SDK.
+  macos-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up zig
+        env:
+          ZIG_VERSION: 0.16.0
+          ZIG_SHA256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+        run: |
+          name=zig-x86_64-linux-$ZIG_VERSION
+          curl -fsSL -o "$RUNNER_TEMP/$name.tar.xz" "https://ziglang.org/download/$ZIG_VERSION/$name.tar.xz"
+          echo "$ZIG_SHA256  $RUNNER_TEMP/$name.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/$name.tar.xz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/$name" >> "$GITHUB_PATH"
+
+      - name: Configure
+        run: cmake -B build-macos -DCMAKE_TOOLCHAIN_FILE=cmake/zig-macos-aarch64.cmake -DCHAT_TESTS=ON
+
+      - name: Build
+        run: cmake --build build-macos -j "$(nproc)" --target engine_test chat
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-test-builds
+          path: |
+            build-macos/tests/engine_test
+            build-macos/chat
+          if-no-files-found: error
+
+  macos:
+    needs: macos-build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: macos-test-builds
+          path: mac
+
+      # Artifacts don't keep the executable bit.
+      - name: Engine test
+        run: |
+          chmod +x mac/tests/engine_test mac/chat
+          mac/tests/engine_test
+
+      - name: chat starts, opens a session and quits
+        run: |
+          mac/chat --version
+          printf ':quit\n' | mac/chat --simple --routing dht --nodht --nonostr --noportmap --nolan
+
   fuzz:
     runs-on: ubuntu-24.04
     strategy:

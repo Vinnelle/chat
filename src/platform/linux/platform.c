@@ -7,6 +7,10 @@
 #define _DEFAULT_SOURCE
 // O_NOATIME, which they declare only for GNU code.
 #define _GNU_SOURCE
+// macOS hides what isn't POSIX (gethostuuid among it) once _POSIX_C_SOURCE is set, without this.
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE
+#endif
 
 #include "platform/platform.h"
 #include "common/util.h"
@@ -38,6 +42,17 @@
 #include <sys/prctl.h>
 #include <sys/syscall.h>
 #endif
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#include <uuid/uuid.h>
+#if __has_include(<sys/ptrace.h>)
+#include <sys/ptrace.h>
+#else
+// zig's macOS headers leave it out, but libSystem has it.
+int ptrace(int request, pid_t pid, char *addr, int data);
+#define PT_DENY_ATTACH 31
+#endif
+#endif
 
 #define SECRET_ENV_MAX 4
 
@@ -67,6 +82,10 @@ void platform_harden_process(const char *const secret_env[]) {
 #ifdef PR_SET_NO_NEW_PRIVS
     // chat only runs curl and tor, and neither needs to gain privileges through exec.
     prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+#endif
+#ifdef __APPLE__
+    // No debugger attaches from then on, and one already attached ends chat.
+    ptrace(PT_DENY_ATTACH, 0, 0, 0);
 #endif
 
     struct rlimit ml;
@@ -605,6 +624,14 @@ const char *platform_home_dir(void) {
 }
 
 int platform_machine_id(char *out, size_t cap) {
+#ifdef __APPLE__
+    // The hardware UUID, which, like a Linux machine id, any program can read.
+    uuid_t u;
+    struct timespec wait = { 0, 0 };
+    if (cap <= 32 || gethostuuid(u, &wait) != 0) return -1;
+    hex_encode(u, sizeof u, out);
+    return 0;
+#endif
     static const char *const PATHS[] = { "/etc/machine-id", "/var/lib/dbus/machine-id" };
     for (size_t i = 0; i < sizeof PATHS / sizeof PATHS[0]; i++) {
         FILE *f = fopen(PATHS[i], "r");
@@ -819,6 +846,13 @@ int platform_remove(const char *utf8_path) {
 }
 
 int platform_exe_path(char *out, size_t cap) {
+#ifdef __APPLE__
+    char found[4096], real[4096];
+    uint32_t len = sizeof found;
+    if (_NSGetExecutablePath(found, &len) != 0 || !realpath(found, real) || strlen(real) >= cap) return -1;
+    copy_str(out, real, cap);
+    return 0;
+#endif
     ssize_t n = readlink("/proc/self/exe", out, cap - 1);
     if (n <= 0 || (size_t)n >= cap - 1) return -1;
     out[n] = '\0';
@@ -849,6 +883,7 @@ int platform_replace_exe(const char *new_path, const char *exe_path) {
     return rename(new_path, exe_path);
 }
 
+// macOS has no /proc: there the router is asked over UPnP alone, which finds it by multicast.
 int platform_default_gateway(uint8_t ip[4]) {
     FILE *f = fopen("/proc/net/route", "r");
     if (!f) return -1;
@@ -928,7 +963,8 @@ int platform_find_program(const char *name, const char *path, char *out, size_t 
             if (program_ok(cand, out, cap) == 0) return 0;
         }
     }
-    static const char *const DIRS[] = { "/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin", "/bin", "/sbin" };
+    static const char *const DIRS[] = { "/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin", "/bin", "/sbin",
+                                        "/opt/homebrew/bin" };
     for (size_t i = 0; i < sizeof DIRS / sizeof DIRS[0]; i++) {
         snprintf(cand, sizeof cand, "%s/%s", DIRS[i], name);
         if (program_ok(cand, out, cap) == 0) return 0;
@@ -943,9 +979,12 @@ static int private_dir_ok(const char *dir) {
 }
 
 static const char *tempdir_base(void) {
-    // XDG_RUNTIME_DIR belongs to this user only and is usually in memory. /tmp is the fallback,
-    // where mkdtemp still creates the folder as 0700 with a name nobody can guess.
+    // XDG_RUNTIME_DIR belongs to this user only and is usually in memory, and macOS gives each user
+    // a private TMPDIR. /tmp is the fallback, where mkdtemp still creates the folder as 0700 with a
+    // name nobody can guess.
     const char *base = getenv("XDG_RUNTIME_DIR");
+    if (private_dir_ok(base)) return base;
+    base = getenv("TMPDIR");
     return private_dir_ok(base) ? base : "/tmp";
 }
 

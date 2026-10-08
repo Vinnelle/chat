@@ -14,6 +14,12 @@
   decoy the betas made still opens, and when its save opens chat says how to move it to the spare.
 
 ### Added
+- chat builds for macOS, Apple silicon and Intel (macOS 11 and later), cross-built with zig like
+  the Linux and Windows releases (`just build macos`). It shares the Linux platform code, with the
+  Mac's hardware UUID as the machine id, `PT_DENY_ATTACH` against debuggers and its private TMPDIR
+  for chat's own tor. Locking a save to the device, security keys, desktop notifications and PCP or
+  NAT-PMP port mapping don't work there yet (they need Apple's frameworks), and releases don't
+  include it until it's been used on a Mac. CI runs the engine test and chat itself on macOS.
 - History, off unless you turn it on: `:set history on` (Chat > History) keeps each session's
   messages, sealed in the save that's open, and shows them when you join that session again with the
   same id and password. Each session's is a file of its own named from its id and password, so the

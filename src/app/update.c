@@ -29,6 +29,8 @@
 #ifdef UPDATE_ARCH
 #ifdef _WIN32
 #define UPDATE_ASSET "chat-windows-" UPDATE_ARCH ".exe"
+#elif defined(__APPLE__)
+#define UPDATE_ASSET "chat-macos-" UPDATE_ARCH
 #else
 #define UPDATE_ASSET "chat-linux-" UPDATE_ARCH
 #endif

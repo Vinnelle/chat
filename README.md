@@ -16,7 +16,8 @@ written to disk unless you ask for it.
 
 > Thank you for reading.
 
-It's written in C, runs on Linux and Windows, and only links static crypto libraries.
+It's written in C, runs on Linux and Windows, builds for macOS (see [macOS](#macos)), and only
+links static crypto libraries.
 
 ## Security
 
@@ -747,6 +748,25 @@ cmake -B build-win -DCMAKE_TOOLCHAIN_FILE=cmake/zig-windows.cmake
 cmake --build build-win
 ```
 
+### macOS
+
+zig cross-builds chat for macOS too, Apple silicon (`aarch64`) and Intel (`x86_64`), for macOS 11
+and later, without Apple's SDK: it links only the system library, and zig signs the result ad hoc,
+which Apple silicon needs to run it.
+
+```sh
+cmake -B build-macos-aarch64 -DCMAKE_TOOLCHAIN_FILE=cmake/zig-macos-aarch64.cmake
+cmake --build build-macos-aarch64
+```
+
+The platform code is the Linux code, which is POSIX apart from what it keeps to Linux. GitHub
+Actions runs the engine test and starts chat on a Mac on every push, but it hasn't been used on
+one beyond that, and releases don't include it yet. What doesn't work there yet, since it needs
+Apple's frameworks: locking a save to the device (the Secure Enclave), security keys, desktop
+notifications, and asking the router for a port over PCP or NAT-PMP (UPnP still works). The
+settings page greys the first two out and says why. A debugger can't attach to chat there
+(`PT_DENY_ATTACH`), and the machine id a native signing key is made with is the Mac's hardware UUID.
+
 ### With just
 
 The [`justfile`](justfile) wraps the commands above:
@@ -754,6 +774,7 @@ The [`justfile`](justfile) wraps the commands above:
 ```sh
 just build              # native binary in build/
 just build windows      # Windows binary in build-win/ (needs zig)
+just build macos        # macOS binaries in build-macos-aarch64/ and build-macos-x86_64/ (needs zig)
 just run --nick you     # build, then run
 just build test         # Linux and Windows binaries in test-builds/<date>-<time>/, offer to run this system's
 just build test linux   # the same for one system (or: windows); the other system's needs zig
@@ -787,8 +808,8 @@ TPM answers (and the device file the TPM's sealed form is kept in), and everythi
 receives, including messages from a room member or a connected peer, and datagrams that unmask to
 anything at all. GitHub Actions runs the engine test, as built and again under AddressSanitizer
 and UndefinedBehaviorSanitizer, and each fuzz target for a minute, on every push and pull request.
-It also runs the engine test on Windows, cross-built with zig as releases are, and starts chat there
-to open a session and quit, so the Windows build's start-up runs on Windows itself.
+It also runs the engine test on Windows and on macOS (Apple silicon), cross-built with zig as
+releases are, and starts chat on each to open a session and quit, so their start-up runs there.
 
 ```sh
 just test               # build and run the engine test

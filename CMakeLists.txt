@@ -11,10 +11,18 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# CHAT_OS names the folder with os.h and the device lock and security key code. macOS shares the
+# rest (platform.c, net.c) with Linux, which is POSIX apart from what it guards.
 if(WIN32)
     set(CHAT_OS windows)
+    set(CHAT_POSIX_OS windows)
+elseif(APPLE)
+    set(CHAT_OS macos)
+    set(CHAT_POSIX_OS linux)
+    add_compile_definitions(_POSIX_C_SOURCE=200809L _DARWIN_C_SOURCE)
 else()
     set(CHAT_OS linux)
+    set(CHAT_POSIX_OS linux)
     add_compile_definitions(_POSIX_C_SOURCE=200809L)
 endif()
 
@@ -180,8 +188,8 @@ add_executable(chat
     src/common/image.c
     src/common/qr.c
     src/common/bytewords.c
-    src/platform/${CHAT_OS}/net.c
-    src/platform/${CHAT_OS}/platform.c
+    src/platform/${CHAT_POSIX_OS}/net.c
+    src/platform/${CHAT_POSIX_OS}/platform.c
     src/platform/${CHAT_OS}/device.c
     src/platform/${CHAT_OS}/seckey.c
 )
@@ -240,6 +248,9 @@ if(WIN32)
     target_compile_definitions(chat PRIVATE SODIUM_STATIC=1 SECP256K1_STATIC=1 WIN32_LEAN_AND_MEAN)
     target_link_libraries(chat PRIVATE ws2_32 bcrypt ncrypt advapi32 shell32 user32 crypt32 iphlpapi)
     target_link_options(chat PRIVATE -static)
+elseif(APPLE)
+    find_package(Threads REQUIRED)
+    target_link_libraries(chat PRIVATE Threads::Threads)
 else()
     # A device lock without systemd's credential service speaks to the TPM itself, and chat speaks
     # CTAP to a security key itself.
