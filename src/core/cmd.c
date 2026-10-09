@@ -4,6 +4,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#define SYNOPSIS_MAX 64
+#define SYNOPSIS_WIDTH 30   // the help lines up after it
+
 const char *cmd_parse(const char *line, char word[CMD_WORD_MAX]) {
     while (*line == ' ') line++;
     size_t n = strcspn(line, " ");
@@ -34,9 +37,9 @@ const command_t *cmd_find(const command_t *table, const char *word) {
 }
 
 void cmd_format_help(const command_t *cmd, char prefix, char *out, size_t cap) {
-    char synopsis[64];
+    char synopsis[SYNOPSIS_MAX];
     snprintf(synopsis, sizeof synopsis, "%c%s%s%s", prefix, cmd->name, cmd->args ? " " : "", cmd->args ? cmd->args : "");
-    size_t pos = (size_t)snprintf(out, cap, "*   %-30s %s", synopsis, cmd->help);
+    size_t pos = (size_t)snprintf(out, cap, "*   %-*s %s", SYNOPSIS_WIDTH, synopsis, cmd->help);
     const char *sep = " (also";
     for (const char *p = cmd->aliases; p && *p && pos < cap; ) {
         size_t n = strcspn(p, " ");

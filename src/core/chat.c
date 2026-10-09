@@ -11,10 +11,17 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <time.h>
 
 #define SECRETS_OFFSET offsetof(chat_t, keys)
 #define SECRETS_LEN (offsetof(chat_t, identity) + sizeof(identity_keypair_t) - offsetof(chat_t, keys))
+
+// Timers wait up to this much longer, at random, so they don't line up between peers.
+#define JITTER 0.25
+// A buffer for a sealed handshake: the text, with its nonce, padding and tag.
+#define FRAME_BUF_LEN (HANDSHAKE_BUF_LEN + 128)
+#define COLOR_HEX_LEN 6
 
 static void ui_print(chat_t *c, const char *fmt, ...);
 static void ui_warn(chat_t *c, const char *fmt, ...);
@@ -33,7 +40,7 @@ void routing_defaults(routing_t *r) {
     memset(r, 0, sizeof *r);
     r->mode = ROUTE_DHT;
     r->dht4 = r->dht6 = r->lan = r->portmap = r->nostr = 1;
-    for (size_t i = 0; i < sizeof DEFAULT_RELAYS / sizeof DEFAULT_RELAYS[0]; i++)
+    for (size_t i = 0; i < COUNT_OF(DEFAULT_RELAYS); i++)
         copy_str(r->relays[r->n_relays++], DEFAULT_RELAYS[i], NOSTR_URL_MAX);
     r->tor = TOR_DEFAULTS;
 }
@@ -57,46 +64,45 @@ const named_color_t COLOR_PALETTE[] = {
     { "purple",  0x8E, 0x4E, 0xC6 }, { "pink",    0xD6, 0x40, 0x9F },
     { "brown",   0xAD, 0x7F, 0x58 }, { "gray",    0x8B, 0x8D, 0x98 },
 };
-const int COLOR_PALETTE_N = (int)(sizeof(COLOR_PALETTE) / sizeof(COLOR_PALETTE[0]));
+const int COLOR_PALETTE_N = (int)COUNT_OF(COLOR_PALETTE);
 
-static int hexval1(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
+void chat_random_colour(uint8_t rgb[3]) {
+    const named_color_t *pick = &COLOR_PALETTE[gen_uniform((uint32_t)COLOR_PALETTE_N)];
+    rgb[0] = pick->r; rgb[1] = pick->g; rgb[2] = pick->b;
+}
+
+static int nick_ieq(const char *a, const char *b) {
+    while (*a && *b) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) return 0;
+        a++; b++;
+    }
+    return *a == '\0' && *b == '\0';
 }
 
 int parse_color(const char *text, uint8_t rgb[3]) {
     const char *h = text;
     if (h[0] == '#') h++;
     size_t len = strlen(h);
-    if (len == 6) {
+    if (len == COLOR_HEX_LEN) {
         int ok = 1;
         uint8_t tmp[3];
         for (int i = 0; i < 3; i++) {
-            int hi = hexval1(h[i * 2]), lo = hexval1(h[i * 2 + 1]);
+            int hi = hex_value(h[i * 2]), lo = hex_value(h[i * 2 + 1]);
             if (hi < 0 || lo < 0) { ok = 0; break; }
             tmp[i] = (uint8_t)((hi << 4) | lo);
         }
         if (ok) { memcpy(rgb, tmp, 3); return 0; }
     }
-    for (int i = 0; i < COLOR_PALETTE_N; i++) {
-        size_t nlen = strlen(COLOR_PALETTE[i].name);
-        if (nlen == strlen(text)) {
-            int match = 1;
-            for (size_t j = 0; j < nlen; j++)
-                if (tolower((unsigned char)text[j]) != COLOR_PALETTE[i].name[j]) { match = 0; break; }
-            if (match) { rgb[0] = COLOR_PALETTE[i].r; rgb[1] = COLOR_PALETTE[i].g; rgb[2] = COLOR_PALETTE[i].b; return 0; }
+    // The palette's names are lower case.
+    for (int i = 0; i < COLOR_PALETTE_N; i++)
+        if (nick_ieq(text, COLOR_PALETTE[i].name)) {
+            rgb[0] = COLOR_PALETTE[i].r; rgb[1] = COLOR_PALETTE[i].g; rgb[2] = COLOR_PALETTE[i].b;
+            return 0;
         }
-    }
     return -1;
 }
 
-static void color_to_hex(const uint8_t rgb[3], char out[7]) {
-    static const char *H = "0123456789abcdef";
-    for (int i = 0; i < 3; i++) { out[i*2] = H[rgb[i]>>4]; out[i*2+1] = H[rgb[i]&0xf]; }
-    out[6] = '\0';
-}
+static void color_to_hex(const uint8_t rgb[3], char out[COLOR_HEX_LEN + 1]) { hex_encode(rgb, 3, out); }
 
 #define MAX_FIELDS 8
 
@@ -111,19 +117,13 @@ static int split_tabs(char *s, char *fields[], int max) {
     return n;
 }
 
-static void gen_mid(char out[9]) {
-    uint8_t b[4];
-    gen_random(b, 4);
-    hex_encode(b, 4, out);
+static void gen_mid(char out[MID_HEX + 1]) {
+    uint8_t b[MID_LEN];
+    gen_random(b, MID_LEN);
+    hex_encode(b, MID_LEN, out);
 }
 
-static int nick_ieq(const char *a, const char *b) {
-    while (*a && *b) {
-        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) return 0;
-        a++; b++;
-    }
-    return *a == '\0' && *b == '\0';
-}
+static void short_id(const uint8_t id[ID_LEN], char out[SHORT_ID_HEX + 1]) { hex_encode(id, SHORT_ID_LEN, out); }
 
 // Characters that render as nothing, or next to nothing.
 static int is_invisible(uint32_t cp) {
@@ -171,12 +171,12 @@ static void nick_skeleton(const char *nick, char *out, size_t cap) {
         uint32_t cp = fold_punct(utf8_decode(nick, n, i, &adv));
         i += adv;
         if (is_invisible(cp)) continue;
-        for (size_t k = 0; k < sizeof LOOKALIKES / sizeof LOOKALIKES[0]; k++)
+        for (size_t k = 0; k < COUNT_OF(LOOKALIKES); k++)
             if (LOOKALIKES[k].cp == cp) { cp = (uint32_t)LOOKALIKES[k].ascii; break; }
         if (cp < 0x80) cp = (uint32_t)tolower((int)cp);
         if (cp == 'i' || cp == '|' || cp == '1') cp = 'l';
         else if (cp == '0') cp = 'o';
-        char enc[4];
+        char enc[UTF8_CHAR_MAX];
         size_t len = utf8_put(cp, enc);
         if (o + len >= cap) break;
         memcpy(out + o, enc, len);
@@ -224,7 +224,7 @@ void chat_peer_name(const chat_t *c, const peer_t *p, char out[CHAT_NAME_LEN]) {
         clash = strcmp(p->nick_skel, q->nick_skel) == 0;
     }
     if (!clash) { copy_str(out, p->nick, CHAT_NAME_LEN); return; }
-    char idhex[9]; hex_encode(p->id, 4, idhex);
+    char idhex[SHORT_ID_HEX + 1]; short_id(p->id, idhex);
     snprintf(out, CHAT_NAME_LEN, "%s#%s", p->nick, idhex);
 }
 
@@ -244,8 +244,8 @@ static int has_mention(const char *text, const char *nick) {
 
 static uint32_t mid_key(const char *mid) {
     uint32_t v = 0;
-    for (int i = 0; i < 8; i++) {
-        int h = hexval1(mid[i]);
+    for (int i = 0; i < MID_HEX; i++) {
+        int h = hex_value(mid[i]);
         if (h < 0) break;
         v = (v << 4) | (uint32_t)h;
     }
@@ -255,22 +255,33 @@ static uint32_t mid_key(const char *mid) {
 static int seen_has(chat_t *c, const char *mid) {
     uint32_t key = mid_key(mid);
     for (int i = 0; i < c->seen_count; i++) {
-        int idx = (c->seen_head - 1 - i + 2048) % 2048;
+        int idx = (c->seen_head - 1 - i + SEEN_MIDS) % SEEN_MIDS;
         if (c->seen_mids[idx] == key) return 1;
     }
     return 0;
 }
 static void seen_add(chat_t *c, const char *mid) {
     c->seen_mids[c->seen_head] = mid_key(mid);
-    c->seen_head = (c->seen_head + 1) % 2048;
-    if (c->seen_count < 2048) c->seen_count++;
+    c->seen_head = (c->seen_head + 1) % SEEN_MIDS;
+    if (c->seen_count < SEEN_MIDS) c->seen_count++;
 }
 
 static double jitter(double spread) {
     uint32_t r;
     gen_random((uint8_t *)&r, sizeof r);
-    return spread * ((double)r / 4294967296.0);
+    return spread * ((double)r / ((double)UINT32_MAX + 1.0));
 }
+
+// d, and up to a quarter more.
+static double jittered(double d) { return d + jitter(d * JITTER); }
+
+#define REKEY_JITTER 0.2
+#define BEACON_JITTER 0.3
+#define KEEPALIVE_SPREAD 3.0
+#define LAN_EVERY 5.0
+#define LAN_SPREAD 2.0
+
+static double rekey_after(double t) { return t + REKEY_INTERVAL + jitter(REKEY_INTERVAL * REKEY_JITTER); }
 
 // Takes a token from a bucket that fills at rate per second, up to burst. Returns 1 if there was one.
 static int take_token(double *tokens, double *at, double now, double rate, double burst) {
@@ -282,12 +293,7 @@ static int take_token(double *tokens, double *at, double now, double rate, doubl
     return 1;
 }
 
-static double retry_delay(int tries) {
-    int shift = tries < HELLO_MAX_BACKOFF ? tries : HELLO_MAX_BACKOFF;
-    double d = RETRY_BASE * (double)(1u << shift);
-    if (d > RETRY_CAP) d = RETRY_CAP;
-    return d + jitter(d * 0.25);
-}
+static double retry_delay(int tries) { return jittered(backoff(tries, RETRY_BASE, HELLO_MAX_BACKOFF, RETRY_CAP)); }
 
 static peer_t *find_peer_by_id(chat_t *c, const uint8_t id[ID_LEN]) {
     for (int i = 0; i < c->peer_hi; i++)
@@ -296,15 +302,26 @@ static peer_t *find_peer_by_id(chat_t *c, const uint8_t id[ID_LEN]) {
 }
 static int peer_slot(chat_t *c, peer_t *p) { return (int)(p - c->peers); }
 
-static int live_count(chat_t *c) {
+static int live_count(const chat_t *c) {
     int n = 0;
     for (int i = 0; i < c->peer_hi; i++) if (c->peers[i].used && c->peers[i].ok) n++;
     return n;
 }
-static int pending_peer_count(chat_t *c) {
+static int pending_peer_count(const chat_t *c) {
     int n = 0;
     for (int i = 0; i < c->peer_hi; i++) if (c->peers[i].used && !c->peers[i].ok) n++;
     return n;
+}
+
+// Whether p gets what's sent: never with a code that differs, and with comparing required, only once compared.
+static int peer_trusted(const chat_t *c, const peer_t *p) {
+    return p->code_ok != CODE_DIFFERENT && (!c->verify_required || p->code_ok == CODE_SAME);
+}
+
+// What's added to p's name on a line from it, when its code matters.
+static const char *code_mark(const chat_t *c, const peer_t *p) {
+    if (p->code_ok == CODE_DIFFERENT) return " (codes differ)";
+    return c->verify_required && p->code_ok != CODE_SAME ? " (code not compared)" : "";
 }
 
 static void pending_clear(pending_msg_t *pm) { crypto_wipe(pm, sizeof *pm); }
@@ -349,7 +366,7 @@ static void xmit(chat_t *c, sock_t sock, const void *data, size_t len, addr_t to
             return;
         default: {
             if (c->route.mode == ROUTE_TOR || sock == SOCK_INVALID) return;
-            uint8_t masked[HANDSHAKE_BUF_LEN + 128];
+            uint8_t masked[FRAME_BUF_LEN];
             if (len > sizeof masked) return;
             memcpy(masked, data, len);
             if (udp_mask(c->udp_key, masked, len) == 0) net_send(sock, masked, len, to);
@@ -357,16 +374,18 @@ static void xmit(chat_t *c, sock_t sock, const void *data, size_t len, addr_t to
     }
 }
 
+static int room_pieces(size_t len) { return (int)((len + CHUNK_PAYLOAD - 1) / CHUNK_PAYLOAD); }
+
 // The i-th piece of a room frame, padded to a whole cell.
-static void room_piece(const uint8_t *frame, size_t len, const uint8_t id[4], int i, int count, uint8_t cell[UDP_CELL]) {
+static void room_piece(const uint8_t *frame, size_t len, const uint8_t id[CHUNK_ID_LEN], int i, int count,
+                       uint8_t cell[UDP_CELL]) {
     size_t off = (size_t)i * CHUNK_PAYLOAD, n = len - off < CHUNK_PAYLOAD ? len - off : CHUNK_PAYLOAD;
     cell[0] = CHUNK_MAGIC0;
     cell[1] = CHUNK_MAGIC1;
-    memcpy(cell + 2, id, 4);
-    cell[6] = (uint8_t)i;
-    cell[7] = (uint8_t)count;
-    cell[8] = (uint8_t)(len >> 8);
-    cell[9] = (uint8_t)len;
+    memcpy(cell + CHUNK_ID_AT, id, CHUNK_ID_LEN);
+    cell[CHUNK_INDEX_AT] = (uint8_t)i;
+    cell[CHUNK_COUNT_AT] = (uint8_t)count;
+    store_be16(cell + CHUNK_LEN_AT, (uint16_t)len);
     memcpy(cell + CHUNK_HDR, frame + off, n);
     // Random instead of zeros, since a cell's last bytes pick the keystream it's masked with.
     gen_random(cell + CHUNK_HDR + n, CHUNK_PAYLOAD - n);
@@ -386,9 +405,10 @@ static int room_queued(const chat_t *c, int slot) {
 
 // A room frame for a connected peer waits for its slots. A peer can have a few queued. Beyond
 // that (junk replayed at it, for example) they're lost, like datagrams would be, and handshakes retry.
+#define ROOMQ_PER_PEER 4
 static void queue_room(chat_t *c, peer_t *p, const uint8_t *frame, size_t len, addr_t to) {
     int slot = peer_slot(c, p);
-    if (room_queued(c, slot) >= 4) return;
+    if (room_queued(c, slot) >= ROOMQ_PER_PEER) return;
     for (int i = 0; i < ROOMQ_MAX; i++) {
         roomq_t *q = &c->roomq[i];
         if (q->used) continue;
@@ -398,7 +418,7 @@ static void queue_room(chat_t *c, peer_t *p, const uint8_t *frame, size_t len, a
         q->to = to;
         gen_random(q->id, sizeof q->id);
         q->next_piece = 0;
-        q->pieces = (int)((len + CHUNK_PAYLOAD - 1) / CHUNK_PAYLOAD);
+        q->pieces = room_pieces(len);
         q->len = len;
         memcpy(q->frame, frame, len);
         return;
@@ -406,7 +426,7 @@ static void queue_room(chat_t *c, peer_t *p, const uint8_t *frame, size_t len, a
 }
 
 static void send_room(chat_t *c, const char *text, addr_t to, sock_t sock) {
-    uint8_t frame[HANDSHAKE_BUF_LEN + 128];
+    uint8_t frame[FRAME_BUF_LEN];
     size_t len;
     if (room_seal(c->room_key, text, strlen(text), frame, sizeof frame, &len) != 0 || len > ROOM_FRAME_MAX) return;
     // A connected peer's frames go in its slots, like everything else sent to it.
@@ -414,9 +434,9 @@ static void send_room(chat_t *c, const char *text, addr_t to, sock_t sock) {
     if (p) { queue_room(c, p, frame, len, to); return; }
     // Relays and Tor streams take whole frames; UDP takes cells.
     if (to.kind != ADDR_UDP) { xmit(c, sock, frame, len, to); return; }
-    int count = (int)((len + CHUNK_PAYLOAD - 1) / CHUNK_PAYLOAD);
-    uint8_t id[4];
-    gen_random(id, 4);
+    int count = room_pieces(len);
+    uint8_t id[CHUNK_ID_LEN];
+    gen_random(id, CHUNK_ID_LEN);
     for (int i = 0; i < count; i++) {
         uint8_t cell[UDP_CELL];
         room_piece(frame, len, id, i, count, cell);
@@ -466,7 +486,7 @@ static int frame_on_chain(ratchet_t *chain, const char *text, size_t body, uint8
                           size_t *len, uint32_t *index) {
     uint32_t idx = chain->index;
     ratchet_t advanced;
-    uint8_t mk[32];
+    uint8_t mk[MSG_KEY_LEN];
     int rc = -1;
     if (ratchet_peek(chain, idx, mk, &advanced) == 0
         && session_seal_padded(mk, idx, text, strlen(text), body, frame, frame_cap, len) == 0) {
@@ -512,6 +532,8 @@ static void send_now(chat_t *c, peer_t *p, const char *text) {
 // A peer's slot: exactly one datagram. The oldest thing waiting goes first: a piece of a room
 // frame, or a record and, for a peer that reads several per frame, the ones after it on the same
 // chain while they fit. With nothing waiting, a "nop".
+#define ROOM_OVERTAKE_MAX 2
+#define BATCH_MAX 16
 static void run_slot(chat_t *c, peer_t *p) {
     int slot = peer_slot(c, p);
     roomq_t *rq = NULL;
@@ -529,7 +551,7 @@ static void run_slot(chat_t *c, peer_t *p) {
     // go first, so a re-handshake doesn't hold up a conversation, but never for more than two slots in
     // a row while the room frame waits, so a busy conversation doesn't hold up the re-handshake.
     int readable = send_chain_for(p) == &p->old_send || p->chain_confirmed;
-    int overtake = rq && first && readable && p->room_waited < 2;
+    int overtake = rq && first && readable && p->room_waited < ROOM_OVERTAKE_MAX;
     if (rq && (!first || (rq->seq < first->seq && !overtake))) {
         p->room_waited = 0;
         if (rq->to.kind == ADDR_UDP) {
@@ -549,7 +571,7 @@ static void run_slot(chat_t *c, peer_t *p) {
     int big = p->batches && p->addr.kind == ADDR_NOSTR;
     size_t cap = big ? RELAY_RECORD_MAX : RECORD_MAX;
     char text[RELAY_RECORD_MAX + 1] = "nop";
-    sendq_t *taken[16];
+    sendq_t *taken[BATCH_MAX];
     int n_taken = 0, old_chain = first ? first->old_chain : 0;
     size_t pos = 0;
     uint32_t after = 0;
@@ -562,7 +584,7 @@ static void run_slot(chat_t *c, peer_t *p) {
         }
         if (!next || next->old_chain != old_chain || (rq && !overtake && next->seq > rq->seq)) break;
         size_t l = strlen(next->text);
-        if (n_taken && (!p->batches || pos + 1 + l > cap || n_taken == 16)) break;
+        if (n_taken && (!p->batches || pos + 1 + l > cap || n_taken == BATCH_MAX)) break;
         if (n_taken) text[pos++] = '\n';
         memcpy(text + pos, next->text, l);
         pos += l;
@@ -595,7 +617,7 @@ static void add_candidate(chat_t *c, addr_t a) {
         if (!c->cands[i].used) continue;
         addr_t b = c->cands[i].addr;
         if (addr_equal(b, a)) return;
-        if (b.is_v6 == a.is_v6 && memcmp(b.ip, a.ip, a.is_v6 ? 16 : 4) == 0) same_host++;
+        if (b.is_v6 == a.is_v6 && memcmp(b.ip, a.ip, addr_ip_len(a)) == 0) same_host++;
     }
     if (same_host >= CAND_PER_HOST) return;
     for (int i = 0; i < MAX_CANDS; i++) {
@@ -623,13 +645,16 @@ static int candidate_reached(chat_t *c, addr_t a) {
 
 // A message resend waits for the ack's round trip: the message waits for a slot here, the ack for
 // a slot there, and relays take a lot longer than UDP.
+#define RELAY_ROUND_TRIP 4.0
+#define UDP_ROUND_TRIP 1.0
 static double resend_delay(chat_t *c, const peer_t *p) {
-    double slots = 2.0 * cover_interval(c, p) * 1.25;
-    return slots + (p->addr.kind == ADDR_NOSTR ? 4.0 + jitter(1.0) : 1.0 + jitter(0.5));
+    double slots = 2.0 * cover_interval(c, p) * (1.0 + JITTER);
+    return slots + (p->addr.kind == ADDR_NOSTR ? RELAY_ROUND_TRIP + jitter(RELAY_ROUND_TRIP / 4)
+                                               : UDP_ROUND_TRIP + jitter(UDP_ROUND_TRIP / 2));
 }
 
 static void refresh_hi(chat_t *c) {
-    char pubhex[65], kemhex[KEM_PUB_LEN * 2 + 1];
+    char pubhex[PUB_LEN * 2 + 1], kemhex[KEM_PUB_LEN * 2 + 1];
     hex_encode(c->my_id, ID_LEN, c->my_idhex);
     hex_encode(c->keys.pub, PUB_LEN, pubhex);
     hex_encode(c->kem_keys.pub, KEM_PUB_LEN, kemhex);
@@ -637,16 +662,15 @@ static void refresh_hi(chat_t *c) {
 }
 
 static void send_kx(chat_t *c, peer_t *p, addr_t to) {
-    char idhex[33]; hex_encode(c->my_id, ID_LEN, idhex);
     char cthex[KEM_CT_LEN * 2 + 1]; hex_encode(p->kem_ct, KEM_CT_LEN, cthex);
-    char kx[16 + 32 + KEM_CT_LEN * 2];
-    snprintf(kx, sizeof kx, "kx\t%s\t%s", idhex, cthex);
+    char kx[16 + ID_LEN * 2 + KEM_CT_LEN * 2];
+    snprintf(kx, sizeof kx, "kx\t%s\t%s", c->my_idhex, cthex);
     send_room(c, kx, to, c->sock);
 }
 
 static void build_k_message(chat_t *c, peer_t *p, char *out, size_t out_cap) {
-    char colorhex[7]; color_to_hex(c->my_color, colorhex);
-    char idpubhex[65] = "", sighex[129] = "";
+    char colorhex[COLOR_HEX_LEN + 1]; color_to_hex(c->my_color, colorhex);
+    char idpubhex[ID_SIGN_PUB_LEN * 2 + 1] = "", sighex[ID_SIGN_LEN * 2 + 1] = "";
     int idtype = IDENT_NONE;
     if (c->identity_source != IDENT_NONE) {
         idtype = c->identity_source;
@@ -674,7 +698,7 @@ static void send_build(chat_t *c, peer_t *p) {
 }
 
 static void send_k_now(chat_t *c, peer_t *p) {
-    char k[8 + MAX_NICK + 8 + 5 + 4 + 65 + 129];
+    char k[8 + MAX_NICK + 8 + 5 + 4 + ID_SIGN_PUB_LEN * 2 + 1 + ID_SIGN_LEN * 2 + 1];
     build_k_message(c, p, k, sizeof k);
     send_peer(c, p, k);
     send_build(c, p);
@@ -696,12 +720,13 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
     // sent us its new key over the current session, which the middle can't change, so a new key it
     // never announced is refused. After a short grace period (the rk may still be on its way) this
     // gives a warning.
+    enum { RK_GRACE = 10, RK_WARN_EVERY = 30 };
     if (p && p->ok && p->announces_rekey && memcmp(p->pub, their_pub, PUB_LEN) != 0
         && !(p->next_pub_set && memcmp(p->next_pub, their_pub, PUB_LEN) == 0)) {
         if (p->rk_refused_since == 0.0) p->rk_refused_since = now;
-        if (now - p->rk_refused_since > 10.0 && now >= p->next_rk_warn) {
+        if (now - p->rk_refused_since > RK_GRACE && now >= p->next_rk_warn) {
             char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
-            p->next_rk_warn = now + 30.0;
+            p->next_rk_warn = now + RK_WARN_EVERY;
             ui_print(c, "* warning: a new key for %s arrived that %s never announced - refused. Someone may be "
                         "intercepting; if it continues, compare :peers verify codes over another channel", name, name);
         }
@@ -709,17 +734,15 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
     }
     if (pending_peer_count(c) >= MAX_PENDING_PEERS || live_count(c) >= MAX_PEERS) return NULL;
 
-    peer_t *slot = NULL;
-    peer_t *existing = find_peer_by_id(c, peer_id);
-    if (existing) slot = existing;
-    else {
+    peer_t *slot = p;
+    if (!slot) {
         for (int i = 0; i < MAX_PEERS + MAX_PENDING_PEERS; i++) if (!c->peers[i].used) { slot = &c->peers[i]; break; }
         if (!slot) return NULL;
     }
 
-    uint8_t shared[32];
+    uint8_t shared[SHARED_LEN];
     if (ecdh_shared(&c->keys, their_pub, shared) != 0) { crypto_wipe(shared, sizeof shared); return NULL; }
-    uint8_t prk_partial[32];
+    uint8_t prk_partial[PRK_LEN];
     session_prk(c->master, shared, c->keys.pub, c->my_id, their_pub, peer_id, prk_partial);
     crypto_wipe(shared, sizeof shared);
 
@@ -727,7 +750,7 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
     // returning.
     peer_t carry;
     int rejoin = 0;
-    if (existing && existing->ok) { carry = *existing; rejoin = 1; }
+    if (p && p->ok) { carry = *p; rejoin = 1; }
     {
         int si = (int)(slot - c->peers) + 1;
         if (si > c->peer_hi) c->peer_hi = si;
@@ -786,7 +809,7 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
 
     peer_t *result = slot;
     if (memcmp(c->my_id, peer_id, ID_LEN) < 0) {
-        uint8_t kem_ss[KEM_SS_LEN], prk[32];
+        uint8_t kem_ss[KEM_SS_LEN], prk[PRK_LEN];
         if (kem_encapsulate(their_kem_pub, slot->kem_ct, kem_ss) == 0) {
             session_prk_finish(prk_partial, kem_ss, prk);
             ratchet_seed(prk, c->keys.pub, &slot->send_chain);
@@ -799,7 +822,7 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
         crypto_wipe(kem_ss, sizeof kem_ss);
         crypto_wipe(prk, sizeof prk);
     } else {
-        memcpy(slot->prk_partial, prk_partial, 32);
+        memcpy(slot->prk_partial, prk_partial, PRK_LEN);
         if (rejoin && carry.kx_early) finish_kem_decap(c, slot, carry.kem_ct);
     }
     crypto_wipe(prk_partial, sizeof prk_partial);
@@ -841,7 +864,7 @@ static void finish_kem_decap(chat_t *c, peer_t *p, const uint8_t ct[KEM_CT_LEN])
     uint8_t kem_ss[KEM_SS_LEN];
     if (kem_decapsulate(&c->kem_keys, ct, kem_ss) != 0) return;
     memcpy(p->kem_ct, ct, KEM_CT_LEN);
-    uint8_t prk[32];
+    uint8_t prk[PRK_LEN];
     session_prk_finish(p->prk_partial, kem_ss, prk);
     ratchet_seed(prk, c->keys.pub, &p->send_chain);
     ratchet_seed(prk, p->pub, &p->recv_chain);
@@ -858,19 +881,17 @@ static void connect_peer(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
     int fresh;
     peer_t *p = do_hello(c, peer_id, addr, their_pub, their_kem_pub, now, &fresh);
     if (!p) return;
-    if (fresh) {
-        send_room(c, c->hi_msg, addr, c->sock);
-    }
+    if (fresh) send_room(c, c->hi_msg, addr, c->sock);
     if (p->send_chain.started) {
         // Keep sending the kx until the peer's frames show it was received. The first copy may be lost,
         // or reach the peer before its side of the re-handshake is ready.
         if (we_initiate(c, p) && (fresh || !p->chain_confirmed)) send_kx(c, p, p->addr);
         send_k_now(c, p);
     }
-
 }
 
-#define PX_MAX_BODY (SESSION_PAD_TARGET - 2)
+#define PX_MAX_BODY RECORD_MAX
+#define PX_MAX_PEERS 24
 
 // How to reach p, for "px": its UDP address, or in Tor mode its onion address. Peers only reached
 // through the relays don't have one, since the relays already connect them.
@@ -885,39 +906,36 @@ static int px_entry(const chat_t *c, const peer_t *p, char out[ADDR_STR_LEN]) {
     return 0;
 }
 
+static void send_px(chat_t *c, peer_t *p, const char *list) {
+    char msg[PX_MAX_BODY + 8];
+    snprintf(msg, sizeof msg, "px\t%s", list);
+    send_peer(c, p, msg);
+}
+
 static void introduce(chat_t *c, peer_t *newp) {
     // Several px messages if one can't hold them all (onion addresses are long).
     char list[PX_MAX_BODY];
     size_t pos = 0;
     int n = 0, total = 0;
-    for (int i = 0; i < c->peer_hi && total < 24; i++) {
+    for (int i = 0; i < c->peer_hi && total < PX_MAX_PEERS; i++) {
         peer_t *q = &c->peers[i];
         char as[ADDR_STR_LEN];
         if (!q->used || !q->ok || q == newp || px_entry(c, q, as) != 0) continue;
         size_t need = strlen(as) + (n ? 1 : 0);
-        if (pos + need + 4 > PX_MAX_BODY) {
-            char msg[PX_MAX_BODY + 8];
-            snprintf(msg, sizeof msg, "px\t%s", list);
-            send_peer(c, newp, msg);
+        if (pos + need + sizeof "px\t" > PX_MAX_BODY) {
+            send_px(c, newp, list);
             pos = 0; n = 0; need = strlen(as);
         }
         pos += (size_t)snprintf(list + pos, sizeof(list) - pos, "%s%s", n ? "," : "", as);
         n++;
         total++;
     }
-    if (n > 0) {
-        char msg[PX_MAX_BODY + 8];
-        snprintf(msg, sizeof msg, "px\t%s", list);
-        send_peer(c, newp, msg);
-    }
+    if (n > 0) send_px(c, newp, list);
     char newp_addr[ADDR_STR_LEN];
     if (px_entry(c, newp, newp_addr) != 0) return;
     for (int i = 0; i < c->peer_hi; i++) {
         peer_t *q = &c->peers[i];
-        if (!q->used || !q->ok || q == newp) continue;
-        char msg[16 + ADDR_STR_LEN];
-        snprintf(msg, sizeof msg, "px\t%s", newp_addr);
-        send_peer(c, q, msg);
+        if (q->used && q->ok && q != newp) send_px(c, q, newp_addr);
     }
 }
 
@@ -929,6 +947,9 @@ static void send_onion(chat_t *c, peer_t *p) {
     send_peer(c, p, msg);
 }
 
+#define REPUBLISH_WAIT 5.0
+#define REPUBLISH_SPREAD 25.0
+
 static void drop_peer(chat_t *c, peer_t *p, const char *why) {
     int was_ok = p->ok;
     char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
@@ -937,12 +958,13 @@ static void drop_peer(chat_t *c, peer_t *p, const char *why) {
         c->gone[g].used = 1;
         memcpy(c->gone[g].id, p->id, ID_LEN);
         memcpy(c->gone[g].vfy, p->vfy, VERIFY_LEN);
-        c->gone_head = (g + 1) % (int)(sizeof c->gone / sizeof c->gone[0]);
+        c->gone_head = (g + 1) % GONE_MAX;
     }
     forget_peer(c, p);
     if (was_ok) ui_print(c, "* %s %s (%d online)", name, why, live_count(c) + 1);
     // The peer who left may have been the latest publisher of the room onion, so point it back at us.
-    if (was_ok && c->tor && c->tor_hosting && c->tor_republish_at == 0.0) c->tor_republish_at = now_seconds() + 5.0 + jitter(25.0);
+    if (was_ok && c->tor && c->tor_hosting && c->tor_republish_at == 0.0)
+        c->tor_republish_at = now_seconds() + REPUBLISH_WAIT + jitter(REPUBLISH_SPREAD);
 }
 
 // A version as a peer may give it: short, and nothing a terminal or a URL would treat specially.
@@ -976,7 +998,7 @@ static int signed_list(const chat_t *c, const char *version, const char *list, c
         if (n == BUILD_LIST_MAX || len != sizeof hex - 1) return -1;
         memcpy(hex, item, len); hex[len] = '\0';
         // Lowercase only, as sha256sum writes it, so the signed text has one spelling.
-        if (strspn(hex, "0123456789abcdef") != len || hex_decode(hex, len, hashes[n]) != 0) return -1;
+        if (strspn(hex, HEX_DIGITS) != len || hex_decode(hex, len, hashes[n]) != 0) return -1;
         memcpy(content + pos, hex, len);
         pos += len;
         content[pos++] = '\n';
@@ -1010,9 +1032,10 @@ static void check_build(chat_t *c, peer_t *p, const char *version, const uint8_t
     if (list) {
         n = signed_list(c, version, list, sig, hashes);
     } else {
-        for (size_t i = 0; i < sizeof LISTLESS_RELEASES / sizeof LISTLESS_RELEASES[0]; i++) {
+        for (size_t i = 0; i < COUNT_OF(LISTLESS_RELEASES); i++) {
             if (strcmp(LISTLESS_RELEASES[i].version, version) != 0) continue;
-            for (n = 0; n < 2; n++) hex_decode(LISTLESS_RELEASES[i].sha256[n], BUILD_HASH_LEN * 2, hashes[n]);
+            for (n = 0; n < (int)COUNT_OF(LISTLESS_RELEASES[i].sha256); n++)
+                hex_decode(LISTLESS_RELEASES[i].sha256[n], BUILD_HASH_LEN * 2, hashes[n]);
         }
     }
     int official = 0;
@@ -1027,16 +1050,16 @@ static void check_build(chat_t *c, peer_t *p, const char *version, const uint8_t
     tell_build(c, p);
 }
 
-_Static_assert(2 + 8 + 1 + ID_LEN * 2 + 1 + MAX_NICK + 1 + MAX_TEXT <= RECORD_MAX, "a message's record fits one frame");
+_Static_assert(2 + MID_HEX + 1 + ID_LEN * 2 + 1 + MAX_NICK + 1 + MAX_TEXT <= RECORD_MAX, "a message's record fits one frame");
 
 // A part's id, the same whoever splits the message, so a part passed on by more than one peer is
 // still only shown once.
-static void part_mid(const char *mid, int i, char out[9]) {
+static void part_mid(const char *mid, int i, char out[MID_HEX + 1]) {
     char in[16];
-    uint8_t h[32];
+    uint8_t h[SHA256_LEN];
     int n = snprintf(in, sizeof in, "%s/%d", mid, i);
     sha256_hash(in, (size_t)n, h);
-    hex_encode(h, 4, out);
+    hex_encode(h, MID_LEN, out);
 }
 
 // How much of text goes in a part of at most max bytes: up to a space in its second half if there's
@@ -1044,7 +1067,7 @@ static void part_mid(const char *mid, int i, char out[9]) {
 static size_t part_len(const char *text, size_t len, size_t max) {
     if (len <= max) return len;
     size_t cut = max;
-    while (cut > 0 && ((unsigned char)text[cut] & 0xc0) == 0x80) cut--;
+    while (cut > 0 && utf8_is_cont(text[cut])) cut--;
     for (size_t i = cut; i > max / 2; i--)
         if (text[i] == ' ') return i;
     return cut;
@@ -1074,7 +1097,7 @@ static int send_message(chat_t *c, peer_t *q, const char *mid, const char *idhex
     int sent = 0;
     for (int i = 0; i < MAX_TEXT_PARTS && pos < len; i++) {
         size_t n = q->long_text ? len : part_len(text + pos, len - pos, OLD_MAX_TEXT);
-        char pmid[9];
+        char pmid[MID_HEX + 1];
         if (n == len) copy_str(pmid, mid, sizeof pmid);
         else part_mid(mid, i, pmid);
         snprintf(record, sizeof record, "m\t%s\t%s\t%s\t%.*s", pmid, idhex, nick, (int)n, text + pos);
@@ -1087,6 +1110,15 @@ static int send_message(chat_t *c, peer_t *q, const char *mid, const char *idhex
     }
     return sent;
 }
+
+// Checks p against the verified keys again, and offers it our files if that makes its code compared.
+static int recheck_trust(chat_t *c, peer_t *p) {
+    int was_ok = p->code_ok, warned = check_trust(c, p);
+    if (was_ok != CODE_SAME && p->code_ok == CODE_SAME) file_offer_all(c, p);
+    return warned;
+}
+
+#define PX_READ_MAX 12
 
 static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
     char *f[MAX_FIELDS];
@@ -1114,13 +1146,12 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         p->long_text = strchr(f[3], 'l') != NULL;
         int idtype = atoi(f[4]);
         size_t idpub_len = strlen(f[5]), sig_len = strlen(f[6]);
-        if (idtype > IDENT_NONE && idtype <= IDENT_PGP && idpub_len == 64 && sig_len == 128) {
+        if (idtype > IDENT_NONE && idtype <= IDENT_PGP && idpub_len == ID_SIGN_PUB_LEN * 2 && sig_len == ID_SIGN_LEN * 2) {
             uint8_t idpub[ID_SIGN_PUB_LEN], sig[ID_SIGN_LEN];
-            if (hex_decode(f[5], 64, idpub) == 0 && hex_decode(f[6], 128, sig) == 0) {
+            if (hex_decode(f[5], idpub_len, idpub) == 0 && hex_decode(f[6], sig_len, sig) == 0) {
                 p->identity_source = (identity_source_t)idtype;
                 memcpy(p->identity_pub, idpub, ID_SIGN_PUB_LEN);
                 identity_fingerprint(idpub, p->identity_fp);
-
                 p->identity_state = identity_verify(idpub, sig, p->pub, p->id, c->keys.pub, c->my_id) == 0
                                      ? VERIFY_VERIFIED : VERIFY_FAILED;
             } else {
@@ -1130,11 +1161,7 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
             p->identity_source = IDENT_NONE; p->identity_state = VERIFY_UNVERIFIED;
         }
         // A peer that joined before its k came is checked now, and one whose nick or key changed again.
-        int warned = 0, was_ok = p->code_ok;
-        if (p->announced) {
-            warned = check_trust(c, p);
-            if (was_ok != 1 && p->code_ok == 1) file_offer_all(c, p);
-        }
+        int warned = p->announced ? recheck_trust(c, p) : 0;
         // A re-handshake (rekey, rejoin) sends k again. Say so if the identity behind it changes.
         if (had_source != IDENT_NONE && !warned) {
             char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
@@ -1162,19 +1189,17 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
     } else if (n == 2 && strcmp(f[0], "n") == 0) {
         set_peer_nick(p, f[1]);
         if (p->announced) {
-            int was_ok = p->code_ok;
-            if (p->trust == 2) p->trust = 0;
-            check_trust(c, p);
-            if (was_ok != 1 && p->code_ok == 1) file_offer_all(c, p);
+            if (p->trust == TRUST_OTHER_KEY) p->trust = TRUST_UNKNOWN;
+            recheck_trust(c, p);
         }
     } else if (n == 2 && strcmp(f[0], "px") == 0) {
         char *item = f[1];
-        for (int cnt = 0; item && *item && cnt < 12; cnt++) {
+        for (int cnt = 0; item && *item && cnt < PX_READ_MAX; cnt++) {
             char *comma = strchr(item, ',');
             if (comma) *comma = '\0';
             addr_t a;
             size_t il = strlen(item);
-            if (il == TOR_ADDR_LEN + 6 && strcmp(item + TOR_ADDR_LEN, ".onion") == 0) {
+            if (il == TOR_ADDR_LEN + sizeof ".onion" - 1 && strcmp(item + TOR_ADDR_LEN, ".onion") == 0) {
                 // Only Tor mode uses onion addresses. Nothing else may ever look them up.
                 item[TOR_ADDR_LEN] = '\0';
                 if (c->tor && tor_target(c->tor, item, &a) == 0) add_candidate(c, a);
@@ -1193,8 +1218,8 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         check_build(c, p, f[1], proof, n == 5 ? f[3] : NULL, n == 5 ? f[4] : NULL);
     } else if (n == 5 && strcmp(f[0], "m") == 0) {
         // Only p itself is authenticated here. f[2] and f[3] (origin id, nick) are whatever p says.
-        uint8_t mid_raw[4], origin[ID_LEN];
-        if (hex_decode(f[1], 8, mid_raw) != 0 || hex_decode(f[2], ID_LEN * 2, origin) != 0) return;
+        uint8_t mid_raw[MID_LEN], origin[ID_LEN];
+        if (hex_decode(f[1], MID_HEX, mid_raw) != 0 || hex_decode(f[2], ID_LEN * 2, origin) != 0) return;
         char ack[16]; snprintf(ack, sizeof ack, "a\t%s", f[1]);
         send_peer(c, p, ack);
         int direct = memcmp(origin, p->id, ID_LEN) == 0;
@@ -1209,7 +1234,7 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         // Its parts, should a peer that only takes short messages pass them on from the origin later.
         if (strlen(f[4]) > OLD_MAX_TEXT)
             for (int i = 0; i < MAX_TEXT_PARTS; i++) {
-                char pmid[9];
+                char pmid[MID_HEX + 1];
                 part_mid(f[1], i, pmid);
                 seen_add(c, pmid);
             }
@@ -1222,9 +1247,9 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         chat_peer_name(c, p, via);
         // A relayed nick is only the relayer's claim, so it always includes the origin's id. Nicks can't
         // contain brackets, so what's added in brackets can't be faked.
-        const char *mark = p->code_ok < 0 ? " (codes differ)" : c->verify_required && p->code_ok != 1 ? " (code not compared)" : "";
+        const char *mark = code_mark(c, p);
         if (direct) snprintf(shown, sizeof shown, "%s%s", via, mark);
-        else snprintf(shown, sizeof shown, "%s#%.8s (via %s%s)", nick, f[2], via, mark);
+        else snprintf(shown, sizeof shown, "%s#%.*s (via %s%s)", nick, SHORT_ID_HEX, f[2], via, mark);
         ui_chat(c, direct ? p->color : NULL, mentioned, shown, text);
         // Only as much as the preview setting allows, since desktops keep what a notification shows.
         if (c->notify && (c->notify_mode == NOTIFY_ALL || (c->notify_mode == NOTIFY_MENTIONS && mentioned)))
@@ -1234,7 +1259,7 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
             peer_t *q = &c->peers[i];
             if (!q->used || !q->ok || q == p || memcmp(q->id, origin, ID_LEN) == 0) continue;
             // Only passed on to peers our own messages would go to.
-            if (q->code_ok < 0 || (c->verify_required && q->code_ok != 1)) continue;
+            if (!peer_trusted(c, q)) continue;
             send_message(c, q, f[1], f[2], nick, text, 0, now);
         }
     } else if (n == 2 && strcmp(f[0], "a") == 0) {
@@ -1243,12 +1268,9 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
                 pending_clear(&c->pending[i]);
     } else if (f[0][0] == 'f' && f[0][1] && !f[0][2]) {
         file_on_record(c, p, f, n, now);
-    } else if (n == 1 && strcmp(f[0], "nop") == 0) {
-
     } else if (n == 1 && strcmp(f[0], "bye") == 0) {
         drop_peer(c, p, "left");
     }
-    (void)now;
 }
 
 // Our own hi came back from addr, so it's one of our addresses and never a candidate. Each is
@@ -1256,17 +1278,21 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
 static void note_self_addr(chat_t *c, addr_t addr) {
     // A relayed address represents a peer or a Tor stream, so it's never one of ours.
     if (addr.kind != ADDR_UDP) return;
-    int cap = (int)(sizeof c->self_addrs / sizeof c->self_addrs[0]);
     for (int i = 0; i < c->n_self_addrs; i++) if (addr_equal(c->self_addrs[i], addr)) return;
-    if (c->n_self_addrs < cap) c->self_addrs[c->n_self_addrs++] = addr;
+    if (c->n_self_addrs < MAX_SELF_ADDRS) c->self_addrs[c->n_self_addrs++] = addr;
 }
+
+// The fields of handshake records, as hex.
+#define ID_HEX (ID_LEN * 2)
+#define PUB_HEX (PUB_LEN * 2)
+#define COOKIE_HEX (COOKIE_LEN * 2)
 
 static void on_room(chat_t *c, char *plain, addr_t addr, double now) {
     char *f[MAX_FIELDS];
     int n = split_tabs(plain, f, MAX_FIELDS);
     const char *my_idhex = c->my_idhex;
 
-    if (n == 4 && strcmp(f[0], "hi") == 0 && strlen(f[1]) == 32 && strlen(f[2]) == 64
+    if (n == 4 && strcmp(f[0], "hi") == 0 && strlen(f[1]) == ID_HEX && strlen(f[2]) == PUB_HEX
         && strlen(f[3]) == KEM_PUB_LEN * 2) {
         if (strcmp(f[1], my_idhex) == 0) {
             note_self_addr(c, addr);
@@ -1274,13 +1300,13 @@ static void on_room(chat_t *c, char *plain, addr_t addr, double now) {
             return;
         }
         uint8_t peer_id[ID_LEN], pub[PUB_LEN], kem_pub[KEM_PUB_LEN];
-        if (hex_decode(f[1], 32, peer_id) != 0 || hex_decode(f[2], 64, pub) != 0
+        if (hex_decode(f[1], ID_HEX, peer_id) != 0 || hex_decode(f[2], PUB_HEX, pub) != 0
             || hex_decode(f[3], KEM_PUB_LEN * 2, kem_pub) != 0) return;
         c->st.hi++;
         char addr_str[ADDR_STR_LEN]; addr_to_string(addr, addr_str);
         peer_t *existing = find_peer_by_id(c, peer_id);
         if (c->net_verbose) {
-            char shortid[9]; hex_encode(peer_id, 4, shortid);
+            char shortid[SHORT_ID_HEX + 1]; short_id(peer_id, shortid);
             ui_print(c, "* hi from %s, peer %s%s", addr_str, shortid, existing ? " (known)" : " (new)");
         }
         // Anyone who recorded a hi can replay it from anywhere. Only accept one without a check if it
@@ -1295,61 +1321,60 @@ static void on_room(chat_t *c, char *plain, addr_t addr, double now) {
                    && take_token(&c->ck_tokens, &c->ck_at, now, CK_RATE, CK_BURST)) {
             uint8_t cookie[COOKIE_LEN];
             cookie_compute(c->cookie_secret, addr_str, peer_id, pub, cookie);
-            char cookiehex[33]; hex_encode(cookie, COOKIE_LEN, cookiehex);
-            char msg[8 + 32 + 32];
+            char cookiehex[COOKIE_HEX + 1]; hex_encode(cookie, COOKIE_LEN, cookiehex);
+            char msg[8 + ID_HEX + COOKIE_HEX];
             snprintf(msg, sizeof msg, "ck\t%s\t%s", f[1], cookiehex);
             send_room(c, msg, addr, c->sock);
             if (c->net_verbose) ui_print(c, "* sent cookie challenge to %s", addr_str);
         }
-    } else if (n == 3 && strcmp(f[0], "ck") == 0 && strcmp(f[1], my_idhex) == 0 && strlen(f[2]) == 32) {
+    } else if (n == 3 && strcmp(f[0], "ck") == 0 && strcmp(f[1], my_idhex) == 0 && strlen(f[2]) == COOKIE_HEX) {
         c->st.ck++;
         if (c->net_verbose) {
             char addr_str[ADDR_STR_LEN]; addr_to_string(addr, addr_str);
             ui_print(c, "* cookie challenge from %s - answering with hi2", addr_str);
         }
-        char pubhex[65]; hex_encode(c->keys.pub, PUB_LEN, pubhex);
+        char pubhex[PUB_HEX + 1]; hex_encode(c->keys.pub, PUB_LEN, pubhex);
         char kemhex[KEM_PUB_LEN * 2 + 1]; hex_encode(c->kem_keys.pub, KEM_PUB_LEN, kemhex);
         char msg[HANDSHAKE_BUF_LEN];
         snprintf(msg, sizeof msg, "hi2\t%s\t%s\t%s\t%s", my_idhex, pubhex, kemhex, f[2]);
         send_room(c, msg, addr, c->sock);
-    } else if (n == 5 && strcmp(f[0], "hi2") == 0 && strlen(f[1]) == 32 && strlen(f[2]) == 64
-               && strlen(f[3]) == KEM_PUB_LEN * 2 && strlen(f[4]) == 32) {
+    } else if (n == 5 && strcmp(f[0], "hi2") == 0 && strlen(f[1]) == ID_HEX && strlen(f[2]) == PUB_HEX
+               && strlen(f[3]) == KEM_PUB_LEN * 2 && strlen(f[4]) == COOKIE_HEX) {
         if (strcmp(f[1], my_idhex) == 0) {
             note_self_addr(c, addr);
             return;
         }
         uint8_t peer_id[ID_LEN], pub[PUB_LEN], kem_pub[KEM_PUB_LEN], given[COOKIE_LEN];
-        if (hex_decode(f[1], 32, peer_id) != 0 || hex_decode(f[2], 64, pub) != 0
-            || hex_decode(f[3], KEM_PUB_LEN * 2, kem_pub) != 0 || hex_decode(f[4], 32, given) != 0) return;
+        if (hex_decode(f[1], ID_HEX, peer_id) != 0 || hex_decode(f[2], PUB_HEX, pub) != 0
+            || hex_decode(f[3], KEM_PUB_LEN * 2, kem_pub) != 0 || hex_decode(f[4], COOKIE_HEX, given) != 0) return;
         char addr_str[ADDR_STR_LEN]; addr_to_string(addr, addr_str);
         uint8_t expect[COOKIE_LEN];
-
         cookie_compute(c->cookie_secret, addr_str, peer_id, pub, expect);
         c->st.hi2++;
         int cookie_ok = crypto_equal(given, expect, COOKIE_LEN) == 0;
         if (c->net_verbose) {
-            char shortid[9]; hex_encode(peer_id, 4, shortid);
+            char shortid[SHORT_ID_HEX + 1]; short_id(peer_id, shortid);
             ui_print(c, "* hi2 from %s, peer %s - cookie %s", addr_str, shortid, cookie_ok ? "ok" : "MISMATCH");
         }
         if (cookie_ok) connect_peer(c, peer_id, addr, pub, kem_pub, now);
         else c->st.hi2_bad++;
-    } else if (n == 3 && strcmp(f[0], "kx") == 0 && strlen(f[1]) == 32 && strlen(f[2]) == KEM_CT_LEN * 2) {
+    } else if (n == 3 && strcmp(f[0], "kx") == 0 && strlen(f[1]) == ID_HEX && strlen(f[2]) == KEM_CT_LEN * 2) {
         uint8_t peer_id[ID_LEN], ct[KEM_CT_LEN];
-        if (hex_decode(f[1], 32, peer_id) != 0 || hex_decode(f[2], KEM_CT_LEN * 2, ct) != 0) return;
+        if (hex_decode(f[1], ID_HEX, peer_id) != 0 || hex_decode(f[2], KEM_CT_LEN * 2, ct) != 0) return;
         c->st.kx++;
         peer_t *p = find_peer_by_id(c, peer_id);
         if (c->net_verbose) {
             char addr_str[ADDR_STR_LEN]; addr_to_string(addr, addr_str);
-            char shortid[9]; hex_encode(peer_id, 4, shortid);
+            char shortid[SHORT_ID_HEX + 1]; short_id(peer_id, shortid);
             ui_print(c, "* kx from %s, peer %s%s", addr_str, shortid, p ? "" : " (unknown peer, ignored)");
         }
         if (p) finish_kem_decap(c, p, ct);
-    } else if (n == 2 && strcmp(f[0], "nb") == 0 && addr.kind == ADDR_NOSTR && strlen(f[1]) == 32
+    } else if (n == 2 && strcmp(f[0], "nb") == 0 && addr.kind == ADDR_NOSTR && strlen(f[1]) == ID_HEX
                && strcmp(f[1], my_idhex) != 0) {
         // A member announcing itself on the relays. Someone we already hear from directly needs nothing.
         // Anyone else gets a hi through the relays.
         uint8_t peer_id[ID_LEN];
-        if (hex_decode(f[1], 32, peer_id) != 0) return;
+        if (hex_decode(f[1], ID_HEX, peer_id) != 0) return;
         peer_t *known = find_peer_by_id(c, peer_id);
         if (known && known->ok && now - known->seen < UDP_STALE) return;
         add_candidate(c, addr_virtual(ADDR_NOSTR, peer_id));
@@ -1358,7 +1383,7 @@ static void on_room(chat_t *c, char *plain, addr_t addr, double now) {
         // port would be applied to an address that represents a peer.
         c->st.lan++;
         int port = atoi(f[2]);
-        if (port > 0 && port <= 65535) {
+        if (port > 0 && port <= UINT16_MAX) {
             addr_t a = addr; a.port = (uint16_t)port;
             add_candidate(c, a);
             if (c->net_verbose) { char as[ADDR_STR_LEN]; addr_to_string(a, as); ui_print(c, "* lan beacon - candidate %s added", as); }
@@ -1371,8 +1396,8 @@ static int on_frame(chat_t *c, uint8_t *data, size_t len, addr_t addr, double no
 
 static int on_chunk(chat_t *c, const uint8_t *d, size_t len, addr_t addr, double now) {
     if (len != UDP_CELL || d[0] != CHUNK_MAGIC0 || d[1] != CHUNK_MAGIC1) return 0;
-    int idx = d[6], count = d[7];
-    size_t total = ((size_t)d[8] << 8) | d[9];
+    int idx = d[CHUNK_INDEX_AT], count = d[CHUNK_COUNT_AT];
+    size_t total = load_be16(d + CHUNK_LEN_AT);
     if (count < 2 || count > CHUNK_MAX || idx >= count) return 0;
     if (total <= (size_t)(count - 1) * CHUNK_PAYLOAD || total > (size_t)count * CHUNK_PAYLOAD) return 0;
     c->st.rx_chunks++;
@@ -1381,7 +1406,7 @@ static int on_chunk(chat_t *c, const uint8_t *d, size_t len, addr_t addr, double
     for (int i = 0; i < REASM_SLOTS; i++) {
         reasm_t *r = &c->reasm[i];
         if (r->used && now - r->born > REASM_TTL) r->used = 0;
-        if (r->used && addr_equal(r->from, addr) && memcmp(r->id, d + 2, 4) == 0 && r->count == count
+        if (r->used && addr_equal(r->from, addr) && memcmp(r->id, d + CHUNK_ID_AT, CHUNK_ID_LEN) == 0 && r->count == count
             && r->total == total) { slot = r; break; }
         if (r->born < oldest->born) oldest = r;
     }
@@ -1389,7 +1414,7 @@ static int on_chunk(chat_t *c, const uint8_t *d, size_t len, addr_t addr, double
         for (int i = 0; i < REASM_SLOTS; i++) if (!c->reasm[i].used) { slot = &c->reasm[i]; break; }
         if (!slot) slot = oldest;
         memset(slot, 0, sizeof *slot);
-        slot->used = 1; slot->from = addr; memcpy(slot->id, d + 2, 4);
+        slot->used = 1; slot->from = addr; memcpy(slot->id, d + CHUNK_ID_AT, CHUNK_ID_LEN);
         slot->count = count; slot->born = now;
         slot->total = total;
     }
@@ -1408,7 +1433,7 @@ static int on_chunk(chat_t *c, const uint8_t *d, size_t len, addr_t addr, double
 static void note_source(chat_t *c, addr_t a) {
     net_stats_t *st = &c->st;
     for (int i = 0; i < st->n_src; i++) if (addr_equal(st->src[i], a)) { st->src_n[i]++; return; }
-    int slot = st->n_src < 6 ? st->n_src++ : 5;
+    int slot = st->n_src < NET_SOURCES ? st->n_src++ : NET_SOURCES - 1;
     st->src[slot] = a; st->src_n[slot] = 1;
 }
 
@@ -1417,7 +1442,7 @@ static void note_source(chat_t *c, addr_t a) {
 static void on_udp(chat_t *c, const uint8_t *raw, size_t len, addr_t addr, double now) {
     c->st.rx++;
     note_source(c, addr);
-    uint8_t d[HANDSHAKE_BUF_LEN + 128];
+    uint8_t d[FRAME_BUF_LEN];
     if (len <= sizeof d) {
         memcpy(d, raw, len);
         if (udp_mask(c->udp_key, d, len) == 0 && (on_chunk(c, d, len, addr, now) || on_frame(c, d, len, addr, now)))
@@ -1440,7 +1465,7 @@ static int in_window(const ratchet_t *r, uint32_t index, uint32_t max_skip) {
 
 static int peer_try_unseal(peer_t *p, const uint8_t *data, size_t len, uint32_t index, uint32_t max_skip,
                             uint8_t *plain, size_t plain_cap, size_t *plain_len, int *on_old) {
-    uint8_t mk[32];
+    uint8_t mk[MSG_KEY_LEN];
     ratchet_t advanced;
     *on_old = 0;
     int got = in_window(&p->recv_chain, index, max_skip)
@@ -1472,18 +1497,18 @@ static int check_trust(chat_t *c, peer_t *p) {
         int renamed = strcmp(t->nick, p->nick) != 0;
         // The entry follows the nick, so the next peer with the old nick isn't taken for this one.
         if (renamed) trust_add(p->identity_source, p->identity_pub, p->nick);
-        if (p->trust == 1) return 0;
-        p->trust = 1;
-        if (p->code_ok != 0) return 0;
-        p->code_ok = 1;
+        if (p->trust == TRUST_KEY) return 0;
+        p->trust = TRUST_KEY;
+        if (p->code_ok != CODE_NOT_COMPARED) return 0;
+        p->code_ok = CODE_SAME;
         if (renamed) ui_print(c, "* %s signs with the key you verified for %s - no need to compare codes again", name, was);
         else ui_print(c, "* %s signs with the key you verified before - no need to compare codes again", name);
         return 0;
     }
     int i = trust_find_nick(p->nick_skel, 0);
-    if (i < 0) { p->trust = 0; return 0; }
-    if (p->trust == 2) return 0;
-    p->trust = 2;
+    if (i < 0) { p->trust = TRUST_UNKNOWN; return 0; }
+    if (p->trust == TRUST_OTHER_KEY) return 0;
+    p->trust = TRUST_OTHER_KEY;
     t = trust_at(i);
     char was[HEX_GROUPS_LEN(ID_FP_LEN)], now_fp[HEX_GROUPS_LEN(ID_FP_LEN) + 16];
     uint8_t fp[ID_FP_LEN];
@@ -1491,7 +1516,7 @@ static int check_trust(chat_t *c, peer_t *p) {
     hex_groups(fp, ID_FP_LEN, was);
     if (p->identity_source == IDENT_NONE) copy_str(now_fp, "no signing key", sizeof now_fp);
     else if (p->identity_state == VERIFY_FAILED) copy_str(now_fp, "a key with an invalid signature", sizeof now_fp);
-    else { hex_groups(p->identity_fp, ID_FP_LEN, now_fp); }
+    else hex_groups(p->identity_fp, ID_FP_LEN, now_fp);
     ui_warn(c, "* warning: %s does not sign with the key you verified for %s (fingerprint %s); it signs with %s. "
                "Their key changed, or someone else uses this nick. Treat them as unverified until you compare "
                "verify codes again: :verify %s",
@@ -1517,7 +1542,7 @@ static void announce_join(chat_t *c, peer_t *p) {
     if (p->persists) ui_warn(c, "* %s keeps a history of this chat", name);
     // A peer that dropped and came back did a fresh handshake, with nothing linking it to the one
     // that may have been verified. Someone who forced the drop could be in the middle of it.
-    for (size_t g = 0; g < sizeof c->gone / sizeof c->gone[0]; g++) {
+    for (size_t g = 0; g < GONE_MAX; g++) {
         if (!c->gone[g].used || memcmp(c->gone[g].id, p->id, ID_LEN) != 0) continue;
         c->gone[g].used = 0;
         if (memcmp(c->gone[g].vfy, p->vfy, VERIFY_LEN) == 0) continue;
@@ -1527,7 +1552,7 @@ static void announce_join(chat_t *c, peer_t *p) {
                     "codes with them, compare the new one", name, was, now_hex);
     }
     check_trust(c, p);
-    if (p->code_ok == 0) {
+    if (p->code_ok == CODE_NOT_COMPARED) {
         char code[HEX_GROUPS_LEN(VERIFY_LEN)]; hex_groups(p->vfy, VERIFY_LEN, code);
         char words[BYTEWORDS_LEN(VERIFY_LEN)]; bytewords(p->vfy, VERIFY_LEN, words);
         // The room's password only proves someone is a member, and any member could sit between two
@@ -1546,14 +1571,14 @@ static void announce_join(chat_t *c, peer_t *p) {
 }
 
 int chat_code_state(const chat_t *c, const peer_t *p) {
-    if (p->code_ok < 0) return 3;
-    if (p->code_ok > 0) return 2;
-    if (p->trust == 2) return 4;
-    return c->verify_required ? 1 : 0;
+    if (p->code_ok == CODE_DIFFERENT) return CODE_DIFFERS;
+    if (p->code_ok == CODE_SAME) return CODE_COMPARED;
+    if (p->trust == TRUST_OTHER_KEY) return CODE_KEY_CHANGED;
+    return c->verify_required ? CODE_TO_COMPARE : CODE_NOTHING;
 }
 
 static int on_frame(chat_t *c, uint8_t *data, size_t len, addr_t addr, double now) {
-    uint8_t plain[HANDSHAKE_BUF_LEN + 128];
+    uint8_t plain[FRAME_BUF_LEN];
     size_t plain_len;
     if (room_unseal(c->room_key, data, len, plain, sizeof plain - 1, &plain_len) == 0) {
         plain[plain_len] = '\0';
@@ -1563,7 +1588,7 @@ static int on_frame(chat_t *c, uint8_t *data, size_t len, addr_t addr, double no
     }
     // Checked before the peer loop, so a frame no sealer could produce doesn't cost ratchet steps.
     if (sealed_len_ok(len, SESSION_HEADER_LEN, SESSION_MIN_BODY)) {
-        uint32_t index = ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) | ((uint32_t)data[2] << 8) | data[3];
+        uint32_t index = load_be32(data);
         int hit = -1, fast = -1, on_old = 0;
         for (int i = 0; i < c->peer_hi && fast < 0; i++)
             if (c->peers[i].used && addr_equal(c->peers[i].addr, addr)) fast = i;
@@ -1610,13 +1635,12 @@ static int on_frame(chat_t *c, uint8_t *data, size_t len, addr_t addr, double no
             }
             if (was_pending) {
                 c->st.connects++;
-
                 send_k_now(c, p);
                 p->k_sent = 1;
                 p->next_k = now + K_EVERY;
                 if (!c->created && !c->ever_connected) ui_print(c, "* connected - chat is open");
                 // "joined" follows once the nick and identity are in.
-                char idhex[9]; hex_encode(p->id, 4, idhex);
+                char idhex[SHORT_ID_HEX + 1]; short_id(p->id, idhex);
                 ui_print(c, "* joining: peer %s - connected, waiting for its nick and identity", idhex);
                 c->ever_connected = 1;
                 c->once_used = 1;
@@ -1647,8 +1671,8 @@ const char *chat_start_error(const chat_t *c) {
     return c->start_error ? c->start_error : "it couldn't start";
 }
 
-int chat_online_count(const chat_t *c) { return live_count((chat_t *)c); }
-int chat_pending_count(const chat_t *c) { return pending_peer_count((chat_t *)c); }
+int chat_online_count(const chat_t *c) { return live_count(c); }
+int chat_pending_count(const chat_t *c) { return pending_peer_count(c); }
 int chat_candidate_count(const chat_t *c) {
     int n = 0;
     for (int i = 0; i < MAX_CANDS; i++) if (c->cands[i].used) n++;
@@ -1662,17 +1686,23 @@ static void transports_step(chat_t *c, double now) {
     if (c->tor) tor_step(c->tor, now);
 }
 
+// The most datagrams read from a socket in one go, so one busy socket doesn't hold up the rest.
+#define RECV_BATCH 64
+
 void chat_on_socket_readable(chat_t *c, sock_t which, double now) {
     if (which == SOCK_INVALID) return;
     if (which != c->sock && which != c->lan_sock) { transports_step(c, now); return; }
-    uint8_t buf[HANDSHAKE_BUF_LEN + 128];
+    uint8_t buf[FRAME_BUF_LEN];
     addr_t from;
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; i < RECV_BATCH; i++) {
         int n = net_recv(which, buf, sizeof buf, &from);
         if (n < 0) break;
         on_udp(c, buf, (size_t)n, from, now);
     }
 }
+
+// How many times a message is sent before it's given up on.
+#define MSG_TRIES 5
 
 static int pending_any(const chat_t *c) {
     for (int i = 0; i < MAX_PENDING_MSGS; i++) if (c->pending[i].used) return 1;
@@ -1706,7 +1736,7 @@ static void session_rekey(chat_t *c, double now) {
     crypto_wipe(&c->kem_keys, sizeof c->kem_keys);
     gen_keypair(&c->keys);
     kem_gen_keypair(&c->kem_keys);
-    gen_random(c->cookie_secret, 32);
+    gen_random(c->cookie_secret, sizeof c->cookie_secret);
     c->keygen++;
 
     refresh_hi(c);
@@ -1720,7 +1750,7 @@ static void session_rekey(chat_t *c, double now) {
         send_room(c, c->hi_msg, p->addr, c->sock);
         p->hello_tries = 0;
         p->next_hello = now + retry_delay(0);
-        p->next_rehello = now + REHELLO_EVERY + jitter(REHELLO_EVERY * 0.25);
+        p->next_rehello = now + jittered(REHELLO_EVERY);
         told++;
     }
     if (c->net_verbose)
@@ -1770,6 +1800,9 @@ static int relays_needed(chat_t *c, double now) {
     return 0;
 }
 
+// The most slots a fast transfer runs in one tick, if ticks fall behind.
+#define FAST_BURST_MAX 64
+
 void chat_tick(chat_t *c, double now) {
     if (c->nostr) {
         if (relays_needed(c, now)) c->relays_until = now + RELAY_LINGER;
@@ -1793,7 +1826,7 @@ void chat_tick(chat_t *c, double now) {
     }
     if (c->nostr && nostr_relays_up(c->nostr) > 0 && now >= c->next_beacon) {
         double every = live_count(c) > 0 ? NOSTR_BEACON_CONNECTED : NOSTR_BEACON_ALONE;
-        c->next_beacon = now + every + jitter(every * 0.3);
+        c->next_beacon = now + every + jitter(every * BEACON_JITTER);
         send_beacon(c);
     }
     if (c->dht_on) {
@@ -1804,17 +1837,13 @@ void chat_tick(chat_t *c, double now) {
                       dht_queried_count(&c->dht), dht_found_count(&c->dht));
         }
     }
-    c->probe_tokens += (now - c->probe_at) * PROBE_RATE;
-    if (c->probe_tokens > PROBE_BURST) c->probe_tokens = PROBE_BURST;
-    c->probe_at = now;
     for (int i = 0; i < MAX_CANDS; i++) {
         cand_t *cd = &c->cands[i];
         if (!cd->used) continue;
         // Already reached at this address, or (relays) under this id, so there's nothing left to try.
         if (candidate_reached(c, cd->addr)) { cd->used = 0; continue; }
         if (now >= cd->next_try) {
-            if (c->probe_tokens < 1.0) break;
-            c->probe_tokens -= 1.0;
+            if (!take_token(&c->probe_tokens, &c->probe_at, now, PROBE_RATE, PROBE_BURST)) break;
             send_room(c, c->hi_msg, cd->addr, c->sock);
             cd->next_try = now + retry_delay(cd->tries);
             cd->tries++;
@@ -1831,7 +1860,7 @@ void chat_tick(chat_t *c, double now) {
         if (!pm->used) continue;
         if (now >= pm->next_retry) {
             peer_t *p = &c->peers[pm->peer_slot];
-            if (!p->used || !p->ok || pm->tries >= 5) pending_clear(pm);
+            if (!p->used || !p->ok || pm->tries >= MSG_TRIES) pending_clear(pm);
             else { send_peer(c, p, pm->text); pm->tries++; pm->next_retry = now + resend_delay(c, p); }
         }
     }
@@ -1843,12 +1872,11 @@ void chat_tick(chat_t *c, double now) {
             p->next_hello = now + retry_delay(p->hello_tries);
             p->hello_tries++;
             send_room(c, c->hi_msg, p->addr, c->sock);
-            char shortid[9]; hex_encode(p->id, 4, shortid);
+            char shortid[SHORT_ID_HEX + 1]; short_id(p->id, shortid);
             if (c->net_verbose) {
                 char as[ADDR_STR_LEN]; addr_to_string(p->addr, as);
                 ui_print(c, "* hi retry -> pending peer %s at %s", shortid, as);
             }
-
             if (p->send_chain.started && we_initiate(c, p)) {
                 send_kx(c, p, p->addr);
                 if (c->net_verbose) ui_print(c, "* kx retry -> pending peer %s", shortid);
@@ -1876,28 +1904,26 @@ void chat_tick(chat_t *c, double now) {
         int quiet = now - p->seen > KEEPALIVE && p->addr.kind != ADDR_NOSTR;
         int stuck = c->keygen > 1 && (p->keygen != c->keygen || !p->chain_confirmed);
         if ((quiet || stuck) && now >= p->next_rehello && !room_queued(c, peer_slot(c, p))) {
-            p->next_rehello = now + REHELLO_EVERY + jitter(REHELLO_EVERY * 0.25);
+            p->next_rehello = now + jittered(REHELLO_EVERY);
             send_room(c, c->hi_msg, p->addr, c->sock);
             if (c->net_verbose) ui_print(c, "* hi -> %s (%s)", p->nick, stuck ? "re-handshake" : "quiet");
         }
     }
     if (now >= c->next_alive) {
-        c->next_alive = now + KEEPALIVE + jitter(3.0);
+        c->next_alive = now + KEEPALIVE + jitter(KEEPALIVE_SPREAD);
         for (int i = 0; i < c->n_static; i++) add_candidate(c, c->static_peers[i]);
         if (c->tor) knock_room_slots(c);
     }
     if (c->lan_sock != SOCK_INVALID && now >= c->next_lan) {
-        c->next_lan = now + 5 + jitter(2.0);
+        c->next_lan = now + LAN_EVERY + jitter(LAN_SPREAD);
         if (c->net_verbose) ui_print(c, "* lan beacon sent");
-        char idhex[33]; hex_encode(c->my_id, ID_LEN, idhex);
-        char beacon[64]; snprintf(beacon, sizeof beacon, "lan\t%s\t%u", idhex, (unsigned)c->port);
+        char beacon[64]; snprintf(beacon, sizeof beacon, "lan\t%s\t%u", c->my_idhex, (unsigned)c->port);
         send_room(c, beacon, addr_broadcast_lan(c->lan_port), c->lan_sock);
         send_room(c, beacon, addr_loopback(c->lan_port), c->lan_sock);
     }
     for (int i = 0; i < c->peer_hi; i++) {
         peer_t *p = &c->peers[i];
         if (!p->used) continue;
-
         // Until the peer re-handshakes with our new key, keep announcing it on the chain it can still read.
         if (p->ok && p->announces_rekey && c->keygen > 1 && now >= p->next_rk
             && (p->keygen != c->keygen || !p->chain_confirmed)) {
@@ -1921,7 +1947,7 @@ void chat_tick(chat_t *c, double now) {
         if ((!pending_any(c) || waited > REKEY_DRAIN_GRACE) && (!rehandshaking(c) || waited > REKEY_DEFER_MAX)) {
             session_rekey(c, now);
             c->rekey_due = 0.0;
-            c->next_rekey = now + REKEY_INTERVAL + jitter(REKEY_INTERVAL * 0.2);
+            c->next_rekey = rekey_after(now);
         }
     }
 
@@ -1939,7 +1965,7 @@ void chat_tick(chat_t *c, double now) {
         // Fast transfers: while one runs with this peer (and not through the relays), its slots
         // come every few milliseconds, as many as are due since the last tick.
         if (c->fast_files && p->ok && p->addr.kind != ADDR_NOSTR && (p->serving || file_downloading_from(c, p))) {
-            for (int burst = 0; burst < 64 && now >= p->next_cover; burst++) {
+            for (int burst = 0; burst < FAST_BURST_MAX && now >= p->next_cover; burst++) {
                 run_slot(c, p);
                 p->next_cover += FILE_FAST_INTERVAL;
             }
@@ -1950,7 +1976,7 @@ void chat_tick(chat_t *c, double now) {
         // Through the relays a transfer can't burst. Instead, slots for a fast transfer we're sending come
         // as often as the relays allow.
         if (c->fast_files && p->ok && p->serving && p->addr.kind == ADDR_NOSTR) iv = relay_fast_interval(c, iv);
-        p->next_cover = now + iv + jitter(iv * 0.25);
+        p->next_cover = now + jittered(iv);
     }
     if (!c->created && !c->warned_lonely && !c->ever_connected && now - c->start > LONELY_HINT_AFTER) {
         c->warned_lonely = 1;
@@ -1967,8 +1993,7 @@ void chat_tick(chat_t *c, double now) {
 
 static void net_report(chat_t *c) {
     net_stats_t *st = &c->st;
-    int cands = 0;
-    for (int i = 0; i < MAX_CANDS; i++) if (c->cands[i].used) cands++;
+    int cands = chat_candidate_count(c);
     if (c->route.mode == ROUTE_TOR) {
         char ts[300] = "not running";
         if (c->tor) tor_status(c->tor, ts, sizeof ts);
@@ -1976,9 +2001,7 @@ static void net_report(chat_t *c) {
                  ts, cands, pending_peer_count(c), live_count(c));
         char ns[300] = "off - DHT peers can't reach this session";
         if (c->nostr) nostr_status(c->nostr, ns, sizeof ns);
-        int relayed = 0;
-        for (int i = 0; i < c->peer_hi; i++) if (c->peers[i].used && c->peers[i].ok && c->peers[i].addr.kind == ADDR_NOSTR) relayed++;
-        ui_print(c, "* nostr relays through Tor: %s | peers through relays: %d", ns, relayed);
+        ui_print(c, "* nostr relays through Tor: %s | peers through relays: %d", ns, relayed_count(c));
     } else if (c->dht_on) {
         ui_print(c, "* net: udp/%u | internet lookup: IPv4 %s%d nodes, %d peers | IPv6 %s%d nodes, %d peers | candidates to try: %d | handshakes in progress: %d | connected: %d",
                  (unsigned)c->port, c->dht.want[DHT_V4] ? "" : "(off) ", dht_queried_count_fam(&c->dht, DHT_V4),
@@ -1993,10 +2016,8 @@ static void net_report(chat_t *c) {
         char pm[160] = "off", ns[300] = "off";
         if (c->pm) portmap_status(c->pm, pm, sizeof pm);
         if (c->nostr) nostr_status(c->nostr, ns, sizeof ns);
-        int relayed = 0;
-        for (int i = 0; i < c->peer_hi; i++) if (c->peers[i].used && c->peers[i].ok && c->peers[i].addr.kind == ADDR_NOSTR) relayed++;
         ui_print(c, "* port mapping: %s | lan: %s | nostr fallback: %s | peers through relays: %d", pm,
-                 c->lan_sock != SOCK_INVALID ? "on" : "off", ns, relayed);
+                 c->lan_sock != SOCK_INVALID ? "on" : "off", ns, relayed_count(c));
     }
     ui_print(c, "* rx: %u datagrams | readable with this room's key: %u (hi %u, ck %u, hi2 %u of which %u bad-cookie, kx %u, lan %u) | from connected peers: %u | unreadable: %u | handshake pieces: %u (%u rebuilt)",
              st->rx, st->room_ok, st->hi, st->ck, st->hi2, st->hi2_bad, st->kx, st->lan, st->session_ok, st->other, st->rx_chunks, st->rx_chunk_done);
@@ -2053,9 +2074,9 @@ void chat_set_nick(chat_t *c, const char *nick) {
 
 void chat_set_colour(chat_t *c, const uint8_t rgb[3]) {
     memcpy(c->my_color, rgb, 3);
-    char hex[7]; color_to_hex(rgb, hex);
+    char hex[COLOR_HEX_LEN + 1]; color_to_hex(rgb, hex);
     ui_print_colored(c, c->my_color, "* your colour is now #%s", hex);
-    char msg[10]; snprintf(msg, sizeof msg, "c\t%s", hex);
+    char msg[sizeof "c\t" + COLOR_HEX_LEN]; snprintf(msg, sizeof msg, "c\t%s", hex);
     send_to_live_peers(c, msg);
 }
 
@@ -2070,7 +2091,7 @@ void chat_set_history(chat_t *c, int on) {
 // From the session's key, so only its members can tell which history is this session's.
 void chat_history_id(const chat_t *c, uint8_t out[CHAT_HISTORY_ID_LEN]) {
     static const char LABEL[] = "chat history v1";
-    uint8_t h[32];
+    uint8_t h[SHA256_LEN];
     hmac_sha256(c->master, MASTER_LEN, (const uint8_t *)LABEL, sizeof LABEL - 1, h);
     memcpy(out, h, CHAT_HISTORY_ID_LEN);
     crypto_wipe(h, sizeof h);
@@ -2102,7 +2123,7 @@ static cmd_result_t cmd_peers(void *ctx, const char *arg) {
         peer_t *p = &c->peers[i];
         if (!p->used || !p->ok) continue;
         if (n++ == 0) ui_print(c, "* online: %s (you), and:", c->nick);
-        char idhex[9]; hex_encode(p->id, 4, idhex);
+        char idhex[SHORT_ID_HEX + 1]; short_id(p->id, idhex);
         char vfyhex[HEX_GROUPS_LEN(VERIFY_LEN)]; hex_groups(p->vfy, VERIFY_LEN, vfyhex);
         char build[64]; chat_build_label(p, build, sizeof build);
         static const char *const CODE[] = { "", ", code not compared", ", code compared", ", CODES DIFFER", ", KEY CHANGED" };
@@ -2136,14 +2157,13 @@ static peer_t *peer_by_name(chat_t *c, const char *arg, int *ambiguous) {
 
 // Adds p's signing key to the verified keys. If p was warned about for having the nick of another
 // verified key, the entries with that nick are replaced: the user compared codes with this key.
-static void pin_identity(chat_t *c, peer_t *p) {
-    (void)c;
+static void pin_identity(peer_t *p) {
     if (p->identity_state != VERIFY_VERIFIED) return;
-    if (p->trust == 2)
+    if (p->trust == TRUST_OTHER_KEY)
         for (int i = trust_find_nick(p->nick_skel, 0); i >= 0; i = trust_find_nick(p->nick_skel, i))
             trust_remove(i);
     trust_add(p->identity_source, p->identity_pub, p->nick);
-    p->trust = 1;
+    p->trust = TRUST_KEY;
 }
 
 static cmd_result_t cmd_verify(void *ctx, const char *arg) {
@@ -2172,15 +2192,15 @@ static cmd_result_t cmd_verify(void *ctx, const char *arg) {
     char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
     char code[HEX_GROUPS_LEN(VERIFY_LEN)]; hex_groups(p->vfy, VERIFY_LEN, code);
     if (verdict[0] == 'n') {
-        p->code_ok = -1;
+        p->code_ok = CODE_DIFFERENT;
         ui_print(c, "* %s: the codes differ - someone with this room's password may be between you. Nothing you send goes "
                     "to them now. Leave this session and start a new one, with a new password shared over a channel you trust",
                  name);
     } else if (verdict[0]) {
-        int was = p->code_ok, replaced = p->trust == 2;
-        p->code_ok = 1;
-        pin_identity(c, p);
-        if (was != 1) file_offer_all(c, p);
+        int was = p->code_ok, replaced = p->trust == TRUST_OTHER_KEY;
+        p->code_ok = CODE_SAME;
+        pin_identity(p);
+        if (was != CODE_SAME) file_offer_all(c, p);
         const char *kept = p->identity_state != VERIFY_VERIFIED
             ? ". They have no valid signing key, so this lasts for this session only"
             : trust_saved() ? ". Their signing key is saved as verified (:verified lists them)"
@@ -2225,7 +2245,8 @@ static cmd_result_t cmd_verified(void *ctx, const char *arg) {
         }
         if (!removed) { ui_print(c, "* no verified key has the nick %s - :verified lists them", who); return CMD_OK; }
         // Peers here keep what was compared in this session, but are checked against the list again.
-        for (int i = 0; i < c->peer_hi; i++) if (c->peers[i].used && c->peers[i].trust == 1) c->peers[i].trust = 0;
+        for (int i = 0; i < c->peer_hi; i++)
+            if (c->peers[i].used && c->peers[i].trust == TRUST_KEY) c->peers[i].trust = TRUST_UNKNOWN;
         ui_print(c, "* removed %d verified key%s%s", removed, removed == 1 ? "" : "s",
                  trust_saved() ? " from what :install saved" : "");
         return CMD_OK;
@@ -2263,7 +2284,7 @@ static cmd_result_t cmd_set(void *ctx, const char *arg) {
     chat_t *c = ctx;
     char key[CMD_WORD_MAX];
     const char *value = cmd_parse(arg, key);
-    char hex[7]; color_to_hex(c->my_color, hex);
+    char hex[COLOR_HEX_LEN + 1]; color_to_hex(c->my_color, hex);
     if (!key[0]) {
         ui_print(c, "* nick %s, colour #%s, notify %s, preview %s, net %s - :set NAME VALUE changes one", c->nick, hex,
                  NOTIFY_NAMES[c->notify_mode], PREVIEW_NAMES[c->notify_preview], NET_LOG_NAMES[c->net_verbose != 0]);
@@ -2283,7 +2304,7 @@ static cmd_result_t cmd_set(void *ctx, const char *arg) {
             chat_set_colour(c, rgb);
         }
     } else if (strcmp(key, "notify") == 0) {
-        int m = name_index(NOTIFY_NAMES, 3, value);
+        int m = name_index(NOTIFY_NAMES, (int)COUNT_OF(NOTIFY_NAMES), value);
         if (m < 0) {
             ui_print(c, "* notify: %s. usage: :set notify all|mentions|none", NOTIFY_NAMES[c->notify_mode]);
         } else {
@@ -2291,7 +2312,7 @@ static cmd_result_t cmd_set(void *ctx, const char *arg) {
             ui_print(c, "* notify: %s", NOTIFY_NAMES[m]);
         }
     } else if (strcmp(key, "preview") == 0) {
-        int m = name_index(PREVIEW_NAMES, 3, value);
+        int m = name_index(PREVIEW_NAMES, (int)COUNT_OF(PREVIEW_NAMES), value);
         if (m < 0) {
             ui_print(c, "* preview: %s. usage: :set preview off|nick|message - what a notification shows besides "
                         "that a message came (desktops keep notifications)", PREVIEW_NAMES[c->notify_preview]);
@@ -2300,7 +2321,7 @@ static cmd_result_t cmd_set(void *ctx, const char *arg) {
             ui_print(c, "* preview: %s", PREVIEW_NAMES[m]);
         }
     } else if (strcmp(key, "net") == 0) {
-        int v = name_index(NET_LOG_NAMES, 2, value);
+        int v = name_index(NET_LOG_NAMES, (int)COUNT_OF(NET_LOG_NAMES), value);
         if (v < 0) {
             ui_print(c, "* net: %s. usage: :set net normal|verbose", NET_LOG_NAMES[c->net_verbose != 0]);
         } else {
@@ -2331,7 +2352,7 @@ static cmd_result_t cmd_port(void *ctx, const char *arg) {
     }
     char *end;
     long want = strtol(arg, &end, 10);
-    if (*end || want < 0 || want > 65535) {
+    if (*end || want < 0 || want > UINT16_MAX) {
         ui_print(c, "* not a port: %s. usage: :port N (0-65535, 0 picks a free one)", arg);
         return CMD_OK;
     }
@@ -2365,19 +2386,12 @@ static cmd_result_t cmd_quit(void *ctx, const char *arg) {
 
 // ---- files ----
 
-static int peer_trusted(const chat_t *c, const peer_t *p) {
-    return p->code_ok >= 0 && (!c->verify_required || p->code_ok == 1);
-}
-
-static file_entry_t *file_by_num(chat_t *c, int num) {
-    for (int i = 0; i < FILE_OFFERS_MAX; i++) if (c->files[i].used && c->files[i].num == num) return &c->files[i];
-    return NULL;
-}
-
 const file_entry_t *chat_file(const chat_t *c, int num) {
     for (int i = 0; i < FILE_OFFERS_MAX; i++) if (c->files[i].used && c->files[i].num == num) return &c->files[i];
     return NULL;
 }
+
+static file_entry_t *file_by_num(chat_t *c, int num) { return (file_entry_t *)chat_file(c, num); }
 
 static file_entry_t *file_by_fid(chat_t *c, const uint8_t owner[ID_LEN], const uint8_t fid[FILE_ID_LEN]) {
     for (int i = 0; i < FILE_OFFERS_MAX; i++) {
@@ -2407,24 +2421,36 @@ static double file_slot_bytes(const peer_t *p) {
     return (p->batches && p->addr.kind == ADDR_NOSTR ? 2.0 : 1.0) * FILE_CHUNK;
 }
 
+#define ETA_MIN_CHUNKS 4
+
 double chat_file_eta(const chat_t *cc, const file_entry_t *e, double now) {
     chat_t *c = (chat_t *)cc;
     peer_t *p = file_owner(c, e);
-    if (!p) return -1.0;
-    if (!peer_trusted(c, p)) return -2.0;
+    if (!p) return ETA_AWAY;
+    if (!peer_trusted(c, p)) return ETA_UNVERIFIED;
     uint64_t got = chat_file_got(e);
     double left = (double)(e->size - got), took = now - e->since;
     // The rate so far, once there are enough chunks to measure it. Until then, chat's normal rate on
     // its path: a slot comes up to a quarter of its interval late, an eighth on average.
-    if (got >= 4 * FILE_CHUNK && took > 0.0) return left * took / (double)got;
-    return left / file_slot_bytes(p) * cover_interval(c, p) * 1.125;
+    if (got >= ETA_MIN_CHUNKS * FILE_CHUNK && took > 0.0) return left * took / (double)got;
+    return left / file_slot_bytes(p) * cover_interval(c, p) * (1.0 + JITTER / 2);
+}
+
+// A whole file in memory, at least a byte so an empty one isn't NULL.
+static uint8_t *file_mem_alloc(uint64_t size) { return malloc(size ? (size_t)size : 1); }
+
+static void file_mem_free(uint8_t **mem, uint64_t size) {
+    if (!*mem) return;
+    crypto_wipe(*mem, size ? (size_t)size : 1);
+    free(*mem);
+    *mem = NULL;
 }
 
 // Stops a download: deletes the partial file and wipes anything in memory.
 static void file_stop_download(file_entry_t *e, dl_state_t to) {
     if (e->out) { fclose(e->out); e->out = NULL; }
     if (e->part_path[0]) { platform_remove(e->part_path); e->part_path[0] = '\0'; }
-    if (e->mem) { crypto_wipe(e->mem, e->size ? (size_t)e->size : 1); free(e->mem); e->mem = NULL; }
+    file_mem_free(&e->mem, e->size);
     if (e->win) { crypto_wipe(e->win, (size_t)FILE_WINDOW * FILE_CHUNK); free(e->win); e->win = NULL; }
     e->done = e->win_off = e->win_got = 0;
     e->win_n = 0;
@@ -2436,9 +2462,7 @@ static void file_fail(file_entry_t *e, const char *why) {
     copy_str(e->why, why, sizeof e->why);
 }
 
-static void file_cache_drop(file_entry_t *e) {
-    if (e->cache) { crypto_wipe(e->cache, e->size ? (size_t)e->size : 1); free(e->cache); e->cache = NULL; }
-}
+static void file_cache_drop(file_entry_t *e) { file_mem_free(&e->cache, e->size); }
 
 // Keeps e->mem (a whole file, checked) as e's cache, dropping the oldest others to stay within
 // FILE_CACHE_MAX.
@@ -2447,7 +2471,7 @@ static void file_cache_keep(chat_t *c, file_entry_t *e) {
     e->mem = NULL;
     if (!m) return;
     file_cache_drop(e);
-    if (e->size > FILE_CACHE_MAX) { crypto_wipe(m, e->size ? (size_t)e->size : 1); free(m); return; }
+    if (e->size > FILE_CACHE_MAX) { file_mem_free(&m, e->size); return; }
     for (;;) {
         uint64_t total = e->size;
         file_entry_t *old = NULL;
@@ -2507,26 +2531,15 @@ static int file_downloading_from(const chat_t *c, const peer_t *p) {
 }
 
 static void file_send_offer(chat_t *c, peer_t *p, const file_entry_t *e, double now) {
-    char mid[9]; gen_mid(mid);
-    char fidhex[FILE_ID_LEN * 2 + 1], shahex[65];
+    char mid[MID_HEX + 1]; gen_mid(mid);
+    char fidhex[FILE_ID_LEN * 2 + 1], shahex[SHA256_LEN * 2 + 1];
     hex_encode(e->fid, FILE_ID_LEN, fidhex);
-    hex_encode(e->sha, 32, shahex);
+    hex_encode(e->sha, SHA256_LEN, shahex);
     char rec[MSG_LINE_LEN];
     snprintf(rec, sizeof rec, "fo\t%s\t%s\t%llu\t%s\t%s\t%s", mid, fidhex, (unsigned long long)e->size, shahex,
              e->image ? "image" : "file", e->name);
-    if (send_peer(c, p, rec) != 0) return;
     // Retried until acked, like a message.
-    for (int s = 0; s < MAX_PENDING_MSGS; s++) {
-        pending_msg_t *pm = &c->pending[s];
-        if (pm->used) continue;
-        pm->used = 1;
-        memcpy(pm->mid, mid, sizeof pm->mid);
-        pm->peer_slot = peer_slot(c, p);
-        copy_str(pm->text, rec, sizeof pm->text);
-        pm->tries = 1;
-        pm->next_retry = now + resend_delay(c, p);
-        break;
-    }
+    if (send_peer(c, p, rec) == 0) track_message(c, p, mid, rec, now);
 }
 
 // Our offers, to a peer that has just joined or whose code was just compared.
@@ -2538,6 +2551,7 @@ static void file_offer_all(chat_t *c, peer_t *p) {
 
 // A path typed in a command: trailing spaces and the quotes file managers copy paths with are
 // removed, and a leading ~ is the home folder.
+#define TYPED_PATH_MAX 1024
 static void typed_path(const char *in, char *path, size_t cap) {
     while (*in == ' ') in++;
     copy_str(path, in, cap);
@@ -2546,19 +2560,22 @@ static void typed_path(const char *in, char *path, size_t cap) {
     if (pl >= 2 && (path[0] == '"' || path[0] == '\'') && path[pl - 1] == path[0]) { memmove(path, path + 1, pl - 2); path[pl - 2] = '\0'; }
     if (path[0] == '~' && (path[1] == '/' || path[1] == '\0')) {
         const char *home = platform_home_dir();
-        char full[1024];
+        char full[TYPED_PATH_MAX];
         if (home) { snprintf(full, sizeof full, "%s%s", home, path + 1); copy_str(path, full, cap); }
     }
 }
 
 static cmd_result_t cmd_send(void *ctx, const char *arg) {
     chat_t *c = ctx;
-    char path[1024];
+    char path[TYPED_PATH_MAX];
     typed_path(arg, path, sizeof path);
     if (!path[0]) { ui_print(c, "* usage: :send PATH - offers a file to everyone here; nobody gets it unless they fetch it"); return CMD_OK; }
     chat_send_file(c, path);
     return CMD_OK;
 }
+
+// As much of the start of a file as image_kind needs.
+#define KIND_HEAD 8
 
 void chat_send_file(chat_t *c, const char *path) {
     uint64_t size = 0;
@@ -2574,14 +2591,14 @@ void chat_send_file(chat_t *c, const char *path) {
     // since then gives a hash that doesn't match, and nothing else is ever sent in its place.
     sha256_ctx_t h;
     sha256_init(&h);
-    uint8_t buf[65536], head[8] = { 0 };
+    uint8_t buf[65536], head[KIND_HEAD] = { 0 };
     uint64_t total = 0;
     size_t n;
     uint8_t *mem = NULL;
     while ((n = fread(buf, 1, sizeof buf, f)) > 0) {
         if (total < sizeof head) memcpy(head + total, buf, n < sizeof head - total ? n : sizeof head - total);
         // A picture is kept as it's read, to show it here.
-        if (total == 0 && size <= FILE_VIEW_MAX && image_kind(buf, n)) mem = malloc(size ? (size_t)size : 1);
+        if (total == 0 && size <= FILE_VIEW_MAX && image_kind(buf, n)) mem = file_mem_alloc(size);
         if (mem && n <= size - total) memcpy(mem + total, buf, n);
         sha256_update(&h, buf, n);
         total += n;
@@ -2593,7 +2610,7 @@ void chat_send_file(chat_t *c, const char *path) {
     if (ferror(f) || total != size) ui_print(c, "* can't send %s: it changed while it was read", path);
     else if (!(e = file_new(c, NULL))) ui_print(c, "* can't offer more files at once - :cancel one you offered first");
     if (!e || !image) {
-        if (mem) { crypto_wipe(mem, size ? (size_t)size : 1); free(mem); mem = NULL; }
+        file_mem_free(&mem, size);
         if (!e) { fclose(f); return; }
     }
     e->mine = 1;
@@ -2625,6 +2642,9 @@ void chat_send_file(chat_t *c, const char *path) {
     if (e->cache && c->file_view) c->file_view(c->ui, e->num, e->name, e->cache, (size_t)e->size);
 }
 
+// When a window's request is sent again if nothing comes: after a few slots, and some seconds more.
+static double file_retry_at(double now, double slot_interval) { return now + 6.0 * slot_interval + 4.0; }
+
 // Asks p for the first run of the window that hasn't arrived (the whole window at the start).
 // Anything that arrived after the run isn't requested again.
 static void file_request(chat_t *c, file_entry_t *e, peer_t *p, double now) {
@@ -2645,7 +2665,7 @@ static void file_request(chat_t *c, file_entry_t *e, peer_t *p, double now) {
              end - first);
     send_peer(c, p, rec);
     double iv = c->fast_files && p->addr.kind != ADDR_NOSTR ? FILE_FAST_INTERVAL : cover_interval(c, p);
-    e->retry_at = now + 6.0 * iv + 4.0;
+    e->retry_at = file_retry_at(now, iv);
 }
 
 // The folder file e is saved in: the one asked for, else Downloads.
@@ -2661,11 +2681,12 @@ static void file_dir_name(const file_entry_t *e, char *out, size_t cap) {
 
 // A new hidden file in e's folder to write it to, under a name nothing else will use. file_save_as
 // gives it its real name once its hash matches.
+#define PART_ID_LEN 6
 static FILE *file_open_part(file_entry_t *e) {
-    char dir[600];
+    char dir[FILE_DIR_MAX];
     if (file_dir(e, dir, sizeof dir) != 0) return NULL;
-    uint8_t r[6]; gen_random(r, sizeof r);
-    char rh[13]; hex_encode(r, sizeof r, rh);
+    uint8_t r[PART_ID_LEN]; gen_random(r, sizeof r);
+    char rh[PART_ID_LEN * 2 + 1]; hex_encode(r, sizeof r, rh);
     snprintf(e->part_path, sizeof e->part_path, "%s/.chat-%s.part", dir, rh);
     FILE *f = platform_create_new(e->part_path);
     if (!f) e->part_path[0] = '\0';
@@ -2674,12 +2695,13 @@ static FILE *file_open_part(file_entry_t *e) {
 
 // Renames the part file to e's name in its folder: name, otherwise "name (2).ext" and so on.
 // Sets e->saved.
+#define SAVE_NAME_TRIES 100
 static int file_save_as(file_entry_t *e) {
-    char dir[600], saved[sizeof e->saved];
+    char dir[FILE_DIR_MAX], saved[sizeof e->saved];
     if (file_dir(e, dir, sizeof dir) != 0) return -1;
     const char *dot = strrchr(e->name, '.');
     size_t stem = dot && dot != e->name ? (size_t)(dot - e->name) : strlen(e->name);
-    for (int k = 1; k < 100; k++) {
+    for (int k = 1; k < SAVE_NAME_TRIES; k++) {
         if (k == 1) snprintf(saved, sizeof saved, "%s/%s", dir, e->name);
         else snprintf(saved, sizeof saved, "%s/%.*s (%d)%s", dir, (int)stem, e->name, k, e->name + stem);
         if (platform_move_new(e->part_path, saved) == 0) {
@@ -2708,9 +2730,9 @@ static int file_copy_checked(const file_entry_t *e, FILE *f, FILE *out, uint8_t 
         total += n;
     }
     crypto_wipe(buf, sizeof buf);
-    uint8_t got[32];
+    uint8_t got[SHA256_LEN];
     sha256_final(&h, got);
-    if (ferror(f) || total != e->size || crypto_equal(got, e->sha, 32) != 0) match = 0;
+    if (ferror(f) || total != e->size || crypto_equal(got, e->sha, SHA256_LEN) != 0) match = 0;
     return !ok ? -1 : match;
 }
 
@@ -2723,11 +2745,11 @@ static int file_check_saved(const file_entry_t *e, uint8_t **mem) {
     FILE *f = platform_open_regular(e->saved, &size);
     if (!f) return -1;
     uint8_t *m = NULL;
-    if (size != e->size || (mem && !(m = malloc(size ? (size_t)size : 1)))) { fclose(f); return -1; }
+    if (size != e->size || (mem && !(m = file_mem_alloc(size)))) { fclose(f); return -1; }
     int match = file_copy_checked(e, f, NULL, m);
     fclose(f);
     if (match != 1) {
-        if (m) { crypto_wipe(m, size ? (size_t)size : 1); free(m); }
+        file_mem_free(&m, size);
         return -1;
     }
     if (mem) *mem = m;
@@ -2738,9 +2760,9 @@ static int file_check_saved(const file_entry_t *e, uint8_t **mem) {
 static int file_read_own(const file_entry_t *e, uint8_t **mem) {
     *mem = NULL;
     if (!e->fp || e->size > FILE_VIEW_MAX || fseek(e->fp, 0, SEEK_SET) != 0) return -1;
-    uint8_t *m = malloc(e->size ? (size_t)e->size : 1);
+    uint8_t *m = file_mem_alloc(e->size);
     if (!m) return -1;
-    if (file_copy_checked(e, e->fp, NULL, m) != 1) { crypto_wipe(m, e->size ? (size_t)e->size : 1); free(m); return -1; }
+    if (file_copy_checked(e, e->fp, NULL, m) != 1) { file_mem_free(&m, e->size); return -1; }
     *mem = m;
     return 0;
 }
@@ -2805,7 +2827,7 @@ static int file_save_local(chat_t *c, file_entry_t *e, const uint8_t *mem) {
         if (!e->saved[0] || !(src = platform_open_regular(e->saved, &size))) { e->saved[0] = '\0'; return 1; }
         if (size != e->size) { fclose(src); e->saved[0] = '\0'; return 1; }
     }
-    char where[600]; file_dir_name(e, where, sizeof where);
+    char where[FILE_DIR_MAX]; file_dir_name(e, where, sizeof where);
     FILE *out = file_open_part(e);
     if (!out) {
         if (src) fclose(src);
@@ -2826,10 +2848,10 @@ static int file_save_local(chat_t *c, file_entry_t *e, const uint8_t *mem) {
 }
 
 static void file_finish(chat_t *c, file_entry_t *e) {
-    uint8_t got[32];
+    uint8_t got[SHA256_LEN];
     sha256_final(&e->hash, got);
     char desc[FILE_NAME_MAX + 48]; file_desc(e, desc, sizeof desc);
-    if (crypto_equal(got, e->sha, 32) != 0) {
+    if (crypto_equal(got, e->sha, SHA256_LEN) != 0) {
         file_fail(e, "didn't match the offer, so it was thrown away");
         ui_print(c, "* file %d (%s) didn't match what was offered - it was thrown away", e->num, desc);
         return;
@@ -2847,7 +2869,7 @@ static void file_finish(chat_t *c, file_entry_t *e) {
     int ok = e->out && fflush(e->out) == 0;
     if (e->out) { if (fclose(e->out) != 0) ok = 0; e->out = NULL; }
     if (!ok || file_save_as(e) != 0) {
-        char where[600]; file_dir_name(e, where, sizeof where);
+        char where[FILE_DIR_MAX]; file_dir_name(e, where, sizeof where);
         char why[sizeof e->why]; snprintf(why, sizeof why, "couldn't be saved in %.40s", where);
         file_fail(e, why);
         ui_print(c, "* file %d (%s) downloaded, but couldn't be saved in %s", e->num, desc, where);
@@ -2881,10 +2903,10 @@ static int file_start(chat_t *c, file_entry_t *e, peer_t *p) {
     e->gone_since = 0.0;
     e->why[0] = '\0';
     e->win = malloc((size_t)FILE_WINDOW * FILE_CHUNK);
-    if (e->view) e->mem = malloc(e->size ? (size_t)e->size : 1);
+    if (e->view) e->mem = file_mem_alloc(e->size);
     if (!e->win || (e->view && !e->mem)) { file_fail(e, "out of memory"); ui_print(c, "* out of memory"); return -1; }
     if (!e->view && !(e->out = file_open_part(e))) {
-        char where[600]; file_dir_name(e, where, sizeof where);
+        char where[FILE_DIR_MAX]; file_dir_name(e, where, sizeof where);
         char why[sizeof e->why]; snprintf(why, sizeof why, "couldn't write a file in %.36s", where);
         file_fail(e, why);
         ui_print(c, "* can't write a file in %s", where);
@@ -2942,7 +2964,7 @@ int chat_file_fetch(chat_t *c, int num, int view, int anyway, const char *dir) {
             return 0;
         }
     } else {
-        char want[600] = "";
+        char want[FILE_DIR_MAX] = "";
         if (dir) copy_str(want, dir, sizeof want);
         size_t wl = strlen(want);
         while (wl > 1 && (want[wl - 1] == '/' || want[wl - 1] == '\\')) want[--wl] = '\0';
@@ -2980,7 +3002,7 @@ int chat_file_fetch(chat_t *c, int num, int view, int anyway, const char *dir) {
         ui_print(c, "* compare verify codes with %s first (:verify %s): until then someone in the middle could be sending it", name, name);
         return -1;
     }
-    uint64_t cap = c->file_cap ? c->file_cap : FILE_CAP_DEFAULT;
+    uint64_t cap = chat_file_cap(c);
     char lim[32]; file_format_size(cap, lim, sizeof lim);
     if (e->size > cap && !anyway) {
         ui_print(c, "* file %d is %s, over your %s limit - :%s %d anyway fetches it regardless", num, sz, lim,
@@ -3006,13 +3028,15 @@ static cmd_result_t cmd_download(void *ctx, const char *arg) {
     if (*arg >= '0' && *arg <= '9') {
         char *end;
         num = strtol(arg, &end, 10);
-        if ((*end && *end != ' ') || num > 1000000) num = -1;
+        if ((*end && *end != ' ') || num > FILE_NUM_MAX) num = -1;
         arg = end;
     }
     while (*arg == ' ') arg++;
-    int anyway = strncmp(arg, "anyway", 6) == 0 && (arg[6] == '\0' || arg[6] == ' ');
-    if (anyway) arg += 6;
-    char dir[600];
+    static const char ANYWAY[] = "anyway";
+    size_t al = sizeof ANYWAY - 1;
+    int anyway = strncmp(arg, ANYWAY, al) == 0 && (arg[al] == '\0' || arg[al] == ' ');
+    if (anyway) arg += al;
+    char dir[FILE_DIR_MAX];
     typed_path(arg, dir, sizeof dir);
     if (num < 0) {
         ui_print(c, "* usage: :download [N] [anyway] [FOLDER] - N from :files (the newest if left out), FOLDER instead of Downloads");
@@ -3102,6 +3126,8 @@ static cmd_result_t cmd_files(void *ctx, const char *arg) {
     return CMD_OK;
 }
 
+_Static_assert(FILE_WINDOW <= 64, "win_got has a bit for each chunk of the window");
+
 // The next chunk p asked for, as a record after the *pos bytes of text already there (instead of a
 // nop if there are none), if it fits in cap. Returns 1 if it was added.
 static int file_next_chunk(chat_t *c, peer_t *p, char *text, size_t *pos, size_t cap) {
@@ -3111,14 +3137,12 @@ static int file_next_chunk(chat_t *c, peer_t *p, char *text, size_t *pos, size_t
     char fidhex[FILE_ID_LEN * 2 + 1]; hex_encode(e->fid, FILE_ID_LEN, fidhex);
     char head[64];
     int hl = snprintf(head, sizeof head, "%sfd\t%s\t%llu\t", *pos ? "\n" : "", fidhex, (unsigned long long)p->serve_next);
-    if (hl < 0 || *pos + (size_t)hl + (want + 2) / 3 * 4 > cap) return 0;
+    if (hl < 0 || *pos + (size_t)hl + BASE64_LEN(want) > cap) return 0;
     uint8_t buf[FILE_CHUNK];
     if (fseek(e->fp, (long)p->serve_next, SEEK_SET) != 0 || fread(buf, 1, want, e->fp) != want) { p->serving = 0; return 0; }
     memcpy(text + *pos, head, (size_t)hl);
     *pos += (size_t)hl;
-    base64_encode(buf, want, text + *pos);
-    *pos += (want + 2) / 3 * 4;
-    text[*pos] = '\0';
+    *pos += base64_encode(buf, want, text + *pos);
     crypto_wipe(buf, sizeof buf);
     p->serve_next += want;
     if (p->serve_next >= p->serve_end) p->serving = 0;
@@ -3126,8 +3150,10 @@ static int file_next_chunk(chat_t *c, peer_t *p, char *text, size_t *pos, size_t
     return 1;
 }
 
+// Digits a number may have: any 19 fit in a uint64_t.
+#define U64_DIGITS 19
 static int parse_u64(const char *s, uint64_t *out) {
-    if (!*s || strlen(s) > 19) return -1;
+    if (!*s || strlen(s) > U64_DIGITS) return -1;
     uint64_t v = 0;
     for (; *s; s++) {
         if (*s < '0' || *s > '9') return -1;
@@ -3141,10 +3167,10 @@ static int parse_u64(const char *s, uint64_t *out) {
 static void file_on_record(chat_t *c, peer_t *p, char **f, int n, double now) {
     uint8_t fid[FILE_ID_LEN];
     if (n == 7 && strcmp(f[0], "fo") == 0) {
-        uint8_t mid_raw[4], sha[32];
+        uint8_t mid_raw[MID_LEN], sha[SHA256_LEN];
         uint64_t size;
-        if (hex_decode(f[1], 8, mid_raw) != 0 || strlen(f[2]) != FILE_ID_LEN * 2 || hex_decode(f[2], FILE_ID_LEN * 2, fid) != 0
-            || parse_u64(f[3], &size) != 0 || strlen(f[4]) != 64 || hex_decode(f[4], 64, sha) != 0) return;
+        if (hex_decode(f[1], MID_HEX, mid_raw) != 0 || strlen(f[2]) != FILE_ID_LEN * 2 || hex_decode(f[2], FILE_ID_LEN * 2, fid) != 0
+            || parse_u64(f[3], &size) != 0 || strlen(f[4]) != SHA256_LEN * 2 || hex_decode(f[4], SHA256_LEN * 2, sha) != 0) return;
         char ack[16]; snprintf(ack, sizeof ack, "a\t%s", f[1]);
         send_peer(c, p, ack);
         if (size > FILE_HARD_MAX || (strcmp(f[5], "image") != 0 && strcmp(f[5], "file") != 0)) return;
@@ -3154,12 +3180,12 @@ static void file_on_record(chat_t *c, peer_t *p, char **f, int n, double now) {
         memcpy(e->owner, p->id, ID_LEN);
         memcpy(e->fid, fid, FILE_ID_LEN);
         e->size = size;
-        memcpy(e->sha, sha, 32);
+        memcpy(e->sha, sha, SHA256_LEN);
         e->image = strcmp(f[5], "image") == 0;
         file_clean_name(f[6], e->name);
         current_hhmm(e->at);
         char desc[FILE_NAME_MAX + 48]; file_desc(e, desc, sizeof desc);
-        uint64_t cap = c->file_cap ? c->file_cap : FILE_CAP_DEFAULT;
+        uint64_t cap = chat_file_cap(c);
         char lim[32]; file_format_size(cap, lim, sizeof lim);
         char text[FILE_NAME_MAX + 200], shown[CHAT_NAME_LEN + 32];
         int over = size > cap;
@@ -3170,8 +3196,7 @@ static void file_on_record(chat_t *c, peer_t *p, char **f, int n, double now) {
             snprintf(text, sizeof text, "offers %s - :download %d%s to save it%s", desc, e->num, over ? " anyway" : "",
                      over ? " (over your limit)" : "");
         char via[CHAT_NAME_LEN]; chat_peer_name(c, p, via);
-        const char *mark = p->code_ok < 0 ? " (codes differ)" : c->verify_required && p->code_ok != 1 ? " (code not compared)" : "";
-        snprintf(shown, sizeof shown, "%s%s", via, mark);
+        snprintf(shown, sizeof shown, "%s%s", via, code_mark(c, p));
         ui_chat_file(c, p->color, 0, shown, text, e->num);
         if (c->notify && c->notify_mode == NOTIFY_ALL)
             c->notify(c->ui, c->notify_preview >= PREVIEW_NICK ? shown : NULL,
@@ -3205,13 +3230,13 @@ static void file_on_record(chat_t *c, peer_t *p, char **f, int n, double now) {
         if (idx >= (uint64_t)e->win_n || (e->win_got >> idx & 1)) return;
         size_t want = e->size - off < FILE_CHUNK ? (size_t)(e->size - off) : FILE_CHUNK;
         uint8_t buf[FILE_CHUNK + 3];
-        if (strlen(f[3]) != (want + 2) / 3 * 4 || base64_decode_strict(f[3], strlen(f[3]), buf, sizeof buf) != (long)want) return;
+        if (strlen(f[3]) != BASE64_LEN(want) || base64_decode_strict(f[3], strlen(f[3]), buf, sizeof buf) != (long)want) return;
         memcpy(e->win + idx * FILE_CHUNK, buf, want);
         e->win_got |= 1ull << idx;
         e->retries = 0;
         double iv = c->fast_files && p->addr.kind != ADDR_NOSTR ? FILE_FAST_INTERVAL : cover_interval(c, p);
-        e->retry_at = now + 6.0 * iv + 4.0;
-        uint64_t full = e->win_n == 64 ? ~0ull : (1ull << e->win_n) - 1;
+        e->retry_at = file_retry_at(now, iv);
+        uint64_t full = e->win_n == (int)(8 * sizeof e->win_got) ? ~0ull : (1ull << e->win_n) - 1;
         if (e->win_got != full) {
             // The last of the requested run has arrived and the window still has a gap. Whatever is in it was
             // lost (or never requested), so it's requested now instead of when the retry is due. Through the
@@ -3244,6 +3269,8 @@ static void file_on_record(chat_t *c, peer_t *p, char **f, int n, double now) {
         ui_print(c, "* %s no longer offers file %d", name, e->num);
     }
 }
+
+#define REHANDSHAKE_RECHECK 1.0
 
 static void files_tick(chat_t *c, double now) {
     // Queued files start once nothing else is coming from their sender, the oldest first.
@@ -3283,7 +3310,7 @@ static void files_tick(chat_t *c, double now) {
         if (now < e->retry_at) continue;
         // During a re-handshake with its sender, our request may use keys it can't read yet, so the retry
         // waits for it to finish instead of being used up. If it never finishes the peer times out.
-        if (rehandshaking_with(c, p)) { e->retry_at = now + 1.0; continue; }
+        if (rehandshaking_with(c, p)) { e->retry_at = now + REHANDSHAKE_RECHECK; continue; }
         if (++e->retries > FILE_RETRIES) {
             char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
             file_fail(e, "stopped coming");
@@ -3298,6 +3325,8 @@ void chat_set_file_options(chat_t *c, uint64_t cap, int fast) {
     c->file_cap = cap ? cap : FILE_CAP_DEFAULT;
     c->fast_files = fast != 0;
 }
+
+uint64_t chat_file_cap(const chat_t *c) { return c->file_cap ? c->file_cap : FILE_CAP_DEFAULT; }
 
 const command_t CHAT_COMMANDS[] = {
     { "help",       NULL,     NULL,              "list commands",                                   cmd_help },
@@ -3328,6 +3357,9 @@ cmd_result_t chat_run_command(chat_t *c, const char *line_in) {
     return cmd->run(c, arg);
 }
 
+// The peers a message is held back from that are named.
+#define HELD_NAMES 3
+
 void chat_send_text(chat_t *c, const char *text_in, double now) {
     char line[MAX_TEXT + 1];
     clean_text(text_in, line, MAX_TEXT);
@@ -3336,28 +3368,28 @@ void chat_send_text(chat_t *c, const char *text_in, double now) {
         ui_print(c, "* not connected yet - message not sent, chat opens once someone answers");
         return;
     }
-    char mid[9]; gen_mid(mid);
+    char mid[MID_HEX + 1]; gen_mid(mid);
     seen_add(c, mid);
-    char myidhex[33]; hex_encode(c->my_id, ID_LEN, myidhex);
     char who[MAX_NICK + 8]; snprintf(who, sizeof who, "%s (you)", c->nick);
     ui_chat(c, c->my_color, 0, who, line);
     int sent = 0, held = 0;
-    char held_names[3 * CHAT_NAME_LEN] = "";
+    char held_names[HELD_NAMES * CHAT_NAME_LEN] = "";
     for (int i = 0; i < c->peer_hi; i++) {
         peer_t *p = &c->peers[i];
         if (!p->used || !p->ok) continue;
         // A peer whose code wasn't compared may be someone in the middle: it gets nothing.
-        if (p->code_ok < 0 || (c->verify_required && p->code_ok != 1)) {
+        if (!peer_trusted(c, p)) {
             char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
-            if (held < 3) snprintf(held_names + strlen(held_names), sizeof held_names - strlen(held_names), "%s%s", held ? ", " : "", name);
+            if (held < HELD_NAMES)
+                snprintf(held_names + strlen(held_names), sizeof held_names - strlen(held_names), "%s%s", held ? ", " : "", name);
             held++;
             continue;
         }
-        sent += send_message(c, p, mid, myidhex, c->nick, line, 1, now);
+        sent += send_message(c, p, mid, c->my_idhex, c->nick, line, 1, now);
     }
     if (held)
         ui_print(c, "* not sent to %s%s: compare verify codes first (:peers lists them, :verify NICK ok once they match)",
-                 held_names, held > 3 ? " and others" : "");
+                 held_names, held > HELD_NAMES ? " and others" : "");
     else if (!sent) ui_print(c, "* nobody else is here yet, message not delivered");
 }
 
@@ -3375,7 +3407,7 @@ static void module_log(void *ctx, int verbose_only, const char *msg) {
 }
 
 static void module_deliver(void *ctx, const uint8_t *data, size_t len, addr_t from, double now) {
-    uint8_t buf[HANDSHAKE_BUF_LEN + 128];
+    uint8_t buf[FRAME_BUF_LEN];
     if (len > sizeof buf) return;
     memcpy(buf, data, len);
     on_relayed((chat_t *)ctx, buf, len, from, now);
@@ -3507,11 +3539,7 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
     chat_set_file_options(c, o->file_cap, o->fast_files);
 
     if (o->has_color) memcpy(c->my_color, o->color, 3);
-    else {
-        uint8_t r; gen_random(&r, 1);
-        const named_color_t *pick = &COLOR_PALETTE[r % COLOR_PALETTE_N];
-        c->my_color[0] = pick->r; c->my_color[1] = pick->g; c->my_color[2] = pick->b;
-    }
+    else chat_random_colour(c->my_color);
 
     c->identity_source = o->identity_source;
     if (c->identity_source != IDENT_NONE) c->identity = o->identity;
@@ -3520,8 +3548,8 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
     c->build.version[MAX_VERSION] = c->build.list[BUILD_LIST_LEN] = c->build.list_sig[MINISIGN_SIG_B64_LEN] = '\0';
     if (!version_ok(c->build.version)) c->build.ok = 0;
     // They're sent between tabs in "v".
-    if (strspn(c->build.list, "0123456789abcdef,") != strlen(c->build.list)
-        || strspn(c->build.list_sig, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=") != strlen(c->build.list_sig))
+    if (strspn(c->build.list, HEX_DIGITS ",") != strlen(c->build.list)
+        || strspn(c->build.list_sig, BASE64_CHARS "=") != strlen(c->build.list_sig))
         c->build.list[0] = c->build.list_sig[0] = '\0';
     c->has_release_key = minisign_pubkey(o->release_key, c->release_key) == 0;
 
@@ -3529,7 +3557,7 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
     gen_keypair(&c->keys);
     kem_gen_keypair(&c->kem_keys);
     c->keygen = 1;
-    gen_random(c->cookie_secret, 32);
+    gen_random(c->cookie_secret, sizeof c->cookie_secret);
     c->sock = c->lan_sock = SOCK_INVALID;
     if (derive_master(o->password, o->session_name, c->master) != 0) {
         c->start_error = "not enough free memory to derive the session key (it needs 512 MiB for a few seconds)";
@@ -3542,9 +3570,9 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
 
     if (c->route.mode == ROUTE_TOR) {
         // No UDP socket at all. Everything goes through Tor.
-        uint8_t room_keys[TOR_ROOM_SLOTS][64], room_pubs[TOR_ROOM_SLOTS][32];
+        uint8_t room_keys[TOR_ROOM_SLOTS][TOR_KEY_LEN], room_pubs[TOR_ROOM_SLOTS][TOR_PUB_LEN];
         for (int i = 0; i < TOR_ROOM_SLOTS; i++) derive_tor_room_key(c->master, i, room_keys[i], room_pubs[i]);
-        c->tor = tor_new(&c->route.tor, (const uint8_t (*)[64])room_keys, (const uint8_t (*)[32])room_pubs,
+        c->tor = tor_new(&c->route.tor, (const uint8_t (*)[TOR_KEY_LEN])room_keys, (const uint8_t (*)[TOR_PUB_LEN])room_pubs,
                          module_deliver, module_log, c);
         crypto_wipe(room_keys, sizeof room_keys);
         c->started = c->tor != NULL;
@@ -3561,14 +3589,13 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
 
     int n_static = c->route.mode == ROUTE_TOR ? 0 : o->n_peers;
     if (n_static < 0) n_static = 0;
-    if (n_static > (int)(sizeof c->static_peers / sizeof c->static_peers[0]))
-        n_static = (int)(sizeof c->static_peers / sizeof c->static_peers[0]);
+    if (n_static > MAX_STATIC_PEERS) n_static = MAX_STATIC_PEERS;
     memcpy(c->static_peers, o->peers, sizeof(addr_t) * (size_t)n_static);
     c->n_static = n_static;
 
     c->persist = o->persist;
     c->start = now_seconds();
-    c->next_rekey = c->start + REKEY_INTERVAL + jitter(REKEY_INTERVAL * 0.2);
+    c->next_rekey = rekey_after(c->start);
     c->probe_tokens = PROBE_BURST;
     c->probe_at = c->start;
     c->ck_tokens = CK_BURST;
@@ -3596,59 +3623,47 @@ void chat_shutdown(chat_t *c) {
     crypto_wipe(c, sizeof *c);
 }
 
-#include <stdarg.h>
+#define UI_LINE_MAX 2200
 
-static void emit_line_file(chat_t *c, const char *hhmm, const char *text, const uint8_t *rgb, unsigned flags, int color_len,
-                           int file) {
+static void emit(chat_t *c, const char *text, const uint8_t *rgb, unsigned flags, int color_len, int file) {
+    char hhmm[HHMM_LEN]; current_hhmm(hhmm);
     c->print(c->ui, hhmm, text, rgb, flags, color_len, file);
 }
 
-static void emit_line(chat_t *c, const char *hhmm, const char *text, const uint8_t *rgb, unsigned flags, int color_len) {
-    c->print(c->ui, hhmm, text, rgb, flags, color_len, 0);
+static void ui_vprint(chat_t *c, const uint8_t *rgb, unsigned flags, const char *fmt, va_list ap) {
+    char msg[UI_LINE_MAX];
+    vsnprintf(msg, sizeof msg, fmt, ap);
+    emit(c, msg, rgb, flags, 0, 0);
 }
 
 static void ui_print(chat_t *c, const char *fmt, ...) {
-    char msg[2200];
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(msg, sizeof msg, fmt, ap);
+    ui_vprint(c, NULL, 0, fmt, ap);
     va_end(ap);
-    char hhmm[6]; current_hhmm(hhmm);
-    emit_line(c, hhmm, msg, NULL, 0, 0);
 }
 
 static void ui_warn(chat_t *c, const char *fmt, ...) {
-    char msg[2200];
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(msg, sizeof msg, fmt, ap);
+    ui_vprint(c, NULL, LINE_WARN, fmt, ap);
     va_end(ap);
-    char hhmm[6]; current_hhmm(hhmm);
-    emit_line(c, hhmm, msg, NULL, LINE_WARN, 0);
-}
-
-static void ui_chat(chat_t *c, const uint8_t rgb[3], int mention, const char *name, const char *text) {
-    char msg[2200];
-    int head = snprintf(msg, sizeof msg, "%s%s:", mention ? "@ " : "", name);
-    snprintf(msg + head, sizeof msg - (size_t)head, " %s", text);
-    char hhmm[6]; current_hhmm(hhmm);
-    emit_line(c, hhmm, msg, rgb, LINE_CHAT | (mention ? LINE_MENTION : 0u), head);
-}
-
-static void ui_chat_file(chat_t *c, const uint8_t rgb[3], int mention, const char *name, const char *text, int file) {
-    char msg[2200];
-    int head = snprintf(msg, sizeof msg, "%s%s:", mention ? "@ " : "", name);
-    snprintf(msg + head, sizeof msg - (size_t)head, " %s", text);
-    char hhmm[6]; current_hhmm(hhmm);
-    emit_line_file(c, hhmm, msg, rgb, LINE_CHAT | (mention ? LINE_MENTION : 0u), head, file);
 }
 
 static void ui_print_colored(chat_t *c, const uint8_t rgb[3], const char *fmt, ...) {
-    char msg[2200];
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(msg, sizeof msg, fmt, ap);
+    ui_vprint(c, rgb, 0, fmt, ap);
     va_end(ap);
-    char hhmm[6]; current_hhmm(hhmm);
-    emit_line(c, hhmm, msg, rgb, 0, 0);
+}
+
+static void ui_chat_file(chat_t *c, const uint8_t rgb[3], int mention, const char *name, const char *text, int file) {
+    char msg[UI_LINE_MAX];
+    int head = snprintf(msg, sizeof msg, "%s%s:", mention ? "@ " : "", name);
+    snprintf(msg + head, sizeof msg - (size_t)head, " %s", text);
+    emit(c, msg, rgb, LINE_CHAT | (mention ? LINE_MENTION : 0u), head, file);
+}
+
+static void ui_chat(chat_t *c, const uint8_t rgb[3], int mention, const char *name, const char *text) {
+    ui_chat_file(c, rgb, mention, name, text, 0);
 }

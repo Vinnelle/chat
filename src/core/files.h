@@ -22,6 +22,9 @@ const char *file_basename(const char *path);
 int file_parse_size(const char *s, uint64_t *out);
 // "230 KB", "8.0 MB".
 void file_format_size(uint64_t n, char *out, size_t cap);
+// The size as file_parse_size takes it, exactly: "8M", "512K", "1G" when it's a whole number of
+// those, else in bytes.
+void file_format_size_exact(uint64_t n, char *out, size_t cap);
 // How long something takes, roughly: "under a minute", "about 6 min", "about 2 h 10 min".
 void file_format_duration(double seconds, char *out, size_t cap);
 

@@ -11,6 +11,7 @@
 #include "transport/tor.h"
 #include "transport/portmap.h"
 #include "core/files.h"
+#include "common/util.h"
 #include <stdint.h>
 #include <stdio.h>
 
@@ -25,6 +26,9 @@
 #define OLD_MAX_TEXT 250
 #define MAX_TEXT_PARTS 8
 #define MAX_SESSION_NAME 64
+#define MAX_PASSWORD 255
+#define MAX_STATIC_PEERS 16
+#define MAX_SELF_ADDRS 8
 // A peer that has sent nothing for this long gets a hi, in case it has lost the session.
 #define KEEPALIVE 10.0
 #define PEER_TIMEOUT 40.0
@@ -63,7 +67,7 @@
 #define UDP_CELL (SESSION_HEADER_LEN + SESSION_PAD_TARGET + AEAD_TAG_LEN)
 #define CHUNK_MAGIC0 0xC5
 #define CHUNK_MAGIC1 0x7B
-#define CHUNK_HDR 10
+enum { CHUNK_ID_AT = 2, CHUNK_ID_LEN = 4, CHUNK_INDEX_AT = 6, CHUNK_COUNT_AT = 7, CHUNK_LEN_AT = 8, CHUNK_HDR = 10 };
 #define CHUNK_PAYLOAD (UDP_CELL - CHUNK_HDR)
 #define CHUNK_MAX 4
 #define ROOM_FRAME_MAX (CHUNK_MAX * CHUNK_PAYLOAD)
@@ -161,9 +165,21 @@
 #define FILE_SENDING_QUIET 30.0
 // The peers one of ours went to in full that are named, beyond those it's only counted.
 #define FILE_SENT_MAX 4
+// A folder a file is saved in, where it was saved, and the hidden file it's written to until then.
+#define FILE_DIR_MAX 600
+#define FILE_SAVED_MAX 800
+#define FILE_PART_MAX 640
+// The highest file number a command takes.
+#define FILE_NUM_MAX 1000000
 
-// A peer's nick as shown (chat_peer_name).
-#define CHAT_NAME_LEN (MAX_NICK + 10)
+// A peer's nick as shown (chat_peer_name), with "#" and the start of its id if another looks the same.
+#define SHORT_ID_LEN 4
+#define SHORT_ID_HEX (2 * SHORT_ID_LEN)
+#define CHAT_NAME_LEN (MAX_NICK + 2 + SHORT_ID_HEX)
+
+// A message's id: random, as hex.
+#define MID_LEN 4
+#define MID_HEX (2 * MID_LEN)
 
 typedef enum { ROUTE_DHT = 0, ROUTE_TOR = 1 } route_mode_t;
 
@@ -184,6 +200,9 @@ typedef struct {
 void routing_defaults(routing_t *r);
 const char *routing_mode_name(route_mode_t m);
 
+// The addresses the most datagrams came from, for the network log.
+#define NET_SOURCES 6
+
 typedef struct {
     unsigned rx;
     unsigned rx_chunks, rx_chunk_done;
@@ -192,15 +211,15 @@ typedef struct {
     unsigned session_ok;
     unsigned other;
     unsigned connects;
-    addr_t src[6];
-    unsigned src_n[6];
+    addr_t src[NET_SOURCES];
+    unsigned src_n[NET_SOURCES];
     int n_src;
 } net_stats_t;
 
 typedef struct {
     int used;
     addr_t from;
-    uint8_t id[4];
+    uint8_t id[CHUNK_ID_LEN];
     int count;
     unsigned got;
     size_t total;   // the whole frame's length, as each piece says it
@@ -216,6 +235,13 @@ typedef enum { PREVIEW_OFF = 0, PREVIEW_NICK = 1, PREVIEW_MESSAGE = 2 } notify_p
 typedef enum { IDENT_NONE = 0, IDENT_NATIVE = 1, IDENT_AGE = 2, IDENT_PGP = 3 } identity_source_t;
 
 typedef enum { VERIFY_UNVERIFIED = 0, VERIFY_VERIFIED = 1, VERIFY_FAILED = 2 } verify_state_t;
+
+// The user's comparison of a peer's verify code (peer_t.code_ok).
+enum { CODE_DIFFERENT = -1, CODE_NOT_COMPARED = 0, CODE_SAME = 1 };
+// Its signing key against the verified keys (peer_t.trust).
+enum { TRUST_UNKNOWN = 0, TRUST_KEY = 1, TRUST_OTHER_KEY = 2 };
+// A peer's verify code as the sidebar shows it (chat_code_state).
+enum { CODE_NOTHING = 0, CODE_TO_COMPARE = 1, CODE_COMPARED = 2, CODE_DIFFERS = 3, CODE_KEY_CHANGED = 4 };
 
 // What a peer's "v" says about the build it runs. A peer can lie about its hash, so OFFICIAL is
 // only its claim. MODIFIED is a build that doesn't claim to be from a release.
@@ -286,11 +312,11 @@ typedef struct {
 
     // When a frame last came over each kind of path (by addr_kind_t), and (Tor) the onion
     // address the peer said it has.
-    double path_seen[3];
+    double path_seen[ADDR_KINDS];
     char onion[TOR_ADDR_LEN + 1];
 
     uint8_t kem_pub[KEM_PUB_LEN];
-    uint8_t prk_partial[32];
+    uint8_t prk_partial[PRK_LEN];
     uint8_t kem_ct[KEM_CT_LEN];
 
     uint32_t keygen;
@@ -356,7 +382,7 @@ typedef struct {
     uint8_t owner[ID_LEN];       // who offered it
     uint8_t fid[FILE_ID_LEN];
     uint64_t size;
-    uint8_t sha[32];
+    uint8_t sha[SHA256_LEN];
     char name[FILE_NAME_MAX + 1];
     int image;                   // offered as a PNG, JPEG or GIF (only decoding it says it is one)
     FILE *fp;                    // ours: open for its chunks, so the file offered is the one sent
@@ -364,11 +390,11 @@ typedef struct {
     dl_state_t dl;
     int view;                    // fetched to show (into mem), not to save (to out)
     int also_show, also_save;    // asked for the other way while on its way: shown or saved too once it's here
-    char save_dir[600];          // the folder to save it in, "" for Downloads
-    char saved[800];             // where it was last saved, "" if it wasn't
+    char save_dir[FILE_DIR_MAX]; // the folder to save it in, "" for Downloads
+    char saved[FILE_SAVED_MAX];  // where it was last saved, "" if it wasn't
     uint8_t *cache;              // a picture shown here: its bytes, checked against sha, for :show and :download
     FILE *out;
-    char part_path[640];
+    char part_path[FILE_PART_MAX];
     uint8_t *mem;
     uint64_t done;               // bytes in order, written and hashed
     sha256_ctx_t hash;
@@ -381,7 +407,7 @@ typedef struct {
     int retries;
     double since;                // when the fetch started
     double gone_since;           // when its sender left, while it's away
-    char at[6];                  // when it was offered, HH:MM
+    char at[HHMM_LEN];           // when it was offered, HH:MM
     char why[64];                // why the last fetch failed
     // Ours: who it went to in full.
     int n_sent;
@@ -394,7 +420,7 @@ typedef struct {
     int peer_slot;
     uint32_t seq;
     addr_t to;
-    uint8_t id[4];
+    uint8_t id[CHUNK_ID_LEN];
     int next_piece, pieces;
     size_t len;
     uint8_t frame[ROOM_FRAME_MAX];
@@ -407,6 +433,11 @@ typedef struct {
     double next_try;
 } cand_t;
 
+// The message ids seen lately, so a message forwarded by more than one peer is shown once.
+#define SEEN_MIDS 2048
+// Peers that dropped whose verify codes are remembered.
+#define GONE_MAX 16
+
 // "m\t" MID "\t" ORIGIN "\t" NICK "\t" TEXT, with room to spare.
 #define MSG_LINE_LEN (16 + ID_LEN * 2 + MAX_NICK + MAX_TEXT + 16)
 
@@ -415,7 +446,7 @@ typedef struct {
 // (a cover nop, for example) has reached it.
 typedef struct {
     int used;
-    char mid[9];
+    char mid[MID_HEX + 1];
     int peer_slot;
     char text[MSG_LINE_LEN];
     int tries;
@@ -441,7 +472,6 @@ typedef void (*chat_file_fn)(void *ui, int num, const char *name, const uint8_t 
 typedef void (*chat_notify_fn)(void *ui, const char *nick, const char *text, int mentioned);
 
 typedef struct {
-
     char nick[MAX_NICK + 1];
     char nick_skel[NICK_SKEL_LEN];
     char session_name[MAX_SESSION_NAME + 1];
@@ -452,7 +482,7 @@ typedef struct {
     uint8_t master[MASTER_LEN];
     uint8_t room_key[ROOM_KEY_LEN];
     uint8_t udp_key[UDP_KEY_LEN];
-    uint8_t cookie_secret[32];
+    uint8_t cookie_secret[COOKIE_SECRET_LEN];
     int created;
     uint8_t my_color[3];
 
@@ -494,13 +524,13 @@ typedef struct {
     peer_t peers[MAX_PEERS + MAX_PENDING_PEERS];
     int peer_hi;
     cand_t cands[MAX_CANDS];
-    addr_t static_peers[16];
+    addr_t static_peers[MAX_STATIC_PEERS];
     int n_static;
     pending_msg_t pending[MAX_PENDING_MSGS];
     sendq_t sendq[SENDQ_MAX];
     roomq_t roomq[ROOMQ_MAX];
     uint32_t queue_seq;
-    addr_t self_addrs[8];
+    addr_t self_addrs[MAX_SELF_ADDRS];
     int n_self_addrs;
 
     int dht_on;
@@ -513,11 +543,11 @@ typedef struct {
 
     int warned_lonely, ever_connected, dht_summary_printed;
 
-    uint32_t seen_mids[2048];
+    uint32_t seen_mids[SEEN_MIDS];
     int seen_head, seen_count;
 
     // Verify codes of peers that dropped. A peer that comes back gets a new one, and chat says so.
-    struct { int used; uint8_t id[ID_LEN]; uint8_t vfy[VERIFY_LEN]; } gone[16];
+    struct { int used; uint8_t id[ID_LEN]; uint8_t vfy[VERIFY_LEN]; } gone[GONE_MAX];
     int gone_head;
 
     // Token buckets for: hellos to candidates, which come unchecked from the DHT and other peers;
@@ -546,9 +576,9 @@ typedef struct {
 typedef struct {
     char nick[MAX_NICK + 1];
     char session_name[MAX_SESSION_NAME + 1];
-    char password[256];
+    char password[MAX_PASSWORD + 1];
     uint16_t port;
-    addr_t peers[16];
+    addr_t peers[MAX_STATIC_PEERS];
     int n_peers;
     routing_t route;
     int created;
@@ -603,8 +633,10 @@ const file_entry_t *chat_file(const chat_t *c, int num);
 int chat_file_queued_after(const chat_t *c, const file_entry_t *e);
 // A file being fetched: the bytes received, including any in the window not written yet, and
 // roughly how many seconds the rest will take, at the rate so far or, before there is one, at the
-// rate its path allows. -1 while its sender is away, -2 while their verify code needs comparing
-// again (they came back with a new one).
+// rate its path allows. ETA_AWAY while its sender is away, ETA_UNVERIFIED while their verify code
+// needs comparing again (they came back with a new one).
+#define ETA_AWAY (-1.0)
+#define ETA_UNVERIFIED (-2.0)
 uint64_t chat_file_got(const file_entry_t *e);
 double chat_file_eta(const chat_t *c, const file_entry_t *e, double now);
 // A picture's bytes, checked against its offer: kept from when it was shown, a saved copy, or ours.
@@ -616,6 +648,8 @@ int chat_file_sending(const chat_t *c, const file_entry_t *e, double now, char n
 // Who one of ours went to in full: "bob", "bob and carol", "bob and 2 others", or "".
 void chat_file_sent_to(const file_entry_t *e, char *out, size_t cap);
 void chat_set_file_options(chat_t *c, uint64_t cap, int fast);
+// The size over which a file needs "anyway" to be fetched.
+uint64_t chat_file_cap(const chat_t *c);
 void chat_set_colour(chat_t *c, const uint8_t rgb[3]);
 
 // Cleans a nick and removes the characters the UI puts around nicks ("(verified)", "#id", "name:"),
@@ -668,6 +702,8 @@ void chat_build_label(const peer_t *p, char *out, size_t cap);
 typedef struct { const char *name; uint8_t r, g, b; } named_color_t;
 extern const named_color_t COLOR_PALETTE[];
 extern const int COLOR_PALETTE_N;
+// One of the palette's, at random.
+void chat_random_colour(uint8_t rgb[3]);
 
 int parse_color(const char *text, uint8_t rgb[3]);
 

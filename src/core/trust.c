@@ -12,6 +12,7 @@ static void (*g_changed)(void);
 static int g_saved;
 
 static const char *const SOURCE_NAMES[] = { "none", "key", "age", "pgp" };
+#define KEY_HEX_LEN (ID_SIGN_PUB_LEN * 2)
 
 static void changed(void) { if (g_changed) g_changed(); }
 
@@ -29,6 +30,12 @@ int trust_find_nick(const char *skel, int from) {
     return -1;
 }
 
+static void set_nick(trust_entry_t *e, identity_source_t source, const char *clean) {
+    e->source = source;
+    copy_str(e->nick, clean, sizeof e->nick);
+    chat_nick_skeleton(e->nick, e->nick_skel, sizeof e->nick_skel);
+}
+
 static int add(identity_source_t source, const uint8_t pub[ID_SIGN_PUB_LEN], const char *nick) {
     char clean[MAX_NICK + 1];
     chat_clean_nick(nick, clean);
@@ -36,9 +43,7 @@ static int add(identity_source_t source, const uint8_t pub[ID_SIGN_PUB_LEN], con
         trust_entry_t *e = &g_list[i];
         if (memcmp(e->pub, pub, ID_SIGN_PUB_LEN) != 0) continue;
         if (strcmp(e->nick, clean) == 0 && e->source == source) return 0;
-        copy_str(e->nick, clean, sizeof e->nick);
-        chat_nick_skeleton(e->nick, e->nick_skel, sizeof e->nick_skel);
-        e->source = source;
+        set_nick(e, source, clean);
         return 1;
     }
     if (g_n == TRUST_MAX) {
@@ -47,10 +52,8 @@ static int add(identity_source_t source, const uint8_t pub[ID_SIGN_PUB_LEN], con
     }
     trust_entry_t *e = &g_list[g_n++];
     memset(e, 0, sizeof *e);
-    e->source = source;
     memcpy(e->pub, pub, ID_SIGN_PUB_LEN);
-    copy_str(e->nick, clean, sizeof e->nick);
-    chat_nick_skeleton(e->nick, e->nick_skel, sizeof e->nick_skel);
+    set_nick(e, source, clean);
     return 1;
 }
 
@@ -76,7 +79,7 @@ int trust_text(char *out, size_t cap) {
     size_t pos = 0;
     for (int i = 0; i < g_n; i++) {
         const trust_entry_t *e = &g_list[i];
-        char hex[ID_SIGN_PUB_LEN * 2 + 1];
+        char hex[KEY_HEX_LEN + 1];
         hex_encode(e->pub, ID_SIGN_PUB_LEN, hex);
         int src = e->source >= IDENT_NONE && e->source <= IDENT_PGP ? (int)e->source : 0;
         int n = snprintf(out + pos, cap - pos, "%s %s %s\n", SOURCE_NAMES[src], hex, e->nick);
@@ -88,33 +91,30 @@ int trust_text(char *out, size_t cap) {
     return 0;
 }
 
+// One line as trust_text writes it. 0 if it can't be read.
+static int load_line(const char *line, size_t len) {
+    char buf[TRUST_LINE_MAX + 1];
+    if (len >= sizeof buf) return 0;
+    memcpy(buf, line, len);
+    buf[len] = '\0';
+    char *sp1 = strchr(buf, ' ');
+    char *sp2 = sp1 ? strchr(sp1 + 1, ' ') : NULL;
+    if (!sp1 || !sp2 || sp2 - sp1 - 1 != KEY_HEX_LEN || !sp2[1]) return 0;
+    *sp1 = *sp2 = '\0';
+    int src = -1;
+    for (int k = IDENT_NATIVE; k <= IDENT_PGP; k++) if (strcmp(buf, SOURCE_NAMES[k]) == 0) src = k;
+    uint8_t pub[ID_SIGN_PUB_LEN];
+    if (src <= 0 || hex_decode(sp1 + 1, KEY_HEX_LEN, pub) != 0) return 0;
+    if (!trust_by_key(pub)) add((identity_source_t)src, pub, sp2 + 1);
+    return 1;
+}
+
 int trust_load(const char *text) {
     int bad = 0;
-    const char *line = text;
-    while (line && *line) {
-        const char *end = strchr(line, '\n');
+    for (const char *line = text, *end; line && *line; line = end ? end + 1 : NULL) {
+        end = strchr(line, '\n');
         size_t len = end ? (size_t)(end - line) : strlen(line);
-        char buf[TRUST_LINE_MAX + 1];
-        if (len == 0) { line = end ? end + 1 : NULL; continue; }
-        int ok = 0;
-        if (len < sizeof buf) {
-            memcpy(buf, line, len);
-            buf[len] = '\0';
-            char *sp1 = strchr(buf, ' ');
-            char *sp2 = sp1 ? strchr(sp1 + 1, ' ') : NULL;
-            if (sp1 && sp2 && sp2 - sp1 - 1 == ID_SIGN_PUB_LEN * 2 && sp2[1]) {
-                *sp1 = *sp2 = '\0';
-                int src = -1;
-                for (int k = IDENT_NATIVE; k <= IDENT_PGP; k++) if (strcmp(buf, SOURCE_NAMES[k]) == 0) src = k;
-                uint8_t pub[ID_SIGN_PUB_LEN];
-                if (src > 0 && hex_decode(sp1 + 1, ID_SIGN_PUB_LEN * 2, pub) == 0) {
-                    if (!trust_by_key(pub)) add((identity_source_t)src, pub, sp2 + 1);
-                    ok = 1;
-                }
-            }
-        }
-        if (!ok) bad++;
-        line = end ? end + 1 : NULL;
+        if (len > 0 && !load_line(line, len)) bad++;
     }
     return bad;
 }
