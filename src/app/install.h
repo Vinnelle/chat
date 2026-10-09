@@ -28,6 +28,12 @@
 #define INSTALL_LOST -7      // a file a factor needs is missing or damaged: install_why says which
 #define INSTALL_DESTROYED -8 // too many wrong passphrases: the save was deleted (install_why says)
 #define INSTALL_NAME_MAX 32
+// Paths: chat's config folder, a save's folder in it (as install_where gives it), and a file in that.
+#define INSTALL_TOP_MAX 900
+#define INSTALL_DIR_MAX 960
+#define INSTALL_PATH_MAX 1000
+// A passphrase, with its NUL.
+#define INSTALL_PASS_MAX 256
 #define INSTALL_SAVES_MAX 32
 
 #define INSTALL_FACTOR_DEVICE 1u
@@ -38,7 +44,7 @@ typedef struct {
     char name[INSTALL_NAME_MAX + 1];
     int settings, key;    // which of the two files it has
     unsigned factors;     // what it needs as well as its passphrase
-    char modified[17];    // when its settings (or key) were last written: "YYYY-MM-DD HH:MM"
+    char modified[STAMP_LEN];    // when its settings (or key) were last written: "YYYY-MM-DD HH:MM"
 } install_save_t;
 
 // 0 if name can name a save: 1 to 32 letters, digits, - and _. "default" is the save in the

@@ -11,11 +11,14 @@
 
 #define HISTORY_WRITE_EVERY 30.0
 
+// A line's fields, in order.
+enum { H_WHEN, H_COLOUR, H_COLOUR_LEN, H_MENTION, H_TEXT, H_FIELDS };
+
 // Only the full-screen UI keeps one, in the save that's open.
 int history_possible(void) { return g_app.installed && !g_app.locked && !g_plain; }
 
 void history_add(session_slot_t *s, const char *text, const uint8_t *rgb, int mention, int color_len) {
-    char line[HISTORY_LINE_MAX], when[17], col[8] = "-";
+    char line[HISTORY_LINE_MAX], when[STAMP_LEN], col[8] = "-";
     current_stamp(when);
     if (rgb) snprintf(col, sizeof col, "%02x%02x%02x", rgb[0], rgb[1], rgb[2]);
     int n = snprintf(line, sizeof line, "%s\t%s\t%d\t%d\t%s\n", when, col, color_len, mention != 0, text);
@@ -51,7 +54,7 @@ void histories_write(void) {
 
 // The lines kept from before, above the session's own.
 static void history_show(session_slot_t *s) {
-    char day[11] = "", line[HISTORY_LINE_MAX];
+    char day[DATE_LEN + 1] = "", line[HISTORY_LINE_MAX];
     size_t pos = 0;
     int shown = 0;
     while (pos < s->hist_len) {
@@ -61,32 +64,32 @@ static void history_show(session_slot_t *s) {
         memcpy(line, s->hist + pos, len);
         line[len] = '\0';
         pos = end + 1;
-        char *f[5], *q = line;
+        char *f[H_FIELDS], *q = line;
         int n = 0;
-        for (; n < 4; n++) {
+        for (; n < H_TEXT; n++) {
             char *tab = strchr(q, '\t');
             if (!tab) break;
             *tab = '\0';
             f[n] = q;
             q = tab + 1;
         }
-        f[4] = q;
-        if (n < 4 || strlen(f[0]) != 16) continue;
+        f[H_TEXT] = q;
+        if (n < H_TEXT || strlen(f[H_WHEN]) != STAMP_LEN - 1) continue;
         if (!shown++)
             tui_scrollback_push(&s->sb, "", "* kept from before, sealed in your save (:history forget deletes it):", NULL, 0, 0);
-        if (strncmp(f[0], day, 10) != 0) {
+        if (strncmp(f[H_WHEN], day, DATE_LEN) != 0) {
             char sep[24];
-            memcpy(day, f[0], 10);
-            day[10] = '\0';
+            memcpy(day, f[H_WHEN], DATE_LEN);
+            day[DATE_LEN] = '\0';
             snprintf(sep, sizeof sep, "* %s", day);
             tui_scrollback_push(&s->sb, "", sep, NULL, 0, 0);
         }
         uint8_t rgb[3];
-        int has_rgb = strlen(f[1]) == 6 && hex_decode(f[1], 6, rgb) == 0;
-        char hhmm[6];
-        memcpy(hhmm, f[0] + 11, 5);
-        hhmm[5] = '\0';
-        tui_scrollback_push(&s->sb, hhmm, f[4], has_rgb ? rgb : NULL, f[3][0] == '1', atoi(f[2]));
+        int has_rgb = hex_decode(f[H_COLOUR], sizeof rgb * 2, rgb) == 0;
+        char hhmm[HHMM_LEN];
+        memcpy(hhmm, f[H_WHEN] + DATE_LEN + 1, HHMM_LEN - 1);
+        hhmm[HHMM_LEN - 1] = '\0';
+        tui_scrollback_push(&s->sb, hhmm, f[H_TEXT], has_rgb ? rgb : NULL, f[H_MENTION][0] == '1', atoi(f[H_COLOUR_LEN]));
     }
     if (shown) tui_scrollback_push(&s->sb, "", "* new from here", NULL, 0, 0);
     crypto_wipe(line, sizeof line);

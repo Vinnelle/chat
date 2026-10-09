@@ -18,7 +18,19 @@
 #endif
 
 #define UPDATE_REPO "Vinnelle/chat"
-#define UPDATE_MAX_BYTES "67108864"
+// The most a download may be (64 MiB), and how long curl gets for one.
+#define UPDATE_MAX_BYTES 67108864
+#define FETCH_TIMEOUT_S 300
+#define STR_(x) #x
+#define STR(x) STR_(x)
+// What the release's JSON, its SHA256SUMS and the signature of that are read up to.
+#define RELEASE_JSON_MAX (1 << 20)
+#define SUMS_MAX (1 << 16)
+#define SIG_MAX 4096
+// The running executable's path, and with a suffix for the files an update writes next to it.
+#define EXE_PATH_MAX 1024
+#define EXE_TMP_MAX 1100
+#define SHA256_HEX (2 * crypto_hash_sha256_BYTES)
 
 #if defined(__x86_64__) || defined(_M_X64)
 #define UPDATE_ARCH "x86_64"
@@ -52,11 +64,14 @@ void update_set_proxy(const char *socks) { copy_str(g_proxy, socks ? socks : "",
 // enough for copies this small.
 static char g_lock;
 static update_view_t g_view;
-static char g_dl_path[1100];   // the download on its way, else ""
-static long g_dl_total;        // its size as GitHub gives it, else 0
+static char g_dl_path[EXE_TMP_MAX];   // the download on its way, else ""
+static long g_dl_total;               // its size as GitHub gives it, else 0
 
-#define DL_FROM 200
-#define DL_TO 900
+// Where each step puts the bar, in thousandths. The download moves it from AT_DOWNLOAD to AT_DOWNLOADED.
+enum {
+    AT_CHECKING = 0, AT_FOUND = 100, AT_SIGNATURE = 130, AT_DOWNLOAD = 200, AT_DOWNLOADED = 900,
+    AT_VERIFYING = 920, AT_INSTALLING = 960, AT_DONE = 1000
+};
 
 static void view_lock(void) { while (__atomic_test_and_set(&g_lock, __ATOMIC_ACQUIRE)) {} }
 static void view_unlock(void) { __atomic_clear(&g_lock, __ATOMIC_RELEASE); }
@@ -123,7 +138,7 @@ void update_view(update_view_t *v) {
     file_format_size((uint64_t)got, gs, sizeof gs);
     if (total > 0) {
         if (got > total) got = total;
-        v->permille = DL_FROM + (int)((int64_t)(DL_TO - DL_FROM) * got / total);
+        v->permille = AT_DOWNLOAD + (int)((int64_t)(AT_DOWNLOADED - AT_DOWNLOAD) * got / total);
         file_format_size((uint64_t)total, ts, sizeof ts);
         snprintf(v->amount, sizeof v->amount, "%s of %s", gs, ts);
     } else {
@@ -136,20 +151,20 @@ static int fetch(const char *url, const char *out_path, int api) {
     // --socks5-hostname leaves name lookups to the proxy, so Tor resolves GitHub, not local DNS.
     const char *argv[24] = {
         "curl", "-q", "-fsL", "--proto", "=https", "--proto-redir", "=https", "--tlsv1.2",
-        "--max-time", "300", "--max-filesize", UPDATE_MAX_BYTES,
+        "--max-time", STR(FETCH_TIMEOUT_S), "--max-filesize", STR(UPDATE_MAX_BYTES),
         "-H", api ? "Accept: application/vnd.github+json" : "Accept: application/octet-stream",
         "-o", out_path, url,
     };
     int n = 0;
     while (argv[n]) n++;
-    char user[24];
+    uint8_t r[8];
+    char user[sizeof r * 2 + sizeof ":x"];
     if (g_proxy[0]) {
         // Made-up SOCKS credentials give each download circuits of its own (Tor isolates by them),
         // so the exit can't tie one download to another, or to chat's own streams.
-        uint8_t r[8];
         randombytes_buf(r, sizeof r);
         hex_encode(r, sizeof r, user);
-        copy_str(user + 16, ":x", sizeof user - 16);
+        copy_str(user + sizeof r * 2, ":x", sizeof user - sizeof r * 2);
         argv[n++] = "--socks5-hostname"; argv[n++] = g_proxy;
         argv[n++] = "--proxy-user"; argv[n++] = user;
     }
@@ -219,14 +234,14 @@ static int sums_lookup(const char *sums, const char *name, uint8_t hash[crypto_h
         const char *end = strchr(line, '\n');
         size_t llen = end ? (size_t)(end - line) : strlen(line);
         if (llen > 0 && line[llen - 1] == '\r') llen--;
-        if (llen >= 66 && (line[64] == ' ' || line[64] == '\t')) {
-            const char *fname = line + 65;
+        if (llen >= SHA256_HEX + 2 && (line[SHA256_HEX] == ' ' || line[SHA256_HEX] == '\t')) {
+            const char *fname = line + SHA256_HEX + 1;
             if (*fname == ' ' || *fname == '*') fname++;
             size_t flen = llen - (size_t)(fname - line);
             if (flen == nlen && memcmp(fname, name, nlen) == 0) {
-                char hex[65];
-                memcpy(hex, line, 64); hex[64] = '\0';
-                return hex_decode(hex, 64, hash);
+                char hex[SHA256_HEX + 1];
+                memcpy(hex, line, SHA256_HEX); hex[SHA256_HEX] = '\0';
+                return hex_decode(hex, SHA256_HEX, hash);
             }
         }
         if (!end) break;
@@ -256,7 +271,7 @@ static long asset_size(const char *json, const char *name) {
         if (*s++ != ':') return 0;
         while (isspace((unsigned char)*s)) s++;
         long v = strtol(s, NULL, 10);
-        return v > 0 && v <= atol(UPDATE_MAX_BYTES) ? v : 0;
+        return v > 0 && v <= UPDATE_MAX_BYTES ? v : 0;
     }
     return 0;
 }
@@ -274,64 +289,75 @@ static int minisign_ok(const char *msg, size_t msg_len, const char *sig_text, co
     uint8_t pk[MINISIGN_KEY_LEN];
     if (minisign_pubkey(RELEASE_PUBKEY, pk) != 0) return -1;
 
-    // Four lines: untrusted comment, signature, trusted comment, global signature.
-    const char *lines[4]; size_t lens[4];
+    enum { L_UNTRUSTED, L_SIGNATURE, L_TRUSTED, L_GLOBAL, LINES };
+    const char *lines[LINES]; size_t lens[LINES];
     const char *p = sig_text;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < LINES; i++) {
         const char *end = strchr(p, '\n');
         size_t n = end ? (size_t)(end - p) : strlen(p);
         if (n > 0 && p[n - 1] == '\r') n--;
         lines[i] = p; lens[i] = n;
-        if (!end) { if (i < 3) return -1; } else p = end + 1;
+        if (!end) { if (i < L_GLOBAL) return -1; } else p = end + 1;
     }
     static const char TC[] = "trusted comment: ";
-    if (lens[2] < sizeof TC - 1 || memcmp(lines[2], TC, sizeof TC - 1) != 0) return -1;
-    const char *comment = lines[2] + sizeof TC - 1;
-    size_t comment_len = lens[2] - (sizeof TC - 1);
+    if (lens[L_TRUSTED] < sizeof TC - 1 || memcmp(lines[L_TRUSTED], TC, sizeof TC - 1) != 0) return -1;
+    const char *comment = lines[L_TRUSTED] + sizeof TC - 1;
+    size_t comment_len = lens[L_TRUSTED] - (sizeof TC - 1);
 
     char want[64];
     int want_len = snprintf(want, sizeof want, "chat %s", tag);
     if (want_len < 0 || (size_t)want_len != comment_len || memcmp(comment, want, comment_len) != 0) return -1;
 
     uint8_t s[crypto_sign_BYTES], global[crypto_sign_BYTES];
-    if (base64_decode_strict(lines[3], lens[3], global, sizeof global) != (long)sizeof global) return -1;
-    if (minisign_verify(pk, msg, msg_len, lines[1], lens[1], s) != 0) return -1;
+    if (base64_decode_strict(lines[L_GLOBAL], lens[L_GLOBAL], global, sizeof global) != (long)sizeof global) return -1;
+    if (minisign_verify(pk, msg, msg_len, lines[L_SIGNATURE], lens[L_SIGNATURE], s) != 0) return -1;
 
-    uint8_t signed_comment[crypto_sign_BYTES + 64];
+    uint8_t signed_comment[crypto_sign_BYTES + sizeof want];
     memcpy(signed_comment, s, crypto_sign_BYTES);
     memcpy(signed_comment + crypto_sign_BYTES, comment, comment_len);
-    return crypto_sign_verify_detached(global, signed_comment, crypto_sign_BYTES + comment_len, pk + 10) == 0 ? 0 : -1;
+    return crypto_sign_verify_detached(global, signed_comment, crypto_sign_BYTES + comment_len, pk + MINISIGN_BODY) == 0
+         ? 0 : -1;
+}
+
+// SHA-256 of the next len bytes of f, or of all the rest if len is negative. Returns how many
+// bytes that was, or -1 if reading failed.
+static long hash_stream(FILE *f, long len, uint8_t out[crypto_hash_sha256_BYTES]) {
+    crypto_hash_sha256_state st;
+    crypto_hash_sha256_init(&st);
+    uint8_t buf[16384];
+    long total = 0;
+    for (;;) {
+        size_t want = len < 0 || len - total > (long)sizeof buf ? sizeof buf : (size_t)(len - total), n;
+        if (want == 0 || (n = fread(buf, 1, want, f)) == 0) break;
+        crypto_hash_sha256_update(&st, buf, n);
+        total += (long)n;
+    }
+    crypto_hash_sha256_final(&st, out);
+    return ferror(f) ? -1 : total;
 }
 
 static int hash_file(const char *path, uint8_t out[crypto_hash_sha256_BYTES], long *size_out) {
     FILE *f = platform_fopen(path, "rb");
     if (!f) return -1;
-    crypto_hash_sha256_state st;
-    crypto_hash_sha256_init(&st);
-    uint8_t buf[16384];
-    size_t n;
-    long total = 0;
-    while ((n = fread(buf, 1, sizeof buf, f)) > 0) {
-        crypto_hash_sha256_update(&st, buf, n);
-        total += (long)n;
-    }
-    int err = ferror(f);
+    long total = hash_stream(f, -1, out);
     fclose(f);
-    if (err) return -1;
-    crypto_hash_sha256_final(&st, out);
+    if (total < 0) return -1;
     if (size_out) *size_out = total;
     return 0;
 }
+
+// A URL without its "https://", as the console shows it.
+static const char *shown_url(const char *url) { return url + sizeof "https://" - 1; }
 
 // The message goes to the console log and into the box. A failure replaces the step it failed
 // at, and leaves the bar where it stopped.
 static void finish(const char *fmt, const char *arg) {
     snprintf(g_msg, sizeof g_msg, fmt, arg);
-    const char *text = strncmp(g_msg, "* update: ", 10) == 0 ? g_msg + 10 : g_msg;
+    const char *text = starts_with(g_msg, UPDATE_PREFIX) ? g_msg + sizeof UPDATE_PREFIX - 1 : g_msg;
     say(g_ok ? UPDATE_LINE_GOOD : UPDATE_LINE_BAD, "%s", text);
     downloading(NULL, 0);
     view_lock();
-    if (g_ok) g_view.permille = 1000;
+    if (g_ok) g_view.permille = AT_DONE;
     else copy_str(g_view.step, "Update failed", sizeof g_view.step);
     g_view.ok = g_ok;
     g_view.running = 0;
@@ -346,16 +372,17 @@ static void succeed(const char *fmt, const char *arg) {
 
 static void update_thread(void *unused) {
     (void)unused;
-    stage(0, "Checking GitHub for a newer release%s", g_betas ? " or beta" : "");
+    stage(AT_CHECKING, "Checking GitHub for a newer release%s", g_betas ? " or beta" : "");
 #if !defined(UPDATE_ASSET)
-    finish("* update: no release builds exist for this CPU architecture%s", "");
+    finish(UPDATE_PREFIX "no release builds exist for this CPU architecture%s", "");
 #else
     if (!RELEASE_PUBKEY[0]) {
-        finish("* update: this build has no release signing key (minisign.pub), so it can't check a release%s", "");
+        finish(UPDATE_PREFIX "this build has no release signing key (minisign.pub), so it can't check a release%s", "");
         return;
     }
-    char exe[1024], tmp_json[1100], tmp_sums[1100], tmp_sig[1100], tmp_bin[1100], url[512];
-    if (platform_exe_path(exe, sizeof exe) != 0) { finish("* update: could not locate the running executable%s", ""); return; }
+    char exe[EXE_PATH_MAX], tmp_json[EXE_TMP_MAX], tmp_sums[EXE_TMP_MAX], tmp_sig[EXE_TMP_MAX], tmp_bin[EXE_TMP_MAX];
+    char url[512];
+    if (platform_exe_path(exe, sizeof exe) != 0) { finish(UPDATE_PREFIX "could not locate the running executable%s", ""); return; }
     snprintf(tmp_json, sizeof tmp_json, "%s.release", exe);
     snprintf(tmp_sums, sizeof tmp_sums, "%s.sums", exe);
     snprintf(tmp_sig, sizeof tmp_sig, "%s.sums.minisig", exe);
@@ -366,52 +393,52 @@ static void update_thread(void *unused) {
     // GitHub's latest release is never a pre-release, so betas come from the list, newest first.
     snprintf(url, sizeof url, "https://api.github.com/repos/" UPDATE_REPO "/releases%s",
              g_betas ? "?per_page=1" : "/latest");
-    say(UPDATE_LINE_DETAIL, "GET %s", url + 8);
+    say(UPDATE_LINE_DETAIL, "GET %s", shown_url(url));
     if (fetch(url, tmp_json, 1) != 0) {
         platform_remove(tmp_json);
-        finish("* update: could not reach GitHub (is curl installed, and is %s's folder writable?)", exe);
+        finish(UPDATE_PREFIX "could not reach GitHub (is curl installed, and is %s's folder writable?)", exe);
         return;
     }
-    char *json = slurp(tmp_json, 1 << 20, NULL);
+    char *json = slurp(tmp_json, RELEASE_JSON_MAX, NULL);
     platform_remove(tmp_json);
     char tag[40];
     int ok = json && parse_tag(json, tag, sizeof tag) == 0;
     long total = ok ? asset_size(json, UPDATE_ASSET) : 0;
     free(json);
-    if (!ok) { finish("* update: GitHub's reply had no usable release tag%s", ""); return; }
+    if (!ok) { finish(UPDATE_PREFIX "GitHub's reply had no usable release tag%s", ""); return; }
     say(UPDATE_LINE_INFO, g_betas ? "newest release, betas included, is %s" : "latest release is %s", tag);
     if (!version_newer(tag, CHAT_VERSION)) {
-        stage(1000, "Already up to date", "");
-        if (g_betas) succeed("* update: already up to date (v" CHAT_VERSION ", newest with betas is %s)", tag);
-        else succeed("* update: already up to date (v" CHAT_VERSION ", latest is %s)", tag);
+        stage(AT_DONE, "Already up to date", "");
+        if (g_betas) succeed(UPDATE_PREFIX "already up to date (v" CHAT_VERSION ", newest with betas is %s)", tag);
+        else succeed(UPDATE_PREFIX "already up to date (v" CHAT_VERSION ", latest is %s)", tag);
         return;
     }
-    stage(100, "Release %s found", tag);
+    stage(AT_FOUND, "Release %s found", tag);
 
     snprintf(url, sizeof url, "https://github.com/" UPDATE_REPO "/releases/download/%s/SHA256SUMS", tag);
-    say(UPDATE_LINE_DETAIL, "GET %s", url + 8);
+    say(UPDATE_LINE_DETAIL, "GET %s", shown_url(url));
     if (fetch(url, tmp_sums, 0) != 0) {
         platform_remove(tmp_sums);
-        finish("* update: release %s has no SHA256SUMS - refusing to install it", tag);
+        finish(UPDATE_PREFIX "release %s has no SHA256SUMS - refusing to install it", tag);
         return;
     }
     size_t sums_len = 0;
-    char *sums = slurp(tmp_sums, 1 << 16, &sums_len);
+    char *sums = slurp(tmp_sums, SUMS_MAX, &sums_len);
     platform_remove(tmp_sums);
 
     // SHA256SUMS comes from the same place as the binary, so on its own it only catches corruption.
     // The signature, made offline with the release key, is what verifies it.
-    stage(130, "Checking %s's signature", tag);
+    stage(AT_SIGNATURE, "Checking %s's signature", tag);
     snprintf(url, sizeof url, "https://github.com/" UPDATE_REPO "/releases/download/%s/SHA256SUMS.minisig", tag);
-    say(UPDATE_LINE_DETAIL, "GET %s", url + 8);
+    say(UPDATE_LINE_DETAIL, "GET %s", shown_url(url));
     char *sig = NULL;
-    if (fetch(url, tmp_sig, 0) == 0) sig = slurp(tmp_sig, 4096, NULL);
+    if (fetch(url, tmp_sig, 0) == 0) sig = slurp(tmp_sig, SIG_MAX, NULL);
     platform_remove(tmp_sig);
     int signed_ok = sums && sig && minisign_ok(sums, sums_len, sig, tag) == 0;
     free(sig);
     if (!signed_ok) {
         free(sums);
-        finish("* update: release %s has no valid release-key signature - refusing to install it", tag);
+        finish(UPDATE_PREFIX "release %s has no valid release-key signature - refusing to install it", tag);
         return;
     }
     say(UPDATE_LINE_GOOD, "SHA256SUMS is signed by the release key, for %s", tag);
@@ -419,49 +446,49 @@ static void update_thread(void *unused) {
     uint8_t want[crypto_hash_sha256_BYTES];
     ok = sums_lookup(sums, UPDATE_ASSET, want) == 0;
     free(sums);
-    if (!ok) { finish("* update: SHA256SUMS lists no " UPDATE_ASSET " for %s - nothing installed", tag); return; }
+    if (!ok) { finish(UPDATE_PREFIX "SHA256SUMS lists no " UPDATE_ASSET " for %s - nothing installed", tag); return; }
     char want_hex[2 * sizeof want + 1];
     hex_encode(want, sizeof want, want_hex);
     say(UPDATE_LINE_DETAIL, "expecting SHA-256 %.16s...", want_hex);
 
-    stage(DL_FROM, "Downloading %s", tag);
+    stage(AT_DOWNLOAD, "Downloading %s", tag);
     snprintf(url, sizeof url, "https://github.com/" UPDATE_REPO "/releases/download/%s/" UPDATE_ASSET, tag);
     if (total > 0) {
         char ts[24];
         file_format_size((uint64_t)total, ts, sizeof ts);
-        say(UPDATE_LINE_DETAIL, "GET %s (%s)", url + 8, ts);
+        say(UPDATE_LINE_DETAIL, "GET %s (%s)", shown_url(url), ts);
     } else {
-        say(UPDATE_LINE_DETAIL, "GET %s", url + 8);
+        say(UPDATE_LINE_DETAIL, "GET %s", shown_url(url));
     }
     downloading(tmp_bin, total);
     int got_ok = fetch(url, tmp_bin, 0) == 0;
     downloading(NULL, 0);
     if (!got_ok) {
         platform_remove(tmp_bin);
-        finish("* update: downloading " UPDATE_ASSET " from %s failed - nothing installed", tag);
+        finish(UPDATE_PREFIX "downloading " UPDATE_ASSET " from %s failed - nothing installed", tag);
         return;
     }
-    stage(920, "Verifying the download", "");
+    stage(AT_VERIFYING, "Verifying the download", "");
     uint8_t got[crypto_hash_sha256_BYTES];
     long size = 0;
     if (hash_file(tmp_bin, got, &size) != 0 || size == 0 || memcmp(got, want, sizeof got) != 0) {
         platform_remove(tmp_bin);
-        finish("* update: SHA-256 of the %s download does NOT match SHA256SUMS - discarded, nothing installed", tag);
+        finish(UPDATE_PREFIX "SHA-256 of the %s download does NOT match SHA256SUMS - discarded, nothing installed", tag);
         return;
     }
     char size_s[24];
     file_format_size((uint64_t)size, size_s, sizeof size_s);
     say(UPDATE_LINE_GOOD, "downloaded %s; its SHA-256 matches SHA256SUMS", size_s);
 
-    stage(960, "Installing %s", tag);
+    stage(AT_INSTALLING, "Installing %s", tag);
     say(UPDATE_LINE_DETAIL, "replacing %s", exe);
     if (platform_replace_exe(tmp_bin, exe) != 0) {
         platform_remove(tmp_bin);
-        finish("* update: verified %s but could not replace the executable (permissions?)", tag);
+        finish(UPDATE_PREFIX "verified %s but could not replace the executable (permissions?)", tag);
         return;
     }
-    stage(1000, "Installed %s - restart chat to run it", tag);
-    succeed("* update: installed %s (signature and SHA-256 verified) - restart chat to run it", tag);
+    stage(AT_DONE, "Installed %s - restart chat to run it", tag);
+    succeed(UPDATE_PREFIX "installed %s (signature and SHA-256 verified) - restart chat to run it", tag);
 #endif
 }
 
@@ -503,9 +530,10 @@ int update_run(int betas, char *msg, size_t cap) {
 const char *update_release_key(void) { return RELEASE_PUBKEY; }
 
 // What `just release` appends to each binary: the signed list ("chat vVERSION", each binary's
-// hash, then the signature line), and a footer of the list's length in 8 digits and this.
+// hash, then the signature line), and a footer of the list's length in LIST_LEN_DIGITS digits and this.
 #define LIST_MAGIC "CHATBLD1"
-#define LIST_FOOTER 16
+#define LIST_LEN_DIGITS 8
+#define LIST_FOOTER (LIST_LEN_DIGITS + (int)sizeof LIST_MAGIC - 1)
 #define LIST_MAX 1024
 
 // Takes the list apart into b: only one for this version, with hashes as sha256sum writes them.
@@ -514,7 +542,7 @@ static void parse_list(char *text, chat_build_t *b) {
     int n = 0;
     for (char *p = text; *p; ) {
         char *end = strchr(p, '\n');
-        if (!end || n == (int)(sizeof lines / sizeof lines[0])) return;
+        if (!end || n == (int)COUNT_OF(lines)) return;
         *end = '\0';
         lines[n++] = p;
         p = end + 1;
@@ -523,7 +551,7 @@ static void parse_list(char *text, chat_build_t *b) {
     char list[BUILD_LIST_LEN + 1] = "";
     size_t pos = 0;
     for (int i = 1; i < n - 1; i++) {
-        if (strlen(lines[i]) != BUILD_HASH_LEN * 2 || strspn(lines[i], "0123456789abcdef") != BUILD_HASH_LEN * 2) return;
+        if (strlen(lines[i]) != BUILD_HASH_LEN * 2 || strspn(lines[i], HEX_DIGITS) != BUILD_HASH_LEN * 2) return;
         pos += (size_t)snprintf(list + pos, sizeof list - pos, "%s%s", i > 1 ? "," : "", lines[i]);
     }
     copy_str(b->list, list, sizeof b->list);
@@ -537,7 +565,7 @@ int update_self_build(chat_build_t *b) {
     // The file this process was started from, even if an update has replaced it since.
     FILE *f = platform_fopen("/proc/self/exe", "rb");
 #else
-    char exe[1024];
+    char exe[EXE_PATH_MAX];
     FILE *f = platform_exe_path(exe, sizeof exe) == 0 ? platform_fopen(exe, "rb") : NULL;
 #endif
     if (!f) return -1;
@@ -545,9 +573,9 @@ int update_self_build(chat_build_t *b) {
     long core = size;
     char foot[LIST_FOOTER], text[LIST_MAX + 1];
     if (size > LIST_FOOTER && fseek(f, size - LIST_FOOTER, SEEK_SET) == 0 && fread(foot, 1, LIST_FOOTER, f) == LIST_FOOTER
-        && memcmp(foot + 8, LIST_MAGIC, 8) == 0) {
+        && memcmp(foot + LIST_LEN_DIGITS, LIST_MAGIC, sizeof LIST_MAGIC - 1) == 0) {
         long len = 0;
-        for (int i = 0; i < 8 && len >= 0; i++) len = isdigit((unsigned char)foot[i]) ? len * 10 + (foot[i] - '0') : -1;
+        for (int i = 0; i < LIST_LEN_DIGITS && len >= 0; i++) len = isdigit((unsigned char)foot[i]) ? len * 10 + (foot[i] - '0') : -1;
         if (len > 0 && len <= LIST_MAX && len <= size - LIST_FOOTER) {
             // The hash doesn't include the list, since the list can't contain its own hash.
             core = size - LIST_FOOTER - len;
@@ -557,25 +585,17 @@ int update_self_build(chat_build_t *b) {
             }
         }
     }
-    crypto_hash_sha256_state st;
-    crypto_hash_sha256_init(&st);
-    uint8_t buf[16384];
-    long left = size >= 0 && fseek(f, 0, SEEK_SET) == 0 ? core : -1;
-    while (left > 0) {
-        size_t got = fread(buf, 1, left < (long)sizeof buf ? (size_t)left : sizeof buf, f);
-        if (got == 0) break;
-        crypto_hash_sha256_update(&st, buf, got);
-        left -= (long)got;
-    }
+    uint8_t hash[crypto_hash_sha256_BYTES];
+    long hashed = size >= 0 && fseek(f, 0, SEEK_SET) == 0 ? hash_stream(f, core, hash) : -1;
     fclose(f);
-    if (left != 0) return -1;
-    crypto_hash_sha256_final(&st, b->hash);
+    if (hashed < 0 || hashed != core) return -1;
+    memcpy(b->hash, hash, sizeof b->hash);
     b->ok = 1;
     return 0;
 }
 
 void update_cleanup_stale(void) {
-    char exe[1024], old[1100];
+    char exe[EXE_PATH_MAX], old[EXE_TMP_MAX];
     if (platform_exe_path(exe, sizeof exe) != 0) return;
     snprintf(old, sizeof old, "%s.old", exe);
     platform_remove(old);

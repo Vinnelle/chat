@@ -13,7 +13,7 @@ int add_para(tui_para_t *p, int n, tui_para_kind_t kind, const char *text) {
 
 static int install_paras(tui_para_t *p) {
     static char settings[1200], key[1400], intro[600], verified[1200], outro[400], device[1200], factors[300];
-    char where[900] = "";
+    char where[APP_PATH_MAX] = "";
     const char *target = g_app.save_target;
     install_where(target, where, sizeof where);
     snprintf(settings, sizeof settings, "`%s/settings`: the settings you've changed - your nickname, colour, routing, "
@@ -271,8 +271,9 @@ static void code_setup_dialog(tui_dialog_t *d, tui_para_t *p) {
     int nq = qr_rows(g_app.code_uri, rows, &qr_cols);
     char grouped[48];
     size_t g = 0;
+    enum { CODE_GROUP = 4 };
     for (size_t i = 0; g_app.code_b32[i] && g + 2 < sizeof grouped; i++) {
-        if (i && i % 4 == 0) grouped[g++] = ' ';
+        if (i && i % CODE_GROUP == 0) grouped[g++] = ' ';
         grouped[g++] = g_app.code_b32[i];
     }
     grouped[g] = '\0';
@@ -283,22 +284,22 @@ static void code_setup_dialog(tui_dialog_t *d, tui_para_t *p) {
         for (int i = 0; i < nq; i++) add_para(p, i, TUI_P_ART, rows[i]);
         d->n_text = code_setup_text(p, add_para(p, nq, TUI_P_BLANK, ""), 1);
         d->note = secret;
-        snprintf(keys, sizeof keys, "%s \xc2\xb7 esc cancel", enter);
+        snprintf(keys, sizeof keys, "%s" DOT_SEP "esc cancel", enter);
         d->keys = keys;
         if (tui_dialog_rows(term_cols, d) <= term_rows) return;
         d->n_text = nq;
         d->note = NULL;
         alone = tui_dialog_rows(term_cols, d) <= term_rows;
         if (alone && g_app.code_qr) {
-            snprintf(keys, sizeof keys, "%s \xc2\xb7 tab text \xc2\xb7 esc cancel", enter);
+            snprintf(keys, sizeof keys, "%s" DOT_SEP "tab text" DOT_SEP "esc cancel", enter);
             return;
         }
     }
     d->n_text = code_setup_text(p, 0, 0);
     size_t sl = strlen(secret);
-    if (nq > 0 && !alone) snprintf(secret + sl, sizeof secret - sl, " \xc2\xb7 a bigger window shows a QR code");
+    if (nq > 0 && !alone) snprintf(secret + sl, sizeof secret - sl, DOT_SEP "a bigger window shows a QR code");
     d->note = secret;
-    snprintf(keys, sizeof keys, "%s%s \xc2\xb7 esc cancel", enter, alone ? " \xc2\xb7 tab QR code" : "");
+    snprintf(keys, sizeof keys, "%s%s" DOT_SEP "esc cancel", enter, alone ? DOT_SEP "tab QR code" : "");
     d->keys = keys;
 }
 
@@ -326,7 +327,7 @@ static int key_wait_paras(tui_para_t *p) {
 
 static int uninstall_paras(tui_para_t *p) {
     static char what[1200];
-    char where[900] = "";
+    char where[APP_PATH_MAX] = "";
     const char *target = g_app.save_target;
     install_where(target, where, sizeof where);
     int settings = install_has_settings(target), key = install_has_key(target), same = is_current_save(target);
@@ -398,7 +399,7 @@ static const tui_dialog_t *quit_dialog(void) {
     if (n_lost) n = add_para(paras, n, TUI_P_BLANK, "");
     for (int i = 0; i < n_lost; i++) n = add_para(paras, n, TUI_P_BULLET, lost[i]);
 
-    d = (tui_dialog_t){ .title = "QUIT", .text = paras, .n_text = n, .keys = "y quit \xc2\xb7 n stay" };
+    d = (tui_dialog_t){ .title = "QUIT", .text = paras, .n_text = n, .keys = "y quit" DOT_SEP "n stay" };
     return &d;
 }
 
@@ -413,27 +414,27 @@ static const tui_dialog_t *current_dialog(void) {
             d.title = "NEW SESSION";
             d.placeholder = "password";
             d.note = "Blank is fine: it still encrypts. Whoever you invite needs the password and the session's id.";
-            d.keys = "enter create \xc2\xb7 esc cancel";
+            d.keys = "enter create" DOT_SEP "esc cancel";
             break;
         case MODE_JOIN_ID:
             d.title = "JOIN SESSION";
             d.mask = 0;
             d.placeholder = "session id";
             d.note = "The id you were given. Its password comes next.";
-            d.keys = "enter next \xc2\xb7 esc cancel";
+            d.keys = "enter next" DOT_SEP "esc cancel";
             break;
         case MODE_JOIN_PASSWORD:
             d.title = "JOIN SESSION";
             d.placeholder = "password";
             snprintf(note_text, sizeof note_text, "The password for %s, as you were given it.", g_app.pending_session_id);
             d.note = note_text;
-            d.keys = "enter join \xc2\xb7 esc cancel";
+            d.keys = "enter join" DOT_SEP "esc cancel";
             break;
         case MODE_SIGN_PASSWORD:
             d.title = g_app.load_kind == IDENT_AGE ? "NATIVE AGE KEY" : "NATIVE PGP KEY";
             d.n_text = add_para(paras, 0, TUI_P_TEXT, SIGN_PASSWORD_HELP);
             d.placeholder = "password (blank: a new key until chat exits)";
-            d.keys = "enter make the key \xc2\xb7 esc back";
+            d.keys = "enter make the key" DOT_SEP "esc back";
             break;
         case MODE_SIGN_PATH: {
             int age = g_app.load_kind == IDENT_AGE;
@@ -445,7 +446,7 @@ static const tui_dialog_t *current_dialog(void) {
             d.n_text = add_para(paras, n, TUI_P_TEXT, KEY_FILE_SAVED);
             d.mask = 0;
             d.placeholder = age ? "~/.config/age/key.txt" : "~/key.asc";
-            d.keys = "enter use this key \xc2\xb7 esc back";
+            d.keys = "enter use this key" DOT_SEP "esc back";
             break;
         }
         case MODE_SIGN_PASTE: {
@@ -469,26 +470,26 @@ static const tui_dialog_t *current_dialog(void) {
             d.mask = sd->kind == K_SECRET;
             d.placeholder = sd->values;
             d.note = sd->help;
-            d.keys = "enter save \xc2\xb7 esc cancel";
+            d.keys = "enter save" DOT_SEP "esc cancel";
             break;
         }
         case MODE_INSTALL:
             d.title = install_resaves() ? "SAVE" : "INSTALL";
             d.n_text = install_paras(paras);
             d.input = NULL;
-            d.keys = install_resaves() ? "y save \xc2\xb7 n cancel" : "y install \xc2\xb7 n cancel";
+            d.keys = install_resaves() ? "y save" DOT_SEP "n cancel" : "y install" DOT_SEP "n cancel";
             break;
         case MODE_INSTALL_FIRST:
             d.title = g_app.install_for == INSTALL_FACTOR_DEVICE ? "DEVICE LOCK"
                     : g_app.install_for == INSTALL_FACTOR_KEY ? "SECURITY KEY" : "AUTHENTICATOR APP";
             d.n_text = install_first_paras(paras);
             d.input = NULL;
-            d.keys = "y install \xc2\xb7 n cancel";
+            d.keys = "y install" DOT_SEP "n cancel";
             break;
         case MODE_INSTALL_PASS:
         case MODE_INSTALL_PASS2: {
             int first = g_app.mode == MODE_INSTALL_PASS;
-            d.title = "INSTALL \xc2\xb7 PASSPHRASE";
+            d.title = "INSTALL" DOT_SEP "PASSPHRASE";
             d.n_text = add_para(paras, 0, TUI_P_TEXT, !first ? "Type it again, to be sure of it."
                 : g_app.identity_source != IDENT_NONE && g_app.device_lock
                 ? "Your settings and signing key are sealed with this passphrase, which chat asks for when it starts. "
@@ -505,7 +506,7 @@ static const tui_dialog_t *current_dialog(void) {
                   "signing key you `:install` later. Make it long: anyone who gets the files can try passphrases "
                   "against them. Forget it, and they're lost.");
             d.placeholder = first ? "passphrase" : "the same passphrase";
-            d.keys = first ? "enter next \xc2\xb7 esc cancel" : "enter install \xc2\xb7 esc cancel";
+            d.keys = first ? "enter next" DOT_SEP "esc cancel" : "enter install" DOT_SEP "esc cancel";
             break;
         }
         case MODE_INSTALL_EXISTING:
@@ -516,7 +517,7 @@ static const tui_dialog_t *current_dialog(void) {
             static char text[900];
             static const char *names[INSTALL_SAVES_MAX], *details[INSTALL_SAVES_MAX];
             static char detail_text[INSTALL_SAVES_MAX][112];
-            char where[900] = "";
+            char where[APP_PATH_MAX] = "";
             const char *shown = install_shown_name(g_app.save_target);
             install_where(g_app.save_target, where, sizeof where);
             d.title = "INSTALL";
@@ -532,7 +533,7 @@ static const tui_dialog_t *current_dialog(void) {
                              "saved there is used from then on. No makes a new save, with a name and a passphrase of "
                              "its own.", shown, where);
                 d.input = NULL;
-                d.keys = "y use it \xc2\xb7 n new save \xc2\xb7 esc cancel";
+                d.keys = "y use it" DOT_SEP "n new save" DOT_SEP "esc cancel";
             } else if (g_app.mode == MODE_INSTALL_PICK) {
                 for (int i = 0; i < g_app.n_saves; i++) {
                     names[i] = install_shown_name(g_app.saves[i].name);
@@ -545,7 +546,7 @@ static const tui_dialog_t *current_dialog(void) {
                 d.details = details;
                 d.n_items = g_app.n_saves;
                 d.sel = g_app.save_sel;
-                d.keys = "enter choose \xc2\xb7 j/k move \xc2\xb7 esc back";
+                d.keys = "enter choose" DOT_SEP "j/k move" DOT_SEP "esc back";
             } else if (g_app.mode == MODE_INSTALL_OVERWRITE) {
                 snprintf(text, sizeof text, "`%s` is another save, in `%s`, sealed with its own passphrase. Save what's "
                          "in use now over it? That's your settings, %s and the keys you verified, which are added to "
@@ -558,7 +559,7 @@ static const tui_dialog_t *current_dialog(void) {
                          : key_saved_as_path() ? "the path to your signing key's file in place of the key saved there,"
                          : "your signing key in place of the one saved there,", shown, shown);
                 d.input = NULL;
-                d.keys = "y overwrite \xc2\xb7 n cancel";
+                d.keys = "y overwrite" DOT_SEP "n cancel";
             } else if (g_app.mode == MODE_INSTALL_UNLOCK) {
                 snprintf(text, sizeof text, "Its passphrase opens `%s`, %s Forgot it? Esc goes back%s, and "
                          "`:uninstall %s` deletes it.", shown, g_app.install_overwrite
@@ -566,18 +567,18 @@ static const tui_dialog_t *current_dialog(void) {
                          : "and what's saved there is used from now on.",
                          g_app.install_overwrite ? "" : g_app.install_pick ? " to the list"
                          : ", where n makes a new save instead", shown);
-                d.title = "INSTALL \xc2\xb7 PASSPHRASE";
+                d.title = "INSTALL" DOT_SEP "PASSPHRASE";
                 d.placeholder = "passphrase";
-                d.keys = g_app.install_overwrite ? "enter install \xc2\xb7 esc back" : "enter open \xc2\xb7 esc back";
+                d.keys = g_app.install_overwrite ? "enter install" DOT_SEP "esc back" : "enter open" DOT_SEP "esc back";
             } else {
                 snprintf(text, sizeof text, "A name for the new save: 1 to %d letters, digits, - and _, or blank for "
                          "`%s`, picked at random. It goes in `saves/NAME` in chat's folder (`default` is the folder "
                          "itself), and anyone who can read the disk can see the folder's name. What it leaves on disk "
                          "is shown next.", INSTALL_NAME_MAX, g_app.save_random);
-                d.title = "INSTALL \xc2\xb7 NEW SAVE";
+                d.title = "INSTALL" DOT_SEP "NEW SAVE";
                 d.mask = 0;
                 d.placeholder = g_app.save_random;
-                d.keys = g_app.n_saves > 0 ? "enter next \xc2\xb7 esc back" : "enter next \xc2\xb7 esc cancel";
+                d.keys = g_app.n_saves > 0 ? "enter next" DOT_SEP "esc back" : "enter next" DOT_SEP "esc cancel";
             }
             d.n_text = add_para(paras, 0, TUI_P_TEXT, text);
             break;
@@ -586,14 +587,14 @@ static const tui_dialog_t *current_dialog(void) {
             d.title = "UNINSTALL";
             d.n_text = uninstall_paras(paras);
             d.input = NULL;
-            d.keys = "y delete \xc2\xb7 n cancel";
+            d.keys = "y delete" DOT_SEP "n cancel";
             break;
         case MODE_DEVICE_LOCK:
             d.title = "DEVICE LOCK";
             d.n_text = device_lock_paras(paras);
             d.input = NULL;
-            d.keys = g_app.device_new ? "y lock it \xc2\xb7 n cancel"
-                   : g_app.device_want ? "y lock \xc2\xb7 n cancel" : "y unlock \xc2\xb7 n cancel";
+            d.keys = g_app.device_new ? "y lock it" DOT_SEP "n cancel"
+                   : g_app.device_want ? "y lock" DOT_SEP "n cancel" : "y unlock" DOT_SEP "n cancel";
             break;
         case MODE_FILE_ASK:
             d.n_text = file_ask_paras(paras, &d.title, &d.keys);
@@ -636,7 +637,7 @@ static const tui_dialog_t *current_dialog(void) {
             d.details = details;
             d.n_items = g_app.n_saves;
             d.sel = g_app.save_sel;
-            d.keys = "enter open \xc2\xb7 j/k move \xc2\xb7 esc skip";
+            d.keys = "enter open" DOT_SEP "j/k move" DOT_SEP "esc skip";
             break;
         }
         case MODE_UNLOCK: {
@@ -662,14 +663,14 @@ static const tui_dialog_t *current_dialog(void) {
             d.n_text = add_para(paras, 0, TUI_P_TEXT, text);
             d.title = "UNLOCK";
             d.placeholder = "passphrase";
-            d.keys = save_to_pick() ? "enter open \xc2\xb7 esc back" : "enter open \xc2\xb7 esc skip";
+            d.keys = save_to_pick() ? "enter open" DOT_SEP "esc back" : "enter open" DOT_SEP "esc skip";
             break;
         }
         case MODE_FACTOR:
             d.title = g_app.factor == INSTALL_FACTOR_KEY ? "SECURITY KEY" : "AUTHENTICATOR APP";
             d.n_text = factor_paras(paras);
             d.input = NULL;
-            d.keys = g_app.factor_want ? "y register \xc2\xb7 n cancel" : "y turn off \xc2\xb7 n cancel";
+            d.keys = g_app.factor_want ? "y register" DOT_SEP "n cancel" : "y turn off" DOT_SEP "n cancel";
             break;
         case MODE_CODE_SETUP:
             d.title = "AUTHENTICATOR APP";
@@ -684,12 +685,12 @@ static const tui_dialog_t *current_dialog(void) {
             d.keys = "esc cancel";
             break;
         case MODE_KEY_PIN:
-            d.title = "SECURITY KEY \xc2\xb7 PIN";
+            d.title = "SECURITY KEY" DOT_SEP "PIN";
             d.n_text = add_para(paras, 0, TUI_P_TEXT, "Your security key wants its PIN for this. chat sends it to the key "
                                 "encrypted, and doesn't keep it.");
             d.note = install_key_why();
             d.placeholder = "PIN";
-            d.keys = "enter send \xc2\xb7 esc cancel";
+            d.keys = "enter send" DOT_SEP "esc cancel";
             break;
         case MODE_UNLOCK_CODE: {
             static char text[300];
@@ -697,10 +698,10 @@ static const tui_dialog_t *current_dialog(void) {
             snprintf(text, sizeof text, "The save `%s` also asks for the 6-digit code your authenticator app shows for "
                      "`chat:%s`.", shown, shown);
             d.n_text = add_para(paras, 0, TUI_P_TEXT, text);
-            d.title = g_app.key_purpose == KP_INSTALL_UNLOCK ? "INSTALL \xc2\xb7 CODE" : "UNLOCK \xc2\xb7 CODE";
+            d.title = g_app.key_purpose == KP_INSTALL_UNLOCK ? "INSTALL" DOT_SEP "CODE" : "UNLOCK" DOT_SEP "CODE";
             d.mask = 0;
             d.placeholder = "6-digit code";
-            d.keys = "enter open \xc2\xb7 esc back";
+            d.keys = "enter open" DOT_SEP "esc back";
             break;
         }
         case MODE_SHADOW_PASS:
@@ -713,7 +714,7 @@ static const tui_dialog_t *current_dialog(void) {
                   "device and code. Make it different from the real one, and don't forget which is which."
                 : "Type the shadow passphrase again, to be sure of it.");
             d.placeholder = first ? "shadow passphrase" : "the same passphrase";
-            d.keys = first ? "enter next \xc2\xb7 esc cancel" : "enter set \xc2\xb7 esc cancel";
+            d.keys = first ? "enter next" DOT_SEP "esc cancel" : "enter set" DOT_SEP "esc cancel";
             break;
         }
         default:
@@ -735,24 +736,24 @@ static tui_bar_t current_bar(void) {
     switch (g_app.mode) {
         case MODE_CHANGELOG:
             b.chip = "CHANGELOG";
-            b.hint = "j/k scroll \xc2\xb7 space/b page \xc2\xb7 g/G top/bottom \xc2\xb7 q close";
+            b.hint = "j/k scroll" DOT_SEP "space/b page" DOT_SEP "g/G top/bottom" DOT_SEP "q close";
             break;
         case MODE_HELP:
             b.chip = "HELP";
-            b.hint = "enter use \xc2\xb7 j/k move \xc2\xb7 tab section \xc2\xb7 esc close";
+            b.hint = "enter use" DOT_SEP "j/k move" DOT_SEP "tab section" DOT_SEP "esc close";
             break;
         case MODE_SETTINGS:        b.hint = settings_hint(); break;
-        case MODE_SIGN_CHOICE:     b.hint = "enter choose \xc2\xb7 j/k move \xc2\xb7 esc back \xc2\xb7 q close"; break;
+        case MODE_SIGN_CHOICE:     b.hint = "enter choose" DOT_SEP "j/k move" DOT_SEP "esc back" DOT_SEP "q close"; break;
         case MODE_SIGN_BROWSE:
-            b.hint = "enter open \xc2\xb7 h up \xc2\xb7 / type a path \xc2\xb7 ~ home \xc2\xb7 esc back \xc2\xb7 q close";
+            b.hint = "enter open" DOT_SEP "h up" DOT_SEP "/ type a path" DOT_SEP "~ home" DOT_SEP "esc back" DOT_SEP "q close";
             break;
         case MODE_SEND_BROWSE:
             b.chip = "SEND";
-            b.hint = "enter send \xc2\xb7 h up \xc2\xb7 ~ home \xc2\xb7 j/k move \xc2\xb7 esc close";
+            b.hint = "enter send" DOT_SEP "h up" DOT_SEP "~ home" DOT_SEP "j/k move" DOT_SEP "esc close";
             break;
         case MODE_SAVE_BROWSE:
             b.chip = "SAVE";
-            b.hint = "s save here \xc2\xb7 enter open \xc2\xb7 h up \xc2\xb7 ~ home \xc2\xb7 j/k move \xc2\xb7 esc close";
+            b.hint = "s save here" DOT_SEP "enter open" DOT_SEP "h up" DOT_SEP "~ home" DOT_SEP "j/k move" DOT_SEP "esc close";
             break;
         case MODE_FILES:
             b.chip = "FILES";
@@ -842,17 +843,19 @@ void render_bar(void) {
 // How the selected session reaches its peers, for the sidebar: the route, its port or tor, the
 // relays and port mapping, the DHT, and the traffic so far.
 #define MAX_NET 10
+#define NET_VALUE_MAX 32
 
-static int build_net(tui_kv_t kv[MAX_NET], char vals[MAX_NET][32]) {
+static int build_net(tui_kv_t kv[MAX_NET], char vals[MAX_NET][NET_VALUE_MAX]) {
     if (!g_app.selected || g_app.selected->initialising) return 0;
     const chat_t *e = &g_app.selected->engine;
     int n = 0;
-#define KV(l, ...) do { snprintf(vals[n], 32, __VA_ARGS__); kv[n].label = (l); kv[n].value = vals[n]; n++; } while (0)
+#define KV(l, ...) do { snprintf(vals[n], NET_VALUE_MAX, __VA_ARGS__); kv[n].label = (l); kv[n].value = vals[n]; n++; } while (0)
     if (e->route.mode == ROUTE_TOR) {
         char t[32];
         tor_link_line(t, sizeof t);
         KV("route", "tor");
-        KV("tor", "%s", strncmp(t, "tor: ", 5) == 0 ? t + 5 : t);
+        static const char tor[] = "tor: ";
+        KV("tor", "%s", starts_with(t, tor) ? t + sizeof tor - 1 : t);
         KV("onion", "%s", e->tor && tor_my_onion(e->tor)[0] ? "published" : "waiting");
     } else {
         KV("route", "dht");
@@ -877,6 +880,9 @@ static int build_net(tui_kv_t kv[MAX_NET], char vals[MAX_NET][32]) {
     return n;
 }
 
+_Static_assert((int)TUI_VERIFY_BAD == (int)VERIFY_FAILED && (int)TUI_CODE_KEY_CHANGED == (int)CODE_KEY_CHANGED,
+               "the sidebar takes the engine's verify states and codes as they are");
+
 void render(void) {
     tui_session_row_t rows[MAX_SESSIONS];
     int n = 0, sel = -1;
@@ -895,7 +901,7 @@ void render(void) {
 
     int rows_n, cols_n; term_get_size(&rows_n, &cols_n);
     tui_bar_t bar = current_bar();
-    char hhmm[6]; current_hhmm(hhmm);
+    char hhmm[HHMM_LEN]; current_hhmm(hhmm);
 
     if (install_mode(g_app.mode) && g_app.install_back == MODE_SETTINGS) { render_settings(rows_n, cols_n, hhmm, &bar); return; }
     switch (g_app.mode) {
@@ -955,8 +961,8 @@ void render(void) {
             if (tag) { copy_str(r->tag, tag, sizeof r->tag); *tag = '\0'; }
             copy_str(r->nick, name, sizeof r->nick);
             memcpy(r->color, p->color, 3);
-            r->verify = (int)p->identity_state;
-            r->code = chat_code_state(e, p);
+            r->verify = (tui_verify_t)p->identity_state;
+            r->code = (tui_code_t)chat_code_state(e, p);
             r->modified = p->build_state == BUILD_MODIFIED;
             r->history = p->persists;
         }
@@ -967,7 +973,7 @@ void render(void) {
     char sub[64]; tui_view_t view = current_view(sub, sizeof sub);
     view.clock = hhmm;
     tui_kv_t net[MAX_NET];
-    char net_vals[MAX_NET][32];
+    char net_vals[MAX_NET][NET_VALUE_MAX];
     int n_net = build_net(net, net_vals);
     tui_render(rows_n, cols_n, rows, n, sel, peer_rows, n_peers, net, n_net, sb, console, &view, &bar,
                g_app.color_enabled);

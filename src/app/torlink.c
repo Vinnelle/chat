@@ -11,37 +11,46 @@ tor_link_t g_tor;
 
 // Downloads (:update) go through Tor whenever Tor mode is on: to the tor in use once there is one,
 // and until then to a port nothing listens on, so they fail instead of going direct.
+#define NO_PROXY "127.0.0.1:1"
+
 void sync_update_proxy(void) {
     if (g_app.route.mode == ROUTE_DHT) update_set_proxy(NULL);
-    else update_set_proxy(g_tor.state == TL_READY ? g_tor.socks : "127.0.0.1:1");
+    else update_set_proxy(g_tor.state == TL_READY ? g_tor.socks : NO_PROXY);
 }
+
+// How long until chat looks for a tor again after there's none, and after its own stopped
+// OWN_STARTS times in a row. A bootstrap is reported in steps of BOOT_STEP percent.
+#define TOR_RETRY 30.0
+#define OWN_TOR_RETRY 60.0
+#define OWN_STARTS 3
+#define BOOT_DONE 100
+#define BOOT_STEP 25
 
 // What chat's own tor takes at its control port, or NULL for a tor that was running already.
 static const char *tor_link_password(void) {
     return g_tor.proc ? torproc_password(g_tor.proc) : NULL;
 }
 
-static void tor_link_apply(void) {
+// fn on each session in Tor mode, --simple's too.
+static void each_tor_session(void (*fn)(chat_t *e)) {
     for (int i = 0; i < MAX_SESSIONS; i++) {
         if (!g_app.used[i] || g_app.sessions[i].initialising) continue;
         chat_t *e = &g_app.sessions[i].engine;
-        if (e->route.mode == ROUTE_TOR) chat_tor_set_ports(e, g_tor.socks, g_tor.control, tor_link_password());
+        if (e->route.mode == ROUTE_TOR) fn(e);
     }
-    if (g_plain_engine && g_plain_engine->route.mode == ROUTE_TOR)
-        chat_tor_set_ports(g_plain_engine, g_tor.socks, g_tor.control, tor_link_password());
+    if (g_plain_engine && g_plain_engine->route.mode == ROUTE_TOR) fn(g_plain_engine);
+}
+
+static void set_tor_ports(chat_t *e) { chat_tor_set_ports(e, g_tor.socks, g_tor.control, tor_link_password()); }
+
+static void tor_link_apply(void) {
+    each_tor_session(set_tor_ports);
     sync_update_proxy();
 }
 
 // Relays tried while tor was still connecting failed and backed off for up to five minutes, so
 // once it's connected they're retried straight away.
-static void tor_link_connected(void) {
-    for (int i = 0; i < MAX_SESSIONS; i++) {
-        if (!g_app.used[i] || g_app.sessions[i].initialising) continue;
-        chat_t *e = &g_app.sessions[i].engine;
-        if (e->route.mode == ROUTE_TOR) chat_tor_connected(e);
-    }
-    if (g_plain_engine && g_plain_engine->route.mode == ROUTE_TOR) chat_tor_connected(g_plain_engine);
-}
+static void tor_link_connected(void) { each_tor_session(chat_tor_connected); }
 
 static void tor_link_fail(double now, double retry_in) {
     g_tor.state = TL_FAILED;
@@ -56,13 +65,13 @@ static void tor_link_start_own(double now) {
         else
             push_log("* tor: tor isn't installed. Install it (Arch: sudo pacman -S tor, Debian/Ubuntu: sudo apt install tor, "
                      "Windows: the Tor Expert Bundle), set where it is with :set torpath, or start Tor Browser");
-        tor_link_fail(now, 30.0);
+        tor_link_fail(now, TOR_RETRY);
         return;
     }
     g_tor.proc = torproc_start(program, err, sizeof err);
     if (!g_tor.proc) {
         push_log("* tor: couldn't start %s: %s", program, err);
-        tor_link_fail(now, 30.0);
+        tor_link_fail(now, TOR_RETRY);
         return;
     }
     g_tor.state = TL_STARTING;
@@ -78,7 +87,7 @@ void tor_link_ensure(double now) {
     if (g_tor.state != TL_OFF) return;
     if (g_app.tor_launch == TOR_LAUNCH_ALWAYS) { tor_link_start_own(now); return; }
     g_tor.probe = tor_probe_new(&g_app.route.tor);
-    if (!g_tor.probe) { tor_link_fail(now, 30.0); return; }
+    if (!g_tor.probe) { tor_link_fail(now, TOR_RETRY); return; }
     g_tor.state = TL_PROBING;
 }
 
@@ -100,7 +109,7 @@ void tor_link_step(double now) {
                 if (r == -2) push_log("* tor: the running tor won't let chat in: %s", why);
                 else push_log("* tor: no tor is running at %s or Tor Browser's ports - start one, or let chat start its "
                               "own (:set torlaunch auto)", g_app.route.tor.control);
-                tor_link_fail(now, 30.0);
+                tor_link_fail(now, TOR_RETRY);
             } else {
                 if (r == -2) push_log("* tor: a tor is running but won't let chat in (%s) - starting chat's own", why);
                 else push_log("* tor: no tor running - starting chat's own");
@@ -119,8 +128,8 @@ void tor_link_step(double now) {
                 torproc_stop(g_tor.proc);
                 g_tor.proc = NULL;
                 // Most likely another program took a port first, so try new ones a couple of times.
-                if (++g_tor.starts < 3) { g_tor.state = TL_OFF; tor_link_start_own(now); }
-                else tor_link_fail(now, 60.0);
+                if (++g_tor.starts < OWN_STARTS) { g_tor.state = TL_OFF; tor_link_start_own(now); }
+                else tor_link_fail(now, OWN_TOR_RETRY);
                 return;
             }
             if (g_tor.state == TL_STARTING && st == TORPROC_READY) {
@@ -132,9 +141,10 @@ void tor_link_step(double now) {
                 tor_link_apply();
             }
             int b = torproc_bootstrap(g_tor.proc);
-            if (g_tor.state == TL_READY && b >= 0 && (b == 100 ? g_tor.boot_told < 100 : b >= g_tor.boot_told + 25)) {
+            if (g_tor.state == TL_READY && b >= 0
+                && (b == BOOT_DONE ? g_tor.boot_told < BOOT_DONE : b >= g_tor.boot_told + BOOT_STEP)) {
                 g_tor.boot_told = b;
-                if (b == 100) { g_tor.starts = 0; push_log("* tor: connected to the Tor network"); tor_link_connected(); }
+                if (b == BOOT_DONE) { g_tor.starts = 0; push_log("* tor: connected to the Tor network"); tor_link_connected(); }
                 else push_log("* tor: connecting to the Tor network: %d%%", b);
             }
             return;
@@ -156,11 +166,13 @@ void tor_link_line(char *out, size_t cap) {
         case TL_PROBING:  snprintf(out, cap, "tor: looking"); break;
         case TL_STARTING: snprintf(out, cap, "tor: starting"); break;
         case TL_FAILED:   snprintf(out, cap, "tor: none"); break;
-        case TL_READY:
+        case TL_READY: {
+            int b = g_tor.proc ? torproc_bootstrap(g_tor.proc) : 0;
             if (!g_tor.proc) snprintf(out, cap, "tor: running one");
-            else if (g_tor.boot_told < 100) snprintf(out, cap, "tor: own %d%%", torproc_bootstrap(g_tor.proc) < 0 ? 0 : torproc_bootstrap(g_tor.proc));
+            else if (g_tor.boot_told < BOOT_DONE) snprintf(out, cap, "tor: own %d%%", b < 0 ? 0 : b);
             else snprintf(out, cap, "tor: own");
             break;
+        }
         default: snprintf(out, cap, "tor: off"); break;
     }
 }
@@ -168,8 +180,18 @@ void tor_link_line(char *out, size_t cap) {
 // This build as reported to peers, read at startup before :update can replace the file.
 chat_build_t g_self_build;
 
-// What peers are told about this build ("v"), and the key used to check the builds they report.
-void set_build_opts(chat_opts_t *o) {
+// What every session takes from the settings: notifications, files, colour and signing identity.
+// Then what peers are told about this build ("v"), and the key used to check the builds they report.
+void app_session_opts(chat_opts_t *o) {
+    o->notify_mode = g_app.notify_mode;
+    o->notify_preview = g_app.notify_preview;
+    o->verify_optional = g_app.verify_optional;
+    o->file_cap = g_app.file_cap;
+    o->fast_files = g_app.fast_files;
+    o->has_color = 1;
+    memcpy(o->color, g_app.color, 3);
+    o->identity_source = g_app.identity_source;
+    if (g_app.identity_source != IDENT_NONE) o->identity = g_app.identity;
     o->build = g_self_build;
     copy_str(o->release_key, update_release_key(), sizeof o->release_key);
 }
@@ -183,7 +205,7 @@ session_slot_t *start_session(const char *session_name, const char *password, in
     lock_scrollbacks(s);
     copy_str(s->name, session_name, sizeof s->name);
 
-    char pw[256];
+    char pw[MAX_PASSWORD + 1];
     copy_str(pw, password, sizeof pw);
 
     s->initialising = 1;
@@ -208,16 +230,7 @@ session_slot_t *start_session(const char *session_name, const char *password, in
         copy_str(o.route.tor.control, g_tor.state == TL_READY ? g_tor.control : "", sizeof o.route.tor.control);
     }
     o.created = created;
-    o.notify_mode = g_app.notify_mode;
-    o.notify_preview = g_app.notify_preview;
-    o.verify_optional = g_app.verify_optional;
-    o.file_cap = g_app.file_cap;
-    o.fast_files = g_app.fast_files;
-    o.has_color = 1;
-    memcpy(o.color, g_app.color, 3);
-    o.identity_source = g_app.identity_source;
-    if (g_app.identity_source != IDENT_NONE) o.identity = g_app.identity;
-    set_build_opts(&o);
+    app_session_opts(&o);
 
     chat_init(&s->engine, &o, session_print, session_notify, s);
     s->engine.file_view = session_file_view;
@@ -242,7 +255,7 @@ session_slot_t *start_session(const char *session_name, const char *password, in
     if (g_app.history && history_possible()) history_start(s, 1);
     chat_set_history(&s->engine, s->hist != NULL);
 
-    char idhex[9]; hex_encode(s->engine.my_id, 4, idhex);
+    char idhex[SHORT_ID_HEX + 1]; hex_encode(s->engine.my_id, SHORT_ID_LEN, idhex);
     if (created) {
         console_note(s, "new session '%s' - share the id and password to invite others. you are %s (peer %s)",
                      s->engine.session_name, s->engine.nick, idhex);
@@ -435,12 +448,12 @@ cmd_result_t app_copyid(void *ctx, const char *arg) {
 cmd_result_t app_update(void *ctx, const char *arg) {
     (void)ctx; (void)arg;
     if (g_app.route.mode == ROUTE_TOR && g_tor.state != TL_READY) {
-        push_log("* update: Tor mode downloads through Tor, and there's no tor yet - try again once it's connected");
+        push_log(UPDATE_PREFIX "Tor mode downloads through Tor, and there's no tor yet - try again once it's connected");
         return CMD_OK;
     }
     // If an update is already running, its box is shown again.
     if (update_start(g_app.betas) == 0)
-        push_log("* update: checking GitHub for a newer release%s (v" CHAT_VERSION " here)...", g_app.betas ? " or beta" : "");
+        push_log(UPDATE_PREFIX "checking GitHub for a newer release%s (v" CHAT_VERSION " here)...", g_app.betas ? " or beta" : "");
     begin_prompt(MODE_UPDATE);
     return CMD_OK;
 }

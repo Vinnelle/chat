@@ -3,6 +3,7 @@
 #ifndef CHAT_TUI_H
 #define CHAT_TUI_H
 
+#include "common/util.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -10,7 +11,7 @@
 #define TUI_LINE_MAX 1024
 
 typedef struct {
-    char hhmm[6];
+    char hhmm[HHMM_LEN];
     char text[TUI_LINE_MAX];
     uint8_t rgb[3];
     int has_color;
@@ -63,6 +64,14 @@ typedef struct {
     tui_session_state_t state;
 } tui_session_row_t;
 
+// A peer's identity: unverified, verified, or its signature invalid. Then its verify code: nothing
+// to do, to be compared, compared, different, or to be compared since it's another key than the one
+// verified for its nick. The values are the engine's verify_state_t and chat_code_state's.
+typedef enum { TUI_VERIFY_NONE = 0, TUI_VERIFY_OK, TUI_VERIFY_BAD } tui_verify_t;
+typedef enum {
+    TUI_CODE_NONE = 0, TUI_CODE_TO_COMPARE, TUI_CODE_COMPARED, TUI_CODE_DIFFERS, TUI_CODE_KEY_CHANGED
+} tui_code_t;
+
 // Someone in the selected session. The nick is cut to fit the sidebar. The tag and the verify state
 // never are, so a long or lookalike nick can't push them out of view.
 typedef struct {
@@ -70,9 +79,8 @@ typedef struct {
     char tag[12];      // "#1a2b3c4d" when another nick looks the same, else ""
     uint8_t color[3];
     int you;
-    int verify;        // 0 unverified, 1 verified, 2 signature invalid
-    int code;          // its verify code: 0 nothing to do, 1 to be compared, 2 compared, 3 different,
-                       // 4 to be compared: another key than the one verified for its nick
+    tui_verify_t verify;
+    tui_code_t code;
     int modified;      // runs a modified client
     int history;       // keeps a history of the session
 } tui_peer_row_t;
@@ -121,7 +129,7 @@ typedef enum {
 
 typedef struct {
     tui_keytype_t type;
-    char ch[5];
+    char ch[UTF8_CHAR_MAX + 1];
     int ch_len;
 } tui_key_t;
 

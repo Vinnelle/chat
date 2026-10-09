@@ -25,14 +25,18 @@
 #define OLD_DECOY_VERIFIED "shadow-verified"
 #define OLD_DECOY_CODE "shadow-authenticator"
 #define TRIES_MAGIC "CT1"   // then one byte each: the limit, the count so far
+#define TRIES_LIMIT_AT (sizeof TRIES_MAGIC - 1)
+#define TRIES_COUNT_AT (TRIES_LIMIT_AT + 1)
+#define TRIES_LEN (TRIES_COUNT_AT + 1)
 // The spare: 1, whether the decoy asks for a code, and the code's secret, sealed under the decoy's
 // lock. Without a decoy it's chaff: random bytes with the same size and header.
-#define SPARE_PLAIN_LEN (2 + TOTP_SECRET_LEN)
+#define SPARE_HEAD 2
+#define SPARE_PLAIN_LEN (SPARE_HEAD + TOTP_SECRET_LEN)
 #define SPARE_FILE_LEN (SPARE_PLAIN_LEN + PASS_SEAL_OVERHEAD)
 // The spare's lock, sealed with the save's other files: 1, whether there's a decoy, then the decoy
 // lock's header and the key its passphrase made (or random bytes), so the decoy can be sealed again
 // when the save's factors change.
-#define SPARE_LOCK_PLAIN_LEN (2 + PASS_HEADER_LEN + 32)
+#define SPARE_LOCK_PLAIN_LEN (SPARE_HEAD + PASS_HEADER_LEN + PASS_KEY_LEN)
 #define SPARE_LOCK_FILE_LEN (SPARE_LOCK_PLAIN_LEN + PASS_SEAL_OVERHEAD)
 // A session's history: this, then its id in hex. As many as the folder has, up to HISTORIES_MAX.
 #define HISTORY_PREFIX "history-"
@@ -45,9 +49,14 @@
 #define CODE_PLAIN_LEN (1 + TOTP_SECRET_LEN)
 #define CODE_FILE_MAX (CODE_PLAIN_LEN + PASS_SEAL_OVERHEAD)
 #define KEYS_MAX 4
+// The securitykey file: this, the salt, how many keys, then for each whether it needs its PIN, its
+// credential's length (2 bytes, big-endian), the credential, and the lock's secret wrapped by it.
 #define KEY_FILE_MAGIC "CSK1"
-#define KEY_FILE_HEAD (4 + SECKEY_SALT_LEN + 1)
-#define KEY_ENTRY_MAX (3 + SECKEY_CRED_MAX + WRAP_LEN)
+#define KEY_SALT_AT (sizeof KEY_FILE_MAGIC - 1)
+#define KEY_COUNT_AT (KEY_SALT_AT + SECKEY_SALT_LEN)
+#define KEY_FILE_HEAD (KEY_COUNT_AT + 1)
+#define KEY_ENTRY_HEAD 3
+#define KEY_ENTRY_MAX (KEY_ENTRY_HEAD + SECKEY_CRED_MAX + WRAP_LEN)
 #define SECKEY_FILE_MAX (KEY_FILE_HEAD + KEYS_MAX * KEY_ENTRY_MAX)
 
 #define F_DEVICE INSTALL_FACTOR_DEVICE
@@ -193,7 +202,7 @@ void install_use(const char *name) {
 static int save_dir(const char *name, char *out, size_t cap, int create) {
     name = stored_name(name);
     if (name[0] && install_name_ok(name) != 0) return -1;
-    char dir[900];
+    char dir[INSTALL_TOP_MAX];
     if (platform_config_dir(dir, sizeof dir, create) != 0) return -1;
     if (!name[0]) { copy_str(out, dir, cap); return strlen(dir) < cap ? 0 : -1; }
     int n = snprintf(out, cap, "%s/" SAVES_DIR, dir);
@@ -204,14 +213,14 @@ static int save_dir(const char *name, char *out, size_t cap, int create) {
 }
 
 static int save_path(const char *name, const char *file, char *out, size_t cap, int create) {
-    char dir[960];
+    char dir[INSTALL_DIR_MAX];
     if (save_dir(name, dir, sizeof dir, create) != 0) return -1;
     int n = snprintf(out, cap, "%s/%s", dir, file);
     return n > 0 && (size_t)n < cap ? 0 : -1;
 }
 
 int install_where(const char *name, char *out, size_t cap) {
-    char dir[960];
+    char dir[INSTALL_DIR_MAX];
     if (save_dir(name, dir, sizeof dir, 0) != 0) return -1;
 #ifndef _WIN32
     const char *home = platform_home_dir();
@@ -231,19 +240,19 @@ static int path_exists(const char *path) {
 }
 
 static int has(const char *name, const char *file) {
-    char path[1000];
+    char path[INSTALL_PATH_MAX];
     return save_path(name, file, path, sizeof path, 0) == 0 && path_exists(path);
 }
 
 static void remove_file(const char *name, const char *file) {
-    char path[1000];
+    char path[INSTALL_PATH_MAX];
     if (save_path(name, file, path, sizeof path, 0) == 0) platform_remove(path);
 }
 
 int install_has_settings(const char *name) { return has(name, SETTINGS_NAME); }
 int install_has_key(const char *name) { return has(name, KEY_NAME); }
 
-static int is_history(const char *file) { return strncmp(file, HISTORY_PREFIX, sizeof HISTORY_PREFIX - 1) == 0; }
+static int is_history(const char *file) { return starts_with(file, HISTORY_PREFIX); }
 
 static size_t file_max(const char *file) {
     return strcmp(file, SETTINGS_NAME) == 0 ? SETTINGS_FILE_MAX : strcmp(file, KEY_NAME) == 0 ? KEY_FILE_MAX
@@ -261,14 +270,14 @@ static void add_history(void *ctx, const char *name, int is_dir) {
 // The histories in a save's folder.
 static history_list_t *list_histories(const char *name) {
     static history_list_t l;
-    char dir[960];
+    char dir[INSTALL_DIR_MAX];
     l.n = 0;
     if (save_dir(name, dir, sizeof dir, 0) == 0) platform_list_dir(dir, add_history, &l);
     return &l;
 }
 
 static unsigned file_needs(const char *name, const char *file) {
-    char path[1000];
+    char path[INSTALL_PATH_MAX];
     uint8_t head[8];
     if (save_path(name, file, path, sizeof path, 0) != 0 || platform_read_file(path, head, sizeof head) != (long)sizeof head)
         return 0;
@@ -298,7 +307,7 @@ static int fill_save(install_save_t *s, const char *name) {
     s->key = install_has_key(name);
     if (!s->settings && !s->key) return -1;
     s->factors = install_factors(name);
-    char path[1000];
+    char path[INSTALL_PATH_MAX];
     file_info_t fi;
     if (save_path(name, s->settings ? SETTINGS_NAME : KEY_NAME, path, sizeof path, 0) == 0
         && platform_file_info(path, &fi) == 0)
@@ -319,7 +328,7 @@ static int by_name(const void *a, const void *b) { return strcmp(a, b); }
 int install_list(install_save_t *out, int max) {
     int n = 0;
     if (n < max && fill_save(&out[n], "") == 0) n++;
-    char dir[900], saves[960];
+    char dir[INSTALL_TOP_MAX], saves[INSTALL_DIR_MAX];
     if (platform_config_dir(dir, sizeof dir, 0) != 0) return n;
     snprintf(saves, sizeof saves, "%s/" SAVES_DIR, dir);
     static name_list_t l;
@@ -333,7 +342,7 @@ int install_list(install_save_t *out, int max) {
 
 // buf holds max + 1, so a file too long to have been written by chat can be detected.
 static int read_sealed(const char *save, const char *file, uint8_t *buf, size_t max, size_t *len) {
-    char path[1000];
+    char path[INSTALL_PATH_MAX];
     if (save_path(save, file, path, sizeof path, 0) != 0) return INSTALL_NO_FILE;
     long n = platform_read_file(path, buf, max + 1);
     if (n < 0) return INSTALL_NO_FILE;
@@ -373,7 +382,7 @@ static void hold(const char *name, const held_t *h) {
 }
 
 static long read_device(const char *name, uint8_t buf[DEVICE_SEALED_MAX + 1]) {
-    char path[1000];
+    char path[INSTALL_PATH_MAX];
     if (save_path(name, DEVICE_NAME, path, sizeof path, 0) != 0) return -1;
     long n = platform_read_file(path, buf, DEVICE_SEALED_MAX + 1);
     return n > 0 && n <= DEVICE_SEALED_MAX ? n : -1;
@@ -394,7 +403,7 @@ static int device_unseal(const char *name, uint8_t secret[DEVICE_SECRET_LEN], de
 // Destroys a save's device file, and what the device keeps for it.
 static void forget_device(const char *name) {
     static uint8_t sealed[DEVICE_SEALED_MAX + 1];
-    char path[1000];
+    char path[INSTALL_PATH_MAX];
     if (save_path(name, DEVICE_NAME, path, sizeof path, 0) != 0) return;
     long n = read_device(name, sealed);
     if (n > 0) platform_device_forget(sealed, (size_t)n);
@@ -405,7 +414,7 @@ static void forget_device(const char *name) {
 // What the device kept for the one it replaces is destroyed. 0, or -1 with g_why set.
 static int device_seal(const char *name, const uint8_t secret[DEVICE_SECRET_LEN], device_kind_t *kind) {
     static uint8_t sealed[DEVICE_SEALED_MAX], old[DEVICE_SEALED_MAX + 1], back[DEVICE_SEALED_MAX + 1];
-    char path[1000];
+    char path[INSTALL_PATH_MAX];
     if (save_path(name, DEVICE_NAME, path, sizeof path, 1) != 0) {
         copy_str(g_why, "there's nowhere to write its device file", sizeof g_why);
         return -1;
@@ -426,25 +435,26 @@ static int device_seal(const char *name, const uint8_t secret[DEVICE_SECRET_LEN]
 
 // ---- the securitykey file ----
 
+// The file's magic and salt, then the entry's PIN flag and credential.
 static size_t entry_ad(const uint8_t salt[SECKEY_SALT_LEN], const key_entry_t *e, uint8_t *ad) {
-    memcpy(ad, KEY_FILE_MAGIC, 4);
-    memcpy(ad + 4, salt, SECKEY_SALT_LEN);
-    ad[4 + SECKEY_SALT_LEN] = (uint8_t)e->uv;
-    memcpy(ad + 5 + SECKEY_SALT_LEN, e->cred, e->cred_len);
-    return 5 + SECKEY_SALT_LEN + e->cred_len;
+    memcpy(ad, KEY_FILE_MAGIC, KEY_SALT_AT);
+    memcpy(ad + KEY_SALT_AT, salt, SECKEY_SALT_LEN);
+    size_t n = KEY_COUNT_AT;
+    ad[n++] = (uint8_t)e->uv;
+    memcpy(ad + n, e->cred, e->cred_len);
+    return n + e->cred_len;
 }
 
 static size_t key_file_pack(const key_file_t *f, uint8_t *out) {
-    size_t n = 0;
-    memcpy(out, KEY_FILE_MAGIC, 4);
-    memcpy(out + 4, f->salt, SECKEY_SALT_LEN);
-    out[4 + SECKEY_SALT_LEN] = (uint8_t)f->n;
-    n = KEY_FILE_HEAD;
+    memcpy(out, KEY_FILE_MAGIC, KEY_SALT_AT);
+    memcpy(out + KEY_SALT_AT, f->salt, SECKEY_SALT_LEN);
+    out[KEY_COUNT_AT] = (uint8_t)f->n;
+    size_t n = KEY_FILE_HEAD;
     for (int i = 0; i < f->n; i++) {
         const key_entry_t *e = &f->e[i];
-        out[n++] = (uint8_t)e->uv;
-        out[n++] = (uint8_t)(e->cred_len >> 8);
-        out[n++] = (uint8_t)e->cred_len;
+        out[n] = (uint8_t)e->uv;
+        store_be16(out + n + 1, (uint16_t)e->cred_len);
+        n += KEY_ENTRY_HEAD;
         memcpy(out + n, e->cred, e->cred_len);
         n += e->cred_len;
         memcpy(out + n, e->wrapped, WRAP_LEN);
@@ -454,17 +464,17 @@ static size_t key_file_pack(const key_file_t *f, uint8_t *out) {
 }
 
 static int key_file_parse(const uint8_t *in, size_t len, key_file_t *f) {
-    if (len < KEY_FILE_HEAD || memcmp(in, KEY_FILE_MAGIC, 4) != 0) return -1;
-    memcpy(f->salt, in + 4, SECKEY_SALT_LEN);
-    f->n = in[4 + SECKEY_SALT_LEN];
+    if (len < KEY_FILE_HEAD || memcmp(in, KEY_FILE_MAGIC, KEY_SALT_AT) != 0) return -1;
+    memcpy(f->salt, in + KEY_SALT_AT, SECKEY_SALT_LEN);
+    f->n = in[KEY_COUNT_AT];
     if (f->n < 1 || f->n > KEYS_MAX) return -1;
     size_t p = KEY_FILE_HEAD;
     for (int i = 0; i < f->n; i++) {
         key_entry_t *e = &f->e[i];
-        if (len - p < 3) return -1;
+        if (len - p < KEY_ENTRY_HEAD) return -1;
         e->uv = in[p];
-        e->cred_len = (size_t)in[p + 1] << 8 | in[p + 2];
-        p += 3;
+        e->cred_len = load_be16(in + p + 1);
+        p += KEY_ENTRY_HEAD;
         if (e->uv > 1 || e->cred_len == 0 || e->cred_len > SECKEY_CRED_MAX || len - p < e->cred_len + WRAP_LEN) return -1;
         memcpy(e->cred, in + p, e->cred_len);
         p += e->cred_len;
@@ -476,7 +486,7 @@ static int key_file_parse(const uint8_t *in, size_t len, key_file_t *f) {
 
 static int read_key_file(const char *name, key_file_t *f) {
     static uint8_t buf[SECKEY_FILE_MAX + 1];
-    char path[1000];
+    char path[INSTALL_PATH_MAX];
     if (save_path(name, SECKEY_NAME, path, sizeof path, 0) != 0) return -1;
     long n = platform_read_file(path, buf, sizeof buf);
     return n > 0 && (size_t)n <= SECKEY_FILE_MAX ? key_file_parse(buf, (size_t)n, f) : -1;
@@ -485,7 +495,7 @@ static int read_key_file(const char *name, key_file_t *f) {
 // Read back to be sure, since the save can't be opened without it.
 static int write_key_file(const char *name, const key_file_t *f) {
     static uint8_t buf[SECKEY_FILE_MAX], back[SECKEY_FILE_MAX + 1];
-    char path[1000];
+    char path[INSTALL_PATH_MAX];
     if (save_path(name, SECKEY_NAME, path, sizeof path, 1) != 0) return -1;
     size_t n = key_file_pack(f, buf);
     if (platform_write_private(path, buf, n) != 0) return -1;
@@ -517,7 +527,7 @@ static int unseal(const uint8_t *sealed, size_t n, void *plain, size_t cap, size
 }
 
 static int write_sealed_to(const char *name, const pass_lock_t *lk, const char *file, const void *plain, size_t len) {
-    char path[1000];
+    char path[INSTALL_PATH_MAX];
     static uint8_t sealed[HISTORY_FILE_MAX];
     size_t n;
     if (save_path(name, file, path, sizeof path, 1) != 0) return -1;
@@ -559,22 +569,22 @@ static int set_lock(unsigned target);
 // ---- the tries file, and the shadow passphrase ----
 
 static int read_tries(const char *name, unsigned *limit, unsigned *count) {
-    char path[1000];
-    uint8_t b[5];
+    char path[INSTALL_PATH_MAX];
+    uint8_t b[TRIES_LEN];
     if (save_path(name, TRIES_NAME, path, sizeof path, 0) != 0) return -1;
-    if (platform_read_file(path, b, sizeof b) != (long)sizeof b || memcmp(b, TRIES_MAGIC, 3) != 0) return -1;
-    *limit = b[3];
-    *count = b[4];
+    if (platform_read_file(path, b, sizeof b) != (long)sizeof b || memcmp(b, TRIES_MAGIC, TRIES_LIMIT_AT) != 0) return -1;
+    *limit = b[TRIES_LIMIT_AT];
+    *count = b[TRIES_COUNT_AT];
     return 0;
 }
 
 static int write_tries(const char *name, unsigned limit, unsigned count) {
-    char path[1000];
-    uint8_t b[5];
+    char path[INSTALL_PATH_MAX];
+    uint8_t b[TRIES_LEN];
     if (save_path(name, TRIES_NAME, path, sizeof path, 1) != 0) return -1;
-    memcpy(b, TRIES_MAGIC, 3);
-    b[3] = (uint8_t)limit;
-    b[4] = (uint8_t)count;
+    memcpy(b, TRIES_MAGIC, TRIES_LIMIT_AT);
+    b[TRIES_LIMIT_AT] = (uint8_t)limit;
+    b[TRIES_COUNT_AT] = (uint8_t)count;
     return platform_write_private(path, b, sizeof b);
 }
 
@@ -590,7 +600,7 @@ int install_tries_left(const char *name) {
 }
 
 int install_arm_destroy(const char *name, unsigned limit) {
-    if (limit > 255) limit = 255;
+    if (limit > UINT8_MAX) limit = UINT8_MAX;
     if (limit == 0) { remove_file(name, TRIES_NAME); return 0; }
     return write_tries(name, limit, 0);
 }
@@ -608,10 +618,10 @@ static int write_spare_lock(const char *name, const pass_lock_t *lk, const pass_
     plain[0] = 1;
     plain[1] = decoy != NULL;
     if (decoy) {
-        memcpy(plain + 2, decoy->header, PASS_HEADER_LEN);
-        memcpy(plain + 2 + PASS_HEADER_LEN, decoy->base, sizeof decoy->base);
+        memcpy(plain + SPARE_HEAD, decoy->header, PASS_HEADER_LEN);
+        memcpy(plain + SPARE_HEAD + PASS_HEADER_LEN, decoy->base, sizeof decoy->base);
     } else {
-        gen_random(plain + 2, sizeof plain - 2);
+        gen_random(plain + SPARE_HEAD, sizeof plain - SPARE_HEAD);
     }
     int rc = write_sealed_to(name, lk, SPARE_LOCK_NAME, plain, sizeof plain);
     crypto_wipe(plain, sizeof plain);
@@ -629,8 +639,8 @@ static int read_spare_lock(const char *name, const held_t *h, pass_lock_t *decoy
         out = plain[1];
         memset(decoy, 0, sizeof *decoy);
         if (out) {
-            memcpy(decoy->header, plain + 2, PASS_HEADER_LEN);
-            memcpy(decoy->base, plain + 2 + PASS_HEADER_LEN, sizeof decoy->base);
+            memcpy(decoy->header, plain + SPARE_HEAD, PASS_HEADER_LEN);
+            memcpy(decoy->base, plain + SPARE_HEAD + PASS_HEADER_LEN, sizeof decoy->base);
         }
     }
     crypto_wipe(plain, sizeof plain);
@@ -639,14 +649,14 @@ static int read_spare_lock(const char *name, const held_t *h, pass_lock_t *decoy
 
 static int write_chaff(const char *name, unsigned needs) {
     uint8_t buf[SPARE_FILE_LEN];
-    char path[1000];
+    char path[INSTALL_PATH_MAX];
     pass_chaff(needs, SPARE_PLAIN_LEN, buf);
     return save_path(name, SPARE_NAME, path, sizeof path, 1) == 0 ? platform_write_private(path, buf, sizeof buf) : -1;
 }
 
 static int write_decoy(const char *name, const pass_lock_t *sl, const uint8_t *code) {
     uint8_t plain[SPARE_PLAIN_LEN] = { 1, code != NULL };
-    if (code) memcpy(plain + 2, code, TOTP_SECRET_LEN);
+    if (code) memcpy(plain + SPARE_HEAD, code, TOTP_SECRET_LEN);
     int rc = write_sealed_to(name, sl, SPARE_NAME, plain, sizeof plain);
     crypto_wipe(plain, sizeof plain);
     return rc;
@@ -674,7 +684,7 @@ static int spare_fit(const char *name, const held_t *h, unsigned needs) {
 
 static void rewrite(const char *name, const char *file) {
     static uint8_t buf[HISTORY_FILE_MAX + 1];
-    char path[1000];
+    char path[INSTALL_PATH_MAX];
     if (save_path(name, file, path, sizeof path, 0) != 0) return;
     long n = platform_read_file(path, buf, sizeof buf);
     if (n > 0 && (size_t)n <= HISTORY_FILE_MAX) platform_write_private(path, buf, (size_t)n);
@@ -697,7 +707,7 @@ static void promote(const char *name, const pass_lock_t *sl, const uint8_t *spar
     if (old) {
         static const char *const to[] = { SETTINGS_NAME, KEY_NAME, VERIFIED_NAME, CODE_NAME };
         static uint8_t buf[VERIFIED_FILE_MAX + 1];
-        char path[1000];
+        char path[INSTALL_PATH_MAX];
         for (size_t i = 0; i < N_OLD_DECOY; i++) {
             long n = save_path(name, OLD_DECOY[i], path, sizeof path, 0) == 0 ? platform_read_file(path, buf, sizeof buf) : -1;
             if (n > 0 && (size_t)n <= VERIFIED_FILE_MAX && save_path(name, to[i], path, sizeof path, 1) == 0)
@@ -709,7 +719,7 @@ static void promote(const char *name, const pass_lock_t *sl, const uint8_t *spar
         write_sealed_to(name, sl, SETTINGS_NAME, "", 0);
         remove_file(name, KEY_NAME);
         write_sealed_to(name, sl, VERIFIED_NAME, "", 0);
-        if (spare_plain[1]) write_code_to(name, sl, spare_plain + 2);
+        if (spare_plain[1]) write_code_to(name, sl, spare_plain + SPARE_HEAD);
         else remove_file(name, CODE_NAME);
     }
     history_list_t *hl = list_histories(name);
@@ -933,7 +943,8 @@ int install_check_code(const char *code) {
     if (parse_code(code, &v) != 0) return PASS_FORMAT;
     if (!code_matches(g_code, v)) {
         // Without the pause, a script could try every code through chat in minutes.
-        platform_sleep_ms(1500);
+        enum { WRONG_CODE_PAUSE_MS = 1500 };
+        platform_sleep_ms(WRONG_CODE_PAUSE_MS);
         return PASS_WRONG;
     }
     hold(g_pend_name, &g_pend);
@@ -1442,7 +1453,7 @@ static int is_bare(const char *dir) {
 }
 
 int install_remove(const char *name) {
-    char dir[960], path[1000];
+    char dir[INSTALL_DIR_MAX], path[INSTALL_PATH_MAX];
     name = stored_name(name);
     if (save_dir(name, dir, sizeof dir, 0) != 0) return -1;
     int left = 0;
@@ -1467,7 +1478,7 @@ int install_remove(const char *name) {
     // Another program could have a folder called chat too.
     if (is_empty(dir)) platform_remove_tree(dir);
     if (name[0]) {
-        char top[900], saves[960];
+        char top[INSTALL_TOP_MAX], saves[INSTALL_DIR_MAX];
         if (platform_config_dir(top, sizeof top, 0) != 0) return 0;
         snprintf(saves, sizeof saves, "%s/" SAVES_DIR, top);
         if (is_bare(saves)) platform_remove_tree(saves);

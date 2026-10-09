@@ -38,6 +38,8 @@
 #endif
 
 #define MAX_SESSIONS 12
+// A new session's id: this many characters from random_session_id.
+#define SESSION_ID_LEN 10
 #define MAX_PEER_ARGS 16
 
 #define PEER_ARG_LEN 256
@@ -51,6 +53,12 @@ typedef struct {
     tui_image_t ti;
     char why[96];
 } pic_t;
+
+// Frees a thumbnail, wiping it first since it's a picture from the conversation.
+static inline void thumb_free(image_thumb_t *t) {
+    if (t->rgb) crypto_wipe(t->rgb, (size_t)t->w * (size_t)t->h * 3);
+    image_thumb_free(t);
+}
 
 typedef struct {
     chat_t engine;
@@ -129,6 +137,9 @@ typedef enum { KEY_MADE, KEY_DERIVED, KEY_FILE, KEY_PASTED } key_origin_t;
 
 #define MAX_DIR_ITEMS 512
 #define KEY_PATH_MAX 1024
+// A folder being browsed, or where something is saved, as the app keeps and shows it.
+#define APP_PATH_MAX 900
+#define TOR_PATH_MAX 512
 
 typedef struct {
     char name[200];   // a folder's ends in '/'
@@ -136,7 +147,7 @@ typedef struct {
 } dir_entry_t;
 
 typedef struct {
-    char path[900];
+    char path[APP_PATH_MAX];
     dir_entry_t items[MAX_DIR_ITEMS];
     int n_items;
     int selected;
@@ -170,7 +181,7 @@ typedef struct {
     char key_path[KEY_PATH_MAX];   // a key from a file (KEY_FILE): the file's full path, or "" if it isn't known
     int path_from_browser;         // the path field was opened from the browser, so Esc goes back there
     int tor_launch;
-    char tor_path[512];
+    char tor_path[TOR_PATH_MAX];
     uint64_t file_cap;   // 0: the default
     int fast_files;
     int betas;
@@ -198,7 +209,7 @@ typedef struct {
     // The open save deletes itself after this many wrong passphrases (0 off); with none open, what
     // the next save :install makes starts with. Mirrored to the save's unsealed tries file.
     int destroy_limit;
-    char shadow_pass[256];   // the shadow passphrase while its box asks for it again to confirm
+    char shadow_pass[INSTALL_PASS_MAX];   // the shadow passphrase while its box asks for it again to confirm
     // The FACTOR box turns factor (INSTALL_FACTOR_) on (factor_want) or off, from the settings page or
     // the chat (factor_back); factor_new: it's a step of :install making a new save. key_purpose: what
     // the security key is touched for, and key_pin what to send it if it asks for its PIN.
@@ -225,7 +236,7 @@ typedef struct {
     int saved_key_known;
     uint8_t saved_key_pub[ID_SIGN_PUB_LEN];
     char saved_key_path[KEY_PATH_MAX];   // what :install saved is the path to a key file: that path, else ""
-    char install_pass[256];
+    char install_pass[INSTALL_PASS_MAX];
     int unlock_at_start;
     // The saves :install made, to pick from at start when there's more than one, and the save
     // :install or :uninstall acts on while its box is open.
@@ -249,8 +260,8 @@ typedef struct {
     tui_input_t input;
     tui_input_t saved_input;
     browser_t browser;
-    char send_dir[900];   // the folder :send's browser last offered a file from
-    char save_dir[900];   // the folder :saveto's browser last saved a file in
+    char send_dir[APP_PATH_MAX];   // the folder :send's browser last offered a file from
+    char save_dir[APP_PATH_MAX];   // the folder :saveto's browser last saved a file in
     int save_num, save_anyway;   // what :saveto's browser saves
     app_mode_t browse_back;      // where :send's and :saveto's browsers go back to
     // The files page's selected file, by its number. A y/n box over it or the picture asks file_ask
@@ -262,7 +273,7 @@ typedef struct {
     char paste_status[80];
 
     char pending_auto_session[MAX_SESSION_NAME + 1];
-    char pending_auto_password[256];
+    char pending_auto_password[MAX_PASSWORD + 1];
     uint16_t pending_auto_port;
     // As given. A name in them is only looked up once the startup settings page is done.
     char pending_auto_peer_args[MAX_PEER_ARGS][PEER_ARG_LEN];
@@ -331,7 +342,7 @@ typedef struct {
     const char *help;
 } setting_def_t;
 
-#define N_SETTINGS ((int)(sizeof SETTINGS / sizeof SETTINGS[0]))
+#define N_SETTINGS ((int)COUNT_OF(SETTINGS))
 
 #define ROW_TEXT_MAX (NOSTR_MAX_RELAYS * NOSTR_URL_MAX)
 
@@ -411,7 +422,7 @@ void tor_link_ensure(double now);
 void tor_link_step(double now);
 void tor_link_stop(void);
 void tor_link_line(char *out, size_t cap);
-void set_build_opts(chat_opts_t *o);
+void app_session_opts(chat_opts_t *o);
 session_slot_t *start_session(const char *session_name, const char *password, int created, uint16_t port,
                               const addr_t *peers, int n_peers);
 int pgp_key_made_here(void);

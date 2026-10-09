@@ -141,6 +141,16 @@ static const int DESTROY_VALS[] = { 0, 3, 5, 10 };
 
 setting_id_t g_edit_id;
 
+static uint64_t file_cap(void) { return g_app.file_cap ? g_app.file_cap : FILE_CAP_DEFAULT; }
+
+// The colour's place in the palette, or -1 if it isn't one of its colours.
+static int palette_index(const uint8_t rgb[3]) {
+    int at = -1;
+    for (int i = 0; i < COLOR_PALETTE_N; i++)
+        if (COLOR_PALETTE[i].r == rgb[0] && COLOR_PALETTE[i].g == rgb[1] && COLOR_PALETTE[i].b == rgb[2]) at = i;
+    return at;
+}
+
 int settings_index(setting_id_t id) {
     for (int i = 0; i < N_SETTINGS; i++) if (SETTINGS[i].id == id) return i;
     return 0;
@@ -259,23 +269,20 @@ void setting_value(setting_id_t id, char *out, size_t cap) {
             break;
         }
         case SET_TOR_PATH: {
-            char found[1024];
+            char found[TOR_PATH_MAX];
             if (g_app.tor_path[0]) snprintf(out, cap, "%s", g_app.tor_path);
             else if (platform_find_program("tor", NULL, found, sizeof found) == 0) snprintf(out, cap, "found %s", found);
             else snprintf(out, cap, "not installed");
             break;
         }
-        case SET_FILE_LIMIT:   file_format_size(g_app.file_cap ? g_app.file_cap : FILE_CAP_DEFAULT, out, cap); break;
+        case SET_FILE_LIMIT:   file_format_size(file_cap(), out, cap); break;
         case SET_TOR_SOCKS:    snprintf(out, cap, "%s", r->tor.socks); break;
         case SET_TOR_CONTROL:  snprintf(out, cap, "%s", r->tor.control); break;
         case SET_TOR_PASSWORD: snprintf(out, cap, "%s", r->tor.password[0] ? "set" : "not set (cookie or no login)"); break;
         case SET_NICK:         snprintf(out, cap, "%s", g_app.nick); break;
         case SET_COLOUR: {
-            const char *name = NULL;
-            for (int i = 0; i < COLOR_PALETTE_N; i++)
-                if (COLOR_PALETTE[i].r == g_app.color[0] && COLOR_PALETTE[i].g == g_app.color[1] && COLOR_PALETTE[i].b == g_app.color[2])
-                    name = COLOR_PALETTE[i].name;
-            if (name) snprintf(out, cap, "%s", name);
+            int at = palette_index(g_app.color);
+            if (at >= 0) snprintf(out, cap, "%s", COLOR_PALETTE[at].name);
             else snprintf(out, cap, "#%02x%02x%02x", g_app.color[0], g_app.color[1], g_app.color[2]);
             break;
         }
@@ -333,13 +340,7 @@ int setting_text(setting_id_t id, char *out, size_t cap) {
         }
         case SET_PORT:     snprintf(out, cap, "%u", (unsigned)g_app.default_port); break;
         case SET_TOR_PATH: copy_str(out, g_app.tor_path, cap); break;
-        case SET_FILE_LIMIT: {
-            uint64_t v = g_app.file_cap ? g_app.file_cap : FILE_CAP_DEFAULT;
-            const char *unit = v % (1024u * 1024 * 1024) == 0 ? "G" : v % (1024 * 1024) == 0 ? "M" : v % 1024 == 0 ? "K" : "";
-            uint64_t per = unit[0] == 'G' ? 1024u * 1024 * 1024 : unit[0] == 'M' ? 1024 * 1024 : unit[0] == 'K' ? 1024 : 1;
-            snprintf(out, cap, "%llu%s", (unsigned long long)(v / per), unit);
-            break;
-        }
+        case SET_FILE_LIMIT: file_format_size_exact(file_cap(), out, cap); break;
         default: setting_value(id, out, cap); break;
     }
     return 1;
@@ -438,17 +439,17 @@ void keep_settings_saved(void) {
         changed = 1;
     }
     size_t n = strlen(g_app.message);
-    if (held && n > 0) snprintf(g_app.message + n, sizeof g_app.message - n, " \xc2\xb7 not saved (autosave is off)");
+    if (held && n > 0) snprintf(g_app.message + n, sizeof g_app.message - n, DOT_SEP "not saved (autosave is off)");
     if (!changed) return;
     static char text[INSTALL_SETTINGS_MAX];
     if (settings_text(text, sizeof text) != 0 || install_write_settings(text) != 0) {
-        char where[900] = "";
+        char where[APP_PATH_MAX] = "";
         install_where(install_current(), where, sizeof where);
         note("couldn't save that in %s/settings - it lasts until chat exits", where);
         return;
     }
     n = strlen(g_app.message);
-    if (n > 0 && !held) snprintf(g_app.message + n, sizeof g_app.message - n, " \xc2\xb7 saved");
+    if (n > 0 && !held) snprintf(g_app.message + n, sizeof g_app.message - n, DOT_SEP "saved");
 }
 
 // Pushes the routing settings to the open sessions, where the toggles take effect immediately. On
@@ -599,9 +600,7 @@ void setting_choose(setting_id_t id, int i) {
 // h/l on a row: the next or previous value, wrapping around. The colour steps through the palette.
 void setting_step(setting_id_t id, int dir) {
     if (id == SET_COLOUR) {
-        int cur = -1;
-        for (int i = 0; i < COLOR_PALETTE_N; i++)
-            if (COLOR_PALETTE[i].r == g_app.color[0] && COLOR_PALETTE[i].g == g_app.color[1] && COLOR_PALETTE[i].b == g_app.color[2]) cur = i;
+        int cur = palette_index(g_app.color);
         int next = cur < 0 ? 0 : (cur + (dir < 0 ? COLOR_PALETTE_N - 1 : 1)) % COLOR_PALETTE_N;
         g_app.color[0] = COLOR_PALETTE[next].r; g_app.color[1] = COLOR_PALETTE[next].g; g_app.color[2] = COLOR_PALETTE[next].b;
         set_colour_all();
@@ -643,7 +642,7 @@ int valid_host_port(const char *s) {
     long port = strtol(colon + 1, NULL, 10);
     for (const char *p = s; p < colon; p++)
         if (!isalnum((unsigned char)*p) && !strchr(".-[]:", *p)) return 0;
-    return port > 0 && port <= 65535;
+    return port > 0 && port <= UINT16_MAX;
 }
 
 // Sets a text row from what was typed for it, on the page or after :set NAME.
@@ -672,7 +671,7 @@ void setting_apply_text(setting_id_t id, const char *typed) {
             routing_changed(id);
             return;
         case SET_TOR_PATH: {
-            char found[1024];
+            char found[TOR_PATH_MAX];
             if (text[0] && platform_find_program("tor", text, found, sizeof found) != 0) {
                 note("can't use %.100s - it has to be a full path to a program only root or you can change", text);
                 return;
@@ -714,7 +713,7 @@ void setting_apply_text(setting_id_t id, const char *typed) {
         case SET_PORT: {
             char *end;
             long port = strtol(text, &end, 10);
-            if (!text[0] || *end || port < 0 || port > 65535) { note("not a port: %.20s (0-65535, 0 picks a free one)", text); return; }
+            if (!text[0] || *end || port < 0 || port > UINT16_MAX) { note("not a port: %.20s (0-65535, 0 picks a free one)", text); return; }
             g_app.default_port = (uint16_t)port;
             note("UDP port for new sessions: %ld%s", port, port ? "" : " (a free one)");
             return;
@@ -853,7 +852,7 @@ const char *settings_hint(void) {
     const setting_def_t *d = g_app.settings_sel < N_SETTINGS ? &SETTINGS[g_app.settings_sel] : NULL;
     const char *act;
     if (!d) act = g_app.onboarding ? "enter start" : "enter done";
-    else if (d->id == SET_COLOUR) act = "h/l step \xc2\xb7 enter type one";
+    else if (d->id == SET_COLOUR) act = "h/l step" DOT_SEP "enter type one";
     else if (d->kind == K_TEXT || d->kind == K_SECRET) act = "enter edit";
     else if (d->id == SET_SIGN) act = "enter choose";
     else if (d->id == SET_SHADOW) act = "enter set";
@@ -861,8 +860,8 @@ const char *settings_hint(void) {
     else if (row_greyed(d->id)) act = NULL;
     else act = "h/l change";
     static char hint[160];
-    snprintf(hint, sizeof hint, "%s%sj/k move \xc2\xb7 tab/1-%d section \xc2\xb7 esc %s", act ? act : "",
-             act ? " \xc2\xb7 " : "", settings_n_sections(), g_app.onboarding ? "start" : "done");
+    snprintf(hint, sizeof hint, "%s%sj/k move" DOT_SEP "tab/1-%d section" DOT_SEP "esc %s", act ? act : "",
+             act ? DOT_SEP : "", settings_n_sections(), g_app.onboarding ? "start" : "done");
     return hint;
 }
 

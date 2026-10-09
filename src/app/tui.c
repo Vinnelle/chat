@@ -33,26 +33,27 @@
 #define G_CROSS   "\xe2\x9c\x97"   // ✗
 #define G_DIAMOND "\xe2\x97\x86"   // ◆
 #define G_ELLIPSIS "\xe2\x80\xa6"  // …
-#define G_MID     "\xc2\xb7"       // ·
 #define G_LSAQ    "\xe2\x80\xb9"   // ‹
 #define G_RSAQ    "\xe2\x80\xba"   // ›
 #define G_DOWN    "\xe2\x86\x93"   // ↓
 #define G_BLOCK   "\xe2\x96\x88"   // █
+#define G_UPPER   "\xe2\x96\x80"   // ▀
 #define G_BULLET  "\xe2\x80\xa2"   // •
+#define G_WBULLET "\xe2\x97\xa6"   // ◦
 
 void tui_scrollback_push(tui_scrollback_t *sb, const char *hhmm, const char *text, const uint8_t *rgb,
                          int mention, int color_len) {
     tui_line_t *l = &sb->lines[sb->head];
-    memcpy(l->hhmm, hhmm, 6);
+    memcpy(l->hhmm, hhmm, HHMM_LEN);
     size_t n = strlen(text);
     if (n > TUI_LINE_MAX - 1) {
         // Cut before a character, never inside one.
         n = TUI_LINE_MAX - 1;
-        while (n > 0 && ((unsigned char)text[n] & 0xc0) == 0x80) n--;
+        while (n > 0 && utf8_is_cont(text[n])) n--;
     }
     memcpy(l->text, text, n);
     l->text[n] = '\0';
-    if (rgb) { memcpy(l->rgb, rgb, 3); l->has_color = 1; }
+    if (rgb) { memcpy(l->rgb, rgb, sizeof l->rgb); l->has_color = 1; }
     else l->has_color = 0;
     l->mention = mention;
     l->color_len = color_len;
@@ -70,32 +71,29 @@ void tui_scrollback_mark_file(tui_scrollback_t *sb, int file) {
     if (sb->count > 0) sb->lines[(sb->head - 1 + TUI_SCROLLBACK) % TUI_SCROLLBACK].file = file;
 }
 
-static int hex_digit(uint8_t c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
+#define ESC 0x1b
+#define BEL 0x07
+#define DEL 0x7f
+#define CTRL_KEY(c) ((c) & 0x1f)
 
 // "11;rgb:RRRR/GGGG/BBBB" (1 to 4 hex digits each), the terminal's background colour, as 8-bit rgb.
+#define BG_DIGITS_MAX 4
+
 static int parse_bg_report(const uint8_t *s, size_t n, uint8_t rgb[3]) {
     static const char head[] = "11;rgb:";
-    if (n < sizeof head - 1 || memcmp(s, head, sizeof head - 1) != 0) return -1;
     size_t i = sizeof head - 1;
+    if (n < i || memcmp(s, head, i) != 0) return -1;
     for (int c = 0; c < 3; c++) {
-        unsigned v = 0;
-        int digits = 0;
-        while (i < n && hex_digit(s[i]) >= 0) {
-            if (digits < 4) v = v * 16 + (unsigned)hex_digit(s[i]);
-            digits++;
-            i++;
-        }
-        if (digits == 0 || digits > 4) return -1;
-        rgb[c] = (uint8_t)(v * 255 / ((1u << (4 * digits)) - 1));
-        if (c < 2) {
+        if (c > 0) {
             if (i >= n || s[i] != '/') return -1;
             i++;
         }
+        unsigned v = 0;
+        int digits = 0;
+        for (int d; i < n && (d = hex_value((char)s[i])) >= 0; i++, digits++)
+            if (digits < BG_DIGITS_MAX) v = v * 16 + (unsigned)d;
+        if (digits == 0 || digits > BG_DIGITS_MAX) return -1;
+        rgb[c] = (uint8_t)(v * UINT8_MAX / ((1u << (4 * digits)) - 1));
     }
     return 0;
 }
@@ -106,14 +104,14 @@ size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out) {
     if (len == 0) return 0;
     uint8_t b0 = buf[0];
 
-    if (b0 == 0x1b) {
+    if (b0 == ESC) {
         if (len == 1) { out->type = TUI_KEY_ESCAPE; return 1; }
 
         // An OSC is the terminal answering a query. It's consumed in full, up to BEL or ST, so none of
         // it ends up in the input.
         if (buf[1] == ']') {
             size_t k = 2;
-            while (k < len && buf[k] != 0x07 && !(buf[k] == 0x1b && k + 1 < len && buf[k + 1] == '\\')) k++;
+            while (k < len && buf[k] != BEL && !(buf[k] == ESC && k + 1 < len && buf[k + 1] == '\\')) k++;
             uint8_t rgb[3];
             out->type = TUI_KEY_UNKNOWN;
             if (k < len && parse_bg_report(buf + 2, k - 2, rgb) == 0) {
@@ -122,7 +120,7 @@ size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out) {
                 out->ch_len = 3;
             }
             if (k >= len) return len;
-            return buf[k] == 0x07 ? k + 1 : k + 2;
+            return buf[k] == BEL ? k + 1 : k + 2;
         }
 
         // Unknown CSI sequences (Ctrl+arrows, F-keys, focus reports) are consumed in full, so the end
@@ -149,13 +147,15 @@ size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out) {
                 }
             }
             if (len >= 5 && buf[2] == '1' && buf[3] == '1' && buf[4] == '~') { out->type = TUI_KEY_HELP; return 5; }
-            // Parameter and intermediate bytes run up to a final byte in 0x40-0x7e.
+            // Parameter and intermediate bytes run up to a final byte from '@' to '~'.
             size_t k = 2;
-            while (k < len && buf[k] >= 0x20 && buf[k] <= 0x3f) k++;
+            while (k < len && buf[k] >= ' ' && buf[k] <= '?') k++;
             out->type = TUI_KEY_UNKNOWN;
-            if (k < len && buf[k] >= 0x40 && buf[k] <= 0x7e) {
+            if (k < len && buf[k] >= '@' && buf[k] <= '~') {
                 // "?997;1n" or "?997;2n": the terminal switched to a dark or a light theme.
-                if (buf[k] == 'n' && k >= 7 && memcmp(buf + 2, "?997;", 5) == 0) out->type = TUI_KEY_THEME_CHANGED;
+                static const char theme[] = "?997;";
+                if (buf[k] == 'n' && k - 2 >= sizeof theme - 1 && memcmp(buf + 2, theme, sizeof theme - 1) == 0)
+                    out->type = TUI_KEY_THEME_CHANGED;
                 return k + 1;
             }
             return 1;
@@ -174,30 +174,29 @@ size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out) {
         return 1;
     }
 
-    if (b0 == '\r') { out->type = TUI_KEY_ENTER; return 1; }
-    if (b0 == '\n') { out->type = TUI_KEY_JOIN_SESSION; return 1; }
-    if (b0 == 0x7f || b0 == 0x08) { out->type = TUI_KEY_BACKSPACE; return 1; }
-    if (b0 == '\t') { out->type = TUI_KEY_TAB; return 1; }
-    if (b0 == 0x0e) { out->type = TUI_KEY_NEW_SESSION; return 1; }
-    if (b0 == 0x17) { out->type = TUI_KEY_DELETE_WORD; return 1; }
-    if (b0 == 0x15) { out->type = TUI_KEY_CTRL_U; return 1; }
-    if (b0 == 0x04) { out->type = TUI_KEY_CTRL_D; return 1; }
-    if (b0 == 0x02) { out->type = TUI_KEY_TOGGLE_SIDEBAR; return 1; }
-    if (b0 == 0x0f) { out->type = TUI_KEY_TOGGLE_CONSOLE; return 1; }
-    if (b0 == 0x14) { out->type = TUI_KEY_TOGGLE_CHAT; return 1; }
-    if (b0 == 0x13) { out->type = TUI_KEY_SETTINGS; return 1; }
-    if (b0 == 0x06) { out->type = TUI_KEY_FILES; return 1; }
-    if (b0 == 0x03) { out->type = TUI_KEY_CTRL_C; return 1; }
-    if (b0 < 0x20) { out->type = TUI_KEY_UNKNOWN; return 1; }
+    switch (b0) {
+        case '\r':                    out->type = TUI_KEY_ENTER; return 1;
+        case '\n':                    out->type = TUI_KEY_JOIN_SESSION; return 1;
+        case DEL: case CTRL_KEY('H'): out->type = TUI_KEY_BACKSPACE; return 1;
+        case '\t':                    out->type = TUI_KEY_TAB; return 1;
+        case CTRL_KEY('N'):           out->type = TUI_KEY_NEW_SESSION; return 1;
+        case CTRL_KEY('W'):           out->type = TUI_KEY_DELETE_WORD; return 1;
+        case CTRL_KEY('U'):           out->type = TUI_KEY_CTRL_U; return 1;
+        case CTRL_KEY('D'):           out->type = TUI_KEY_CTRL_D; return 1;
+        case CTRL_KEY('B'):           out->type = TUI_KEY_TOGGLE_SIDEBAR; return 1;
+        case CTRL_KEY('O'):           out->type = TUI_KEY_TOGGLE_CONSOLE; return 1;
+        case CTRL_KEY('T'):           out->type = TUI_KEY_TOGGLE_CHAT; return 1;
+        case CTRL_KEY('S'):           out->type = TUI_KEY_SETTINGS; return 1;
+        case CTRL_KEY('F'):           out->type = TUI_KEY_FILES; return 1;
+        case CTRL_KEY('C'):           out->type = TUI_KEY_CTRL_C; return 1;
+        default:
+            if (b0 < ' ') { out->type = TUI_KEY_UNKNOWN; return 1; }
+    }
 
     // Only complete, valid characters reach the input line. A stray byte (including a C1 control)
     // is dropped instead of being echoed to the terminal.
-    size_t seqlen = 1;
-    if ((b0 & 0xe0) == 0xc0) seqlen = 2;
-    else if ((b0 & 0xf0) == 0xe0) seqlen = 3;
-    else if ((b0 & 0xf8) == 0xf0) seqlen = 4;
-    else if (b0 >= 0x80) { out->type = TUI_KEY_UNKNOWN; return 1; }
-    if (seqlen > len) { out->type = TUI_KEY_UNKNOWN; return 1; }
+    size_t seqlen = utf8_lead_len(b0);
+    if (seqlen == 0 || seqlen > len) { out->type = TUI_KEY_UNKNOWN; return 1; }
     size_t adv;
     utf8_decode((const char *)buf, seqlen, 0, &adv);
     if (adv != seqlen) { out->type = TUI_KEY_UNKNOWN; return 1; }
@@ -228,11 +227,11 @@ const char *tui_mode_name(tui_input_mode_t mode) {
 }
 
 static int step_left(const tui_input_t *in, int pos) {
-    if (pos > 0) { pos--; while (pos > 0 && (in->buf[pos] & 0xc0) == 0x80) pos--; }
+    if (pos > 0) { pos--; while (pos > 0 && utf8_is_cont(in->buf[pos])) pos--; }
     return pos;
 }
 static int step_right(const tui_input_t *in, int pos) {
-    if (pos < in->len) { pos++; while (pos < in->len && (in->buf[pos] & 0xc0) == 0x80) pos++; }
+    if (pos < in->len) { pos++; while (pos < in->len && utf8_is_cont(in->buf[pos])) pos++; }
     return pos;
 }
 
@@ -479,7 +478,7 @@ static int command_feed(tui_input_t *in, const tui_key_t *key) {
         case TUI_KEY_BACKSPACE:
             if (in->cmd_len == 0) { tui_input_end_command(in); return 1; }
             in->cmd_len--;
-            while (in->cmd_len > 0 && (in->cmd[in->cmd_len] & 0xc0) == 0x80) in->cmd_len--;
+            while (in->cmd_len > 0 && utf8_is_cont(in->cmd[in->cmd_len])) in->cmd_len--;
             in->cmd[in->cmd_len] = '\0';
             in->menu_sel = 0;
             return 1;
@@ -525,6 +524,20 @@ int tui_input_feed(tui_input_t *in, const tui_key_t *key) {
 #define FRAME_CAP 1048576
 static char g_frame[FRAME_CAP];
 
+// While a frame is drawn: the terminal holds it back until it's whole (mode 2026), the cursor is
+// hidden, and autowrap is off.
+#define SYNC_BEGIN "\x1b[?2026h"
+#define SYNC_END "\x1b[?2026l"
+#define CURSOR_HIDE "\x1b[?25l"
+#define CURSOR_SHOW "\x1b[?25h"
+#define WRAP_OFF "\x1b[?7l"
+#define WRAP_ON "\x1b[?7h"
+// A steady block for NORMAL, a steady bar otherwise.
+#define CURSOR_BLOCK "\x1b[2 q"
+#define CURSOR_BAR "\x1b[6 q"
+
+#define SGR_RESET "\x1b[0m"
+
 typedef struct { char *buf; size_t cap; size_t len; } wbuf_t;
 
 static void wapp(wbuf_t *w, const char *fmt, ...) {
@@ -533,6 +546,18 @@ static void wapp(wbuf_t *w, const char *fmt, ...) {
     int n = vsnprintf(w->buf + w->len, w->cap - w->len, fmt, ap);
     va_end(ap);
     if (n > 0) w->len += (size_t)n < w->cap - w->len ? (size_t)n : w->cap - w->len;
+}
+
+// Bytes already formatted (a span, a grid row), if they fit.
+static void wapp_raw(wbuf_t *w, const char *s, size_t n) {
+    if (w->len + n < w->cap) { memcpy(w->buf + w->len, s, n); w->len += n; }
+}
+
+// len bytes of s as a string, cut to fit cap.
+static void copy_slice(char *out, size_t cap, const char *s, size_t len) {
+    if (len >= cap) len = cap - 1;
+    memcpy(out, s, len);
+    out[len] = '\0';
 }
 
 // Appends as much of s as fits in width columns and returns the columns it takes. A malformed
@@ -546,7 +571,7 @@ static int wapp_trunc(wbuf_t *w, const char *s, int width) {
         int cw = utf8_char_cols(s, n, i, &adv);
         if (used + cw > width) break;
         uint32_t cp = utf8_decode(s, n, i, &adv);
-        int bad = cp < 0x20 || cp == 0x7f || (cp >= 0x80 && cp <= 0x9f) || (adv == 1 && cp >= 0x80);
+        int bad = is_control_cp(cp) || (adv == 1 && cp >= 0x80);
         const char *src = bad ? REPLACEMENT : s + i;
         size_t len = bad ? sizeof REPLACEMENT - 1 : adv;
         if (len > w->cap - w->len) break;
@@ -587,30 +612,29 @@ static const char *const STYLE_MONO[] = {
 
 // Every style starts from just the row's background, so nothing carries over into the next.
 static void sty(wbuf_t *w, style_t s) {
-    wapp(w, "\x1b[0m%s%s", g_row_bg, (g_color ? STYLE_COLOR : STYLE_MONO)[s]);
+    wapp(w, SGR_RESET "%s%s", g_row_bg, (g_color ? STYLE_COLOR : STYLE_MONO)[s]);
 }
 
 // The palette colour of each tone: INSERT green, NORMAL blue, COMMAND yellow, prompts and pages magenta.
-static const char *const TONE_SGR[] = { "32", "34", "33", "35", "35" };
+static const char *const TONE_SGR[] = { "\x1b[32m", "\x1b[34m", "\x1b[33m", "\x1b[35m", "\x1b[35m" };
 
-static const char *tone_sgr(tui_tone_t t) { return TONE_SGR[(unsigned)t < 5 ? (unsigned)t : 0]; }
+static const char *tone_sgr(tui_tone_t t) { return TONE_SGR[(unsigned)t < COUNT_OF(TONE_SGR) ? (unsigned)t : 0]; }
 
 static void sty_tone(wbuf_t *w, tui_tone_t t, int bold) {
-    wapp(w, "\x1b[0m%s%s", g_row_bg, bold ? "\x1b[1m" : "");
-    if (g_color) wapp(w, "\x1b[%sm", tone_sgr(t));
+    wapp(w, SGR_RESET "%s%s", g_row_bg, bold ? "\x1b[1m" : "");
+    if (g_color) wapp(w, "%s", tone_sgr(t));
 }
 
 // Reversed, so the chip takes the palette colour and its text the terminal's background.
 static void sty_pill(wbuf_t *w, tui_tone_t t) {
-    wapp(w, "\x1b[0m\x1b[1;7m");
-    if (g_color) wapp(w, "\x1b[%sm", tone_sgr(t));
+    wapp(w, SGR_RESET "\x1b[1;7m");
+    if (g_color) wapp(w, "%s", tone_sgr(t));
 }
 
 // A box's border: faint, or in the tone of the keys it holds.
 static const char *border_sgr(int tone) {
-    static const char *const LIT[] = { "\x1b[32m", "\x1b[34m", "\x1b[33m", "\x1b[35m", "\x1b[35m" };
     if (!g_color) return "";
-    return tone >= 0 && tone < 5 ? LIT[tone] : "\x1b[2m";
+    return tone >= 0 && (unsigned)tone < COUNT_OF(TONE_SGR) ? TONE_SGR[tone] : "\x1b[2m";
 }
 
 // Relative luminance, using a gamma of 2 to approximate sRGB's curve.
@@ -624,31 +648,38 @@ static double contrast(const uint8_t a[3], const uint8_t b[3]) {
     return la > lb ? la / lb : lb / la;
 }
 
+#define DARK_LUM 0.25
+static int is_dark(const uint8_t c[3]) { return lum(c) < DARK_LUM; }
+
 // A person's colour, moved toward the terminal's foreground until it's readable on the background:
 // yellow on a light theme gets darker, indigo on a dark one gets lighter. Unchanged until the
-// terminal has reported its background.
+// terminal has reported its background. Readable is WCAG's contrast for large text, reached in at
+// most READABLE_STEPS steps of a fifth of the way each.
+#define READABLE_CONTRAST 3.0
+#define READABLE_STEPS 12
+
 static void readable(const uint8_t in[3], uint8_t out[3]) {
     memcpy(out, in, 3);
     if (!g_have_bg) return;
-    int toward = lum(g_bg) < 0.25 ? 255 : 0;
-    for (int i = 0; i < 12 && contrast(out, g_bg) < 3.0; i++)
+    int toward = is_dark(g_bg) ? UINT8_MAX : 0;
+    for (int i = 0; i < READABLE_STEPS && contrast(out, g_bg) < READABLE_CONTRAST; i++)
         for (int k = 0; k < 3; k++) out[k] = (uint8_t)(out[k] + (toward - out[k]) / 5);
 }
 
-int tui_background_light(void) { return g_have_bg && lum(g_bg) >= 0.25; }
+int tui_background_light(void) { return g_have_bg && !is_dark(g_bg); }
 
 void tui_set_background(const uint8_t rgb[3]) {
     memcpy(g_bg, rgb, 3);
     g_have_bg = 1;
-    int dark = lum(rgb) < 0.25;
+    int dark = is_dark(rgb);
     uint8_t s[3];
-    for (int k = 0; k < 3; k++) s[k] = (uint8_t)(dark ? rgb[k] + (255 - rgb[k]) / 9 : rgb[k] - rgb[k] / 16);
+    for (int k = 0; k < 3; k++) s[k] = (uint8_t)(dark ? rgb[k] + (UINT8_MAX - rgb[k]) / 9 : rgb[k] - rgb[k] / 16);
     snprintf(g_sel_bg, sizeof g_sel_bg, "\x1b[48;2;%u;%u;%um", s[0], s[1], s[2]);
 }
 
 // exact: used as given (a colour sample), otherwise passed through readable().
 static void sty_rgb(wbuf_t *w, const uint8_t rgb[3], int bold, int exact) {
-    wapp(w, "\x1b[0m%s%s", g_row_bg, bold ? "\x1b[1m" : "");
+    wapp(w, SGR_RESET "%s%s", g_row_bg, bold ? "\x1b[1m" : "");
     if (!g_color) return;
     uint8_t c[3];
     if (exact) memcpy(c, rgb, 3);
@@ -704,7 +735,7 @@ static void inner_begin(wbuf_t *w, pen_t *p, int row, int left, int width) {
 static void inner_end(pen_t *p) {
     pspace(p, p->room);
     sty(p->w, S_PLAIN);
-    wapp(p->w, " \x1b[0m");
+    wapp(p->w, " " SGR_RESET);
 }
 
 static void blank_row(wbuf_t *w, int row, int left, int width) {
@@ -716,21 +747,17 @@ static void blank_row(wbuf_t *w, int row, int left, int width) {
 // "key action · key action": each key highlighted, what it does faint. It takes as many columns as
 // it has characters.
 static void draw_hint(pen_t *p, const char *h) {
-    static const char SEP[] = " " G_MID " ";
     for (const char *s = h; *s; ) {
-        const char *end = strstr(s, SEP);
-        size_t n = end ? (size_t)(end - s) : strlen(s);
+        const char *end = strstr(s, DOT_SEP);
         char part[96];
-        if (n >= sizeof part) n = sizeof part - 1;
-        memcpy(part, s, n);
-        part[n] = '\0';
+        copy_slice(part, sizeof part, s, end ? (size_t)(end - s) : strlen(s));
         char *sp = strchr(part, ' ');
         if (sp) *sp = '\0';
         ptext(p, S_ACCENT, part);
         if (sp) { ptext(p, S_FAINT, " "); ptext(p, S_FAINT, sp + 1); }
         if (!end) break;
-        ptext(p, S_FAINT, SEP);
-        s = end + sizeof SEP - 1;
+        ptext(p, S_FAINT, DOT_SEP);
+        s = end + sizeof DOT_SEP - 1;
     }
 }
 
@@ -742,9 +769,14 @@ static void span_init(span_t *s, int room) {
     s->p = (pen_t){ &s->w, 0, room < 0 ? 0 : room };
 }
 
+// An edge's corners and the rule beside each, which a title never covers, and the space either
+// side of a title.
+#define EDGE_ENDS 4
+#define TITLE_PAD 2
+
 // The space for a title in an edge width columns wide, next to one right_cols wide on its right.
 static int title_room(int width, int right_cols) {
-    int r = width - 6 - (right_cols > 0 ? right_cols + 2 : 0);
+    int r = width - EDGE_ENDS - TITLE_PAD - (right_cols > 0 ? right_cols + TITLE_PAD : 0);
     return r < 0 ? 0 : r;
 }
 
@@ -752,33 +784,33 @@ static int title_room(int width, int right_cols) {
 // right near its right end, then rc. bs styles the rule.
 static void edge(wbuf_t *w, int row, int left, int width, const char *lc, const char *rc, const char *bs,
                  const span_t *title, const span_t *right) {
-    if (width < 4) return;
-    int tc = title && title->p.used > 0 ? title->p.used + 2 : 0;
-    int rc_w = right && right->p.used > 0 ? right->p.used + 2 : 0;
-    if (4 + tc + rc_w > width) rc_w = 0;
-    if (4 + tc > width) tc = 0;
+    if (width < EDGE_ENDS) return;
+    int tc = title && title->p.used > 0 ? title->p.used + TITLE_PAD : 0;
+    int rc_w = right && right->p.used > 0 ? right->p.used + TITLE_PAD : 0;
+    if (EDGE_ENDS + tc + rc_w > width) rc_w = 0;
+    if (EDGE_ENDS + tc > width) tc = 0;
     at(w, row, left);
-    wapp(w, "\x1b[0m%s%s" G_H, bs, lc);
+    wapp(w, SGR_RESET "%s%s" G_H, bs, lc);
     if (tc) {
         wapp(w, " ");
-        if (w->len + title->w.len < w->cap) { memcpy(w->buf + w->len, title->buf, title->w.len); w->len += title->w.len; }
-        wapp(w, "\x1b[0m%s ", bs);
+        wapp_raw(w, title->buf, title->w.len);
+        wapp(w, SGR_RESET "%s ", bs);
     }
-    for (int i = 0; i < width - 4 - tc - rc_w; i++) wapp(w, G_H);
+    for (int i = 0; i < width - EDGE_ENDS - tc - rc_w; i++) wapp(w, G_H);
     if (rc_w) {
         wapp(w, " ");
-        if (w->len + right->w.len < w->cap) { memcpy(w->buf + w->len, right->buf, right->w.len); w->len += right->w.len; }
-        wapp(w, "\x1b[0m%s ", bs);
+        wapp_raw(w, right->buf, right->w.len);
+        wapp(w, SGR_RESET "%s ", bs);
     }
-    wapp(w, G_H "%s\x1b[0m", rc);
+    wapp(w, G_H "%s" SGR_RESET, rc);
 }
 
 static void sides(wbuf_t *w, int top, int h, int left, int width, const char *bs) {
     for (int r = top; r < top + h; r++) {
         at(w, r, left);
-        wapp(w, "\x1b[0m%s" G_V, bs);
+        wapp(w, SGR_RESET "%s" G_V, bs);
         at(w, r, left + width - 1);
-        wapp(w, G_V "\x1b[0m");
+        wapp(w, G_V SGR_RESET);
     }
 }
 
@@ -795,16 +827,18 @@ static void box(wbuf_t *w, rect_t r, const char *bs, const span_t *title, const 
     edge(w, r.top + r.h - 1, r.left, r.w, bottom_left(r), G_BR, bs, NULL, foot);
 }
 
+#define BRAND G_DIAMOND " chat"
+
 // The "◆ chat" and version in the title of every screen's left hand box.
 static void brand(span_t *title, span_t *right, int width) {
     span_init(right, width);
     ptext(&right->p, S_FAINT, "v" CHAT_VERSION);
     span_init(title, title_room(width, right->p.used));
-    ptext(&title->p, S_ACCENT_BOLD, G_DIAMOND " chat");
+    ptext(&title->p, S_ACCENT_BOLD, BRAND);
 }
 
 // The last whole frame sent, by its hash.
-static uint8_t g_last_frame[32];
+static uint8_t g_last_frame[SHA256_LEN];
 static int g_last_frame_valid;
 
 void tui_invalidate(void) { g_last_frame_valid = 0; }
@@ -815,16 +849,16 @@ static void lock_buffers(void);
 // it is gets clipped at the right edge instead of pushing the rest of the frame down a row.
 static void begin_frame(wbuf_t *w) {
     lock_buffers();
-    wapp(w, "\x1b[?2026h\x1b[?25l\x1b[?7l");
+    wapp(w, SYNC_BEGIN CURSOR_HIDE WRAP_OFF);
 }
 
 // whole: the frame covers the screen, and isn't sent if it's the same as what's already there (the
 // clock redraws every second, but only shows minutes).
 static void end_frame(wbuf_t *w, int whole) {
     // Written separately so a frame that filled its buffer still turns autowrap back on.
-    static const char tail[] = "\x1b[0m\x1b[?7h\x1b[?2026l";
+    static const char tail[] = SGR_RESET WRAP_ON SYNC_END;
     if (whole) {
-        uint8_t h[32];
+        uint8_t h[SHA256_LEN];
         sha256_hash(w->buf, w->len, h);
         int same = g_last_frame_valid && memcmp(h, g_last_frame, sizeof h) == 0;
         memcpy(g_last_frame, h, sizeof h);
@@ -838,19 +872,32 @@ static void end_frame(wbuf_t *w, int whole) {
 }
 
 static void place_cursor(wbuf_t *w, int row, int col, const tui_input_t *in) {
-    if (row <= 0) { wapp(w, "\x1b[?25l"); return; }
-    const char *shape = in && in->modal && in->mode == TUI_IMODE_NORMAL ? "\x1b[2 q" : "\x1b[6 q";
-    wapp(w, "\x1b[0m%s\x1b[%d;%dH\x1b[?25h", shape, row, col);
+    if (row <= 0) { wapp(w, CURSOR_HIDE); return; }
+    const char *shape = in && in->modal && in->mode == TUI_IMODE_NORMAL ? CURSOR_BLOCK : CURSOR_BAR;
+    wapp(w, SGR_RESET "%s\x1b[%d;%dH" CURSOR_SHOW, shape, row, col);
 }
 
+#define MIN_ROWS 6
+#define MIN_COLS 30
 #define MAX_ROWS 200
 #define MAX_COLS 1000
+// A screen smaller than this is drawn without boxes.
+#define BOXED_ROWS 10
+#define BOXED_COLS 40
 
 static void clamp_size(int *rows, int *cols) {
-    if (*rows < 6) *rows = 6;
-    if (*cols < 30) *cols = 30;
+    if (*rows < MIN_ROWS) *rows = MIN_ROWS;
+    if (*cols < MIN_COLS) *cols = MIN_COLS;
     if (*rows > MAX_ROWS) *rows = MAX_ROWS;
     if (*cols > MAX_COLS) *cols = MAX_COLS;
+}
+
+// Every frame starts from the screen's size, clamped, and an empty buffer.
+static wbuf_t frame_init(int *rows, int *cols, int color_enabled) {
+    clamp_size(rows, cols);
+    g_color = color_enabled;
+    g_row_bg = "";
+    return (wbuf_t){ g_frame, FRAME_CAP, 0 };
 }
 
 // ---- the grid: rows drawn out of order (the chat fills from the bottom), then put on screen ----
@@ -899,13 +946,10 @@ static void grid_close(grid_t *g, int r, const gpen_t *gp) {
 static void grid_emit(wbuf_t *w, const grid_t *g, int top, int left, int pad) {
     for (int r = 0; r < g->rows; r++) {
         at(w, top + r, left);
-        wapp(w, "\x1b[0m");
+        wapp(w, SGR_RESET);
         for (int i = 0; i < pad; i++) wapp(w, " ");
-        if (g->len[r] > 0 && w->len + (size_t)g->len[r] < w->cap) {
-            memcpy(w->buf + w->len, g->buf[r], (size_t)g->len[r]);
-            w->len += (size_t)g->len[r];
-        }
-        wapp(w, "\x1b[0m");
+        wapp_raw(w, g->buf[r], (size_t)g->len[r]);
+        wapp(w, SGR_RESET);
         for (int i = g->used[r]; i < g->w + pad; i++) wapp(w, " ");
     }
 }
@@ -947,6 +991,9 @@ static int wrap_rows(const char *text, int first_w, int rest_w, size_t *off, siz
 
 // ---- the chat and the console ----
 
+// A chat line's name, the nick and what the UI adds to it.
+#define NAME_BUF 96
+
 // A chat line's name (its first color_len bytes, minus a mention's "@ " and the ':' after it) and
 // the text after it. 0 for a line that isn't a chat line.
 static int split_chat_line(const tui_line_t *l, char *name, size_t cap, const char **body) {
@@ -955,9 +1002,7 @@ static int split_chat_line(const tui_line_t *l, char *name, size_t cap, const ch
     const char *s = l->text;
     size_t len = (size_t)l->color_len - 1;
     if (l->mention && len >= 2 && s[0] == '@' && s[1] == ' ') { s += 2; len -= 2; }
-    if (len >= cap) len = cap - 1;
-    memcpy(name, s, len);
-    name[len] = '\0';
+    copy_slice(name, cap, s, len);
     const char *b = l->text + l->color_len;
     while (*b == ' ') b++;
     *body = b;
@@ -969,10 +1014,8 @@ static int split_chat_line(const tui_line_t *l, char *name, size_t cap, const ch
 static void draw_name(pen_t *p, const char *name, const uint8_t *rgb) {
     size_t nick = strcspn(name, "#(");
     while (nick > 0 && name[nick - 1] == ' ') nick--;
-    char buf[96];
-    if (nick >= sizeof buf) nick = sizeof buf - 1;
-    memcpy(buf, name, nick);
-    buf[nick] = '\0';
+    char buf[NAME_BUF];
+    copy_slice(buf, sizeof buf, name, nick);
     if (rgb) sty_rgb(p->w, rgb, 1, 0);
     else sty(p->w, S_BOLD);
     p->used += wapp_trunc(p->w, buf, p->room - p->used);
@@ -986,37 +1029,56 @@ static void draw_name(pen_t *p, const char *name, const uint8_t *rgb) {
 // shows the time and name once. The console's lines are faint, and its warnings yellow (bold in the chat).
 // A picture's rows at width cols: each is two of its pixel rows, the upper one as the colour of a
 // half block and the lower one as the colour behind it, scaled to the width by nearest pixel.
+// The picture's size in pixels at most cols wide, keeping its shape.
+static void image_fit(const tui_image_t *im, int cols, int *w, int *h) {
+    *w = im->w < cols ? im->w : cols;
+    *h = (int)(((int64_t)im->h * *w + im->w / 2) / im->w);
+    if (*h < 1) *h = 1;
+}
+
 static int image_rows(const tui_image_t *im, int cols) {
     if (!im || im->w < 1 || im->h < 1 || cols < 1) return 0;
-    int w = im->w < cols ? im->w : cols;
-    int h = (int)(((int64_t)im->h * w + im->w / 2) / im->w);
-    if (h < 1) h = 1;
+    int w, h;
+    image_fit(im, cols, &w, &h);
     return (h + 1) / 2;
 }
 
 static void draw_image_row(pen_t *p, const tui_image_t *im, int cols, int r) {
-    int w = im->w < cols ? im->w : cols;
-    int h = (int)(((int64_t)im->h * w + im->w / 2) / im->w);
-    if (h < 1) h = 1;
+    int w, h;
+    image_fit(im, cols, &w, &h);
     if (!g_color) {
         // It can't be drawn without colour.
         if (r == 0) ptext(p, S_FAINT, "(a picture: it needs a terminal with colour)");
         return;
     }
     int y0 = r * 2, y1 = r * 2 + 1;
+    size_t stride = (size_t)im->w * 3;
+    const uint8_t *top_row = im->rgb + (size_t)((int64_t)y0 * im->h / h) * stride;
+    const uint8_t *bot_row = y1 < h ? im->rgb + (size_t)((int64_t)y1 * im->h / h) * stride : top_row;
     uint8_t last[6] = { 0 };
     for (int x = 0; x < w && p->used < p->room; x++) {
-        int sx = (int)((int64_t)x * im->w / w);
-        const uint8_t *top = im->rgb + ((size_t)((int64_t)y0 * im->h / h) * (size_t)im->w + (size_t)sx) * 3;
-        const uint8_t *bot = y1 < h ? im->rgb + ((size_t)((int64_t)y1 * im->h / h) * (size_t)im->w + (size_t)sx) * 3 : top;
-        if (x > 0 && memcmp(last, top, 3) == 0 && memcmp(last + 3, bot, 3) == 0) wapp(p->w, "\xe2\x96\x80");
-        else if (y1 < h) wapp(p->w, "\x1b[38;2;%u;%u;%u;48;2;%u;%u;%um\xe2\x96\x80", top[0], top[1], top[2], bot[0], bot[1], bot[2]);
-        else wapp(p->w, "\x1b[0;38;2;%u;%u;%um\xe2\x96\x80", top[0], top[1], top[2]);
+        size_t sx = (size_t)((int64_t)x * im->w / w) * 3;
+        const uint8_t *top = top_row + sx, *bot = bot_row + sx;
+        if (x > 0 && memcmp(last, top, 3) == 0 && memcmp(last + 3, bot, 3) == 0) wapp(p->w, G_UPPER);
+        else if (y1 < h) wapp(p->w, "\x1b[38;2;%u;%u;%u;48;2;%u;%u;%um" G_UPPER, top[0], top[1], top[2], bot[0], bot[1], bot[2]);
+        else wapp(p->w, "\x1b[0;38;2;%u;%u;%um" G_UPPER, top[0], top[1], top[2]);
         memcpy(last, top, 3);
         memcpy(last + 3, bot, 3);
         p->used++;
     }
-    wapp(p->w, "\x1b[0m");
+    wapp(p->w, SGR_RESET);
+}
+
+static int clamp_permille(int pm) { return pm < 0 ? 0 : pm > 1000 ? 1000 : pm; }
+
+// A progress bar width columns wide, permille of it lit: heavier, and in the accent colour.
+static void draw_bar(pen_t *p, int permille, int width) {
+    int lit = clamp_permille(permille) * width / 1000;
+    sty(p->w, S_ACCENT);
+    for (int i = 0; i < lit; i++) wapp(p->w, G_HEAVY);
+    sty(p->w, S_FAINT);
+    for (int i = lit; i < width; i++) wapp(p->w, G_H);
+    p->used += width;
 }
 
 // What a file is doing: a progress bar (heavier without colour) and its text, or the text after
@@ -1030,13 +1092,8 @@ static void draw_progress(pen_t *p, const tui_progress_t *pg) {
     }
     int room = p->room - p->used;
     int bw = room >= 40 ? 16 : room >= 24 ? 8 : 0;
-    int lit = pg->permille <= 0 ? 0 : pg->permille >= 1000 ? bw : pg->permille * bw / 1000;
     if (bw) {
-        sty(p->w, S_ACCENT);
-        for (int i = 0; i < lit; i++) wapp(p->w, G_HEAVY);
-        sty(p->w, S_FAINT);
-        for (int i = lit; i < bw; i++) wapp(p->w, G_H);
-        p->used += bw;
+        draw_bar(p, pg->permille, bw);
         ptext(p, S_PLAIN, " ");
     }
     pell(p, S_FAINT, pg->text, p->room - p->used);
@@ -1087,6 +1144,11 @@ static void draw_new_rule(grid_t *g, int row, int n) {
     grid_close(g, row, &gp);
 }
 
+// The time column, "HH:MM" and a gap, in a pane at least TIME_MIN_W wide.
+#define TIME_COLS (HHMM_LEN - 1 + 2)
+#define TIME_MIN_W 36
+#define WRAP_ROWS_MAX 64
+
 static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *sb, int skip, int console,
                        const tui_view_t *v) {
     if (!sb || nrows <= 0 || sb->count == 0) return;
@@ -1096,13 +1158,13 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
     // The line goes above the oldest of the new messages, and only if there are older ones above it.
     int fresh = !console && v && v->new_lines > 0 && v->new_lines < sb->count ? v->new_lines : 0;
     const char *self = !console && v ? v->self : NULL;
-    int time_w = W >= 36 ? 7 : 0;
+    int time_w = W >= TIME_MIN_W ? TIME_COLS : 0;
     // The name column: as wide as the widest name in view, up to a third of the pane. A name wider
     // than that goes on its own row, so it doesn't take up space in the column.
     int nw = 0;
     if (!console) {
         for (int k = skip; k < sb->count && k < skip + nrows; k++) {
-            char name[96];
+            char name[NAME_BUF];
             const char *body;
             if (!split_chat_line(SB_AT(sb, k), name, sizeof name, &body)) continue;
             int c = utf8_str_cols(name);
@@ -1113,7 +1175,7 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
     int bottom = first + nrows - 1;
     for (int k = skip; k < sb->count && bottom >= first; k++) {
         const tui_line_t *l = SB_AT(sb, k);
-        char name[96];
+        char name[NAME_BUF];
         const char *body = l->text;
         int chat = split_chat_line(l, name, sizeof name, &body);
         if (!chat && body[0] == '*' && body[1] == ' ') body += 2;
@@ -1129,8 +1191,8 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
         if (first_pre > W - 1) first_pre = W - 1 > 0 ? W - 1 : 0;
         if (rest_pre > W - 1) rest_pre = W - 1 > 0 ? W - 1 : 0;
 
-        size_t off[64], len[64];
-        int nch = wrap_rows(body, W - first_pre, W - rest_pre, off, len, 64);
+        size_t off[WRAP_ROWS_MAX], len[WRAP_ROWS_MAX];
+        int nch = wrap_rows(body, W - first_pre, W - rest_pre, off, len, WRAP_ROWS_MAX);
         // A picture shown under the line that offers it, lined up with the text.
         const tui_image_t *im = chat && l->file && v && v->image ? v->image(v->image_ctx, l->file) : NULL;
         int img_cols = W - rest_pre - 1 < TUI_IMAGE_MAX_W ? W - rest_pre - 1 : TUI_IMAGE_MAX_W;
@@ -1150,15 +1212,15 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
         int grouped = 0;
         if (chat && k + 1 < sb->count && k + 1 != fresh && bottom - nch - under >= first) {
             const tui_line_t *older = SB_AT(sb, k + 1);
-            char oname[96];
+            char oname[NAME_BUF];
             const char *ob;
-            grouped = memcmp(older->hhmm, l->hhmm, 5) == 0 && older->mention == l->mention
+            grouped = memcmp(older->hhmm, l->hhmm, HHMM_LEN - 1) == 0 && older->mention == l->mention
                    && split_chat_line(older, oname, sizeof oname, &ob) && strcmp(oname, name) == 0;
         }
 
         int head = stacked && !grouped;
 
-        int warn = !chat && strncmp(body, "warning:", 8) == 0;
+        int warn = !chat && starts_with(body, "warning:");
         style_t body_style = l->mention ? S_BOLD : warn ? (console ? S_YELLOW : S_YELLOW_BOLD) : console ? S_FAINT : S_PLAIN;
         int body_rgb = !chat && l->has_color && !warn;
 
@@ -1207,8 +1269,7 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
                 pspace(p, rest_pre);
             }
             char piece[TUI_LINE_MAX + 1];
-            memcpy(piece, body + off[c], len[c]);
-            piece[len[c]] = '\0';
+            copy_slice(piece, sizeof piece, body + off[c], len[c]);
             if (body_rgb) {
                 sty_rgb(p->w, l->rgb, 0, 0);
                 p->used += wapp_trunc(p->w, piece, p->room - p->used);
@@ -1224,27 +1285,35 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
     }
 }
 
+// Splits text at its newlines into at most max lines. Returns how many.
+static int split_lines(const char *text, const char **lines, size_t *lens, int max) {
+    int n = 0;
+    for (const char *s = text; s && *s && n < max; ) {
+        const char *nl = strchr(s, '\n');
+        lines[n] = s;
+        lens[n++] = nl ? (size_t)(nl - s) : strlen(s);
+        if (!nl) break;
+        s = nl + 1;
+    }
+    return n;
+}
+
+// Where n rows start to sit a little above the middle of nrows rows from first.
+static int center_top(int first, int nrows, int n) {
+    int top = first + (nrows - n) / 2 - nrows / 10;
+    return top < first ? first : top;
+}
+
 // Lines centred across the grid, a little above the middle: the first bold and the rest faint,
 // except a line that's just emph (the session's id, to share), which is highlighted.
 static void draw_center(grid_t *g, int first, int nrows, const char *text, const char *emph) {
     const char *lines[12];
     size_t lens[12];
-    int n = 0;
-    for (const char *s = text; *s && n < 12; ) {
-        const char *nl = strchr(s, '\n');
-        lines[n] = s;
-        lens[n] = nl ? (size_t)(nl - s) : strlen(s);
-        n++;
-        if (!nl) break;
-        s = nl + 1;
-    }
-    int top = first + (nrows - n) / 2 - nrows / 10;
-    if (top < first) top = first;
+    int n = split_lines(text, lines, lens, (int)COUNT_OF(lines));
+    int top = center_top(first, nrows, n);
     for (int i = 0; i < n && top + i < first + nrows; i++) {
         char buf[TUI_LINE_MAX];
-        size_t l = lens[i] < sizeof buf - 1 ? lens[i] : sizeof buf - 1;
-        memcpy(buf, lines[i], l);
-        buf[l] = '\0';
+        copy_slice(buf, sizeof buf, lines[i], lens[i]);
         int c = utf8_str_cols(buf);
         if (c > g->w) c = g->w;
         gpen_t gp;
@@ -1264,19 +1333,19 @@ static void draw_welcome(grid_t *g, int first, int nrows) {
         { "ctrl+s", "settings" },
         { "/help", "keys and commands" },
     };
-    int nkeys = (int)(sizeof KEYS / sizeof KEYS[0]);
+    // The keys in a column, and what they do in one about as wide as the longest.
+    enum { KEY_COLS = 9, DOES_COLS = 20 };
+    int nkeys = (int)COUNT_OF(KEYS);
     int W = g->w;
-    int n = 2 + nkeys;
-    int top = first + (nrows - n) / 2 - nrows / 10;
-    if (top < first) top = first;
+    int top = center_top(first, nrows, 2 + nkeys);
     gpen_t gp;
     if (top < first + nrows) {
         grid_open(g, top, &gp);
-        pspace(&gp.p, (W - 6) / 2);
-        ptext(&gp.p, S_ACCENT_BOLD, G_DIAMOND " chat");
+        pspace(&gp.p, (W - utf8_str_cols(BRAND)) / 2);
+        ptext(&gp.p, S_ACCENT_BOLD, BRAND);
         grid_close(g, top, &gp);
     }
-    int block = 9 + 20;
+    int block = KEY_COLS + DOES_COLS;
     int left = block < W ? (W - block) / 2 : 0;
     for (int i = 0; i < nkeys; i++) {
         int row = top + 2 + i;
@@ -1284,7 +1353,7 @@ static void draw_welcome(grid_t *g, int first, int nrows) {
         grid_open(g, row, &gp);
         pspace(&gp.p, left);
         ptext(&gp.p, S_ACCENT_BOLD, KEYS[i][0]);
-        pspace(&gp.p, left + 9);
+        pspace(&gp.p, left + KEY_COLS);
         ptext(&gp.p, S_PLAIN, KEYS[i][1]);
         grid_close(g, row, &gp);
     }
@@ -1296,29 +1365,40 @@ static void draw_chat_pane(grid_t *g, int first, int nrows, const tui_scrollback
     else draw_lines(g, first, nrows, sb, v->scroll, 0, v);
 }
 
-static const char HIDDEN_HINT[] = "Chat and console are hidden\nctrl+t shows the chat " G_MID " ctrl+o the console";
+static const char HIDDEN_HINT[] = "Chat and console are hidden\nctrl+t shows the chat" DOT_SEP "ctrl+o the console";
+
+// A session's state: a ring while it starts, dotted while it connects, a dot once it's live.
+static void state_mark(pen_t *p, tui_session_state_t state) {
+    static const char *const GLYPH[] = { G_RING, G_DOTTED, G_DOT };
+    static const style_t STYLE[] = { S_FAINT, S_YELLOW, S_GREEN };
+    unsigned st = (unsigned)state < COUNT_OF(GLYPH) ? (unsigned)state : TUI_SESSION_LIVE;
+    ptext(p, STYLE[st], GLYPH[st]);
+}
 
 // The session's state and name, unread counts for other sessions while the sidebar is hidden, and
 // the subtitle.
 static void chat_title(span_t *t, const tui_view_t *v, int sidebar_shown) {
     if (!v->title) { ptext(&t->p, S_BOLD, "welcome"); return; }
-    static const char *const GLYPH[] = { G_RING, G_DOTTED, G_DOT };
-    static const style_t STYLE[] = { S_FAINT, S_YELLOW, S_GREEN };
-    unsigned st = (unsigned)v->state < 3 ? (unsigned)v->state : 2;
-    ptext(&t->p, STYLE[st], GLYPH[st]);
+    state_mark(&t->p, v->state);
     ptext(&t->p, S_PLAIN, " ");
     ptext(&t->p, S_BOLD, v->title);
     if (!sidebar_shown && v->elsewhere > 0) {
         char n[48];
         snprintf(n, sizeof n, "%s%d new elsewhere", v->elsewhere_mention ? "@" : "", v->elsewhere);
-        ptext(&t->p, S_FAINT, " " G_MID " ");
+        ptext(&t->p, S_FAINT, DOT_SEP);
         ptext(&t->p, v->elsewhere_mention ? S_YELLOW_BOLD : S_ACCENT_BOLD, n);
     }
     if (v->subtitle && v->subtitle[0]) {
-        ptext(&t->p, S_FAINT, " " G_MID " ");
+        ptext(&t->p, S_FAINT, DOT_SEP);
         ptext(&t->p, S_FAINT, v->subtitle);
     }
 }
+
+// The console over the chat takes a quarter of the box, within these, and leaves the chat CHAT_ROWS_MIN.
+#define CONSOLE_ROWS_MIN 3
+#define CONSOLE_ROWS_MAX 8
+#define CHAT_ROWS_MIN 4
+#define CONSOLE_TITLE "console"
 
 // The console above the chat, sharing an edge, in one box. Either one fills it if shown alone.
 static void draw_main(wbuf_t *w, rect_t m, int boxed, int sidebar_shown, const tui_scrollback_t *sb,
@@ -1337,9 +1417,9 @@ static void draw_main(wbuf_t *w, rect_t m, int boxed, int sidebar_shown, const t
     int con_h = 0;
     if (show_con && show_chat) {
         con_h = inner / 4;
-        if (con_h < 3) con_h = 3;
-        if (con_h > 8) con_h = 8;
-        if (inner - con_h - 1 < 4) con_h = inner - 1 - 4;
+        if (con_h < CONSOLE_ROWS_MIN) con_h = CONSOLE_ROWS_MIN;
+        if (con_h > CONSOLE_ROWS_MAX) con_h = CONSOLE_ROWS_MAX;
+        if (inner - con_h - 1 < CHAT_ROWS_MIN) con_h = inner - 1 - CHAT_ROWS_MIN;
         if (con_h < 1) show_con = 0;
     }
     span_t clock, ctitle, ktitle, kright;
@@ -1348,7 +1428,7 @@ static void draw_main(wbuf_t *w, rect_t m, int boxed, int sidebar_shown, const t
     span_init(&ctitle, title_room(m.w, clock.p.used));
     if (show_chat) chat_title(&ctitle, v, sidebar_shown);
     else if (!show_con) ptext(&ctitle.p, S_FAINT, "hidden");
-    span_init(&kright, title_room(m.w, 0) - 9);   // after "console"
+    span_init(&kright, title_room(m.w, 0) - (int)(sizeof CONSOLE_TITLE - 1) - TITLE_PAD);
     int clock_room = show_chat ? 0 : clock.p.used + 2;
     if (v->build_label) pell(&kright.p, S_FAINT, v->build_label, kright.p.room - clock_room);
     if (!show_chat && v->clock) {
@@ -1356,7 +1436,7 @@ static void draw_main(wbuf_t *w, rect_t m, int boxed, int sidebar_shown, const t
         ptext(&kright.p, S_FAINT, v->clock);
     }
     span_init(&ktitle, title_room(m.w, kright.p.used));
-    ptext(&ktitle.p, S_FAINT, "console");
+    ptext(&ktitle.p, S_FAINT, CONSOLE_TITLE);
     // Its bottom edge is the input box's top, which draw_input() draws.
     if (show_con) edge(w, m.top, m.left, m.w, top_left(m), G_TR, bs, &ktitle, &kright);
     else edge(w, m.top, m.left, m.w, top_left(m), G_TR, bs, &ctitle, &clock);
@@ -1392,20 +1472,23 @@ static void heading(pen_t *p, const char *title, int count) {
     }
 }
 
+// The mark before an entry in a list: a pointer on the selected one.
+static void pointer(pen_t *p, int on) { ptext(p, on ? S_ACCENT_BOLD : S_PLAIN, on ? G_PTR " " : "  "); }
+
 // A session: its name, then a badge with how many messages came in while it wasn't on screen
-// (yellow, with '@' first, if one mentions you), its state and how many peers are online.
+// (yellow, with '@' first, if one mentions you; past BADGE_MAX, a '+'), its state and how many
+// peers are online.
+#define BADGE_MAX 99
+
 static void session_line(pen_t *p, const tui_session_row_t *s, int sel) {
-    static const char *const GLYPH[] = { G_RING, G_DOTTED, G_DOT };
-    static const style_t STYLE[] = { S_FAINT, S_YELLOW, S_GREEN };
-    unsigned st = (unsigned)s->state < 3 ? (unsigned)s->state : 2;
     char count[16], badge[16] = "";
     snprintf(count, sizeof count, "%d", s->online);
     if (!sel && s->unread > 0)
-        snprintf(badge, sizeof badge, " %s%d%s ", s->mention ? "@" : "", s->unread > 99 ? 99 : s->unread,
-                 s->unread > 99 ? "+" : "");
+        snprintf(badge, sizeof badge, " %s%d%s ", s->mention ? "@" : "", s->unread > BADGE_MAX ? BADGE_MAX : s->unread,
+                 s->unread > BADGE_MAX ? "+" : "");
     int bw = badge[0] ? (int)strlen(badge) + 1 : 0;
     int right = 2 + (int)strlen(count) + bw;
-    ptext(p, sel ? S_ACCENT_BOLD : S_PLAIN, sel ? G_PTR " " : "  ");
+    pointer(p, sel);
     pell(p, sel ? S_ACCENT_BOLD : badge[0] ? S_BOLD : S_PLAIN, s->label, p->room - p->used - right - 1);
     pspace(p, p->room - right);
     if (badge[0]) {
@@ -1413,7 +1496,7 @@ static void session_line(pen_t *p, const tui_session_row_t *s, int sel) {
         p->used += wapp_trunc(p->w, badge, p->room - p->used);
         ptext(p, S_PLAIN, " ");
     }
-    ptext(p, STYLE[st], GLYPH[st]);
+    state_mark(p, s->state);
     ptext(p, S_FAINT, " ");
     ptext(p, S_FAINT, count);
 }
@@ -1427,12 +1510,12 @@ static void peer_line(pen_t *p, const tui_peer_row_t *pr) {
     // Most urgent first: codes that differ, a key that isn't the one verified for the nick, a bad
     // signature, a code still to compare.
     if (pr->you) { word = glyph = "you"; st = S_FAINT; }
-    else if (pr->code == 3) { word = G_CROSS " codes differ"; glyph = G_CROSS; st = S_RED_BOLD; }
-    else if (pr->code == 4) { word = G_CROSS " key changed"; glyph = G_CROSS; st = S_RED_BOLD; }
-    else if (pr->verify == 2) { word = G_CROSS " invalid"; glyph = G_CROSS; st = S_RED_BOLD; }
-    else if (pr->code == 1) { word = "? compare code"; glyph = "?"; st = S_YELLOW_BOLD; }
-    else if (pr->code == 2) { word = G_CHECK " compared"; glyph = G_CHECK; st = S_GREEN; }
-    else if (pr->verify == 1) { word = G_CHECK " verified"; glyph = G_CHECK; st = S_GREEN; }
+    else if (pr->code == TUI_CODE_DIFFERS) { word = G_CROSS " codes differ"; glyph = G_CROSS; st = S_RED_BOLD; }
+    else if (pr->code == TUI_CODE_KEY_CHANGED) { word = G_CROSS " key changed"; glyph = G_CROSS; st = S_RED_BOLD; }
+    else if (pr->verify == TUI_VERIFY_BAD) { word = G_CROSS " invalid"; glyph = G_CROSS; st = S_RED_BOLD; }
+    else if (pr->code == TUI_CODE_TO_COMPARE) { word = "? compare code"; glyph = "?"; st = S_YELLOW_BOLD; }
+    else if (pr->code == TUI_CODE_COMPARED) { word = G_CHECK " compared"; glyph = G_CHECK; st = S_GREEN; }
+    else if (pr->verify == TUI_VERIFY_OK) { word = G_CHECK " verified"; glyph = G_CHECK; st = S_GREEN; }
     else { word = "unverified"; glyph = "?"; st = S_FAINT; }
     const char *mod_word = pr->modified ? "modified " : "", *mod_glyph = pr->modified ? "! " : "";
     const char *hist_word = pr->history ? "history " : "", *hist_glyph = pr->history ? "h " : "";
@@ -1498,7 +1581,7 @@ static void draw_sidebar(wbuf_t *w, rect_t r, const tui_session_row_t *sessions,
         inner_begin(w, &p, r.top + 1 + i, r.left + 1, r.w - 2);
         switch (k) {
             case L_HEAD_SESSIONS: heading(&p, "SESSIONS", n_sessions > 0 ? n_sessions : -1); break;
-            case L_NO_SESSIONS:   ptext(&p, S_FAINT, "none yet " G_MID " ctrl+n"); break;
+            case L_NO_SESSIONS:   ptext(&p, S_FAINT, "none yet" DOT_SEP "ctrl+n"); break;
             case L_SESSION:       session_line(&p, &sessions[a], sel); break;
             case L_HEAD_PEERS:   heading(&p, "PEERS", n_peers); break;
             case L_PEER:          peer_line(&p, &peers[a]); break;
@@ -1591,7 +1674,7 @@ static int draw_menu(wbuf_t *w, rect_t in_r, rect_t over, const tui_input_t *in,
         pen_t p;
         inner_begin(w, &p, top + 1 + i, in_r.left + 1, in_r.w - 2);
         if (ok) {
-            ptext(&p, on ? S_ACCENT_BOLD : S_PLAIN, on ? G_PTR " " : "  ");
+            pointer(&p, on);
             ptext(&p, on ? S_ACCENT_BOLD : S_BOLD, s.name);
             if (s.args[0]) { ptext(&p, S_FAINT, " "); ptext(&p, S_FAINT, s.args); }
             if (p.used < 2 + nw + 3) pspace(&p, 2 + nw + 3);
@@ -1674,8 +1757,7 @@ static void draw_wrapped(wbuf_t *w, int row, int left, int width, int nrows, con
         if (k < wr.n) {
             int end = k + 1 < wr.n ? wr.start[k + 1] : in->len;
             char piece[sizeof in->buf];
-            memcpy(piece, in->buf + wr.start[k], (size_t)(end - wr.start[k]));
-            piece[end - wr.start[k]] = '\0';
+            copy_slice(piece, sizeof piece, in->buf + wr.start[k], (size_t)(end - wr.start[k]));
             ptext(&p, S_PLAIN, piece);
             if (nick && k == wr.cur_row) ptext(&p, S_FAINT, nick + (in->cursor - mention_start(in)));
         }
@@ -1688,19 +1770,15 @@ static void draw_wrapped(wbuf_t *w, int row, int left, int width, int nrows, con
 // The input box's title without a prompt: "what · what to do", the first part yellow and the rest
 // highlighted like keys, or just the first part when both don't fit.
 static void draw_warn(pen_t *p, const char *warn) {
-    static const char SEP[] = " " G_MID " ";
-    const char *sep = strstr(warn, SEP);
+    const char *sep = strstr(warn, DOT_SEP);
     char what[256];
-    size_t n = sep ? (size_t)(sep - warn) : strlen(warn);
-    if (n >= sizeof what) n = sizeof what - 1;
-    memcpy(what, warn, n);
-    what[n] = '\0';
-    const char *todo = sep ? sep + sizeof SEP - 1 : NULL;
+    copy_slice(what, sizeof what, warn, sep ? (size_t)(sep - warn) : strlen(warn));
+    const char *todo = sep ? sep + sizeof DOT_SEP - 1 : NULL;
     int room = p->room - p->used;
-    if (todo && utf8_str_cols(what) + 3 + utf8_str_cols(todo) > room) todo = NULL;
+    if (todo && utf8_str_cols(what) + utf8_str_cols(DOT_SEP) + utf8_str_cols(todo) > room) todo = NULL;
     pell(p, S_YELLOW_BOLD, what, room);
     if (todo) {
-        ptext(p, S_FAINT, SEP);
+        ptext(p, S_FAINT, DOT_SEP);
         ptext(p, S_ACCENT, todo);
     }
 }
@@ -1721,7 +1799,7 @@ static void draw_input(wbuf_t *w, rect_t r, int boxed, const tui_bar_t *bar, con
         span_init(&more, r.w);
         if (v->chat && v->title && v->scroll > 0) {
             char t[48];
-            snprintf(t, sizeof t, G_DOWN " %d newer " G_MID " pgdn", v->scroll);
+            snprintf(t, sizeof t, G_DOWN " %d newer" DOT_SEP "pgdn", v->scroll);
             ptext(&more.p, S_ACCENT_BOLD, t);
         }
         span_init(&title, title_room(r.w, more.p.used));
@@ -1791,10 +1869,9 @@ static void draw_status(wbuf_t *w, int row, int cols, const tui_bar_t *bar) {
     }
     // As many of the hints as fit, starting from the first, since they're ordered most useful first.
     if (bar->hint && bar->hint[0]) {
-        static const char SEP[] = " " G_MID " ";
         char fit[256] = "";
         for (const char *s = bar->hint; ; ) {
-            const char *end = strstr(s, SEP);
+            const char *end = strstr(s, DOT_SEP);
             size_t upto = end ? (size_t)(end - bar->hint) : strlen(bar->hint);
             char part[256];
             if (upto >= sizeof part) break;
@@ -1803,7 +1880,7 @@ static void draw_status(wbuf_t *w, int row, int cols, const tui_bar_t *bar) {
             if (p.used + 3 + utf8_str_cols(part) > cols) break;
             copy_str(fit, part, sizeof fit);
             if (!end) break;
-            s = end + sizeof SEP - 1;
+            s = end + sizeof DOT_SEP - 1;
         }
         if (fit[0]) {
             pspace(&p, cols - utf8_str_cols(fit) - 1);
@@ -1811,7 +1888,7 @@ static void draw_status(wbuf_t *w, int row, int cols, const tui_bar_t *bar) {
         }
     }
     pspace(&p, cols);
-    wapp(w, "\x1b[0m");
+    wapp(w, SGR_RESET);
 }
 
 static void finish_frame(wbuf_t *w, int rows, int cols, const tui_bar_t *bar, int cr, int cc);
@@ -1819,18 +1896,23 @@ static void finish_frame(wbuf_t *w, int rows, int cols, const tui_bar_t *bar, in
 // The input box's height in the last full chat frame, or 0 after anything else was drawn.
 static int g_input_h;
 
+// The sidebar takes a quarter of the screen, within these, if the chat keeps CHAT_COLS_MIN.
+#define SIDEBAR_MIN 24
+#define SIDEBAR_MAX 32
+#define CHAT_COLS_MIN 44
+
 // One frame, split by lines: the sidebar's right side is the chat's left, and the chat's bottom
 // edge is the input box's top. The box is as tall as the wrapped text, up to a third of the space
 // inside the frame, so the chat keeps most of the screen.
 static void chat_layout(int rows, int cols, const tui_view_t *v, const tui_bar_t *bar, rect_t *side, rect_t *main_r,
                         rect_t *input, int *boxed) {
-    *boxed = rows >= 10 && cols >= 40;
+    *boxed = rows >= BOXED_ROWS && cols >= BOXED_COLS;
     int sbw = 0;
     if (*boxed && v->sidebar) {
         sbw = cols / 4;
-        if (sbw < 24) sbw = 24;
-        if (sbw > 32) sbw = 32;
-        if (cols - sbw < 44) sbw = 0;
+        if (sbw < SIDEBAR_MIN) sbw = SIDEBAR_MIN;
+        if (sbw > SIDEBAR_MAX) sbw = SIDEBAR_MAX;
+        if (cols - sbw < CHAT_COLS_MIN) sbw = 0;
     }
     *side = (rect_t){ 1, 1, rows - 1, sbw };
     int x = sbw > 0 ? sbw : 1, ih = 1;
@@ -1847,10 +1929,7 @@ void tui_render(int rows, int cols,
                 const tui_peer_row_t *peers, int n_peers, const tui_kv_t *net, int n_net,
                 const tui_scrollback_t *sb, const tui_scrollback_t *console,
                 const tui_view_t *view, const tui_bar_t *bar, int color_enabled) {
-    clamp_size(&rows, &cols);
-    g_color = color_enabled;
-    g_row_bg = "";
-    wbuf_t w = { g_frame, FRAME_CAP, 0 };
+    wbuf_t w = frame_init(&rows, &cols, color_enabled);
     rect_t side, main_r, input;
     int boxed;
     chat_layout(rows, cols, view, bar, &side, &main_r, &input, &boxed);
@@ -1865,10 +1944,7 @@ void tui_render(int rows, int cols,
 }
 
 int tui_render_bar(int rows, int cols, const tui_view_t *view, const tui_bar_t *bar, int color_enabled) {
-    clamp_size(&rows, &cols);
-    g_color = color_enabled;
-    g_row_bg = "";
-    wbuf_t w = { g_frame, FRAME_CAP, 0 };
+    wbuf_t w = frame_init(&rows, &cols, color_enabled);
     rect_t side, main_r, input;
     int boxed;
     chat_layout(rows, cols, view, bar, &side, &main_r, &input, &boxed);
@@ -1887,17 +1963,20 @@ int tui_render_bar(int rows, int cols, const tui_view_t *view, const tui_bar_t *
 
 // ---- list pages ----
 
+// The first of n entries to show in shown rows: the one that puts sel in the middle, when they
+// don't all fit.
+static int centred_first(int n, int shown, int sel) {
+    if (n <= shown || sel < 0) return 0;
+    int first = sel - shown / 2;
+    if (first > n - shown) first = n - shown;
+    return first < 0 ? 0 : first;
+}
+
 static void draw_nav(wbuf_t *w, rect_t r, const char *const *nav, int n_nav, int nav_sel) {
     span_t title, right;
     brand(&title, &right, r.w);
     box(w, r, border_sgr(-1), &title, &right, NULL);
-    // Scrolled so the selected one is in the middle, when they don't all fit.
-    int shown = r.h - 3, top = 0;
-    if (n_nav > shown && nav_sel >= 0) {
-        top = nav_sel - shown / 2;
-        if (top > n_nav - shown) top = n_nav - shown;
-        if (top < 0) top = 0;
-    }
+    int top = centred_first(n_nav, r.h - 3, nav_sel);
     for (int i = 0; i < r.h - 2; i++) {
         int k = i == 0 ? -1 : i - 1 + top;   // a blank row above the first
         int on = k >= 0 && k < n_nav && k == nav_sel;
@@ -1905,7 +1984,7 @@ static void draw_nav(wbuf_t *w, rect_t r, const char *const *nav, int n_nav, int
         pen_t p;
         inner_begin(w, &p, r.top + 1 + i, r.left + 1, r.w - 2);
         if (k >= 0 && k < n_nav) {
-            ptext(&p, on ? S_ACCENT_BOLD : S_PLAIN, on ? G_PTR " " : "  ");
+            pointer(&p, on);
             pell(&p, on ? S_ACCENT_BOLD : S_FAINT, nav[k], p.room - p.used);
         }
         inner_end(&p);
@@ -1919,10 +1998,7 @@ static void crumb_title(span_t *t, const char *title) {
     for (const char *s = title; ; ) {
         const char *next = strstr(s, SEP);
         char part[1024];
-        size_t n = next ? (size_t)(next - s) : strlen(s);
-        if (n >= sizeof part) n = sizeof part - 1;
-        memcpy(part, s, n);
-        part[n] = '\0';
+        copy_slice(part, sizeof part, s, next ? (size_t)(next - s) : strlen(s));
         ptext(&t->p, next ? S_FAINT : S_BOLD, part);
         if (!next) break;
         ptext(&t->p, S_FAINT, SEP);
@@ -1961,13 +2037,8 @@ static void draw_value(pen_t *p, const tui_row_t *r, int on) {
             break;
         case TUI_V_PROGRESS: {
             int bw = room >= 30 ? 10 : room >= 18 ? 6 : 0;
-            int pm = r->permille < 0 ? 0 : r->permille > 1000 ? 1000 : r->permille;
             if (bw) {
-                sty(p->w, S_ACCENT);
-                for (int i = 0; i < pm * bw / 1000; i++) wapp(p->w, G_HEAVY);
-                sty(p->w, S_FAINT);
-                for (int i = pm * bw / 1000; i < bw; i++) wapp(p->w, G_H);
-                p->used += bw;
+                draw_bar(p, r->permille, bw);
                 ptext(p, S_PLAIN, " ");
             }
             pell(p, S_PLAIN, r->value, p->room - p->used);
@@ -2058,7 +2129,7 @@ static void draw_list(wbuf_t *w, int top, int left, int iw, int view, int nrows,
         int on = arg[li] == pg->selected;
         row_select(on);
         inner_begin(w, &p, row, left, iw);
-        ptext(&p, on ? S_ACCENT_BOLD : S_PLAIN, on ? G_PTR " " : "  ");
+        pointer(&p, on);
         int pc = 0;
         if (pr->prefix) {
             pc = utf8_str_cols(pr->prefix);
@@ -2075,20 +2146,33 @@ static void draw_list(wbuf_t *w, int top, int left, int iw, int view, int nrows,
     }
 }
 
+// The side column takes a third of the rows' width, within these, if the rows keep ROWS_COLS_MIN.
+#define SIDE_MIN 20
+#define SIDE_MAX 36
+#define ROWS_COLS_MIN 60
+// The nav takes a fifth of the screen, within these, if the page keeps PAGE_COLS_MIN.
+#define NAV_MIN 20
+#define NAV_MAX 26
+#define PAGE_COLS_MIN 56
+
 // The side column's width for rows iw columns wide, its rule included, or 0 if it doesn't fit.
 static int side_width(int iw) {
     int w = iw / 3;
-    if (w < 20) w = 20;
-    if (w > 36) w = 36;
-    return iw - w >= 60 ? w : 0;
+    if (w < SIDE_MIN) w = SIDE_MIN;
+    if (w > SIDE_MAX) w = SIDE_MAX;
+    return iw - w >= ROWS_COLS_MIN ? w : 0;
+}
+
+static int nav_width(int cols) {
+    int navw = cols / 5;
+    if (navw < NAV_MIN) navw = NAV_MIN;
+    if (navw > NAV_MAX) navw = NAV_MAX;
+    return cols - navw < PAGE_COLS_MIN ? 0 : navw;
 }
 
 // The page's width inside its border, as tui_render_page works it out.
 static int page_inner_width(int cols, int with_nav) {
-    int navw = cols / 5;
-    if (navw < 20) navw = 20;
-    if (navw > 26) navw = 26;
-    if (!with_nav || cols - navw < 56) navw = 0;
+    int navw = with_nav ? nav_width(cols) : 0;
     return cols - (navw > 0 ? navw : 1) - 1;
 }
 
@@ -2104,12 +2188,7 @@ int tui_nav_text_cols(int cols) {
 // The side column: its title, a blank row, then its entries, scrolled so the selected one is in
 // the middle when they don't all fit, with a rule on its right.
 static void draw_side(wbuf_t *w, int top, int left, int width, int nrows, const tui_page_t *pg) {
-    int shown = nrows - 2, first = 0;
-    if (pg->n_side > shown && pg->side_sel >= 0) {
-        first = pg->side_sel - shown / 2;
-        if (first > pg->n_side - shown) first = pg->n_side - shown;
-        if (first < 0) first = 0;
-    }
+    int first = centred_first(pg->n_side, nrows - 2, pg->side_sel);
     for (int i = 0; i < nrows; i++) {
         int k = i < 2 ? -1 : first + i - 2;
         int on = k >= 0 && k < pg->n_side && k == pg->side_sel;
@@ -2118,42 +2197,40 @@ static void draw_side(wbuf_t *w, int top, int left, int width, int nrows, const 
         if (i == 0 && pg->side_title) {
             pell(&p, S_FAINT, pg->side_title, p.room);
         } else if (k >= 0 && k < pg->n_side) {
-            ptext(&p, on ? S_ACCENT_BOLD : S_PLAIN, on ? G_PTR " " : "  ");
+            pointer(&p, on);
             pell(&p, on ? S_ACCENT_BOLD : S_FAINT, pg->side[k], p.room - p.used);
         }
         pspace(&p, p.room);
         sty(w, S_PLAIN);
         wapp(w, " ");
         sty(w, S_FAINT);
-        wapp(w, G_V);
-        wapp(w, "\x1b[0m");
+        wapp(w, G_V SGR_RESET);
     }
 }
 
+// The most sections the nav takes from a page's rows, and the most rows of help and of intro.
+#define ROW_SECTIONS_MAX 32
+#define HELP_ROWS 5
+#define INTRO_ROWS 3
+
 void tui_render_page(int rows, int cols, const tui_page_t *page, const tui_bar_t *bar, int color_enabled) {
-    clamp_size(&rows, &cols);
-    g_color = color_enabled;
-    g_row_bg = "";
+    wbuf_t w = frame_init(&rows, &cols, color_enabled);
     g_input_h = 0;
-    wbuf_t w = { g_frame, FRAME_CAP, 0 };
 
     // The sections on the left: as given, or taken from the rows, with the selected row's highlighted.
     static const char *nav[1024];
     int n_nav = 0, nav_sel = -1;
     if (page->nav) {
-        for (int i = 0; i < page->n_nav && i < 1024; i++) nav[n_nav++] = page->nav[i];
+        for (int i = 0; i < page->n_nav && i < (int)COUNT_OF(nav); i++) nav[n_nav++] = page->nav[i];
         nav_sel = page->nav_sel;
     } else {
-        for (int i = 0; i < page->n_rows && n_nav < 32; i++) {
+        for (int i = 0; i < page->n_rows && n_nav < ROW_SECTIONS_MAX; i++) {
             if (page->rows[i].section) nav[n_nav++] = page->rows[i].section;
             if (i == page->selected) nav_sel = n_nav - 1;
         }
     }
-    int boxed = rows >= 10 && cols >= 40;
-    int navw = cols / 5;
-    if (navw < 20) navw = 20;
-    if (navw > 26) navw = 26;
-    if (!boxed || n_nav == 0 || cols - navw < 56) navw = 0;
+    int boxed = rows >= BOXED_ROWS && cols >= BOXED_COLS;
+    int navw = boxed && n_nav > 0 ? nav_width(cols) : 0;
 
     begin_frame(&w);
     if (navw) draw_nav(&w, (rect_t){ 1, 1, rows - 1, navw }, nav, n_nav, nav_sel);
@@ -2168,12 +2245,12 @@ void tui_render_page(int rows, int cols, const tui_page_t *page, const tui_bar_t
     // Over the bottom of the rows, below an edge titled with the selected row: its help and usage.
     // The rows scroll as if those were at their longest, so the rows don't move when they change.
     // Above the rows, the intro. Rows take priority when there's no room for all of it.
-    static size_t hoff[5], hlen[5], ioff[3], ilen[3];
-    int hl = boxed && page->help && page->help[0] ? wrap_rows(page->help, cw, cw, hoff, hlen, 5) : 0;
+    static size_t hoff[HELP_ROWS], hlen[HELP_ROWS], ioff[INTRO_ROWS], ilen[INTRO_ROWS];
+    int hl = boxed && page->help && page->help[0] ? wrap_rows(page->help, cw, cw, hoff, hlen, HELP_ROWS) : 0;
     int ul = boxed && page->usage && page->usage[0] ? 1 : 0;
-    int il = boxed && page->intro && page->intro[0] ? wrap_rows(page->intro, cw, cw, ioff, ilen, 3) : 0;
+    int il = boxed && page->intro && page->intro[0] ? wrap_rows(page->intro, cw, cw, ioff, ilen, INTRO_ROWS) : 0;
     int btn = page->button ? 2 : 0;
-    int hmax = boxed ? 5 : 0, umax = boxed;
+    int hmax = boxed ? HELP_ROWS : 0, umax = boxed;
     int list, view;
     for (;;) {
         list = ih - (il ? il + 1 : 0);
@@ -2198,9 +2275,7 @@ void tui_render_page(int rows, int cols, const tui_page_t *page, const tui_bar_t
     int row = top, end = top + ih;
     for (int i = 0; i < il && row < end; i++, row++) {
         char piece[TUI_LINE_MAX];
-        size_t n = ilen[i] < sizeof piece - 1 ? ilen[i] : sizeof piece - 1;
-        memcpy(piece, page->intro + ioff[i], n);
-        piece[n] = '\0';
+        copy_slice(piece, sizeof piece, page->intro + ioff[i], ilen[i]);
         pen_t p;
         inner_begin(&w, &p, row, left, iw);
         ptext(&p, S_FAINT, piece);
@@ -2222,9 +2297,7 @@ void tui_render_page(int rows, int cols, const tui_page_t *page, const tui_bar_t
         edge(&w, row++, r.left, r.w, G_LT, G_RT, border_sgr(TUI_TONE_PAGE), &about, NULL);
         for (int i = 0; i < hl && row < end; i++, row++) {
             char piece[TUI_LINE_MAX];
-            size_t n = hlen[i] < sizeof piece - 1 ? hlen[i] : sizeof piece - 1;
-            memcpy(piece, page->help + hoff[i], n);
-            piece[n] = '\0';
+            copy_slice(piece, sizeof piece, page->help + hoff[i], hlen[i]);
             pen_t p;
             inner_begin(&w, &p, row, left, iw);
             ptext(&p, S_PLAIN, piece);
@@ -2313,9 +2386,13 @@ static size_t md_inline(const char *s, char *out, uint8_t *attr, size_t cap) {
 typedef void (*text_row_fn)(void *ctx, int v, const tui_para_t *pa, const char *plain, const uint8_t *attr,
                             size_t off, size_t len, int first);
 
+// A list item's depth, as far as it's drawn.
+#define LIST_DEPTH_MAX 6
+static int para_level(const tui_para_t *pa) { return pa->level > LIST_DEPTH_MAX ? LIST_DEPTH_MAX : pa->level; }
+
 // Columns before a paragraph's text: its list depth, and the bullet, number or bar.
 static int para_hang(const tui_para_t *pa) {
-    int lvl = pa->level > 6 ? 6 : pa->level;
+    int lvl = para_level(pa);
     switch (pa->kind) {
         case TUI_P_BULLET:   return 2 + 2 * lvl;
         case TUI_P_NUMBERED: return (int)strlen(pa->marker) + 1 + 2 * lvl;
@@ -2326,9 +2403,11 @@ static int para_hang(const tui_para_t *pa) {
     }
 }
 
+#define PARA_MAX 8192
+
 static int layout_text(const tui_para_t *paras, int n, int w, text_row_fn row, void *ctx) {
-    static char plain[8192];
-    static uint8_t attr[8192];
+    static char plain[PARA_MAX];
+    static uint8_t attr[PARA_MAX];
     int v = 0;
     for (int i = 0; i < n; i++) {
         const tui_para_t *pa = &paras[i];
@@ -2340,9 +2419,9 @@ static int layout_text(const tui_para_t *paras, int n, int w, text_row_fn row, v
         int hang = para_hang(pa);
         if (pa->kind == TUI_P_CODE || pa->kind == TUI_P_ART) {
             // Code keeps its spaces and lines: one row each, cut off at the edge.
-            size_t len = strlen(pa->text) < sizeof plain - 1 ? strlen(pa->text) : sizeof plain - 1;
-            memcpy(plain, pa->text, len);
-            plain[len] = '\0';
+            size_t len = strlen(pa->text);
+            if (len > sizeof plain - 1) len = sizeof plain - 1;
+            copy_slice(plain, sizeof plain, pa->text, len);
             memset(attr, pa->kind == TUI_P_CODE ? A_CODE : 0, len);
             if (row) row(ctx, v, pa, plain, attr, 0, len, 1);
             v++;
@@ -2350,7 +2429,7 @@ static int layout_text(const tui_para_t *paras, int n, int w, text_row_fn row, v
         }
         md_inline(pa->text, plain, attr, sizeof plain);
         static size_t off[256], len[256];
-        int k = wrap_rows(plain, w - hang, w - hang, off, len, 256);
+        int k = wrap_rows(plain, w - hang, w - hang, off, len, (int)COUNT_OF(off));
         for (int j = 0; j < k; j++, v++)
             if (row) row(ctx, v, pa, plain, attr, off[j], len[j], j == 0);
     }
@@ -2365,9 +2444,7 @@ typedef struct {
 // One run of text with the same marks, in the paragraph's own style underneath.
 static void draw_run(pen_t *p, style_t base, uint8_t a, const char *t, size_t n) {
     char piece[TUI_LINE_MAX * 4];
-    if (n >= sizeof piece) n = sizeof piece - 1;
-    memcpy(piece, t, n);
-    piece[n] = '\0';
+    copy_slice(piece, sizeof piece, t, n);
     sty(p->w, (a & A_CODE) || (a & A_LINK) ? S_ACCENT : (a & A_FAINT) ? S_FAINT : base);
     if (a & A_BOLD) wapp(p->w, "\x1b[1m");
     if (a & A_ITALIC) wapp(p->w, "\x1b[3m");
@@ -2384,22 +2461,22 @@ static void draw_text_row(void *ctx, int v, const tui_para_t *pa, const char *pl
     pspace(&p, 1);
     if (pa->kind == TUI_P_RULE) {
         sty(p.w, S_FAINT);
-        for (int x = 0; x < d->tw && p.used < p.room; x++) { wapp(p.w, "\xe2\x94\x80"); p.used++; }
+        for (int x = 0; x < d->tw && p.used < p.room; x++) { wapp(p.w, G_H); p.used++; }
         inner_end(&p);
         return;
     }
-    int lvl = pa->level > 6 ? 6 : pa->level;
+    int lvl = para_level(pa);
     int hang = para_hang(pa);
     // A list item's first row starts with its bullet or number, and the rows after it are indented under its text.
     if (first && pa->kind == TUI_P_BULLET) {
         pspace(&p, 1 + 2 * lvl);
-        ptext(&p, S_ACCENT, lvl % 2 ? "\xe2\x97\xa6 " : "\xe2\x80\xa2 ");
+        ptext(&p, S_ACCENT, lvl % 2 ? G_WBULLET " " : G_BULLET " ");
     } else if (first && pa->kind == TUI_P_NUMBERED) {
         pspace(&p, 1 + 2 * lvl);
         ptext(&p, S_ACCENT, pa->marker);
         pspace(&p, 1 + hang);
     } else if (pa->kind == TUI_P_QUOTE) {
-        ptext(&p, S_FAINT, "\xe2\x94\x82 ");
+        ptext(&p, S_FAINT, G_V " ");
     } else {
         pspace(&p, 1 + hang);
     }
@@ -2416,15 +2493,11 @@ static void draw_text_row(void *ctx, int v, const tui_para_t *pa, const char *pl
 
 int tui_render_text(int rows, int cols, const char *title, const char *clock, const tui_para_t *paras, int n,
                     int *scroll, const tui_bar_t *bar, int color_enabled) {
-    clamp_size(&rows, &cols);
-    g_color = color_enabled;
-    g_row_bg = "";
+    // Always in a box: the smallest screen it's drawn on has room for one.
+    wbuf_t w = frame_init(&rows, &cols, color_enabled);
     g_input_h = 0;
-    wbuf_t w = { g_frame, FRAME_CAP, 0 };
-    int boxed = rows >= 6 && cols >= 20;
     rect_t r = { 1, 1, rows - 1, cols };
-    int top = boxed ? r.top + 1 : r.top, ih = boxed ? r.h - 2 : r.h;
-    int left = boxed ? r.left + 1 : r.left, iw = boxed ? r.w - 2 : r.w;
+    int top = r.top + 1, ih = r.h - 2, left = r.left + 1, iw = r.w - 2;
     int tw = iw - 3;   // minus the box's padding on each side and the margin before the text
     if (tw < 8) tw = 8;
     int total = layout_text(paras, n, tw, NULL, NULL);
@@ -2433,17 +2506,15 @@ int tui_render_text(int rows, int cols, const char *title, const char *clock, co
     if (*scroll < 0) *scroll = 0;
 
     begin_frame(&w);
-    if (boxed) {
-        span_t t, right;
-        span_init(&right, r.w);
-        char where[48];
-        snprintf(where, sizeof where, "%d%%", most ? *scroll * 100 / most : 100);
-        ptext(&right.p, S_FAINT, where);
-        if (clock) { ptext(&right.p, S_FAINT, "  "); ptext(&right.p, S_FAINT, clock); }
-        span_init(&t, title_room(r.w, right.p.used));
-        crumb_title(&t, title ? title : "");
-        box(&w, r, border_sgr(TUI_TONE_PAGE), &t, &right, NULL);
-    }
+    span_t t, right;
+    span_init(&right, r.w);
+    char where[48];
+    snprintf(where, sizeof where, "%d%%", most ? *scroll * 100 / most : 100);
+    ptext(&right.p, S_FAINT, where);
+    if (clock) { ptext(&right.p, S_FAINT, "  "); ptext(&right.p, S_FAINT, clock); }
+    span_init(&t, title_room(r.w, right.p.used));
+    crumb_title(&t, title ? title : "");
+    box(&w, r, border_sgr(TUI_TONE_PAGE), &t, &right, NULL);
     text_draw_t d = { &w, top, left, iw, tw, *scroll, ih };
     layout_text(paras, n, tw, draw_text_row, &d);
     for (int v = total - *scroll; v < ih; v++) blank_row(&w, top + v, left, iw);
@@ -2469,26 +2540,19 @@ static void center_text(pen_t *p, style_t st, const char *mark, style_t mark_st,
 }
 
 static void center_bar(pen_t *p, int permille) {
-    int pm = permille < 0 ? 0 : permille > 1000 ? 1000 : permille;
+    int pm = clamp_permille(permille);
     char pct[8];
     snprintf(pct, sizeof pct, " %d%%", pm / 10);
     int bw = p->room - 8 < 40 ? p->room - 8 : 40;
     if (bw < 4) bw = 0;
     pspace(p, (p->room - bw - (int)strlen(pct)) / 2);
-    sty(p->w, S_ACCENT);
-    for (int i = 0; i < pm * bw / 1000; i++) wapp(p->w, G_HEAVY);
-    sty(p->w, S_FAINT);
-    for (int i = pm * bw / 1000; i < bw; i++) wapp(p->w, G_H);
-    p->used += bw;
+    draw_bar(p, pm, bw);
     ptext(p, S_BOLD, pct);
 }
 
 void tui_render_picture(int rows, int cols, const tui_picture_t *pic, const tui_bar_t *bar, int color_enabled) {
-    clamp_size(&rows, &cols);
-    g_color = color_enabled;
-    g_row_bg = "";
+    wbuf_t w = frame_init(&rows, &cols, color_enabled);
     g_input_h = 0;
-    wbuf_t w = { g_frame, FRAME_CAP, 0 };
     begin_frame(&w);
 
     rect_t r = { 1, 1, rows - 1, cols };
@@ -2504,14 +2568,7 @@ void tui_render_picture(int rows, int cols, const tui_picture_t *pic, const tui_
     const tui_image_t *im = pic->image && pic->image->rgb && pic->image->w > 0 && pic->image->h > 0 ? pic->image : NULL;
     const char *lines[8];
     size_t lens[8];
-    int nl = 0;
-    for (const char *s = pic->note; !im && s && *s && nl < 8; ) {
-        const char *end = strchr(s, '\n');
-        lens[nl] = end ? (size_t)(end - s) : strlen(s);
-        lines[nl++] = s;
-        if (!end) break;
-        s = end + 1;
-    }
+    int nl = im ? 0 : split_lines(pic->note, lines, lens, (int)COUNT_OF(lines));
     const tui_progress_t *pg = im ? NULL : pic->progress;
     int pg_rows = pg ? (pg->kind == TUI_PROGRESS_BAR ? 2 : 1) : 0;
     int block = im ? (im->h + 1) / 2 : nl + (nl && pg ? 1 : 0) + pg_rows;
@@ -2531,9 +2588,7 @@ void tui_render_picture(int rows, int cols, const tui_picture_t *pic, const tui_
                 draw_image_row(&p, im, im->w, k);
             } else if (k < nl) {
                 char t[TUI_LINE_MAX];
-                size_t n = lens[k] < sizeof t - 1 ? lens[k] : sizeof t - 1;
-                memcpy(t, lines[k], n);
-                t[n] = '\0';
+                copy_slice(t, sizeof t, lines[k], lens[k]);
                 center_text(&p, k == 0 ? S_BOLD : S_FAINT, NULL, S_PLAIN, t);
             } else if (pg && under == 0 && pg->kind == TUI_PROGRESS_BAR) {
                 center_bar(&p, pg->permille);
@@ -2591,13 +2646,15 @@ static style_t log_style(tui_log_kind_t k) {
 }
 
 #define CONSOLE_ROWS 12
+#define CONSOLE_DIALOG_MAX_W 100
+#define DIALOG_MAX_W 76
 
 // Something in progress: its console in its own frame with the last lines that fit, then a progress
 // bar as wide as the console with the percentage on its right, then the current step. The console
 // loses rows on a short screen, but the rest is always shown.
 static void draw_console_dialog(wbuf_t *w, int rows, int cols, const tui_dialog_t *d) {
     int avail = rows - 1;
-    int bw = cols - 4 < 100 ? cols - 4 : 100, my = 1;
+    int bw = cols - 4 < CONSOLE_DIALOG_MAX_W ? cols - 4 : CONSOLE_DIALOG_MAX_W, my = 1;
     // A blank, the console's top edge, its rows, its bottom edge, a blank, the bar, a blank, the
     // step and a blank.
     const int fixed = 8;
@@ -2632,9 +2689,7 @@ static void draw_console_dialog(wbuf_t *w, int rows, int cols, const tui_dialog_
         pen_t p;
         inner_begin(w, &p, row++, x, iw);
         pspace(&p, 1);
-        int pm = d->progress ? d->progress->permille : 0;
-        if (pm < 0) pm = 0;
-        if (pm > 1000) pm = 1000;
+        int pm = clamp_permille(d->progress ? d->progress->permille : 0);
         char right[TUI_LINE_MAX];
         if (d->progress && d->progress->text[0]) snprintf(right, sizeof right, "%3d%%  %s", pm / 10, d->progress->text);
         else snprintf(right, sizeof right, "%3d%%", pm / 10);
@@ -2642,12 +2697,7 @@ static void draw_console_dialog(wbuf_t *w, int rows, int cols, const tui_dialog_
         int barw = cw - rw - 1;
         if (barw < 8) { snprintf(right, sizeof right, "%3d%%", pm / 10); rw = (int)strlen(right); barw = cw - rw - 1; }
         if (barw < 0) barw = 0;
-        int lit = pm * barw / 1000;
-        sty(w, S_ACCENT);
-        for (int i = 0; i < lit; i++) wapp(w, G_HEAVY);
-        sty(w, S_FAINT);
-        for (int i = lit; i < barw; i++) wapp(w, G_H);
-        p.used += barw;
+        draw_bar(&p, pm, barw);
         ptext(&p, S_PLAIN, " ");
         ptext(&p, S_BOLD, right);
         inner_end(&p);
@@ -2667,7 +2717,7 @@ static void draw_console_dialog(wbuf_t *w, int rows, int cols, const tui_dialog_
 
 // What doesn't fit is cut from the end of the text, then from the note. The field is always shown.
 static int dialog_width(int cols) {
-    return cols - 4 < 76 ? cols - 4 : 76;
+    return cols - 4 < DIALOG_MAX_W ? cols - 4 : DIALOG_MAX_W;
 }
 
 int tui_dialog_rows(int cols, const tui_dialog_t *d) {
@@ -2720,7 +2770,7 @@ static void draw_dialog(wbuf_t *w, int rows, int cols, const tui_dialog_t *d, in
             pen_t p;
             inner_begin(w, &p, row, x, iw);
             pspace(&p, 1);
-            ptext(&p, on ? S_ACCENT_BOLD : S_PLAIN, on ? G_PTR " " : "  ");
+            pointer(&p, on);
             const char *detail = d->details && d->details[i] ? d->details[i] : "";
             int dw = utf8_str_cols(detail), nw = utf8_str_cols(d->items[i]);
             // The detail is left out unless the whole name fits beside it.
@@ -2754,9 +2804,7 @@ static void draw_dialog(wbuf_t *w, int rows, int cols, const tui_dialog_t *d, in
     }
     for (int i = 0; i < note_n && row < end; i++, row++) {
         char piece[TUI_LINE_MAX];
-        size_t n = nlen[i] < sizeof piece - 1 ? nlen[i] : sizeof piece - 1;
-        memcpy(piece, d->note + noff[i], n);
-        piece[n] = '\0';
+        copy_slice(piece, sizeof piece, d->note + noff[i], nlen[i]);
         pen_t p;
         inner_begin(w, &p, row, x, iw);
         pspace(&p, 1);

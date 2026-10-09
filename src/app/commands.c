@@ -44,7 +44,7 @@ static const struct { const char *section, *keys, *what; } HELP_KEYS[] = {
     { NULL,          "esc  q",          "back / close" },
 };
 
-#define N_HELP_KEYS ((int)(sizeof HELP_KEYS / sizeof HELP_KEYS[0]))
+#define N_HELP_KEYS ((int)COUNT_OF(HELP_KEYS))
 
 #define MAX_HELP_COMMANDS 32
 
@@ -109,15 +109,16 @@ static cmd_result_t app_set(void *ctx, const char *arg) {
             { "off", PICK_OFF }, { "age", PICK_AGE_MADE }, { "pgp", PICK_PGP_MADE },
         };
         int pick = -1;
-        for (size_t i = 0; i < sizeof SIGN_VALUES / sizeof SIGN_VALUES[0]; i++)
+        for (size_t i = 0; i < COUNT_OF(SIGN_VALUES); i++)
             if (strcmp(value, SIGN_VALUES[i].name) == 0) pick = SIGN_VALUES[i].pick;
         if (pick == PICK_OFF) { sign_pick(pick); return CMD_OK; }
         // age:PATH or pgp:PATH: a key file, like --identity takes.
-        if ((strncmp(value, "age:", 4) == 0 || strncmp(value, "pgp:", 4) == 0) && value[4]) {
+        if ((starts_with(value, "age:") || starts_with(value, "pgp:")) && value[sizeof "age:" - 1]) {
+            const char *path = value + sizeof "age:" - 1;
             identity_source_t kind = value[0] == 'a' ? IDENT_AGE : IDENT_PGP;
-            if (load_key_file(kind, value + 4) == 0) { identity_chosen(); return CMD_OK; }
-            if (kind == IDENT_AGE) note("%.80s can't be read, or holds no AGE secret key", value + 4);
-            else note("%.80s can't be read, or isn't an unencrypted EdDSA/Ed25519 secret key", value + 4);
+            if (load_key_file(kind, path) == 0) { identity_chosen(); return CMD_OK; }
+            if (kind == IDENT_AGE) note("%.80s can't be read, or holds no AGE secret key", path);
+            else note("%.80s can't be read, or isn't an unencrypted EdDSA/Ed25519 secret key", path);
             return CMD_OK;
         }
         settings_open_at(SET_SIGN);
@@ -154,7 +155,7 @@ static int pick_save_target(const char *arg) {
 int begin_install(const char *arg) {
     if (pick_save_target(arg) != 0) return -1;
     device_check();
-    char where[900];
+    char where[APP_PATH_MAX];
     if (install_where(g_app.save_target, where, sizeof where) != 0) { note("there's nowhere to install to - no home folder"); return -1; }
     g_app.n_saves = install_list(g_app.saves, INSTALL_SAVES_MAX);
     const char *t = g_app.save_target;
@@ -294,7 +295,7 @@ int file_arg(const char *arg, int *anyway) {
     long n = strtol(arg, &end, 10);
     while (*end == ' ') end++;
     *anyway = strcmp(end, "anyway") == 0;
-    return n > 0 && n < 1000000 && (!*end || *anyway) ? (int)n : 0;
+    return n > 0 && n <= FILE_NUM_MAX && (!*end || *anyway) ? (int)n : 0;
 }
 
 // Pictures are only fetched when you ask to show them, and drawn where they were offered.
@@ -551,14 +552,14 @@ static int arg_nicks(arg_menu_t *m, const char *rest) {
         if (!arg_item(m, rest, p[i]->nick, name, "peers")) continue;
         snprintf(m->out->help, sizeof m->out->help, "%s%s",
                  p[i]->identity_source == IDENT_NONE ? "unsigned" : chat_verify_label(p[i]->identity_state),
-                 p[i]->build_state == BUILD_MODIFIED ? " \xc2\xb7 modified client" : "");
+                 p[i]->build_state == BUILD_MODIFIED ? DOT_SEP "modified client" : "");
         return 1;
     }
     return 0;
 }
 
 static int arg_words(arg_menu_t *m, const char *rest) {
-    for (size_t i = 0; i < sizeof ARG_WORDS / sizeof *ARG_WORDS; i++) {
+    for (size_t i = 0; i < COUNT_OF(ARG_WORDS); i++) {
         const char *w = ARG_WORDS[i].word;
         if (strcmp(ARG_WORDS[i].cmd, m->c->name) != 0 || strncmp(w, rest, strlen(rest)) != 0) continue;
         if (!arg_item(m, rest, w, w, m->c->name)) continue;
@@ -596,9 +597,9 @@ static int arg_files(arg_menu_t *m, const char *rest) {
         char ns[12]; snprintf(ns, sizeof ns, "%d", f->num);
         if (!arg_item(m, rest, ns, ns, "files")) continue;
         char sz[32]; file_format_size(f->size, sz, sizeof sz);
-        snprintf(m->out->help, sizeof m->out->help, "%s \xc2\xb7 %s%s", f->name, sz,
-                 f->mine ? " \xc2\xb7 yours" : f->dl == DL_ACTIVE ? " \xc2\xb7 fetching" : f->dl == DL_QUEUED ? " \xc2\xb7 queued"
-                 : f->saved[0] ? " \xc2\xb7 saved" : "");
+        snprintf(m->out->help, sizeof m->out->help, "%s" DOT_SEP "%s%s", f->name, sz,
+                 f->mine ? DOT_SEP "yours" : f->dl == DL_ACTIVE ? DOT_SEP "fetching" : f->dl == DL_QUEUED ? DOT_SEP "queued"
+                 : f->saved[0] ? DOT_SEP "saved" : "");
         return 1;
     }
     return 0;
@@ -640,7 +641,7 @@ static int arg_saves(arg_menu_t *m, const char *rest) {
         const char *name = install_shown_name(saves[i].name);
         if (strncmp(name, rest, strlen(rest)) != 0 || !arg_item(m, rest, name, name, "saves")) continue;
         snprintf(m->out->help, sizeof m->out->help, "saved %s%s", saves[i].modified,
-                 g_app.installed && is_current_save(saves[i].name) ? " \xc2\xb7 open" : "");
+                 g_app.installed && is_current_save(saves[i].name) ? DOT_SEP "open" : "");
         return 1;
     }
     return 0;
@@ -674,7 +675,7 @@ static const char *arg_end(const command_t *c, int kind, const char *rest) {
     size_t n = 0;
     if (kind == A_FILE) n = strspn(rest, "0123456789");
     else if (kind == A_WORD) {
-        for (size_t i = 0; i < sizeof ARG_WORDS / sizeof *ARG_WORDS; i++) {
+        for (size_t i = 0; i < COUNT_OF(ARG_WORDS); i++) {
             size_t wl = strlen(ARG_WORDS[i].word);
             if (strcmp(ARG_WORDS[i].cmd, c->name) == 0 && strncmp(rest, ARG_WORDS[i].word, wl) == 0) n = wl;
         }
@@ -723,15 +724,16 @@ int suggest_command(const char *typed, int nth, tui_suggestion_t *out) {
         memcpy(word, typed, wn);
         word[wn] = '\0';
         const command_t *c = find_command(word);
-        for (size_t i = 0; c && i < sizeof COMMAND_ARGS / sizeof *COMMAND_ARGS; i++) {
+        for (size_t i = 0; c && i < COUNT_OF(COMMAND_ARGS); i++) {
             if (strcmp(COMMAND_ARGS[i].cmd, c->name) != 0) continue;
             arg_menu_t m = { c, typed, &nth, out, "" };
             return arg_suggest(&m, COMMAND_ARGS[i].args, typed + wn + 1);
         }
     }
-    if (strncmp(typed, "set ", 4) == 0) {
+    static const char set[] = "set ";
+    if (starts_with(typed, set)) {
         copy_str(out->group, "settings", sizeof out->group);
-        const char *key = typed + 4, *sp = strchr(key, ' ');
+        const char *key = typed + sizeof set - 1, *sp = strchr(key, ' ');
         const char *const *names;
         int n;
         if (sp) {
@@ -748,7 +750,7 @@ int suggest_command(const char *typed, int nth, tui_suggestion_t *out) {
                 if (strncmp(names[i], v, strlen(v)) != 0 || nth-- > 0) continue;
                 snprintf(out->line, sizeof out->line, "set %s %s", d->key, names[i]);
                 copy_str(out->name, names[i], sizeof out->name);
-                snprintf(out->help, sizeof out->help, "%s%s", d->label, i == cur ? " \xc2\xb7 now" : "");
+                snprintf(out->help, sizeof out->help, "%s%s", d->label, i == cur ? DOT_SEP "now" : "");
                 return 1;
             }
             return 0;
@@ -762,7 +764,7 @@ int suggest_command(const char *typed, int nth, tui_suggestion_t *out) {
             snprintf(out->name, sizeof out->name, "set %s", d->key);
             copy_str(out->args, d->values ? d->values : "", sizeof out->args);
             char v[96]; setting_value(d->id, v, sizeof v);
-            snprintf(out->help, sizeof out->help, "%s \xc2\xb7 %s", d->label, v);
+            snprintf(out->help, sizeof out->help, "%s" DOT_SEP "%s", d->label, v);
             return 1;
         }
         return 0;
@@ -808,7 +810,7 @@ static void submit_prompt(void) {
     switch (g_app.mode) {
         case MODE_NEW_PASSWORD: {
             char session_id[MAX_SESSION_NAME + 1], pw[sizeof input->buf];
-            random_session_id(session_id, 10);
+            random_session_id(session_id, SESSION_ID_LEN);
             copy_str(pw, input->buf, sizeof pw);
             end_prompt();
             start_session(session_id, pw, 1, 0, NULL, 0);
@@ -1102,7 +1104,7 @@ tui_view_t current_view(char *sub, size_t cap) {
     }
     if (s->has_new) v.new_lines = (int)(s->sb.total - s->new_at);
     if (s->initialising) snprintf(sub, cap, "starting");
-    else snprintf(sub, cap, "%d online \xc2\xb7 %s", chat_online_count(&s->engine) + 1, routing_mode_name(s->engine.route.mode));
+    else snprintf(sub, cap, "%d online" DOT_SEP "%s", chat_online_count(&s->engine) + 1, routing_mode_name(s->engine.route.mode));
     v.subtitle = sub;
     return v;
 }
@@ -1119,14 +1121,14 @@ static const char *held_warning(const session_slot_t *s) {
     for (int i = 0; i < MAX_PEERS + MAX_PENDING_PEERS; i++) {
         const peer_t *p = &e->peers[i];
         int code = chat_code_state(e, p);
-        if (!p->used || !p->ok || (code != 1 && !(code == 4 && e->verify_required))) continue;
+        if (!p->used || !p->ok || (code != CODE_TO_COMPARE && code != CODE_KEY_CHANGED)) continue;
         if (held++ == 0) chat_peer_name(e, p, first);
     }
     if (held == 0) return NULL;
     if (held == 1)
-        snprintf(warn, sizeof warn, "not sent to %s until you compare codes \xc2\xb7 :verify %s", first, first);
+        snprintf(warn, sizeof warn, "not sent to %s until you compare codes" DOT_SEP ":verify %s", first, first);
     else
-        snprintf(warn, sizeof warn, "not sent to %d peers until you compare codes \xc2\xb7 :peers", held);
+        snprintf(warn, sizeof warn, "not sent to %d peers until you compare codes" DOT_SEP ":peers", held);
     return warn;
 }
 
@@ -1142,26 +1144,26 @@ void chat_input(tui_bar_t *b, const tui_input_t *in) {
     b->limit = MAX_TEXT;
     b->warn = held_warning(s);
     if (m == TUI_IMODE_NORMAL) {
-        b->placeholder = "i to type \xc2\xb7 : for a command";
-        b->hint = s && !s->initialising ? "i type \xc2\xb7 : command \xc2\xb7 f files \xc2\xb7 j/k session \xc2\xb7 pgup/pgdn scroll \xc2\xb7 ? help"
-                                        : "i type \xc2\xb7 : command \xc2\xb7 j/k session \xc2\xb7 pgup/pgdn scroll \xc2\xb7 ? help";
+        b->placeholder = "i to type" DOT_SEP ": for a command";
+        b->hint = s && !s->initialising ? "i type" DOT_SEP ": command" DOT_SEP "f files" DOT_SEP "j/k session" DOT_SEP "pgup/pgdn scroll" DOT_SEP "? help"
+                                        : "i type" DOT_SEP ": command" DOT_SEP "j/k session" DOT_SEP "pgup/pgdn scroll" DOT_SEP "? help";
         return;
     }
     if (m == TUI_IMODE_COMMAND) {
-        b->hint = "enter run \xc2\xb7 tab complete \xc2\xb7 \xe2\x86\x91\xe2\x86\x93 choose \xc2\xb7 esc back";
+        b->hint = "enter run" DOT_SEP "tab complete" DOT_SEP "\xe2\x86\x91\xe2\x86\x93 choose" DOT_SEP "esc back";
         return;
     }
     if (!s) {
-        b->placeholder = "No session yet \xc2\xb7 ctrl+n starts one, ctrl+j joins one, / for commands";
-        b->hint = "ctrl+n new \xc2\xb7 ctrl+j join \xc2\xb7 / commands \xc2\xb7 ctrl+s settings";
+        b->placeholder = "No session yet" DOT_SEP "ctrl+n starts one, ctrl+j joins one, / for commands";
+        b->hint = "ctrl+n new" DOT_SEP "ctrl+j join" DOT_SEP "/ commands" DOT_SEP "ctrl+s settings";
         return;
     }
     if (s->initialising) snprintf(placeholder, sizeof placeholder, "Starting %s\xe2\x80\xa6", s->name);
     else if (!session_ready(s)) snprintf(placeholder, sizeof placeholder, "Waiting for someone in %s to answer\xe2\x80\xa6", s->name);
     else snprintf(placeholder, sizeof placeholder, "Message %s", s->name);
     b->placeholder = placeholder;
-    snprintf(hint, sizeof hint, "enter send \xc2\xb7 / commands%s%s \xc2\xb7 esc normal \xc2\xb7 f1 help",
-             session_count() > 1 ? " \xc2\xb7 tab next session" : "",
-             !s->initialising && s->engine.file_seq > 0 ? " \xc2\xb7 ctrl+f files" : "");
+    snprintf(hint, sizeof hint, "enter send" DOT_SEP "/ commands%s%s" DOT_SEP "esc normal" DOT_SEP "f1 help",
+             session_count() > 1 ? DOT_SEP "tab next session" : "",
+             !s->initialising && s->engine.file_seq > 0 ? DOT_SEP "ctrl+f files" : "");
     b->hint = hint;
 }

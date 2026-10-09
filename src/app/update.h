@@ -8,6 +8,8 @@
 #include <stdint.h>
 
 #define UPDATE_MSG_MAX 200
+// What every message about an update starts with.
+#define UPDATE_PREFIX "* update: "
 #define UPDATE_LOG_MAX 24
 #define UPDATE_LINE_MAX 160
 

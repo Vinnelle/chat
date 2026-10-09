@@ -110,7 +110,7 @@ void sign_picker_key(const tui_key_t *key) {
 
 // Up to the parent folder, with the folder just left selected.
 static void browser_up(void) {
-    char up[900], name[200] = "";
+    char up[APP_PATH_MAX], name[sizeof g_app.browser.items[0].name] = "";
     copy_str(up, g_app.browser.path, sizeof up);
     size_t n = strlen(up);
     while (n > 1 && up[n - 1] == '/') up[--n] = '\0';
@@ -282,14 +282,13 @@ void paste_key(const tui_key_t *key) {
     int age = g_app.load_kind == IDENT_AGE;
     if (age) {
         // Read when the key's last line ends, so a pasted file's own newline doesn't end up on the settings page.
-        const char *at = strstr(g_app.paste_buf, "AGE-SECRET-KEY-1");
+        const char *at = strstr(g_app.paste_buf, AGE_SECRET_KEY_PREFIX);
         if (!at || g_app.paste_buf[g_app.paste_len - 1] != '\n'
             || g_app.paste_len - 1 - (size_t)(at - g_app.paste_buf) < AGE_SECRET_KEY_STRLEN) return;
     } else {
         // Only look at the end, where the END line will be.
-        static const char end_line[] = "-----END PGP PRIVATE KEY BLOCK-----";
-        size_t el = sizeof end_line - 1;
-        if (g_app.paste_len < el || memcmp(g_app.paste_buf + g_app.paste_len - el, end_line, el) != 0) return;
+        size_t el = sizeof PGP_PRIVATE_END - 1;
+        if (g_app.paste_len < el || memcmp(g_app.paste_buf + g_app.paste_len - el, PGP_PRIVATE_END, el) != 0) return;
     }
     int rc = age ? age_import_secret_key_text(g_app.paste_buf, &g_app.identity)
                  : pgp_import_secret_key_text(g_app.paste_buf, &g_app.identity);
@@ -426,6 +425,20 @@ void render_sign_picker(int rows_n, int cols_n, const char *clock, const tui_bar
 
 #define TREE_NAME_ROOM 14    // columns kept for the names
 
+// Before an entry in the tree, and before the last one: "├─ " and "└─ ".
+#define TREE_MID "\xe2\x94\x9c\xe2\x94\x80 "
+#define TREE_LAST "\xe2\x94\x94\xe2\x94\x80 "
+#define ELLIPSIS "\xe2\x80\xa6"
+
+// s, or if it's longer than room bytes its end after an ellipsis: the end of a path says where it is.
+static void tail_ellipsis(const char *s, size_t room, char *out, size_t cap) {
+    size_t len = strlen(s);
+    if (len <= room) { copy_str(out, s, cap); return; }
+    const char *tail = s + len - (room - 1);
+    while (utf8_is_cont(*tail)) tail++;
+    snprintf(out, cap, ELLIPSIS "%s", tail);
+}
+
 static tui_row_t g_browser_rows[TREE_MAX_LEVELS + MAX_DIR_ITEMS];
 
 static char g_browser_labels[MAX_DIR_ITEMS][200];
@@ -437,11 +450,11 @@ static int g_browser_levels;   // rows above the entries
 // Returns 0 at the root, which has no parent.
 static int parent_nav(const browser_t *b, int room, const char **nav, int *n, int *sel, char *title, size_t cap) {
     static browser_t parent;
-    static char of[900], name[200];
+    static char of[APP_PATH_MAX], name[sizeof b->items[0].name];
     static int ok;
     if (strcmp(of, b->path) != 0) {
         copy_str(of, b->path, sizeof of);
-        char up[900];
+        char up[APP_PATH_MAX];
         copy_str(up, b->path, sizeof up);
         size_t len = strlen(up);
         while (len > 1 && up[len - 1] == '/' && !path_is_root(up)) up[--len] = '\0';
@@ -461,22 +474,15 @@ static int parent_nav(const browser_t *b, int room, const char **nav, int *n, in
         nav[(*n)++] = e;
     }
     // Its path, cut from the left to fit.
-    char shown[900];
+    char shown[APP_PATH_MAX];
     tilde_path(parent.path, shown, sizeof shown);
-    size_t len = strlen(shown);
-    const char *tail = shown;
-    if (room > 4 && len > (size_t)room) {
-        tail = shown + len - (room - 1);
-        while ((*tail & 0xc0) == 0x80) tail++;
-        snprintf(title, cap, "\xe2\x80\xa6%s", tail);
-    } else {
-        copy_str(title, shown, cap);
-    }
+    if (room > 4) tail_ellipsis(shown, (size_t)room, title, cap);
+    else copy_str(title, shown, cap);
     return 1;
 }
 
 static void browser_rows(const browser_t *b, int row_cols, int list_rows, char *intro, size_t cap) {
-    static char shown[900], head[900], level_pre[TREE_MAX_LEVELS][TREE_MAX_LEVELS * TREE_INDENT + 8];
+    static char shown[APP_PATH_MAX], head[APP_PATH_MAX], level_pre[TREE_MAX_LEVELS][TREE_MAX_LEVELS * TREE_INDENT + 8];
     static char mid_pre[TREE_MAX_LEVELS * TREE_INDENT + 8], last_pre[TREE_MAX_LEVELS * TREE_INDENT + 8];
     tilde_path(b->path, shown, sizeof shown);
     size_t len = strlen(shown);
@@ -485,9 +491,9 @@ static void browser_rows(const browser_t *b, int row_cols, int list_rows, char *
     // The folder's path split at each '/', where the first part is "" if it starts at the root.
     const char *parts[256];
     int n = 0;
-    static char split[900];
+    static char split[APP_PATH_MAX];
     copy_str(split, shown, sizeof split);
-    for (char *at = split; n < 256; ) {
+    for (char *at = split; n < (int)COUNT_OF(parts); ) {
         parts[n++] = at;
         char *slash = strchr(at, '/');
         if (!slash) break;
@@ -502,7 +508,8 @@ static void browser_rows(const browser_t *b, int row_cols, int list_rows, char *
     if (levels > TREE_MAX_LEVELS) levels = TREE_MAX_LEVELS;
     if (levels > n) levels = n;
     // And room under them for a few entries, so the top of the tree isn't scrolled away.
-    int below = b->n_items < 3 ? b->n_items : 3;
+    enum { ENTRIES_BELOW = 3 };
+    int below = b->n_items < ENTRIES_BELOW ? b->n_items : ENTRIES_BELOW;
     if (levels > list_rows - below) levels = list_rows - below > 1 ? list_rows - below : 1;
     // The top row: every part not given a row of its own.
     int joined = n - (levels - 1);
@@ -511,25 +518,22 @@ static void browser_rows(const browser_t *b, int row_cols, int list_rows, char *
     for (int i = 0; i < joined && p < sizeof head - 1; i++)
         p += (size_t)snprintf(head + p, sizeof head - p, "%s%s", i ? "/" : "", parts[i]);
     if (!head[0] || (joined == 1 && n > 1 && !parts[0][0])) copy_str(head, "/", sizeof head);
-    // Too long for its room: its end, which says where it is, after a "\xe2\x80\xa6".
+    // Too long for its room: its end, which says where it is, after an ellipsis.
     int room = row_cols / 2 - 3;
-    size_t hl = strlen(head);
-    if (room > 8 && hl > (size_t)room) {
-        const char *tail = head + hl - (room - 1);
-        while ((*tail & 0xc0) == 0x80) tail++;
-        char cut[900];
-        snprintf(cut, sizeof cut, "\xe2\x80\xa6%s", tail);
+    if (room > 8 && strlen(head) > (size_t)room) {
+        char cut[APP_PATH_MAX];
+        tail_ellipsis(head, (size_t)room, cut, sizeof cut);
         copy_str(head, cut, sizeof head);
     }
     g_browser_rows[0] = (tui_row_t){ NULL, head, NULL, TUI_V_TEXT, NULL, NULL, 0, 0 };
     for (int i = 1; i < levels; i++) {
-        snprintf(level_pre[i], sizeof level_pre[i], "%*s\xe2\x94\x94\xe2\x94\x80 ", (i - 1) * TREE_INDENT, "");
+        snprintf(level_pre[i], sizeof level_pre[i], "%*s" TREE_LAST, (i - 1) * TREE_INDENT, "");
         g_browser_rows[i] = (tui_row_t){ NULL, parts[joined + i - 1], NULL, TUI_V_TEXT, NULL, level_pre[i], 0, 0 };
     }
     g_browser_levels = levels;
 
-    snprintf(mid_pre, sizeof mid_pre, "%*s\xe2\x94\x9c\xe2\x94\x80 ", (levels - 1) * TREE_INDENT, "");
-    snprintf(last_pre, sizeof last_pre, "%*s\xe2\x94\x94\xe2\x94\x80 ", (levels - 1) * TREE_INDENT, "");
+    snprintf(mid_pre, sizeof mid_pre, "%*s" TREE_MID, (levels - 1) * TREE_INDENT, "");
+    snprintf(last_pre, sizeof last_pre, "%*s" TREE_LAST, (levels - 1) * TREE_INDENT, "");
     int folders = 0, files = 0;
     for (int i = 0; i < b->n_items; i++) {
         const dir_entry_t *e = &b->items[i];
@@ -542,7 +546,7 @@ static void browser_rows(const browser_t *b, int row_cols, int list_rows, char *
     }
     char f[24] = "", g[24] = "";
     if (folders) snprintf(f, sizeof f, "%d folder%s", folders, folders == 1 ? "" : "s");
-    if (files) snprintf(g, sizeof g, "%s%d file%s", folders ? " \xc2\xb7 " : "", files, files == 1 ? "" : "s");
+    if (files) snprintf(g, sizeof g, "%s%d file%s", folders ? DOT_SEP : "", files, files == 1 ? "" : "s");
     snprintf(intro, cap, "%s%s", folders || files ? f : "empty", g);
 }
 
@@ -565,6 +569,8 @@ static void count_cb(void *ctx, const char *name, int is_dir) {
 }
 
 #define INFO_LINES 16
+// A file bigger than this isn't read to see if it holds a key: no key file is that big.
+#define KEY_FILE_MAX 65536
 
 static int browser_info(const browser_t *b, identity_source_t kind, const char **lines) {
     static char of[1200], text[INFO_LINES][120];
@@ -599,28 +605,28 @@ static int browser_info(const browser_t *b, identity_source_t kind, const char *
         // "YYYY-MM-DD HH:MM" on two rows, to fit the sidebar.
         text[n++][0] = '\0';
         copy_str(text[n++], "changed", sizeof text[0]);
-        snprintf(text[n++], sizeof text[0], "%.10s", fi.modified);
-        copy_str(text[n++], fi.modified + 11, sizeof text[0]);
+        snprintf(text[n++], sizeof text[0], "%.*s", DATE_LEN, fi.modified);
+        copy_str(text[n++], fi.modified + DATE_LEN + 1, sizeof text[0]);
     }
     if (fi.mode >= 0) {
         static const char RWX[] = "rwxrwxrwx";
-        char perm[10];
-        for (int i = 0; i < 9; i++) perm[i] = fi.mode & (0400 >> i) ? RWX[i] : '-';
-        perm[9] = '\0';
+        char perm[sizeof RWX];
+        for (size_t i = 0; i < sizeof RWX - 1; i++) perm[i] = fi.mode & (0400 >> i) ? RWX[i] : '-';
+        perm[sizeof RWX - 1] = '\0';
         snprintf(text[n++], sizeof text[0], "%s %03o", perm, fi.mode & 0777);
     }
     if (kind != IDENT_NONE && !fi.is_dir) {
         text[n++][0] = '\0';
         static char head[16384];
-        long got = fi.size <= 65536 ? platform_read_file(full, head, sizeof head - 1) : -1;
+        long got = fi.size <= KEY_FILE_MAX ? platform_read_file(full, head, sizeof head - 1) : -1;
         int found = 0;
         if (got >= 0) {
             head[got] = '\0';
-            if (strstr(head, "AGE-SECRET-KEY-1")) found = IDENT_AGE;
-            else if (strstr(head, "-----BEGIN PGP PRIVATE KEY BLOCK-----")) found = IDENT_PGP;
+            if (strstr(head, AGE_SECRET_KEY_PREFIX)) found = IDENT_AGE;
+            else if (strstr(head, PGP_PRIVATE_BEGIN)) found = IDENT_PGP;
             crypto_wipe(head, sizeof head);
         }
-        if (fi.size > 65536) copy_str(text[n++], "too big for a key", sizeof text[0]);
+        if (fi.size > KEY_FILE_MAX) copy_str(text[n++], "too big for a key", sizeof text[0]);
         else if (got < 0) copy_str(text[n++], "can't be read", sizeof text[0]);
         else if (!found) copy_str(text[n++], "no secret key", sizeof text[0]);
         else snprintf(text[n++], sizeof text[0], "%s secret key", found == IDENT_AGE ? "AGE" : "PGP");
@@ -637,14 +643,49 @@ done:
     return n;
 }
 
+// A file browser's page, laid out by browser_lay_out: the parent folder's entries in a column left
+// of the tree when there's room, and what browser_info says about the selected entry in the nav.
+typedef struct {
+    char intro[1000], side_title[APP_PATH_MAX];
+    const char *side[MAX_DIR_ITEMS], *info[INFO_LINES];
+    int n_side, side_sel, columns, n_info;
+} browser_page_t;
+
+// The rows the page takes besides the tree's.
+#define BROWSER_CHROME_ROWS 12
+
+static void browser_lay_out(browser_page_t *v, int rows_n, int cols_n, identity_source_t kind) {
+    const browser_t *b = &g_app.browser;
+    int sw = tui_side_width(cols_n, 1);
+    v->n_side = 0;
+    v->side_sel = -1;
+    v->columns = sw && parent_nav(b, sw - 4, v->side, &v->n_side, &v->side_sel, v->side_title, sizeof v->side_title);
+    browser_rows(b, tui_page_row_cols(cols_n, 1) - (v->columns ? sw : 0), rows_n - BROWSER_CHROME_ROWS, v->intro,
+                 sizeof v->intro);
+    v->n_info = browser_info(b, kind, v->info);
+}
+
+static void browser_render(const browser_page_t *v, int rows_n, int cols_n, const char *title, const char *clock,
+                           const char *help, const char *usage, const tui_bar_t *bar) {
+    const browser_t *b = &g_app.browser;
+    tui_page_t page = {
+        .title = title,
+        .clock = clock,
+        .intro = v->intro,
+        .nav = v->info, .n_nav = v->n_info, .nav_sel = 0,
+        .side = v->columns ? v->side : NULL, .n_side = v->n_side, .side_sel = v->side_sel, .side_title = v->side_title,
+        .rows = g_browser_rows, .n_rows = g_browser_levels + b->n_items, .selected = g_browser_levels + b->selected,
+        .help = help, .usage = usage,
+    };
+    tui_render_page(rows_n, cols_n, &page, bar, g_app.color_enabled);
+}
+
 void render_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar) {
     const browser_t *b = &g_app.browser;
     int age = g_app.load_kind == IDENT_AGE;
-    char intro[1000], help[700], usage[1100] = "", side_title[900];
-    static const char *side[MAX_DIR_ITEMS];
-    int n_side = 0, side_sel = -1, sw = tui_side_width(cols_n, 1);
-    int columns = sw && parent_nav(b, sw - 4, side, &n_side, &side_sel, side_title, sizeof side_title);
-    browser_rows(b, tui_page_row_cols(cols_n, 1) - (columns ? sw : 0), rows_n - 12, intro, sizeof intro);
+    static browser_page_t v;
+    browser_lay_out(&v, rows_n, cols_n, g_app.load_kind);
+    char help[700], usage[1100] = "";
     if (!browser_folder_help(b, help, sizeof help)) {
         char full[1200], shown[1200];
         browser_entry_path(b, &b->items[b->selected], full, sizeof full);
@@ -653,54 +694,28 @@ void render_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *
                  ":install saves this file's path, not the key.", g_browser_labels[b->selected], age ? "AGE" : "PGP");
         snprintf(usage, sizeof usage, ":set sign %s:%s", age ? "age" : "pgp", shown);
     }
-    const char *nav[INFO_LINES];
-    int n_nav = browser_info(b, g_app.load_kind, nav);
-    tui_page_t page = {
-        .title = age ? "Settings" CRUMB "Profile" CRUMB "Signing identity" CRUMB "AGE key file"
-                     : "Settings" CRUMB "Profile" CRUMB "Signing identity" CRUMB "PGP key file",
-        .clock = clock,
-        .intro = intro,
-        .nav = nav, .n_nav = n_nav, .nav_sel = 0,
-        .side = columns ? side : NULL, .n_side = n_side, .side_sel = side_sel, .side_title = side_title,
-        .rows = g_browser_rows, .n_rows = g_browser_levels + b->n_items, .selected = g_browser_levels + b->selected,
-        .help = help, .usage = usage[0] ? usage : NULL,
-    };
-    tui_render_page(rows_n, cols_n, &page, bar, g_app.color_enabled);
+    browser_render(&v, rows_n, cols_n,
+                   age ? "Settings" CRUMB "Profile" CRUMB "Signing identity" CRUMB "AGE key file"
+                       : "Settings" CRUMB "Profile" CRUMB "Signing identity" CRUMB "PGP key file",
+                   clock, help, usage[0] ? usage : NULL, bar);
 }
 
 void render_send_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar) {
     const browser_t *b = &g_app.browser;
-    char intro[1000], help[700], side_title[900];
-    const char *info[INFO_LINES];
-    static const char *side[MAX_DIR_ITEMS];
-    int n_side = 0, side_sel = -1, sw = tui_side_width(cols_n, 1);
-    int columns = sw && parent_nav(b, sw - 4, side, &n_side, &side_sel, side_title, sizeof side_title);
-    browser_rows(b, tui_page_row_cols(cols_n, 1) - (columns ? sw : 0), rows_n - 12, intro, sizeof intro);
-    int n_info = browser_info(b, IDENT_NONE, info);
+    static browser_page_t v;
+    browser_lay_out(&v, rows_n, cols_n, IDENT_NONE);
+    char help[700];
     if (!browser_folder_help(b, help, sizeof help))
         snprintf(help, sizeof help, "Enter offers %s to everyone in this session. Nobody gets it unless they fetch it.",
                  g_browser_labels[b->selected]);
-    tui_page_t page = {
-        .title = "Send a file",
-        .clock = clock,
-        .intro = intro,
-        .nav = info, .n_nav = n_info, .nav_sel = 0,
-        .side = columns ? side : NULL, .n_side = n_side, .side_sel = side_sel, .side_title = side_title,
-        .rows = g_browser_rows, .n_rows = g_browser_levels + b->n_items, .selected = g_browser_levels + b->selected,
-        .help = help,
-    };
-    tui_render_page(rows_n, cols_n, &page, bar, g_app.color_enabled);
+    browser_render(&v, rows_n, cols_n, "Send a file", clock, help, NULL, bar);
 }
 
 void render_save_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar) {
     const browser_t *b = &g_app.browser;
-    char intro[1000], help[1400], title[160], side_title[900];
-    const char *info[INFO_LINES];
-    static const char *side[MAX_DIR_ITEMS];
-    int n_side = 0, side_sel = -1, sw = tui_side_width(cols_n, 1);
-    int columns = sw && parent_nav(b, sw - 4, side, &n_side, &side_sel, side_title, sizeof side_title);
-    browser_rows(b, tui_page_row_cols(cols_n, 1) - (columns ? sw : 0), rows_n - 12, intro, sizeof intro);
-    int n_info = browser_info(b, IDENT_NONE, info);
+    static browser_page_t v;
+    browser_lay_out(&v, rows_n, cols_n, IDENT_NONE);
+    char help[1400], title[160];
     const file_entry_t *f = g_app.selected ? chat_file(&g_app.selected->engine, g_app.save_num) : NULL;
     char what[FILE_NAME_MAX + 48];
     if (f) {
@@ -713,16 +728,7 @@ void render_save_browser(int rows_n, int cols_n, const char *clock, const tui_ba
     char open_help[700] = "";
     if (b->n_items > 0 && b->items[b->selected].is_dir) browser_folder_help(b, open_help, sizeof open_help);
     snprintf(help, sizeof help, "s saves %s in %s.%s%s", what, b->path, open_help[0] ? " " : "", open_help);
-    tui_page_t page = {
-        .title = title,
-        .clock = clock,
-        .intro = intro,
-        .nav = info, .n_nav = n_info, .nav_sel = 0,
-        .side = columns ? side : NULL, .n_side = n_side, .side_sel = side_sel, .side_title = side_title,
-        .rows = g_browser_rows, .n_rows = g_browser_levels + b->n_items, .selected = g_browser_levels + b->selected,
-        .help = help,
-    };
-    tui_render_page(rows_n, cols_n, &page, bar, g_app.color_enabled);
+    browser_render(&v, rows_n, cols_n, title, clock, help, NULL, bar);
 }
 
 typedef enum { FS_NEW, FS_OVER, FS_COMING, FS_QUEUED, FS_FAILED, FS_SAVED, FS_HERE, FS_BROKEN, FS_MINE } file_state_t;
@@ -746,14 +752,12 @@ static file_state_t file_state(const session_slot_t *s, const file_entry_t *f) {
     const pic_t *p = pic_of(s, f->num);
     if (f->cache || (p && p->th.rgb)) return FS_HERE;
     if (p && p->why[0]) return FS_BROKEN;
-    uint64_t cap = s->engine.file_cap ? s->engine.file_cap : FILE_CAP_DEFAULT;
-    return f->size > cap ? FS_OVER : FS_NEW;
+    return f->size > chat_file_cap(&s->engine) ? FS_OVER : FS_NEW;
 }
 
 // Fetching f now would take it past the size limit: it's over, and there's no copy here to use instead.
 static int file_needs_anyway(const session_slot_t *s, const file_entry_t *f) {
-    uint64_t cap = s->engine.file_cap ? s->engine.file_cap : FILE_CAP_DEFAULT;
-    return !f->mine && f->size > cap && !f->cache && !f->saved[0] && f->dl != DL_ACTIVE && f->dl != DL_QUEUED;
+    return !f->mine && f->size > chat_file_cap(&s->engine) && !f->cache && !f->saved[0] && f->dl != DL_ACTIVE && f->dl != DL_QUEUED;
 }
 
 static int file_cmp(const void *a, const void *b) {
@@ -800,32 +804,33 @@ static tui_value_kind_t file_value(const session_slot_t *s, const file_entry_t *
             chat_file_sent_to(f, to, sizeof to);
             if (n) {
                 *permille = pm;
-                snprintf(out, cap, "%d%% \xc2\xb7 sending to %s%s", pm / 10, name, n > 1 ? " and others" : "");
+                snprintf(out, cap, "%d%%" DOT_SEP "sending to %s%s", pm / 10, name, n > 1 ? " and others" : "");
                 return TUI_V_PROGRESS;
             }
             if (to[0]) { snprintf(out, cap, "sent to %s", to); return TUI_V_ON; }
             if (!f->fp) { snprintf(out, cap, "no longer offered"); return TUI_V_MUTED; }
-            snprintf(out, cap, "offered \xc2\xb7 %s", sz);
+            snprintf(out, cap, "offered" DOT_SEP "%s", sz);
             return TUI_V_TEXT;
         }
         case FS_COMING:
         case FS_QUEUED: *permille = fetch_progress(&s->engine, f, out, cap); return TUI_V_PROGRESS;
         case FS_FAILED: snprintf(out, cap, "%s", f->why[0] ? f->why : "it didn't finish"); return TUI_V_BAD;
-        case FS_SAVED:  snprintf(out, cap, "saved \xc2\xb7 %s", sz); return TUI_V_ON;
+        case FS_SAVED:  snprintf(out, cap, "saved" DOT_SEP "%s", sz); return TUI_V_ON;
         case FS_HERE: {
             const pic_t *p = pic_of(s, f->num);
-            snprintf(out, cap, "%s \xc2\xb7 %s", p && p->shown && p->th.rgb ? "shown" : "here, hidden", sz);
+            snprintf(out, cap, "%s" DOT_SEP "%s", p && p->shown && p->th.rgb ? "shown" : "here, hidden", sz);
             return TUI_V_ON;
         }
         case FS_BROKEN: snprintf(out, cap, "can't be shown"); return TUI_V_BAD;
-        case FS_OVER:   snprintf(out, cap, "%s \xc2\xb7 over your size limit", sz); return TUI_V_OFF;
-        default:        snprintf(out, cap, "%s \xc2\xb7 %s", f->image ? "picture" : "file", sz); return TUI_V_OFF;
+        case FS_OVER:   snprintf(out, cap, "%s" DOT_SEP "over your size limit", sz); return TUI_V_OFF;
+        default:        snprintf(out, cap, "%s" DOT_SEP "%s", f->image ? "picture" : "file", sz); return TUI_V_OFF;
     }
 }
 
 #define DETAIL_LINES 24
+#define DETAIL_LINE_MAX 128
 
-static int add_wrapped(char lines[][128], int n, const char *t, int width) {
+static int add_wrapped(char lines[][DETAIL_LINE_MAX], int n, const char *t, int width) {
     size_t len = strlen(t);
     if (len == 0 && n < DETAIL_LINES) lines[n++][0] = '\0';
     while (len > 0 && n < DETAIL_LINES) {
@@ -836,7 +841,7 @@ static int add_wrapped(char lines[][128], int n, const char *t, int width) {
             while (sp > 0 && t[sp] != ' ') sp--;
             if (sp > 0) fit = sp;
         }
-        snprintf(lines[n++], 128, "%.*s", (int)(fit < 127 ? fit : 127), t);
+        snprintf(lines[n++], DETAIL_LINE_MAX, "%.*s", (int)(fit < DETAIL_LINE_MAX - 1 ? fit : DETAIL_LINE_MAX - 1), t);
         t += fit;
         len -= fit;
         while (len > 0 && *t == ' ') { t++; len--; }
@@ -845,7 +850,7 @@ static int add_wrapped(char lines[][128], int n, const char *t, int width) {
 }
 
 static int file_details(const session_slot_t *s, const file_entry_t *f, int width, const char **out) {
-    static char lines[DETAIL_LINES][128];
+    static char lines[DETAIL_LINES][DETAIL_LINE_MAX];
     char t[900], sz[32], who[CHAT_NAME_LEN];
     int n = 0;
     if (width < 8) return 0;
@@ -853,7 +858,7 @@ static int file_details(const session_slot_t *s, const file_entry_t *f, int widt
     file_owner_name(&s->engine, f, who);
     n = add_wrapped(lines, n, f->name, width);
     n = add_wrapped(lines, n, "", width);
-    snprintf(t, sizeof t, "%s \xc2\xb7 %s", f->image ? "picture" : "file", sz);
+    snprintf(t, sizeof t, "%s" DOT_SEP "%s", f->image ? "picture" : "file", sz);
     n = add_wrapped(lines, n, t, width);
     if (f->mine) copy_str(t, "yours", sizeof t);
     else snprintf(t, sizeof t, "from %s", who);
@@ -875,8 +880,8 @@ static int file_details(const session_slot_t *s, const file_entry_t *f, int widt
         case FS_QUEUED: {
             fetch_progress(&s->engine, f, t, sizeof t);
             for (char *part = t, *next; part; part = next) {
-                next = strstr(part, " \xc2\xb7 ");
-                if (next) { *next = '\0'; next += 4; }
+                next = strstr(part, DOT_SEP);
+                if (next) { *next = '\0'; next += sizeof DOT_SEP - 1; }
                 n = add_wrapped(lines, n, part, width);
             }
             break;
@@ -906,8 +911,7 @@ static int file_details(const session_slot_t *s, const file_entry_t *f, int widt
             n = add_wrapped(lines, n, t, width);
             break;
         case FS_OVER: {
-            uint64_t cap = s->engine.file_cap ? s->engine.file_cap : FILE_CAP_DEFAULT;
-            char lim[32]; file_format_size(cap, lim, sizeof lim);
+            char lim[32]; file_format_size(chat_file_cap(&s->engine), lim, sizeof lim);
             snprintf(t, sizeof t, "not fetched, and over your %s limit", lim);
             n = add_wrapped(lines, n, t, width);
             break;
@@ -1123,19 +1127,19 @@ int file_ask_paras(tui_para_t *paras, const char **title, const char **keys) {
     if (!f) { *title = "FILES"; *keys = "n back"; return add_para(paras, 0, TUI_P_TEXT, "That file isn't here any more."); }
     char sz[32], lim[32];
     file_format_size(f->size, sz, sizeof sz);
-    file_format_size(s->engine.file_cap ? s->engine.file_cap : FILE_CAP_DEFAULT, lim, sizeof lim);
+    file_format_size(chat_file_cap(&s->engine), lim, sizeof lim);
     switch (g_app.file_ask) {
         case ASK_STOP: {
             char got[32]; file_format_size(chat_file_got(f), got, sizeof got);
             *title = "STOP";
-            *keys = "y stop \xc2\xb7 n keep it coming";
+            *keys = "y stop" DOT_SEP "n keep it coming";
             snprintf(text, sizeof text, "Stop fetching `%s`? The %s that's come so far is thrown away, and fetching it again "
                      "starts from the beginning.", f->name, got);
             break;
         }
         case ASK_UNOFFER:
             *title = "STOP";
-            *keys = "y stop offering \xc2\xb7 n keep offering";
+            *keys = "y stop offering" DOT_SEP "n keep offering";
             snprintf(text, sizeof text, "Stop offering `%s`? Nobody can fetch it after this, and anyone fetching it now stops. "
                      "`:send` offers it again, as a new file.", f->name);
             break;
@@ -1150,7 +1154,7 @@ int file_ask_paras(tui_para_t *paras, const char **title, const char **keys) {
             }
             int ask = g_app.file_ask;
             *title = "OVER YOUR LIMIT";
-            *keys = "y fetch it \xc2\xb7 n cancel";
+            *keys = "y fetch it" DOT_SEP "n cancel";
             snprintf(text, sizeof text, "`%s` is %s, over your %s file size limit. Fetch it anyway%s?%s", f->name, sz, lim,
                      ask == ASK_SAVETO ? ", into a folder you pick" : ask == ASK_VIEW || ask == ASK_SHOW ? ", to show it" : "", took);
             break;
@@ -1163,13 +1167,13 @@ const char *files_hint(void) {
     static char hint[200];
     session_slot_t *s = g_app.selected;
     const file_entry_t *f = selected_file();
-    if (!f) return "n send a file \xc2\xb7 esc close";
+    if (!f) return "n send a file" DOT_SEP "esc close";
     const char *enter = file_enter(s, f);
     file_state_t st = file_state(s, f);
-    snprintf(hint, sizeof hint, "%s%s%s%s%s%sn send \xc2\xb7 esc close", enter ? "enter " : "", enter ? enter : "",
-             enter ? " \xc2\xb7 " : "", f->saved[0] ? "y copy path \xc2\xb7 " : "",
-             f->mine ? "" : "d download \xc2\xb7 s save in \xc2\xb7 ",
-             (f->mine && f->fp) || st == FS_COMING || st == FS_QUEUED ? "x stop \xc2\xb7 " : "");
+    snprintf(hint, sizeof hint, "%s%s%s%s%s%sn send" DOT_SEP "esc close", enter ? "enter " : "", enter ? enter : "",
+             enter ? DOT_SEP : "", f->saved[0] ? "y copy path" DOT_SEP : "",
+             f->mine ? "" : "d download" DOT_SEP "s save in" DOT_SEP,
+             (f->mine && f->fp) || st == FS_COMING || st == FS_QUEUED ? "x stop" DOT_SEP : "");
     return hint;
 }
 
@@ -1211,8 +1215,8 @@ void render_files(int rows_n, int cols_n, const char *clock, const tui_bar_t *ba
     if (coming) snprintf(parts[np++], sizeof parts[0], "%d on the way", coming);
     if (n - theirs) snprintf(parts[np++], sizeof parts[0], "%d yours", n - theirs);
     if (!n) snprintf(intro, sizeof intro, "Nothing's been offered here yet.");
-    else snprintf(intro, sizeof intro, "%s%s%s%s%s", parts[0], np > 1 ? " \xc2\xb7 " : "", np > 1 ? parts[1] : "",
-                  np > 2 ? " \xc2\xb7 " : "", np > 2 ? parts[2] : "");
+    else snprintf(intro, sizeof intro, "%s%s%s%s%s", parts[0], np > 1 ? DOT_SEP : "", np > 1 ? parts[1] : "",
+                  np > 2 ? DOT_SEP : "", np > 2 ? parts[2] : "");
     const char *nav[DETAIL_LINES];
     int n_nav = 0;
     usage[0] = '\0';
@@ -1276,8 +1280,7 @@ typedef struct {
 static picture_view_t g_view;
 
 static void view_drop(void) {
-    if (g_view.th.rgb) crypto_wipe(g_view.th.rgb, (size_t)g_view.th.w * (size_t)g_view.th.h * 3);
-    image_thumb_free(&g_view.th);
+    thumb_free(&g_view.th);
     memset(&g_view, 0, sizeof g_view);
 }
 
@@ -1285,8 +1288,11 @@ void view_forget(const session_slot_t *s) {
     if (g_view.s == s) view_drop();
 }
 
+// What the picture page shows for f depends on: its download's state, in the bits below SIG_CACHED, and these.
+enum { SIG_CACHED = 8, SIG_SAVED = 16, SIG_OFFERED = 32 };
+
 static unsigned view_sig(const file_entry_t *f) {
-    return (unsigned)f->dl | (f->cache ? 8u : 0u) | (f->saved[0] ? 16u : 0u) | (f->fp ? 32u : 0u);
+    return (unsigned)f->dl | (f->cache ? SIG_CACHED : 0u) | (f->saved[0] ? SIG_SAVED : 0u) | (f->fp ? SIG_OFFERED : 0u);
 }
 
 static void view_update(session_slot_t *s, const file_entry_t *f, int w, int h) {
@@ -1331,14 +1337,14 @@ void render_viewer(int rows_n, int cols_n, const char *clock, const tui_bar_t *b
     file_state_t st = file_state(s, f);
     if (g_view.th.rgb) {
         pic.image = &g_view.ti;
-        snprintf(dims, sizeof dims, "%d\xc3\x97%d \xc2\xb7 ", g_view.th.src_w, g_view.th.src_h);
+        snprintf(dims, sizeof dims, "%d\xc3\x97%d" DOT_SEP, g_view.th.src_w, g_view.th.src_h);
     } else if (small && small->th.rgb && st != FS_COMING && st != FS_QUEUED) {
         // Only the small copy the chat shows is left: what was fetched has been dropped from memory.
         pic.image = &small->ti;
-        snprintf(dims, sizeof dims, "small copy \xc2\xb7 ");
+        snprintf(dims, sizeof dims, "small copy" DOT_SEP);
     }
-    if (pics > 1) snprintf(of, sizeof of, " \xc2\xb7 %d of %d", at, pics);
-    snprintf(caption, sizeof caption, "%s \xc2\xb7 %s%s \xc2\xb7 %s%s%s", f->name, dims, sz, f->mine ? "yours" : "from ",
+    if (pics > 1) snprintf(of, sizeof of, DOT_SEP "%d of %d", at, pics);
+    snprintf(caption, sizeof caption, "%s" DOT_SEP "%s%s" DOT_SEP "%s%s%s", f->name, dims, sz, f->mine ? "yours" : "from ",
              f->mine ? "" : who, of);
     if (!pic.image) {
         memset(&pg, 0, sizeof pg);
@@ -1348,8 +1354,8 @@ void render_viewer(int rows_n, int cols_n, const char *clock, const tui_bar_t *b
                 snprintf(text, sizeof text, "On its way\n%s from %s", sz, who);
                 pg.permille = fetch_progress(&s->engine, f, pg.text, sizeof pg.text);
                 // The bar has the percentage already.
-                char *after = f->dl == DL_ACTIVE ? strstr(pg.text, " \xc2\xb7 ") : NULL;
-                if (after) memmove(pg.text, after + 4, strlen(after + 4) + 1);
+                char *after = f->dl == DL_ACTIVE ? strstr(pg.text, DOT_SEP) : NULL;
+                if (after) memmove(pg.text, after + sizeof DOT_SEP - 1, strlen(after + sizeof DOT_SEP - 1) + 1);
                 pic.progress = &pg;
                 break;
             }
@@ -1360,7 +1366,7 @@ void render_viewer(int rows_n, int cols_n, const char *clock, const tui_bar_t *b
                 snprintf(text, sizeof text, "Not fetched yet\n%s, over your file size limit\nenter fetches it, after asking", sz);
                 break;
             case FS_NEW:
-                snprintf(text, sizeof text, "Not fetched yet\n%s from %s\nenter fetches it \xc2\xb7 d saves it in Downloads", sz, who);
+                snprintf(text, sizeof text, "Not fetched yet\n%s from %s\nenter fetches it" DOT_SEP "d saves it in Downloads", sz, who);
                 break;
             case FS_MINE:
                 snprintf(text, sizeof text, "It can't be shown\n%s", g_view.why[0] ? g_view.why
@@ -1420,8 +1426,8 @@ const char *viewer_hint(void) {
     if (!f) return "esc back";
     file_state_t st = file_state(g_app.selected, f);
     int fetch = !(g_view.th.rgb && g_view.num == f->num) && st != FS_MINE && st != FS_COMING && st != FS_QUEUED && st != FS_BROKEN;
-    snprintf(hint, sizeof hint, "%sj/k next/previous \xc2\xb7 %sv in chat \xc2\xb7 esc back", fetch ? "enter fetch \xc2\xb7 " : "",
-             f->mine ? "x stop offering \xc2\xb7 " : "d download \xc2\xb7 s save in \xc2\xb7 ");
+    snprintf(hint, sizeof hint, "%sj/k next/previous" DOT_SEP "%sv in chat" DOT_SEP "esc back", fetch ? "enter fetch" DOT_SEP : "",
+             f->mine ? "x stop offering" DOT_SEP : "d download" DOT_SEP "s save in" DOT_SEP);
     return hint;
 }
 

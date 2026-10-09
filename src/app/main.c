@@ -241,7 +241,7 @@ int g_plain;   // --simple (or no terminal): app notes go to stdout
 void push_log(const char *fmt, ...) {
     char msg[TUI_LINE_MAX];
     va_list ap; va_start(ap, fmt); vsnprintf(msg, sizeof msg, fmt, ap); va_end(ap);
-    char hhmm[6]; current_hhmm(hhmm);
+    char hhmm[HHMM_LEN]; current_hhmm(hhmm);
     if (g_plain) { printf("[%s] %s\n", hhmm, msg); fflush(stdout); return; }
     tui_scrollback_push(g_app.selected ? &g_app.selected->console : &g_app.log, hhmm, msg, NULL, 0, 0);
     g_app.dirty = 1;
@@ -288,8 +288,7 @@ pic_t *pic_find(session_slot_t *s, int num) {
 }
 
 static void pic_free(pic_t *p) {
-    if (p->th.rgb) crypto_wipe(p->th.rgb, (size_t)p->th.w * (size_t)p->th.h * 3);
-    image_thumb_free(&p->th);
+    thumb_free(&p->th);
     memset(p, 0, sizeof *p);
 }
 
@@ -314,8 +313,8 @@ const char *pic_why(const session_slot_t *s, int num) {
 int fetch_progress(const chat_t *e, const file_entry_t *f, char *text, size_t cap) {
     if (f->dl == DL_QUEUED) {
         int after = chat_file_queued_after(e, f);
-        if (after) snprintf(text, cap, "queued \xc2\xb7 starts after file %d", after);
-        else snprintf(text, cap, "queued \xc2\xb7 waiting for its sender");
+        if (after) snprintf(text, cap, "queued" DOT_SEP "starts after file %d", after);
+        else snprintf(text, cap, "queued" DOT_SEP "waiting for its sender");
         return 0;
     }
     uint64_t got = chat_file_got(f);
@@ -325,8 +324,8 @@ int fetch_progress(const chat_t *e, const file_entry_t *f, char *text, size_t ca
     file_format_size(f->size, all, sizeof all);
     double left = chat_file_eta(e, f, now_seconds());
     if (left >= 0.0) { file_format_duration(left, eta, sizeof eta); strcat(eta, " left"); }
-    else copy_str(eta, left < -1.0 ? "waiting until verify codes are compared" : "waiting for its sender", sizeof eta);
-    snprintf(text, cap, "%d%% \xc2\xb7 %s of %s \xc2\xb7 %s", permille / 10, gs, all, eta);
+    else copy_str(eta, left < ETA_AWAY ? "waiting until verify codes are compared" : "waiting for its sender", sizeof eta);
+    snprintf(text, cap, "%d%%" DOT_SEP "%s of %s" DOT_SEP "%s", permille / 10, gs, all, eta);
     return permille;
 }
 
@@ -344,10 +343,10 @@ const tui_progress_t *progress_for(const void *ctx, int file) {
         chat_file_sent_to(f, to, sizeof to);
         if (n) {
             pg.permille = pm;
-            snprintf(pg.text, sizeof pg.text, "%d%% \xc2\xb7 sending to %s%s", pm / 10, name, n > 1 ? " and others" : "");
+            snprintf(pg.text, sizeof pg.text, "%d%%" DOT_SEP "sending to %s%s", pm / 10, name, n > 1 ? " and others" : "");
         } else if (to[0]) {
             pg.kind = TUI_PROGRESS_DONE;
-            snprintf(pg.text, sizeof pg.text, "sent to %s%s", to, f->fp ? "" : " \xc2\xb7 no longer offered");
+            snprintf(pg.text, sizeof pg.text, "sent to %s%s", to, f->fp ? "" : DOT_SEP "no longer offered");
         } else if (!f->fp) {
             pg.kind = TUI_PROGRESS_NOTE;
             copy_str(pg.text, "no longer offered", sizeof pg.text);
@@ -362,7 +361,7 @@ const tui_progress_t *progress_for(const void *ctx, int file) {
     }
     if (f->dl == DL_FAILED) {
         pg.kind = TUI_PROGRESS_FAILED;
-        snprintf(pg.text, sizeof pg.text, "%s \xc2\xb7 :%s %d tries again", f->why[0] ? f->why : "it didn't finish",
+        snprintf(pg.text, sizeof pg.text, "%s" DOT_SEP ":%s %d tries again", f->why[0] ? f->why : "it didn't finish",
                  f->view ? "show" : "download", f->num);
         return &pg;
     }
@@ -376,7 +375,7 @@ const tui_progress_t *progress_for(const void *ctx, int file) {
     const char *why = pic_why(s, file);
     if (why) {
         pg.kind = TUI_PROGRESS_FAILED;
-        snprintf(pg.text, sizeof pg.text, "can't show it: %s \xc2\xb7 :download %d saves it", why, f->num);
+        snprintf(pg.text, sizeof pg.text, "can't show it: %s" DOT_SEP ":download %d saves it", why, f->num);
         return &pg;
     }
     return NULL;
@@ -511,7 +510,7 @@ void select_step(int dir) {
 void console_note(session_slot_t *s, const char *fmt, ...) {
     char msg[300];
     va_list ap; va_start(ap, fmt); vsnprintf(msg, sizeof msg, fmt, ap); va_end(ap);
-    char hhmm[6]; current_hhmm(hhmm);
+    char hhmm[HHMM_LEN]; current_hhmm(hhmm);
     tui_scrollback_push(&s->console, hhmm, msg, NULL, 0, 0);
     g_app.dirty = 1;
 }
@@ -525,13 +524,13 @@ void note(const char *fmt, ...) {
     g_app.dirty = 1;
 }
 
-// Asks the terminal to put text (up to 255 bytes) on the clipboard. A terminal that doesn't allow OSC 52 ignores it.
+// Asks the terminal to put text (up to OSC52_MAX bytes) on the clipboard. A terminal that doesn't allow OSC 52 ignores it.
 #define OSC52_MAX 1024   // a PGP public key fits
 
 void osc52_copy(const char *text) {
     size_t n = strlen(text);
     if (n > OSC52_MAX) n = OSC52_MAX;
-    char b64[(OSC52_MAX + 2) / 3 * 4 + 1];
+    char b64[BASE64_LEN(OSC52_MAX) + 1];
     base64_encode((const uint8_t *)text, n, b64);
     char osc[sizeof b64 + 16];
     snprintf(osc, sizeof osc, "\x1b]52;c;%s\x07", b64);
@@ -559,14 +558,17 @@ static const char *const ROUTE_CHOICE_LINES[] = {
      "its own; connecting takes longer"),
 };
 
+// The choices, by their numbers above.
+enum { CHOICE_DHT_NOSTR = 1, CHOICE_DHT, CHOICE_TOR };
+
 // A routing choice doesn't override --nonostr or --nostr-always. DHT + Nostr uses the relays as
 // those options say, and only DHT alone turns the relays off.
 static void apply_route_choice(int choice) {
-    if (choice == 3) {
+    if (choice == CHOICE_TOR) {
         g_app.route.mode = ROUTE_TOR;
     } else {
         g_app.route.mode = ROUTE_DHT;
-        g_app.route.nostr = choice == 2 ? NOSTR_OFF : g_app.nostr_flag >= 0 ? g_app.nostr_flag : NOSTR_FALLBACK;
+        g_app.route.nostr = choice == CHOICE_DHT ? NOSTR_OFF : g_app.nostr_flag >= 0 ? g_app.nostr_flag : NOSTR_FALLBACK;
     }
     g_app.route_chosen = 1;
 }
@@ -580,11 +582,17 @@ const char *route_label(void) {
 static int run_plain(const char *session_name, const char *password, uint16_t port,
                      const char peer_args[][PEER_ARG_LEN], int n_peer_args);
 
+// The longest the main loops wait for a socket or a key before doing their timed work.
+#define WAIT_MS 200
+// The full-screen UI: the window's title saved and set to chat, then the alternate screen, cleared.
+// Leaving it undoes that.
+#define SCREEN_ENTER "\x1b[22;0t\x1b]0;chat\x07\x1b[?1049h\x1b[2J\x1b[H"
+#define SCREEN_LEAVE "\x1b[?7h\x1b[0 q\x1b[?25h\x1b[?1049l\x1b[23;0t"
+
 static int run_tui(const char *explicit_session, char *explicit_password, uint16_t explicit_port,
                     const char peer_args[][PEER_ARG_LEN], int n_peer_args) {
     term_watch_resize();
     if (term_raw_enable() != 0) {
-
         fprintf(stderr, "chat: this terminal can't do the full-screen UI, using --simple instead\n");
         if (g_app.unlock_at_start) unlock_at_start(0);
         if (!g_app.nick[0]) random_nickname(g_app.nick, sizeof g_app.nick);
@@ -592,7 +600,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
     }
 
     // The terminal's background colour, and reports of its theme changing, arrive as keys.
-    fputs("\x1b[22;0t\x1b]0;chat\x07\x1b[?1049h\x1b[2J\x1b[H" TUI_THEME_WATCH, stdout);
+    fputs(SCREEN_ENTER TUI_THEME_WATCH, stdout);
     fflush(stdout);
     catch_quit_signals();
 
@@ -633,6 +641,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
     }
     render();
 
+    // Once a second at least, for the clock.
     double next_ui_tick = now_seconds() + 1.0;
 
     while (!g_interrupted) {
@@ -644,11 +653,11 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
             if (!g_app.used[i] || g_app.sessions[i].initialising) continue;
             sock_t mine[CHAT_MAX_SOCKS];
             int ns = chat_sockets(&g_app.sessions[i].engine, mine);
-            // Beyond the limit a socket just waits for the next tick, 200 ms at most.
+            // Beyond the limit a socket just waits for the next tick, WAIT_MS at most.
             for (int j = 0; j < ns && n < PLATFORM_WAIT_MAX; j++) { socks[n] = mine[j]; owner[n] = &g_app.sessions[i]; n++; }
         }
         int stdin_ready = 0;
-        platform_wait(socks, n, ready, &stdin_ready, 200);
+        platform_wait(socks, n, ready, &stdin_ready, WAIT_MS);
 
         if (g_ctrl_c) { g_ctrl_c = 0; g_app.asking_quit = 1; g_app.dirty = 1; }
 
@@ -711,7 +720,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
 
     // Back to the main screen with the cursor visible, its default shape and autowrap on, however
     // the last frame left them.
-    fputs(TUI_THEME_UNWATCH "\x1b[?7h\x1b[0 q\x1b[?25h\x1b[?1049l\x1b[23;0t", stdout);
+    fputs(TUI_THEME_UNWATCH SCREEN_LEAVE, stdout);
     term_raw_disable();
     fflush(stdout);
     net_shutdown();
@@ -752,8 +761,7 @@ static void plain_file_view(void *ui, int num, const char *name, const uint8_t *
     }
     printf("* file %d (%dx%d)\n", num, th.src_w, th.src_h);
     fflush(stdout);
-    crypto_wipe(th.rgb, (size_t)th.w * (size_t)th.h * 3);
-    image_thumb_free(&th);
+    thumb_free(&th);
 }
 
 static void plain_print(void *ui, const char *hhmm, const char *text, const uint8_t *rgb,
@@ -789,29 +797,32 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
     } else if (tty) {
         char line[MAX_SESSION_NAME + 1];
         if (term_read_line("session id (blank = start a new one): ", line, sizeof line) != 0) return 1;
-        if (line[0]) copy_str(o.session_name, line, sizeof o.session_name);
-        else { random_session_id(o.session_name, 10); o.created = 1; printf("new session id: %s  (share this and the password)\n", o.session_name); }
-    } else {
-        // No fixed default, since a well known id with a blank password would be a room anyone can join.
-        random_session_id(o.session_name, 10);
+        copy_str(o.session_name, line, sizeof o.session_name);
+    }
+    if (!o.session_name[0]) {
+        // Without a terminal too: no fixed default, since a well known id with a blank password would
+        // be a room anyone can join.
+        random_session_id(o.session_name, SESSION_ID_LEN);
         o.created = 1;
         printf("new session id: %s  (share this and the password)\n", o.session_name);
     }
 
     if (password) copy_str(o.password, password, sizeof o.password);
-    else if (platform_env_take("CHAT_PASSWORD", o.password, sizeof o.password) == 0) {  }
-    else if (tty && term_read_password(o.created ? "create password: " : "password: ", o.password, sizeof o.password) != 0) return 1;
+    else if (platform_env_take("CHAT_PASSWORD", o.password, sizeof o.password) != 0 && tty
+             && term_read_password(o.created ? "create password: " : "password: ", o.password, sizeof o.password) != 0)
+        return 1;
 
     o.port = port;
     if (!g_app.route_chosen) {
         // Without a terminal to ask, --nonostr means DHT only.
-        int choice = g_app.nostr_flag == NOSTR_OFF ? 2 : 1;
+        int choice = g_app.nostr_flag == NOSTR_OFF ? CHOICE_DHT : CHOICE_DHT_NOSTR;
         if (tty) {
-            for (size_t i = 0; i < sizeof ROUTE_CHOICE_LINES / sizeof ROUTE_CHOICE_LINES[0]; i++)
+            // Without the "* " the log puts first.
+            for (size_t i = 0; i < COUNT_OF(ROUTE_CHOICE_LINES); i++)
                 printf("%s\n", ROUTE_CHOICE_LINES[i] + 2);
             char line[16];
             if (term_read_line("routing [1/2/3, Enter = 1]: ", line, sizeof line) != 0) return 1;
-            if (line[0] >= '1' && line[0] <= '3') choice = line[0] - '0';
+            if (line[0] >= '0' + CHOICE_DHT_NOSTR && line[0] <= '0' + CHOICE_TOR) choice = line[0] - '0';
         }
         apply_route_choice(choice);
     }
@@ -822,7 +833,7 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
         crypto_wipe(&o, sizeof o);
         return 1;
     }
-    for (int i = 0; i < n_peer_args && o.n_peers < (int)(sizeof o.peers / sizeof o.peers[0]); i++) {
+    for (int i = 0; i < n_peer_args && o.n_peers < (int)COUNT_OF(o.peers); i++) {
         if (addr_parse_hostport(peer_args[i], &o.peers[o.n_peers]) != 0) {
             fprintf(stderr, "chat: can't use --peer %s\n", peer_args[i]);
             crypto_wipe(&o, sizeof o);
@@ -836,16 +847,7 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
         tor_link_ensure(now_seconds());
         o.route.tor.socks[0] = o.route.tor.control[0] = '\0';
     }
-    o.notify_mode = g_app.notify_mode;
-    o.notify_preview = g_app.notify_preview;
-    o.verify_optional = g_app.verify_optional;
-    o.file_cap = g_app.file_cap;
-    o.fast_files = g_app.fast_files;
-    o.has_color = 1;
-    memcpy(o.color, g_app.color, 3);
-    o.identity_source = g_app.identity_source;
-    if (g_app.identity_source != IDENT_NONE) o.identity = g_app.identity;
-    set_build_opts(&o);
+    app_session_opts(&o);
 
     static chat_t c;
     chat_init(&c, &o, plain_print, plain_notify, NULL);
@@ -860,7 +862,7 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
         return 1;
     }
     c.net_verbose = g_app.net_verbose;
-    char idhex[9]; hex_encode(c.my_id, 4, idhex);
+    char idhex[SHORT_ID_HEX + 1]; hex_encode(c.my_id, SHORT_ID_LEN, idhex);
     if (c.route.mode == ROUTE_TOR)
         printf("session '%s', you are %s (peer %s). encrypted, over Tor only. :quit or EOF to stop.\n",
                c.session_name, c.nick, idhex);
@@ -871,23 +873,26 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
     catch_quit_signals();
     stdin_reader_t *reader = stdin_reader_start();
     int alive = 1;
-    double ctrl_c_at = -10.0;
+    // No box to ask in here, so a second press within CTRL_C_AGAIN seconds confirms. From a script,
+    // Ctrl+C still quits at once.
+    enum { CTRL_C_AGAIN = 3 };
+    double ctrl_c_at = -CTRL_C_AGAIN;
     while (alive && !g_interrupted) {
         sock_t socks[CHAT_MAX_SOCKS]; int ns = chat_sockets(&c, socks);
         int ready[CHAT_MAX_SOCKS] = {0};
-        net_wait(socks, ready, ns, 200);
+        net_wait(socks, ready, ns, WAIT_MS);
         double now = now_seconds();
-        // No box to ask in here, so a second press confirms. From a script, Ctrl+C still quits at once.
         if (g_ctrl_c) {
             g_ctrl_c = 0;
-            if (!term_is_tty() || now - ctrl_c_at < 3.0) break;
+            if (!term_is_tty() || now - ctrl_c_at < CTRL_C_AGAIN) break;
             ctrl_c_at = now;
-            push_log("* Ctrl+C again within 3 seconds leaves the session and quits (so does :quit)");
+            push_log("* Ctrl+C again within %d seconds leaves the session and quits (so does :quit)", CTRL_C_AGAIN);
         }
         for (int i = 0; i < ns; i++) if (ready[i]) chat_on_socket_readable(&c, socks[i], now);
         char line[MAX_TEXT + 1];
         int rc = stdin_reader_poll(reader, line, sizeof line);
-        int show_anyway, show_n = rc == 1 && strncmp(line, ":show ", 6) == 0 ? file_arg(line + 6, &show_anyway) : 0;
+        static const char show[] = ":show ";
+        int show_anyway, show_n = rc == 1 && starts_with(line, show) ? file_arg(line + sizeof show - 1, &show_anyway) : 0;
         if (rc == 1 && (strcmp(line, ":changelog") == 0 || strcmp(line, ":news") == 0)) { fputs(CHANGELOG_TEXT, stdout); fflush(stdout); }
         else if (show_n) chat_file_fetch(&c, show_n, 1, show_anyway, NULL);
         else if (rc == 1) alive = chat_submit_line(&c, line, now);
@@ -928,7 +933,7 @@ static int read_options(int argc, char **argv, options_t *o) {
         } else if (strcmp(key, "port") == 0 && i + 1 < argc) {
             char *end;
             long port = strtol(argv[++i], &end, 10);
-            if (!argv[i][0] || *end || port < 0 || port > 65535) {
+            if (!argv[i][0] || *end || port < 0 || port > UINT16_MAX) {
                 fprintf(stderr, "chat: bad --port %s (0-65535, 0 picks a free one)\n", argv[i]);
                 return 1;
             }
@@ -966,9 +971,10 @@ static int read_options(int argc, char **argv, options_t *o) {
         } else if (strcmp(key, "routing") == 0 && i + 1 < argc) {
             const char *v = argv[++i];
             // direct+nostr and direct: the modes' old names, still accepted.
-            if (strcmp(v, "dht+nostr") == 0 || strcmp(v, "nostr") == 0 || strcmp(v, "direct+nostr") == 0) apply_route_choice(1);
-            else if (strcmp(v, "dht") == 0 || strcmp(v, "direct") == 0) apply_route_choice(2);
-            else if (strcmp(v, "tor") == 0) apply_route_choice(3);
+            if (strcmp(v, "dht+nostr") == 0 || strcmp(v, "nostr") == 0 || strcmp(v, "direct+nostr") == 0)
+                apply_route_choice(CHOICE_DHT_NOSTR);
+            else if (strcmp(v, "dht") == 0 || strcmp(v, "direct") == 0) apply_route_choice(CHOICE_DHT);
+            else if (strcmp(v, "tor") == 0) apply_route_choice(CHOICE_TOR);
             else { fprintf(stderr, "chat: --routing takes dht+nostr, dht or tor\n"); return 1; }
         } else if (strcmp(key, "relay") == 0 && i + 1 < argc) {
             const char *v = argv[++i];
@@ -983,7 +989,7 @@ static int read_options(int argc, char **argv, options_t *o) {
             else if (strcmp(v, "never") == 0) g_app.tor_launch = TOR_LAUNCH_NEVER;
             else { fprintf(stderr, "chat: --tor-launch takes auto, always or never\n"); return 1; }
         } else if (strcmp(key, "tor-path") == 0 && i + 1 < argc) {
-            char found[1024];
+            char found[TOR_PATH_MAX];
             if (platform_find_program("tor", argv[++i], found, sizeof found) != 0) {
                 fprintf(stderr, "chat: can't use %s as tor - it has to be a full path to a program only root or you can change\n", argv[i]);
                 return 1;
@@ -1080,13 +1086,14 @@ int main(int argc, char **argv) {
         // With --routing tor the download goes through Tor, never direct, so find or start a tor first.
         int over_tor = g_app.route_chosen && g_app.route.mode == ROUTE_TOR;
         if (over_tor) {
+            enum { TOR_WAIT_S = 120, TOR_POLL_MS = 100 };
             net_startup();
             g_plain = 1;
-            double give_up = now_seconds() + 120.0;
+            double give_up = now_seconds() + TOR_WAIT_S;
             tor_link_ensure(now_seconds());
             while (g_tor.state != TL_READY && g_tor.state != TL_FAILED && now_seconds() < give_up) {
                 tor_link_step(now_seconds());
-                platform_sleep_ms(100);
+                platform_sleep_ms(TOR_POLL_MS);
             }
             if (g_tor.state != TL_READY) {
                 fprintf(stderr, "chat: no tor to download through - not updating\n");
@@ -1101,7 +1108,7 @@ int main(int argc, char **argv) {
         char msg[UPDATE_MSG_MAX];
         int rc = update_run(g_app.betas, msg, sizeof msg);
         if (over_tor) tor_link_stop();
-        const char *text = strncmp(msg, "* update: ", 10) == 0 ? msg + 10 : msg;
+        const char *text = starts_with(msg, UPDATE_PREFIX) ? msg + sizeof UPDATE_PREFIX - 1 : msg;
         fprintf(rc == 0 ? stdout : stderr, "chat: %s\n", text);
         return rc == 0 ? 0 : 1;
     }
@@ -1113,11 +1120,7 @@ int main(int argc, char **argv) {
     const char *no_color = getenv("NO_COLOR");
     g_app.color_enabled = interactive && !(no_color && no_color[0]);
     if (o->has_color) memcpy(g_app.color, o->color, 3);
-    else {
-        uint8_t r; gen_random(&r, 1);
-        const named_color_t *pick = &COLOR_PALETTE[r % COLOR_PALETTE_N];
-        g_app.color[0] = pick->r; g_app.color[1] = pick->g; g_app.color[2] = pick->b;
-    }
+    else chat_random_colour(g_app.color);
     if (o->nick[0]) chat_clean_nick(o->nick, g_app.nick);
 
     // Only the format is checked here. Nothing goes on the network before the routing is decided, so
@@ -1135,7 +1138,7 @@ int main(int argc, char **argv) {
         const char *path = o->identity[3] == ':' ? o->identity + 4 : NULL;
         if (!path) {
             // Like a session's password: from the environment, otherwise asked for, otherwise blank.
-            char pw[256] = "";
+            char pw[MAX_PASSWORD + 1] = "";
             if (platform_env_take("CHAT_SIGN_PASSWORD", pw, sizeof pw) != 0 && term_is_tty())
                 term_read_password("signing key password (always the same one keeps the same key; blank for a "
                                    "new key): ", pw, sizeof pw);
@@ -1169,11 +1172,9 @@ int main(int argc, char **argv) {
         return run_tui(NULL, NULL, 0, NULL, 0);
     }
 
-    char explicit_password[256] = "";
-
-    if (platform_env_take("CHAT_PASSWORD", explicit_password, sizeof explicit_password) != 0) {
-        if (term_read_password("password: ", explicit_password, sizeof explicit_password) != 0) return 1;
-    }
+    char explicit_password[MAX_PASSWORD + 1] = "";
+    if (platform_env_take("CHAT_PASSWORD", explicit_password, sizeof explicit_password) != 0
+        && term_read_password("password: ", explicit_password, sizeof explicit_password) != 0) return 1;
     int rc = run_tui(o->session, explicit_password, o->port, o->peers, o->n_peers);
     crypto_wipe(explicit_password, sizeof explicit_password);
     return rc;

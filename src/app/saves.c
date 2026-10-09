@@ -62,7 +62,7 @@ static void apply_row(const setting_def_t *d, const char *value) {
     }
 }
 
-typedef struct { char where[920]; } loading_t;
+typedef struct { char where[INSTALL_PATH_MAX]; } loading_t;
 
 static void load_setting(void *ctx, const char *table, const char *key, const toml_value *tv) {
     loading_t *l = ctx;
@@ -90,7 +90,7 @@ static void load_setting(void *ctx, const char *table, const char *key, const to
 static void load_saved_settings(void) {
     static char text[INSTALL_SETTINGS_MAX];
     loading_t l;
-    char where[900] = "";
+    char where[APP_PATH_MAX] = "";
     install_where(install_current(), where, sizeof where);
     snprintf(l.where, sizeof l.where, "%s/settings", where);
     long n = install_read_settings(text, sizeof text);
@@ -110,7 +110,9 @@ static void load_saved_settings(void) {
 // fingerprint covers it), then the public key. Format 1 follows it with the secret key. Format 2,
 // for a key from a file, with the file's full path instead, so the secret key isn't copied: the
 // file is read again when it's opened. The public key tells whether the file still holds that key.
-#define KEY_BLOB_HEAD (8 + ID_SIGN_PUB_LEN)
+enum { KB_FORMAT_AT, KB_SOURCE_AT, KB_ORIGIN_AT, KB_SCALAR_AT, KB_CREATED_AT, KB_PUB_AT = KB_CREATED_AT + 4 };
+enum { KEY_FORMAT_KEY = 1, KEY_FORMAT_PATH = 2 };
+#define KEY_BLOB_HEAD (KB_PUB_AT + ID_SIGN_PUB_LEN)
 
 #define KEY_BLOB_LEN (KEY_BLOB_HEAD + ID_SIGN_PRIV_LEN)
 
@@ -125,12 +127,12 @@ int key_saved_as_path(void) {
 // Returns the length.
 static size_t identity_pack(uint8_t out[KEY_BLOB_MAX]) {
     int path = key_saved_as_path();
-    out[0] = path ? 2 : 1;
-    out[1] = (uint8_t)g_app.identity_source;
-    out[2] = (uint8_t)g_app.key_origin;
-    out[3] = (uint8_t)(g_app.identity.scalar != 0);
-    for (int i = 0; i < 4; i++) out[4 + i] = (uint8_t)(g_app.pgp_created >> (24 - 8 * i));
-    memcpy(out + 8, g_app.identity.pub, ID_SIGN_PUB_LEN);
+    out[KB_FORMAT_AT] = path ? KEY_FORMAT_PATH : KEY_FORMAT_KEY;
+    out[KB_SOURCE_AT] = (uint8_t)g_app.identity_source;
+    out[KB_ORIGIN_AT] = (uint8_t)g_app.key_origin;
+    out[KB_SCALAR_AT] = (uint8_t)(g_app.identity.scalar != 0);
+    store_be32(out + KB_CREATED_AT, g_app.pgp_created);
+    memcpy(out + KB_PUB_AT, g_app.identity.pub, ID_SIGN_PUB_LEN);
     if (!path) {
         memcpy(out + KEY_BLOB_HEAD, g_app.identity.priv, ID_SIGN_PRIV_LEN);
         return KEY_BLOB_LEN;
@@ -143,22 +145,23 @@ static size_t identity_pack(uint8_t out[KEY_BLOB_MAX]) {
 // The saved key's public half (and path) is kept even when it isn't used, to tell whether the key
 // in use is the same one. A key file that's gone or changed is said why with saved_note.
 static int identity_unpack(const uint8_t *in, size_t len, int use) {
-    if (len < KEY_BLOB_HEAD || (in[0] != 1 && in[0] != 2) || (in[1] != IDENT_AGE && in[1] != IDENT_PGP)
-        || in[2] > KEY_PASTED || in[3] > 1)
+    if (len < KEY_BLOB_HEAD || (in[KB_FORMAT_AT] != KEY_FORMAT_KEY && in[KB_FORMAT_AT] != KEY_FORMAT_PATH)
+        || (in[KB_SOURCE_AT] != IDENT_AGE && in[KB_SOURCE_AT] != IDENT_PGP) || in[KB_ORIGIN_AT] > KEY_PASTED
+        || in[KB_SCALAR_AT] > 1)
         return -1;
-    int path = in[0] == 2;
-    if (path ? in[2] != KEY_FILE || len == KEY_BLOB_HEAD || len >= KEY_BLOB_MAX : len != KEY_BLOB_LEN) return -1;
+    int path = in[KB_FORMAT_AT] == KEY_FORMAT_PATH;
+    if (path ? in[KB_ORIGIN_AT] != KEY_FILE || len == KEY_BLOB_HEAD || len >= KEY_BLOB_MAX : len != KEY_BLOB_LEN) return -1;
     char saved_path[KEY_PATH_MAX] = "";
     if (path) {
         memcpy(saved_path, in + KEY_BLOB_HEAD, len - KEY_BLOB_HEAD);
         saved_path[len - KEY_BLOB_HEAD] = '\0';
         if (strlen(saved_path) != len - KEY_BLOB_HEAD) return -1;
     }
-    memcpy(g_app.saved_key_pub, in + 8, ID_SIGN_PUB_LEN);
+    memcpy(g_app.saved_key_pub, in + KB_PUB_AT, ID_SIGN_PUB_LEN);
     copy_str(g_app.saved_key_path, saved_path, sizeof g_app.saved_key_path);
     g_app.saved_key_known = 1;
     if (!use) return 0;
-    identity_source_t kind = (identity_source_t)in[1];
+    identity_source_t kind = (identity_source_t)in[KB_SOURCE_AT];
     identity_keypair_t kp;
     char full[KEY_PATH_MAX];
     if (path) {
@@ -174,15 +177,15 @@ static int identity_unpack(const uint8_t *in, size_t len, int use) {
             saved_note("* %.200s holds a different key from the one :install saved - chat signs with it, and "
                        ":install records it", shown);
     } else {
-        kp.scalar = in[3];
-        memcpy(kp.pub, in + 8, ID_SIGN_PUB_LEN);
+        kp.scalar = in[KB_SCALAR_AT];
+        memcpy(kp.pub, in + KB_PUB_AT, ID_SIGN_PUB_LEN);
         memcpy(kp.priv, in + KEY_BLOB_HEAD, ID_SIGN_PRIV_LEN);
     }
     g_app.identity = kp;
     crypto_wipe(&kp, sizeof kp);
     g_app.identity_source = kind;
-    g_app.key_origin = (key_origin_t)in[2];
-    g_app.pgp_created = (uint32_t)in[4] << 24 | (uint32_t)in[5] << 16 | (uint32_t)in[6] << 8 | in[7];
+    g_app.key_origin = (key_origin_t)in[KB_ORIGIN_AT];
+    g_app.pgp_created = load_be32(in + KB_CREATED_AT);
     // A key file saved as the key itself, before :install saved paths, has no path to show.
     copy_str(g_app.key_path, saved_path, sizeof g_app.key_path);
     return 0;
@@ -238,7 +241,7 @@ void save_verified(void) {
     if (!trust_saved() || !g_app.installed || g_app.locked) return;
     static char text[TRUST_TEXT_MAX];
     if (trust_text(text, sizeof text) == 0 && install_write_verified(text) == 0) return;
-    char where[900] = "";
+    char where[APP_PATH_MAX] = "";
     install_where(install_current(), where, sizeof where);
     push_log("* couldn't save the verified keys in %s/verified - they last until chat exits", where);
 }
@@ -252,7 +255,7 @@ void autosave_changed(void) {
 // Adds the saved verified keys to the ones in use. 0, or a PASS_ code.
 static int load_saved_verified(void) {
     static char text[INSTALL_VERIFIED_MAX + 1];
-    char where[900] = "";
+    char where[APP_PATH_MAX] = "";
     install_where(install_current(), where, sizeof where);
     long n = install_read_verified(text, sizeof text);
     if (n == INSTALL_NO_FILE) return 0;
@@ -353,10 +356,14 @@ static void use_opened_save(char (*loaded)[ROW_TEXT_MAX]) {
         saved_note("* your saved signing key is damaged, or isn't sealed with this passphrase - it's left out");
 }
 
+// Before the screen is up, how often a security key, a code and a passphrase are asked for, and how
+// often the security key's progress is looked at.
+enum { PIN_TRIES = 4, CODE_TRIES = 5, PICK_TRIES = 3, PASS_TRIES = 3, KEY_POLL_MS = 50 };
+
 // Before the screen is up: the save's security key, waited for here. 0 once it's given its secret.
 static int key_in_terminal(const char *name) {
     char pin[64] = "";
-    for (int tries = 0; tries < 4; tries++) {
+    for (int tries = 0; tries < PIN_TRIES; tries++) {
         if (install_key_open(name, pin[0] ? pin : NULL) != 0) break;
         crypto_wipe(pin, sizeof pin);
         int stage = -1, said = -1;
@@ -367,7 +374,7 @@ static int key_in_terminal(const char *name) {
                                               : "touch your security key (it's blinking)");
                 said = stage;
             }
-            platform_sleep_ms(50);
+            platform_sleep_ms(KEY_POLL_MS);
         }
         if (st == INSTALL_KEY_DONE) return 0;
         if (st != INSTALL_KEY_PIN || !term_is_tty()) break;
@@ -380,12 +387,9 @@ static int key_in_terminal(const char *name) {
 }
 
 static int code_in_terminal(void) {
-    for (int tries = 0; tries < 5 && term_is_tty(); tries++) {
+    for (int tries = 0; tries < CODE_TRIES && term_is_tty(); tries++) {
         char line[32] = "";
-        if (term_read_line("the code your authenticator app shows: ", line, sizeof line) != 0) return -1;
-        size_t n = strlen(line);
-        while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = '\0';
-        if (!line[0]) return -1;
+        if (term_read_line("the code your authenticator app shows: ", line, sizeof line) != 0 || !line[0]) return -1;
         int rc = install_check_code(line);
         if (rc == 0) return 0;
         fprintf(stderr, "chat: %s\n", rc == PASS_FORMAT ? "a code is 6 digits"
@@ -413,9 +417,9 @@ static int open_saved(const char *name, const char *passphrase, int probe) {
 // What a save holds, what it needs to open and when it was last written, for the list to pick one from.
 void save_detail(const install_save_t *sv, char *out, size_t cap) {
     snprintf(out, cap, "%s%s%s%s%s%s", sv->settings && sv->key ? "settings and key" : sv->settings ? "settings" : "key",
-             sv->factors & INSTALL_FACTOR_DEVICE ? " \xc2\xb7 this device only" : "",
-             sv->factors & INSTALL_FACTOR_KEY ? " \xc2\xb7 security key" : "",
-             sv->factors & INSTALL_FACTOR_CODE ? " \xc2\xb7 code" : "", sv->modified[0] ? " \xc2\xb7 " : "", sv->modified);
+             sv->factors & INSTALL_FACTOR_DEVICE ? DOT_SEP "this device only" : "",
+             sv->factors & INSTALL_FACTOR_KEY ? DOT_SEP "security key" : "",
+             sv->factors & INSTALL_FACTOR_CODE ? DOT_SEP "code" : "", sv->modified[0] ? DOT_SEP : "", sv->modified);
 }
 
 // With more than one save and no --save, one is picked from a list before its passphrase is asked for.
@@ -427,10 +431,11 @@ static int pick_save_in_terminal(void) {
     for (int i = 0; i < g_app.n_saves; i++) {
         char detail[112];
         save_detail(&g_app.saves[i], detail, sizeof detail);
-        printf("  %2d  %-*s  %s\n", i + 1, INSTALL_NAME_MAX < 16 ? INSTALL_NAME_MAX : 16,
+        enum { NAME_COLS = 16 };
+        printf("  %2d  %-*s  %s\n", i + 1, INSTALL_NAME_MAX < NAME_COLS ? INSTALL_NAME_MAX : NAME_COLS,
                install_shown_name(g_app.saves[i].name), detail);
     }
-    for (int tries = 0; tries < 3; tries++) {
+    for (int tries = 0; tries < PICK_TRIES; tries++) {
         char line[64] = "";
         if (term_read_line("which one to open (number or name, blank: none): ", line, sizeof line) != 0) return -1;
         size_t n = strlen(line);
@@ -455,7 +460,7 @@ static int pick_save_in_terminal(void) {
 // takes the passphrase from it, and asks for them in the box, or in the terminal.
 void unlock_at_start(int in_box) {
     g_app.locked = 1;
-    char pw[256] = "";
+    char pw[INSTALL_PASS_MAX] = "";
     int from_env = platform_env_take("CHAT_INSTALL_PASSWORD", pw, sizeof pw) == 0;
     const unsigned more = INSTALL_FACTOR_KEY | INSTALL_FACTOR_CODE;
     if (from_env && in_box && !save_to_pick() && (install_factors(install_current()) & more)) {
@@ -482,7 +487,7 @@ void unlock_at_start(int in_box) {
     }
     if (in_box) { g_app.unlock_at_start = 1; return; }
     int picked = !save_to_pick() || (term_is_tty() && pick_save_in_terminal() == 0);
-    for (int tries = 0; tries < 3 && picked && term_is_tty(); tries++) {
+    for (int tries = 0; tries < PASS_TRIES && picked && term_is_tty(); tries++) {
         char prompt[96];
         snprintf(prompt, sizeof prompt, "passphrase for %s%s (blank: start without it): ",
                  g_app.n_saves > 1 ? "the save " : "what :install saved",
@@ -518,7 +523,7 @@ static int g_n_uninstalled_keys;
 // same passphrase.
 static void finish_install(const char *passphrase) {
     int resave = !passphrase && g_app.installed && is_current_save(g_app.save_target);
-    char where[900] = "";
+    char where[APP_PATH_MAX] = "";
     install_where(g_app.save_target, where, sizeof where);
     if (passphrase) {
         note(g_app.device_lock ? "sealing, and locking it to this device..." : "sealing...");
@@ -851,7 +856,7 @@ static void use_save_now(void) {
     note_settings_seen();
 
     const char *shown = install_shown_name(install_current());
-    char where[900] = "";
+    char where[APP_PATH_MAX] = "";
     install_where(install_current(), where, sizeof where);
     if (keep) {
         static char text[INSTALL_SETTINGS_MAX];
@@ -934,7 +939,7 @@ void commit_install_unlock(void) {
 
 void uninstall_confirmed(void) {
     end_prompt();
-    char where[900] = "";
+    char where[APP_PATH_MAX] = "";
     install_where(g_app.save_target, where, sizeof where);
     if (install_remove(g_app.save_target) != 0) { note("couldn't delete everything chat saved in %s", where); return; }
     if (!is_current_save(g_app.save_target)) {
@@ -1104,7 +1109,7 @@ void device_lock_yes(void) {
     int on = g_app.device_want;
     device_lock_back();
     const char *shown = install_shown_name(install_current());
-    char where[900] = "";
+    char where[APP_PATH_MAX] = "";
     install_where(install_current(), where, sizeof where);
     // A TPM can take a few seconds to make a key.
     note(on ? "locking %s to this device..." : "unlocking %s from this device...", shown);
