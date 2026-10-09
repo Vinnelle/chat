@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0-beta.4
 
 ### Security
 - Nothing on disk or on screen says whether a save has a decoy any more. Every save has a `spare`
