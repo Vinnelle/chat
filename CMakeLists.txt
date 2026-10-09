@@ -245,6 +245,9 @@ if(WIN32)
     enable_language(RC)
     if(CMAKE_RC_COMPILER MATCHES "zig-rc$")
         set(CMAKE_RC_OUTPUT_EXTENSION .obj)
+        # zig rc takes '/' as an option prefix too, so without "--" it notes that it read the .rc
+        # file's absolute path as an option before taking it as the file.
+        set(CMAKE_RC_COMPILE_OBJECT "<CMAKE_RC_COMPILER> <DEFINES> <INCLUDES> <FLAGS> /fo <OBJECT> -- <SOURCE>")
     endif()
     add_library(chat_rc OBJECT src/platform/windows/chat.rc)
     string(REPLACE "." "," CHAT_VERSION_N "${PROJECT_VERSION}")
