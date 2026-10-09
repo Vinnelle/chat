@@ -3,6 +3,9 @@
 #include "common/bencode.h"
 #include <string.h>
 
+// Digits an integer may have: any 18 fit in an int64_t.
+#define BE_INT_DIGITS 18
+
 typedef struct {
     const uint8_t *buf;
     size_t len, pos;
@@ -18,22 +21,21 @@ static be_value *alloc_node(be_ctx *c) {
 
 static be_value *parse_value(be_ctx *c, int depth);
 
-static be_value *parse_int(be_ctx *c) {
+static int at_digit(const be_ctx *c) { return c->pos < c->len && c->buf[c->pos] >= '0' && c->buf[c->pos] <= '9'; }
 
-    size_t start = ++c->pos;
+static be_value *parse_int(be_ctx *c) {
+    c->pos++;
     int neg = 0;
     if (c->pos < c->len && c->buf[c->pos] == '-') { neg = 1; c->pos++; }
     size_t digits_start = c->pos;
     int64_t val = 0;
-    while (c->pos < c->len && c->buf[c->pos] >= '0' && c->buf[c->pos] <= '9') {
-
-        if (c->pos - digits_start >= 18) return NULL;
+    while (at_digit(c)) {
+        if (c->pos - digits_start >= BE_INT_DIGITS) return NULL;
         val = val * 10 + (c->buf[c->pos] - '0');
         c->pos++;
     }
     if (c->pos == digits_start || c->pos >= c->len || c->buf[c->pos] != 'e') return NULL;
     c->pos++;
-    (void)start;
     be_value *v = alloc_node(c);
     if (!v) return NULL;
     v->type = BE_INT;
@@ -42,10 +44,9 @@ static be_value *parse_int(be_ctx *c) {
 }
 
 static be_value *parse_str(be_ctx *c) {
-
     size_t digits_start = c->pos;
     size_t n = 0;
-    while (c->pos < c->len && c->buf[c->pos] >= '0' && c->buf[c->pos] <= '9') {
+    while (at_digit(c)) {
         n = n * 10 + (c->buf[c->pos] - '0');
         c->pos++;
         if (n > c->len) return NULL;
@@ -97,7 +98,6 @@ static be_value *parse_list(be_ctx *c, int depth) {
 
 static be_value *parse_dict(be_ctx *c, int depth) {
     c->pos++;
-
     uint16_t key_idx[BE_MAX_ITEMS / 2], val_idx[BE_MAX_ITEMS / 2];
     size_t count = 0;
     while (c->pos < c->len && c->buf[c->pos] != 'e') {
@@ -130,9 +130,7 @@ static be_value *parse_value(be_ctx *c, int depth) {
         case 'i': return parse_int(c);
         case 'l': return parse_list(c, depth);
         case 'd': return parse_dict(c, depth);
-        default:
-            if (c->buf[c->pos] >= '0' && c->buf[c->pos] <= '9') return parse_str(c);
-            return NULL;
+        default:  return at_digit(c) ? parse_str(c) : NULL;
     }
 }
 

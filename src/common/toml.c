@@ -1,10 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
 #include "common/toml.h"
+#include "common/util.h"
 #include <ctype.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+
+#define UTF8_BOM "\xef\xbb\xbf"
+// The largest integer read: 18 digits, so it always fits in a long long.
+#define TOML_INT_MAX 999999999999999999LL
+// The hex digits after \u and after \U.
+#define SHORT_ESCAPE_DIGITS 4
+#define LONG_ESCAPE_DIGITS 8
 
 typedef struct {
     const char *p;
@@ -47,16 +55,8 @@ static int bare_char(char c) {
 }
 
 static int put_utf8(char *out, size_t *n, size_t room, uint32_t cp) {
-    uint8_t b[4];
-    size_t k;
-    if (cp < 0x80) { b[0] = (uint8_t)cp; k = 1; }
-    else if (cp < 0x800) { b[0] = (uint8_t)(0xc0 | cp >> 6); b[1] = (uint8_t)(0x80 | (cp & 0x3f)); k = 2; }
-    else if (cp < 0x10000) {
-        b[0] = (uint8_t)(0xe0 | cp >> 12); b[1] = (uint8_t)(0x80 | (cp >> 6 & 0x3f)); b[2] = (uint8_t)(0x80 | (cp & 0x3f)); k = 3;
-    } else {
-        b[0] = (uint8_t)(0xf0 | cp >> 18); b[1] = (uint8_t)(0x80 | (cp >> 12 & 0x3f));
-        b[2] = (uint8_t)(0x80 | (cp >> 6 & 0x3f)); b[3] = (uint8_t)(0x80 | (cp & 0x3f)); k = 4;
-    }
+    char b[UTF8_CHAR_MAX];
+    size_t k = utf8_put(cp, b);
     if (*n + k >= room) return -1;
     memcpy(out + *n, b, k);
     *n += k;
@@ -72,14 +72,14 @@ static int escape(parser_t *ps, char *out, size_t *n, size_t room) {
     ps->p++;
     if (at) return put_utf8(out, n, room, (uint8_t)TO[at - FROM]);
     uint32_t cp = 0;
-    for (int k = 0; k < (e == 'u' ? 4 : 8); k++) {
-        char h = *ps->p;
-        if (!isxdigit((unsigned char)h)) return -1;
+    for (int k = 0; k < (e == 'u' ? SHORT_ESCAPE_DIGITS : LONG_ESCAPE_DIGITS); k++) {
+        int h = hex_value(*ps->p);
+        if (h < 0) return -1;
         ps->p++;
-        cp = cp << 4 | (uint32_t)(isdigit((unsigned char)h) ? h - '0' : (tolower((unsigned char)h) - 'a' + 10));
+        cp = cp << 4 | (uint32_t)h;
     }
     // NUL would end the string early.
-    if (cp == 0 || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) return -1;
+    if (cp == 0 || !is_unicode_scalar(cp)) return -1;
     return put_utf8(out, n, room, cp);
 }
 
@@ -136,7 +136,7 @@ static int integer(parser_t *ps, long long *out) {
             if (!isdigit((unsigned char)p[1])) return -1;
             continue;
         }
-        if (v > (999999999999999999LL - (*p - '0')) / 10) return -1;
+        if (v > (TOML_INT_MAX - (*p - '0')) / 10) return -1;
         v = v * 10 + (*p - '0');
     }
     ps->p = p;
@@ -181,7 +181,7 @@ int toml_parse(const char *text, toml_fn fn, void *ctx, int *bad_line) {
     parser_t ps;
     ps.p = text;
     ps.line = 1;
-    if (strncmp(ps.p, "\xef\xbb\xbf", 3) == 0) ps.p += 3;
+    if (starts_with(ps.p, UTF8_BOM)) ps.p += sizeof UTF8_BOM - 1;
     char table[TOML_KEY_MAX] = "";
     int bad = 0, lost = 0;
     if (bad_line) *bad_line = 0;

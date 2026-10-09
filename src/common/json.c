@@ -4,6 +4,16 @@
 #include "common/util.h"
 #include <string.h>
 
+// Digits an integer may have and still be read as one: any 18 fit in an int64_t.
+#define JS_INT_DIGITS 18
+#define JS_HEX_DIGITS 4   // in a \u escape
+
+// UTF-16 surrogates: a \u escape of a high one must be followed by one of a low one.
+enum { HIGH_SURROGATE = 0xd800, LOW_SURROGATE = 0xdc00, SURROGATE_END = 0xe000, SUPPLEMENTARY = 0x10000 };
+
+// The escapes a string may hold, and the characters they stand for.
+static const char ESCAPE_CODES[] = "\"\\/bfnrt", ESCAPED[] = "\"\\/\b\f\n\r\t";
+
 typedef struct {
     const char *buf;
     size_t len, pos;
@@ -33,16 +43,31 @@ static int literal(js_ctx *c, const char *word) {
 }
 
 static int hex4(js_ctx *c, uint32_t *out) {
-    if (c->len - c->pos < 4) return -1;
+    if (c->len - c->pos < JS_HEX_DIGITS) return -1;
     uint32_t v = 0;
-    for (int i = 0; i < 4; i++) {
-        char ch = c->buf[c->pos++];
-        int h = (ch >= '0' && ch <= '9') ? ch - '0' : (ch >= 'a' && ch <= 'f') ? ch - 'a' + 10
-              : (ch >= 'A' && ch <= 'F') ? ch - 'A' + 10 : -1;
+    for (int i = 0; i < JS_HEX_DIGITS; i++) {
+        int h = hex_value(c->buf[c->pos++]);
         if (h < 0) return -1;
         v = (v << 4) | (uint32_t)h;
     }
     *out = v;
+    return 0;
+}
+
+// The character a \u escape stands for (and a second one, for a surrogate pair), as UTF-8.
+static int unicode_escape(js_ctx *c, char enc[UTF8_CHAR_MAX], size_t *n) {
+    uint32_t cp;
+    if (hex4(c, &cp) != 0) return -1;
+    if (cp >= HIGH_SURROGATE && cp < LOW_SURROGATE) {
+        uint32_t lo;
+        if (c->len - c->pos < 2 || c->buf[c->pos] != '\\' || c->buf[c->pos + 1] != 'u') return -1;
+        c->pos += 2;
+        if (hex4(c, &lo) != 0 || lo < LOW_SURROGATE || lo >= SURROGATE_END) return -1;
+        cp = SUPPLEMENTARY + ((cp - HIGH_SURROGATE) << 10) + (lo - LOW_SURROGATE);
+    } else if (cp >= LOW_SURROGATE && cp < SURROGATE_END) {
+        return -1;
+    }
+    *n = utf8_put(cp, enc);
     return 0;
 }
 
@@ -54,39 +79,18 @@ static js_value *parse_str(js_ctx *c) {
     for (;;) {
         if (c->pos >= c->len) return NULL;
         unsigned char ch = (unsigned char)c->buf[c->pos++];
-        char enc[4];
-        size_t n = 0;
+        char enc[UTF8_CHAR_MAX];
+        size_t n = 1;
         if (ch == '"') break;
         if (ch < 0x20) return NULL;
-        if (ch != '\\') { enc[0] = (char)ch; n = 1; }
-        else {
+        if (ch != '\\') {
+            enc[0] = (char)ch;
+        } else {
             if (c->pos >= c->len) return NULL;
             char e = c->buf[c->pos++];
-            uint32_t cp;
-            switch (e) {
-                case '"': enc[0] = '"'; n = 1; break;
-                case '\\': enc[0] = '\\'; n = 1; break;
-                case '/': enc[0] = '/'; n = 1; break;
-                case 'b': enc[0] = '\b'; n = 1; break;
-                case 'f': enc[0] = '\f'; n = 1; break;
-                case 'n': enc[0] = '\n'; n = 1; break;
-                case 'r': enc[0] = '\r'; n = 1; break;
-                case 't': enc[0] = '\t'; n = 1; break;
-                case 'u':
-                    if (hex4(c, &cp) != 0) return NULL;
-                    if (cp >= 0xd800 && cp <= 0xdbff) {
-                        uint32_t lo;
-                        if (c->len - c->pos < 2 || c->buf[c->pos] != '\\' || c->buf[c->pos + 1] != 'u') return NULL;
-                        c->pos += 2;
-                        if (hex4(c, &lo) != 0 || lo < 0xdc00 || lo > 0xdfff) return NULL;
-                        cp = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00);
-                    } else if (cp >= 0xdc00 && cp <= 0xdfff) {
-                        return NULL;
-                    }
-                    n = utf8_put(cp, enc);
-                    break;
-                default: return NULL;
-            }
+            const char *code = e ? strchr(ESCAPE_CODES, e) : NULL;
+            if (code) enc[0] = ESCAPED[code - ESCAPE_CODES];
+            else if (e != 'u' || unicode_escape(c, enc, &n) != 0) return NULL;
         }
         if (a->text_used + n + 1 > JS_MAX_TEXT) return NULL;
         memcpy(a->text + a->text_used, enc, n);
@@ -102,15 +106,23 @@ static js_value *parse_str(js_ctx *c) {
     return v;
 }
 
+static int at_digit(const js_ctx *c) { return c->pos < c->len && c->buf[c->pos] >= '0' && c->buf[c->pos] <= '9'; }
+
+// Past one digit or more. -1 if there are none.
+static int skip_digits(js_ctx *c) {
+    size_t f = c->pos;
+    while (at_digit(c)) c->pos++;
+    return c->pos == f ? -1 : 0;
+}
+
 static js_value *parse_num(js_ctx *c) {
-    size_t start = c->pos;
     int neg = 0;
     if (c->pos < c->len && c->buf[c->pos] == '-') { neg = 1; c->pos++; }
     size_t digits = c->pos;
     int64_t val = 0;
     int is_int = 1;
-    while (c->pos < c->len && c->buf[c->pos] >= '0' && c->buf[c->pos] <= '9') {
-        if (c->pos - digits >= 18) is_int = 0;
+    while (at_digit(c)) {
+        if (c->pos - digits >= JS_INT_DIGITS) is_int = 0;
         else val = val * 10 + (c->buf[c->pos] - '0');
         c->pos++;
     }
@@ -119,19 +131,14 @@ static js_value *parse_num(js_ctx *c) {
     if (c->pos < c->len && c->buf[c->pos] == '.') {
         is_int = 0;
         c->pos++;
-        size_t f = c->pos;
-        while (c->pos < c->len && c->buf[c->pos] >= '0' && c->buf[c->pos] <= '9') c->pos++;
-        if (c->pos == f) return NULL;
+        if (skip_digits(c) != 0) return NULL;
     }
     if (c->pos < c->len && (c->buf[c->pos] == 'e' || c->buf[c->pos] == 'E')) {
         is_int = 0;
         c->pos++;
         if (c->pos < c->len && (c->buf[c->pos] == '+' || c->buf[c->pos] == '-')) c->pos++;
-        size_t f = c->pos;
-        while (c->pos < c->len && c->buf[c->pos] >= '0' && c->buf[c->pos] <= '9') c->pos++;
-        if (c->pos == f) return NULL;
+        if (skip_digits(c) != 0) return NULL;
     }
-    (void)start;
     js_value *v = alloc_node(c);
     if (!v) return NULL;
     v->type = JS_NUM;
@@ -257,28 +264,22 @@ const js_value *js_obj_get(const js_value *obj, const char *key) {
 const char *js_str(const js_value *v) { return v && v->type == JS_STR ? v->s : NULL; }
 
 size_t js_put_str(char *out, size_t pos, size_t cap, const char *s, size_t len) {
-    static const char *H = "0123456789abcdef";
     if (pos >= cap) return cap;
     out[pos++] = '"';
     for (size_t i = 0; i < len; i++) {
         unsigned char ch = (unsigned char)s[i];
+        // NIP-01 escapes these with a letter, and every other control character as \u00XX. '/' and
+        // \0 (which strchr would find) are never escaped with a letter.
+        const char *esc_at = ch && ch != '/' ? strchr(ESCAPED, ch) : NULL;
         char esc[7];
-        size_t n = 0;
-        switch (ch) {
-            case '\n': esc[0] = '\\'; esc[1] = 'n'; n = 2; break;
-            case '"':  esc[0] = '\\'; esc[1] = '"'; n = 2; break;
-            case '\\': esc[0] = '\\'; esc[1] = '\\'; n = 2; break;
-            case '\r': esc[0] = '\\'; esc[1] = 'r'; n = 2; break;
-            case '\t': esc[0] = '\\'; esc[1] = 't'; n = 2; break;
-            case '\b': esc[0] = '\\'; esc[1] = 'b'; n = 2; break;
-            case '\f': esc[0] = '\\'; esc[1] = 'f'; n = 2; break;
-            default:
-                if (ch < 0x20) {
-                    esc[0] = '\\'; esc[1] = 'u'; esc[2] = '0'; esc[3] = '0';
-                    esc[4] = H[ch >> 4]; esc[5] = H[ch & 15]; n = 6;
-                } else {
-                    esc[0] = (char)ch; n = 1;
-                }
+        size_t n;
+        if (esc_at) {
+            esc[0] = '\\'; esc[1] = ESCAPE_CODES[esc_at - ESCAPED]; n = 2;
+        } else if (ch < 0x20) {
+            esc[0] = '\\'; esc[1] = 'u'; esc[2] = '0'; esc[3] = '0';
+            esc[4] = HEX_DIGITS[ch >> 4]; esc[5] = HEX_DIGITS[ch & 15]; n = 6;
+        } else {
+            esc[0] = (char)ch; n = 1;
         }
         if (pos + n >= cap) return cap;
         memcpy(out + pos, esc, n);

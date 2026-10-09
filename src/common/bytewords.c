@@ -42,7 +42,11 @@
 // IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 // THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "common/bytewords.h"
+#include "common/util.h"
 #include <string.h>
+
+#define WORD_LEN 4
+#define GROUP 4
 
 // Four letters each, so a word only ever needs its place in this string.
 static const char WORDS[] =
@@ -62,17 +66,16 @@ static const char WORDS[] =
     "taxitenttiedtimetinytoiltombtoys" "triptunatwinuglyundouniturgeuser"
     "vastveryvetovialvibeviewvisavoid" "vowswallwandwarmwaspwavewaxywebs"
     "whatwhenwhizwolfworkyankyawnyell" "yogayurtzapszerozestzinczonezoom";
-_Static_assert(sizeof WORDS == 256 * 4 + 1, "a word of four letters for each byte");
+_Static_assert(sizeof WORDS == 256 * WORD_LEN + 1, "a word of four letters for each byte");
 
 void bytewords(const uint8_t *in, size_t len, char *out) {
     size_t o = 0;
     for (size_t i = 0; i < len; i++) {
-        if (i > 0) {
-            if (i % 4 == 0) { memcpy(out + o, " \xc2\xb7 ", 4); o += 4; }
-            else out[o++] = ' ';
-        }
-        memcpy(out + o, WORDS + in[i] * 4, 4);
-        o += 4;
+        const char *sep = i == 0 ? "" : i % GROUP == 0 ? DOT_SEP : " ";
+        size_t n = strlen(sep);
+        memcpy(out + o, sep, n);
+        memcpy(out + o + n, WORDS + in[i] * WORD_LEN, WORD_LEN);
+        o += n + WORD_LEN;
     }
     out[o] = '\0';
 }

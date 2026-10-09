@@ -7,13 +7,15 @@
 #include <time.h>
 #include <sodium.h>
 
-static const char HEXCH[] = "0123456789abcdef";
+#define BASE64_GROUP 3   // bytes in each four characters
+#define BASE64_QUAD 4
+#define BASE32_BITS 5
 
-static const char B64CH[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+static const char B64CH[] = BASE64_CHARS;
 
 size_t base64_encode(const uint8_t *in, size_t n, char *out) {
     size_t o = 0;
-    for (size_t i = 0; i < n; i += 3) {
+    for (size_t i = 0; i < n; i += BASE64_GROUP) {
         uint32_t v = (uint32_t)in[i] << 16;
         if (i + 1 < n) v |= (uint32_t)in[i + 1] << 8;
         if (i + 2 < n) v |= in[i + 2];
@@ -26,35 +28,43 @@ size_t base64_encode(const uint8_t *in, size_t n, char *out) {
     return o;
 }
 
+int base64_value(char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    return c == '+' ? 62 : c == '/' ? 63 : -1;
+}
+
 size_t base32_encode(const uint8_t *in, size_t n, char *out) {
     static const char B32CH[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    const uint32_t mask = (1u << BASE32_BITS) - 1;
     size_t o = 0;
     uint32_t acc = 0;
     int bits = 0;
     for (size_t i = 0; i < n; i++) {
         acc = acc << 8 | in[i];
         bits += 8;
-        while (bits >= 5) { out[o++] = B32CH[(acc >> (bits - 5)) & 31]; bits -= 5; }
+        while (bits >= BASE32_BITS) { out[o++] = B32CH[(acc >> (bits - BASE32_BITS)) & mask]; bits -= BASE32_BITS; }
     }
-    if (bits > 0) out[o++] = B32CH[(acc << (5 - bits)) & 31];
+    if (bits > 0) out[o++] = B32CH[(acc << (BASE32_BITS - bits)) & mask];
     out[o] = '\0';
     return o;
 }
 
 long base64_decode_strict(const char *in, size_t inlen, uint8_t *out, size_t cap) {
-    if (inlen % 4 != 0) return -1;
+    if (inlen % BASE64_QUAD != 0) return -1;
     size_t o = 0;
-    for (size_t i = 0; i < inlen; i += 4) {
+    for (size_t i = 0; i < inlen; i += BASE64_QUAD) {
         uint32_t v = 0;
         int pad = 0;
-        for (int k = 0; k < 4; k++) {
+        for (int k = 0; k < BASE64_QUAD; k++) {
             char ch = in[i + k];
-            const char *hit = ch ? strchr(B64CH, ch) : NULL;
-            if (ch == '=' && i + 4 == inlen && k >= 2 && (k == 3 || in[i + 3] == '=')) { pad++; v <<= 6; continue; }
-            if (!hit || pad) return -1;
-            v = (v << 6) | (uint32_t)(hit - B64CH);
+            int six = base64_value(ch);
+            if (ch == '=' && i + BASE64_QUAD == inlen && k >= 2 && (k == 3 || in[i + 3] == '=')) { pad++; v <<= 6; continue; }
+            if (six < 0 || pad) return -1;
+            v = (v << 6) | (uint32_t)six;
         }
-        for (int k = 0; k < 3 - pad; k++) {
+        for (int k = 0; k < BASE64_GROUP - pad; k++) {
             if (o >= cap) return -1;
             out[o++] = (uint8_t)(v >> (16 - 8 * k));
         }
@@ -64,8 +74,8 @@ long base64_decode_strict(const char *in, size_t inlen, uint8_t *out, size_t cap
 
 void hex_encode(const uint8_t *in, size_t len, char *out) {
     for (size_t i = 0; i < len; i++) {
-        out[i * 2] = HEXCH[in[i] >> 4];
-        out[i * 2 + 1] = HEXCH[in[i] & 0xf];
+        out[i * 2] = HEX_DIGITS[in[i] >> 4];
+        out[i * 2 + 1] = HEX_DIGITS[in[i] & 0xf];
     }
     out[len * 2] = '\0';
 }
@@ -74,46 +84,50 @@ void hex_groups(const uint8_t *in, size_t len, char *out) {
     size_t o = 0;
     for (size_t i = 0; i < len; i++) {
         if (i > 0 && i % 2 == 0) out[o++] = ' ';
-        out[o++] = HEXCH[in[i] >> 4];
-        out[o++] = HEXCH[in[i] & 0xf];
+        out[o++] = HEX_DIGITS[in[i] >> 4];
+        out[o++] = HEX_DIGITS[in[i] & 0xf];
     }
     out[o] = '\0';
 }
 
-static int hexval(char c) {
+static int hex_lower(char c) {
     if (c >= '0' && c <= '9') return c - '0';
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
     return -1;
 }
 
+int hex_value(char c) {
+    int v = hex_lower(c);
+    return v >= 0 ? v : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+}
+
 int hex_decode(const char *in, size_t hexlen, uint8_t *out) {
     if (strlen(in) != hexlen || hexlen % 2 != 0) return -1;
     for (size_t i = 0; i < hexlen / 2; i++) {
-        int hi = hexval(in[i * 2]), lo = hexval(in[i * 2 + 1]);
+        int hi = hex_lower(in[i * 2]), lo = hex_lower(in[i * 2 + 1]);
         if (hi < 0 || lo < 0) return -1;
         out[i] = (uint8_t)((hi << 4) | lo);
     }
     return 0;
 }
 
+int is_unicode_scalar(uint32_t cp) { return cp <= UNICODE_MAX && !(cp >= 0xd800 && cp <= 0xdfff); }
+
 // Strict: overlong forms, surrogates and anything past U+10FFFF are malformed. Decoding those
 // leniently would let e.g. C1 9B through as '[' while an 8-bit terminal reads the 9B as CSI.
 static uint32_t utf8_next(const unsigned char *s, size_t n, size_t i, size_t *adv) {
-    static const uint32_t MIN_CP[5] = { 0, 0, 0x80, 0x800, 0x10000 };
+    static const uint32_t MIN_CP[UTF8_CHAR_MAX + 1] = { 0, 0, 0x80, 0x800, 0x10000 };
     unsigned char c = s[i];
-    size_t len;
-    uint32_t cp;
-    if ((c & 0x80) == 0) { *adv = 1; return c; }
-    else if ((c & 0xe0) == 0xc0 && i + 1 < n) { len = 2; cp = c & 0x1f; }
-    else if ((c & 0xf0) == 0xe0 && i + 2 < n) { len = 3; cp = c & 0x0f; }
-    else if ((c & 0xf8) == 0xf0 && i + 3 < n) { len = 4; cp = c & 0x07; }
-    else { *adv = 1; return c; }
+    size_t len = utf8_lead_len(c);
+    if (len <= 1 || i + len > n) { *adv = 1; return c; }
+    // The lead byte's own bits: those after its len ones and a zero.
+    uint32_t cp = c & (0x7fu >> len);
     for (size_t k = 1; k < len; k++) {
         unsigned char cc = s[i + k];
-        if ((cc & 0xc0) != 0x80) { *adv = 1; return c; }
+        if (!utf8_is_cont(cc)) { *adv = 1; return c; }
         cp = (cp << 6) | (cc & 0x3f);
     }
-    if (cp < MIN_CP[len] || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) { *adv = 1; return c; }
+    if (cp < MIN_CP[len] || !is_unicode_scalar(cp)) { *adv = 1; return c; }
     *adv = len;
     return cp;
 }
@@ -173,11 +187,15 @@ static const cp_range_t WIDE[] = {
     { 0x1f680, 0x1f6ff }, { 0x1f7e0, 0x1f7eb }, { 0x1f90c, 0x1f9ff }, { 0x1fa70, 0x1faff }, { 0x20000, 0x3fffd },
 };
 
+int utf8_cp_cols(uint32_t cp) {
+    if (cp < 0x80) return 1;
+    if (in_ranges(cp, ZERO_WIDTH, COUNT_OF(ZERO_WIDTH))) return 0;
+    return in_ranges(cp, WIDE, COUNT_OF(WIDE)) ? 2 : 1;
+}
+
 int utf8_char_cols(const char *s, size_t n, size_t i, size_t *adv) {
     uint32_t cp = utf8_next((const unsigned char *)s, n, i, adv);
-    if (cp < 0x80 || *adv == 1) return 1;
-    if (in_ranges(cp, ZERO_WIDTH, sizeof ZERO_WIDTH / sizeof ZERO_WIDTH[0])) return 0;
-    return in_ranges(cp, WIDE, sizeof WIDE / sizeof WIDE[0]) ? 2 : 1;
+    return *adv == 1 ? 1 : utf8_cp_cols(cp);
 }
 
 size_t utf8_fit_cols(const char *s, size_t len, int max_cols, int *cols) {
@@ -201,8 +219,7 @@ int utf8_str_cols(const char *s) {
 }
 
 static int is_stripped(uint32_t cp) {
-    if (cp < 0x20 || cp == 0x7f) return 1;
-    if (cp >= 0x80 && cp <= 0x9f) return 1;
+    if (is_control_cp(cp)) return 1;
     if (cp == 0x61c || cp == 0x200e || cp == 0x200f) return 1;
     if (cp >= 0x202a && cp <= 0x202e) return 1;
     if (cp >= 0x2066 && cp <= 0x2069) return 1;
@@ -220,6 +237,8 @@ int has_control_chars(const char *in) {
     return 0;
 }
 
+static int is_space(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
+
 size_t clean_text(const char *in, char *out, size_t max_len) {
     size_t n = strlen(in), i = 0, o = 0;
     const unsigned char *s = (const unsigned char *)in;
@@ -235,20 +254,20 @@ size_t clean_text(const char *in, char *out, size_t max_len) {
         i += adv;
     }
 
-    while (o > 0 && (out[o - 1] == ' ' || out[o - 1] == '\t' || out[o - 1] == '\n' || out[o - 1] == '\r'))
-        o--;
+    while (o > 0 && is_space(out[o - 1])) o--;
     size_t lead = 0;
-    while (lead < o && (out[lead] == ' ' || out[lead] == '\t' || out[lead] == '\n' || out[lead] == '\r'))
-        lead++;
+    while (lead < o && is_space(out[lead])) lead++;
     if (lead > 0) { memmove(out, out + lead, o - lead); o -= lead; }
     out[o] = '\0';
     return o;
 }
 
+#define SESSION_ID_MAX 64
+
 static const char SID_ALPHABET[] = "23456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 void random_session_id(char *out, size_t len) {
-    if (len > 64) len = 64;
+    if (len > SESSION_ID_MAX) len = SESSION_ID_MAX;
     // randombytes_uniform has no modulo bias, so every character carries the full log2(30) bits.
     for (size_t i = 0; i < len; i++)
         out[i] = SID_ALPHABET[randombytes_uniform((uint32_t)(sizeof(SID_ALPHABET) - 1))];
@@ -265,13 +284,12 @@ static const char *NICK_NOUN[] = {
     "raven", "cedar", "ember", "sparrow", "harbor", "meadow", "gecko", "juniper",
     "pixel", "quartz", "tundra", "wren", "yonder", "zephyr", "canyon", "delta",
 };
+#define NICK_NUMBERS 100   // the number after the noun, 0 to 99
 
 void random_nickname(char *out, size_t out_cap) {
-    uint8_t b[3];
-    randombytes_buf(b, sizeof b);
-    const char *adj = NICK_ADJ[b[0] % (sizeof(NICK_ADJ) / sizeof(NICK_ADJ[0]))];
-    const char *noun = NICK_NOUN[b[1] % (sizeof(NICK_NOUN) / sizeof(NICK_NOUN[0]))];
-    snprintf(out, out_cap, "%s-%s%u", adj, noun, (unsigned)(b[2] % 100));
+    const char *adj = NICK_ADJ[randombytes_uniform((uint32_t)COUNT_OF(NICK_ADJ))];
+    const char *noun = NICK_NOUN[randombytes_uniform((uint32_t)COUNT_OF(NICK_NOUN))];
+    snprintf(out, out_cap, "%s-%s%u", adj, noun, (unsigned)randombytes_uniform(NICK_NUMBERS));
 }
 
 void copy_str(char *dst, const char *src, size_t dstsize) {
@@ -280,4 +298,12 @@ void copy_str(char *dst, const char *src, size_t dstsize) {
     if (n > dstsize - 1) n = dstsize - 1;
     memcpy(dst, src, n);
     dst[n] = '\0';
+}
+
+int starts_with(const char *s, const char *prefix) { return strncmp(s, prefix, strlen(prefix)) == 0; }
+
+double backoff(int tries, double base, int max_shift, double cap) {
+    int shift = tries < max_shift ? tries : max_shift;
+    double d = base * (double)(1u << shift);
+    return d > cap ? cap : d;
 }
