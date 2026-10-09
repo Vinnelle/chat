@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0-beta.5
 
 ### Changed
 - The full-screen UI marks a name in the chat with a symbol in a column of its own, where it added
