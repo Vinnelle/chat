@@ -1,20 +1,6 @@
 # Changelog
 
-## 0.5.0-beta.5
-
-### Changed
-- The full-screen UI marks a name in the chat with a symbol in a column of its own, where it added
-  words that could push everyone's messages halfway across the chat: `◆` you, `✓` code compared, `?`
-  code not compared, `✗` codes differ. The name column is as wide as the longest nick in view, up to
-  a quarter of the chat (a third before), and a longer name, like a relayed one, goes on its own row
-  above its message. Lines from a history kept by an older version show the symbols too.
-- The sidebar spells out the symbols that apply to each peer on rows under it: its verify state,
-  `h keeps history` and `! modified client`. When the sidebar is too short for that, they go next to
-  the nick as before.
-- Messages from a peer whose verify code you compared say `(code compared)` after its name, in
-  `--simple` and notifications too. Only `(code not compared)` and `(codes differ)` were shown before.
-
-## 0.5.0-beta.4
+## 0.5.0
 
 ### Security
 - Nothing on disk or on screen says whether a save has a decoy any more. Every save has a `spare`
@@ -26,88 +12,6 @@
   A decoy follows the save when its device lock, security key or code changes, where the betas' kept
   needing what the save needed when it was set, and the shadow passphrase can't be the save's own. A
   decoy the betas made still opens, and when its save opens chat says how to move it to the spare.
-
-### Added
-- chat builds for macOS, Apple silicon and Intel (macOS 11 and later), cross-built with zig like
-  the Linux and Windows releases (`just build macos`). It shares the Linux platform code, with the
-  Mac's hardware UUID as the machine id, `PT_DENY_ATTACH` against debuggers and its private TMPDIR
-  for chat's own tor. Locking a save to the device, security keys, desktop notifications and PCP or
-  NAT-PMP port mapping don't work there yet (they need Apple's frameworks), and releases don't
-  include it until it's been used on a Mac. CI runs the engine test and chat itself on macOS.
-- History, off unless you turn it on: `:set history on` (Chat > History) keeps each session's
-  messages, sealed in the save that's open, and shows them when you join that session again with the
-  same id and password. Each session's is a file of its own named from its id and password, so the
-  name doesn't say which session it is, up to 256 KB of it, sealed again with the rest when the
-  save's device lock, security key or code changes, and deleted with the save or by a decoy taking
-  its place. Everyone in the session is told while you keep it (`[keeps history]` when you join, a
-  warning in the chat, the sidebar and `:peers`), straight away when you turn it on or off, and you're
-  told the same of them. `:history` says whether it's kept, and `:history forget` (or `forget all`)
-  deletes it. Only the full-screen UI keeps it.
-- A message can be 880 bytes long, up from 250: as much as one frame holds, so nothing about how
-  messages travel changes. A peer on 0.5.0's betas or older only reads 250 bytes of one (its `k`
-  doesn't have the new `l`), so a longer message goes to it in parts, cut between words, each a
-  message of its own. A part a peer like that passes on is shown once, even to someone who got the
-  whole message.
-- Verify codes come as words to read out over a call: 16 four-letter words, one for each byte of the
-  code, from Bytewords (a list made to be hard to mishear), like `iron when sets good · deli axis road
-  exam · ...`. The prompt to compare codes when a peer joins and `:verify NICK` show them, with the
-  same code in hex after them for a peer on an older version, which only shows hex.
-- `PROTOCOL.md` describes the wire protocol: the keys and what they're made from, the frames, the
-  handshake, rekeys, every record and the timers. `SECURITY.md` has the threat model and how to
-  report a vulnerability.
-- The shadow passphrase and self-destruct, in 0.5.0's betas but not their notes. `:set shadow on`
-  (the **Shadow password** row) gives the open save a second passphrase that opens a decoy in its
-  place: a clean save with no key or verified keys, needing the same device, security key and code,
-  whose files replace or delete the real save's. `:set destroy 3` (or `5` or `10`, the
-  **Self-destruct** row) deletes a save after that many wrong passphrases in a row. The README says
-  what they can't do: deleting isn't erasing, and the count is kept unsealed next to the save.
-
-### Changed
-- The engine's unused plain-text session log is gone. Its flag in the handshake now says a peer
-  keeps a history, which 0.4.0 and the betas show as `[logging chat locally]`.
-- Tab on an argument in the command line's menu adds a space after it when another argument can
-  follow, so that one's menu comes up straight away, as it already did after a command's name:
-  `:verify NICK` lists `ok` and `no`, `:verified forget` the verified nicks, `:download N` `anyway`
-  and folders, and `:show N` and `:saveto N` `anyway`. Enter still runs the line without them.
-- The list of saves says when each was last opened or saved, since opening a save now writes its
-  files again.
-
-### Fixed
-- With more than one save and no `--save`, `CHAT_INSTALL_PASSWORD` is tried on each save in turn,
-  and each save it didn't open counted it as a wrong passphrase: a few runs could delete a save set
-  to self-destruct that it was never meant for, and a save whose shadow passphrase it happened to be
-  lost its real save to the decoy. Saves it's tried on that way no longer count it, or open a decoy.
-
-## 0.5.0-beta.3
-
-### Added
-- Beta releases are opt-in: with the new `betas` setting on (Chat > Updates, `:set betas on`, or
-  `--betas` for one run), `:update` and `chat --update` install the newest release, betas
-  included. It's off by default, so `:update` still only installs releases. A newer beta of the
-  same version counts as an update, so testers go from `-beta.1` to `-beta.2`.
-
-### Changed
-- `just release` deletes the GitHub releases of the version's betas once the release is
-  published, so the release is the one left to download. The betas' tags stay.
-
-## 0.5.0-beta.2
-
-### Added
-- `just release beta` releases the Unreleased section as a beta of the next version,
-  `vVERSION-beta.N`, signed like a release and published as a GitHub pre-release, which `:update`
-  doesn't install. On a beta, `:update` installs the release it's a beta of once that's out.
-  `just release` folds the betas' sections since the last release into the new version's.
-
-### Changed
-- Turning on **Device lock**, **Security key** or **Authenticator app** with no save open no
-  longer just flips the row on, waiting for a later `:install`: a box says it needs chat installed
-  first (or a save open, if there are saves here) and asks to install now. Yes goes through
-  `:install`, which sets it up for the new save as it makes it (the device lock's box, the key's
-  two touches, the QR code), or asks to set it up for a save it opens instead. No, or cancelling
-  `:install` part way, leaves the row off. Started from the settings page, `:install`'s boxes stay
-  over it and go back to it. `:uninstall` of the open save turns the three rows off too.
-
-## 0.5.0-beta.1
 
 ### Added
 - A device lock for saves. `:set devicelock on` (the **Device lock** row) locks a save to the
@@ -155,6 +59,47 @@
   part way through a change to them is finished with all of them when it opens.
   `CHAT_INSTALL_PASSWORD` gives the passphrase of a save that needs a security key or a code, and
   those are still asked for. Older versions of chat can't open a save that needs either.
+- `just release beta` releases the Unreleased section as a beta of the next version,
+  `vVERSION-beta.N`, signed like a release and published as a GitHub pre-release, which `:update`
+  doesn't install. On a beta, `:update` installs the release it's a beta of once that's out.
+  `just release` folds the betas' sections since the last release into the new version's.
+- Beta releases are opt-in: with the new `betas` setting on (Chat > Updates, `:set betas on`, or
+  `--betas` for one run), `:update` and `chat --update` install the newest release, betas
+  included. It's off by default, so `:update` still only installs releases. A newer beta of the
+  same version counts as an update, so testers go from `-beta.1` to `-beta.2`.
+- chat builds for macOS, Apple silicon and Intel (macOS 11 and later), cross-built with zig like
+  the Linux and Windows releases (`just build macos`). It shares the Linux platform code, with the
+  Mac's hardware UUID as the machine id, `PT_DENY_ATTACH` against debuggers and its private TMPDIR
+  for chat's own tor. Locking a save to the device, security keys, desktop notifications and PCP or
+  NAT-PMP port mapping don't work there yet (they need Apple's frameworks), and releases don't
+  include it until it's been used on a Mac. CI runs the engine test and chat itself on macOS.
+- History, off unless you turn it on: `:set history on` (Chat > History) keeps each session's
+  messages, sealed in the save that's open, and shows them when you join that session again with the
+  same id and password. Each session's is a file of its own named from its id and password, so the
+  name doesn't say which session it is, up to 256 KB of it, sealed again with the rest when the
+  save's device lock, security key or code changes, and deleted with the save or by a decoy taking
+  its place. Everyone in the session is told while you keep it (`[keeps history]` when you join, a
+  warning in the chat, the sidebar and `:peers`), straight away when you turn it on or off, and you're
+  told the same of them. `:history` says whether it's kept, and `:history forget` (or `forget all`)
+  deletes it. Only the full-screen UI keeps it.
+- A message can be 880 bytes long, up from 250: as much as one frame holds, so nothing about how
+  messages travel changes. A peer on 0.5.0's betas or older only reads 250 bytes of one (its `k`
+  doesn't have the new `l`), so a longer message goes to it in parts, cut between words, each a
+  message of its own. A part a peer like that passes on is shown once, even to someone who got the
+  whole message.
+- Verify codes come as words to read out over a call: 16 four-letter words, one for each byte of the
+  code, from Bytewords (a list made to be hard to mishear), like `iron when sets good · deli axis road
+  exam · ...`. The prompt to compare codes when a peer joins and `:verify NICK` show them, with the
+  same code in hex after them for a peer on an older version, which only shows hex.
+- `PROTOCOL.md` describes the wire protocol: the keys and what they're made from, the frames, the
+  handshake, rekeys, every record and the timers. `SECURITY.md` has the threat model and how to
+  report a vulnerability.
+- The shadow passphrase and self-destruct, in 0.5.0's betas but not their notes. `:set shadow on`
+  (the **Shadow password** row) gives the open save a second passphrase that opens a decoy in its
+  place: a clean save with no key or verified keys, needing the same device, security key and code,
+  whose files replace or delete the real save's. `:set destroy 3` (or `5` or `10`, the
+  **Self-destruct** row) deletes a save after that many wrong passphrases in a row. The README says
+  what they can't do: deleting isn't erasing, and the count is kept unsealed next to the save.
 
 ### Changed
 - The settings page shows one section at a time, picked in the list on the left, with its rows
@@ -188,6 +133,39 @@
   first save used to go in `~/.config/chat` itself as `default`. Now it goes in
   `~/.config/chat/saves/NAME` like the rest. Typing `default` still makes the old kind, and saves
   made there before keep working.
+- Turning on **Device lock**, **Security key** or **Authenticator app** with no save open no
+  longer just flips the row on, waiting for a later `:install`: a box says it needs chat installed
+  first (or a save open, if there are saves here) and asks to install now. Yes goes through
+  `:install`, which sets it up for the new save as it makes it (the device lock's box, the key's
+  two touches, the QR code), or asks to set it up for a save it opens instead. No, or cancelling
+  `:install` part way, leaves the row off. Started from the settings page, `:install`'s boxes stay
+  over it and go back to it. `:uninstall` of the open save turns the three rows off too.
+- `just release` deletes the GitHub releases of the version's betas once the release is
+  published, so the release is the one left to download. The betas' tags stay.
+- The engine's unused plain-text session log is gone. Its flag in the handshake now says a peer
+  keeps a history, which 0.4.0 and the betas show as `[logging chat locally]`.
+- Tab on an argument in the command line's menu adds a space after it when another argument can
+  follow, so that one's menu comes up straight away, as it already did after a command's name:
+  `:verify NICK` lists `ok` and `no`, `:verified forget` the verified nicks, `:download N` `anyway`
+  and folders, and `:show N` and `:saveto N` `anyway`. Enter still runs the line without them.
+- The list of saves says when each was last opened or saved, since opening a save now writes its
+  files again.
+- The full-screen UI marks a name in the chat with a symbol in a column of its own, where it added
+  words that could push everyone's messages halfway across the chat: `◆` you, `✓` code compared, `?`
+  code not compared, `✗` codes differ. The name column is as wide as the longest nick in view, up to
+  a quarter of the chat (a third before), and a longer name, like a relayed one, goes on its own row
+  above its message. Lines from a history kept by an older version show the symbols too.
+- The sidebar spells out the symbols that apply to each peer on rows under it: its verify state,
+  `h keeps history` and `! modified client`. When the sidebar is too short for that, they go next to
+  the nick as before.
+- Messages from a peer whose verify code you compared say `(code compared)` after its name, in
+  `--simple` and notifications too. Only `(code not compared)` and `(codes differ)` were shown before.
+
+### Fixed
+- With more than one save and no `--save`, `CHAT_INSTALL_PASSWORD` is tried on each save in turn,
+  and each save it didn't open counted it as a wrong passphrase: a few runs could delete a save set
+  to self-destruct that it was never meant for, and a save whose shadow passphrase it happened to be
+  lost its real save to the decoy. Saves it's tried on that way no longer count it, or open a decoy.
 
 ## 0.4.0
 
