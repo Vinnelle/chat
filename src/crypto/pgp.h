@@ -9,6 +9,8 @@
 
 #define PGP_FP_LEN 20
 #define PGP_ARMOR_MAX 2048
+#define PGP_PRIVATE_BEGIN "-----BEGIN PGP PRIVATE KEY BLOCK-----"
+#define PGP_PRIVATE_END "-----END PGP PRIVATE KEY BLOCK-----"
 
 // created is the key's creation time. The fingerprint covers it, so it has to stay the same.
 void pgp_export_public_key(const identity_keypair_t *idkp, const char *nick, uint32_t created,

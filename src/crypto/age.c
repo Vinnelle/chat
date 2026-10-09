@@ -8,6 +8,11 @@
 #include <string.h>
 
 static const char CHARSET[] = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+#define BECH32_SEPARATOR '1'
+#define BECH32_CONST 1u
+#define BECH32_CHECKSUM 6   // five-bit groups
+#define KEY_GROUPS 52       // a 32-byte key in five-bit groups
+#define AGE_FILE_MAX 4096
 
 static uint32_t bech32_polymod(const uint8_t *values, size_t len) {
     static const uint32_t GEN[5] = { 0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3 };
@@ -32,37 +37,41 @@ static size_t convert_8_to_5(const uint8_t *in, size_t inlen, uint8_t *out) {
     return n;
 }
 
+// The HRP spread out for the checksum: each character's high bits, a zero, then their low bits.
+static size_t hrp_expand(const char *hrp, size_t len, uint8_t *out) {
+    size_t p = 0;
+    for (size_t i = 0; i < len; i++) out[p++] = (uint8_t)(hrp[i] >> 5);
+    out[p++] = 0;
+    for (size_t i = 0; i < len; i++) out[p++] = (uint8_t)(hrp[i] & 0x1f);
+    return p;
+}
+
 void age_export_recipient(const identity_keypair_t *idkp, char out[AGE_RECIPIENT_STRLEN + 1]) {
-    uint8_t x25519_pub[32];
+    uint8_t x25519_pub[PUB_LEN];
     if (crypto_sign_ed25519_pk_to_curve25519(x25519_pub, idkp->pub) != 0) {
         fprintf(stderr, "chat: identity key not convertible to AGE format\n");
         exit(1);
     }
 
-    uint8_t data5[52 + 6];
-    size_t n = convert_8_to_5(x25519_pub, 32, data5);
+    uint8_t data5[KEY_GROUPS];
+    size_t n = convert_8_to_5(x25519_pub, sizeof x25519_pub, data5);
 
     static const char HRP[] = "age";
+    enum { HRP_LEN = sizeof HRP - 1 };
 
-    uint8_t polymod_input[3 + 1 + 3 + 52 + 6 + 6];
-    size_t p = 0;
-    for (size_t i = 0; i < 3; i++) polymod_input[p++] = (uint8_t)(HRP[i] >> 5);
-    polymod_input[p++] = 0;
-    for (size_t i = 0; i < 3; i++) polymod_input[p++] = (uint8_t)(HRP[i] & 0x1f);
-    for (size_t i = 0; i < n; i++) polymod_input[p++] = data5[i];
-    size_t checksum_input_len = p;
-    for (int i = 0; i < 6; i++) polymod_input[p++] = 0;
-
-    uint32_t polymod = bech32_polymod(polymod_input, p) ^ 1u;
-    uint8_t checksum[6];
-    for (int i = 0; i < 6; i++) checksum[i] = (uint8_t)((polymod >> (5 * (5 - i))) & 0x1f);
-    (void)checksum_input_len;
+    uint8_t polymod_input[2 * HRP_LEN + 1 + KEY_GROUPS + BECH32_CHECKSUM];
+    size_t p = hrp_expand(HRP, HRP_LEN, polymod_input);
+    memcpy(polymod_input + p, data5, n);
+    p += n;
+    memset(polymod_input + p, 0, BECH32_CHECKSUM);
+    p += BECH32_CHECKSUM;
+    uint32_t polymod = bech32_polymod(polymod_input, p) ^ BECH32_CONST;
 
     size_t o = 0;
-    memcpy(out, HRP, 3); o += 3;
-    out[o++] = '1';
+    memcpy(out, HRP, HRP_LEN); o += HRP_LEN;
+    out[o++] = BECH32_SEPARATOR;
     for (size_t i = 0; i < n; i++) out[o++] = CHARSET[data5[i]];
-    for (int i = 0; i < 6; i++) out[o++] = CHARSET[checksum[i]];
+    for (int i = 0; i < BECH32_CHECKSUM; i++) out[o++] = CHARSET[(polymod >> (5 * (BECH32_CHECKSUM - 1 - i))) & 0x1f];
     out[o] = '\0';
 }
 
@@ -75,7 +84,7 @@ static int bech32_upper_value(char c) {
 }
 
 int age_import_secret_key_text(const char *text, identity_keypair_t *idkp) {
-    static const char PREFIX[] = "AGE-SECRET-KEY-1";
+    static const char PREFIX[] = AGE_SECRET_KEY_PREFIX;
     static const char HRP[] = "age-secret-key-";
     enum { HRP_LEN = sizeof HRP - 1, DATA_LEN = AGE_SECRET_KEY_STRLEN - (sizeof PREFIX - 1) };
     const char *at = strstr(text, PREFIX);
@@ -84,29 +93,26 @@ int age_import_secret_key_text(const char *text, identity_keypair_t *idkp) {
 
     // The checksum runs over the HRP spread into high and low bits, then the data and checksum.
     uint8_t values[2 * HRP_LEN + 1 + DATA_LEN];
-    size_t p = 0;
-    for (size_t i = 0; i < HRP_LEN; i++) values[p++] = (uint8_t)(HRP[i] >> 5);
-    values[p++] = 0;
-    for (size_t i = 0; i < HRP_LEN; i++) values[p++] = (uint8_t)(HRP[i] & 0x1f);
+    size_t p = hrp_expand(HRP, HRP_LEN, values);
     for (size_t i = 0; i < DATA_LEN; i++) {
         int v = bech32_upper_value(at[i]);
         if (v < 0) { sodium_memzero(values, sizeof values); return -1; }
         values[p++] = (uint8_t)v;
     }
     int rc = -1;
-    if (bech32_polymod(values, p) == 1 && bech32_upper_value(at[DATA_LEN]) < 0) {
+    if (bech32_polymod(values, p) == BECH32_CONST && bech32_upper_value(at[DATA_LEN]) < 0) {
         // 52 five-bit groups: the 32-byte key, then four bits of padding that must be zero.
         const uint8_t *data5 = values + 2 * HRP_LEN + 1;
-        uint8_t secret[32];
+        uint8_t secret[PRIV_LEN];
         uint32_t acc = 0;
         int bits = 0;
         size_t n = 0;
-        for (size_t i = 0; i < DATA_LEN - 6; i++) {
+        for (size_t i = 0; i < DATA_LEN - BECH32_CHECKSUM; i++) {
             acc = (acc << 5) | data5[i];
             bits += 5;
             if (bits >= 8) { bits -= 8; secret[n++] = (uint8_t)(acc >> bits); }
         }
-        if (n == 32 && (acc & ((1u << bits) - 1)) == 0) rc = identity_from_x25519(secret, idkp);
+        if (n == sizeof secret && (acc & ((1u << bits) - 1)) == 0) rc = identity_from_x25519(secret, idkp);
         sodium_memzero(secret, sizeof secret);
         sodium_memzero(&acc, sizeof acc);
     }
@@ -115,7 +121,7 @@ int age_import_secret_key_text(const char *text, identity_keypair_t *idkp) {
 }
 
 int age_import_secret_key(const char *path, identity_keypair_t *idkp) {
-    char text[4096];
+    char text[AGE_FILE_MAX];
     long n = platform_read_file(path, text, sizeof(text) - 1);
     if (n < 0) return -1;
     text[n] = '\0';

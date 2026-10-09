@@ -10,6 +10,7 @@
 #define AGE_RECIPIENT_STRLEN 62
 
 // "AGE-SECRET-KEY-1" and the key in upper-case bech32, as age-keygen writes it.
+#define AGE_SECRET_KEY_PREFIX "AGE-SECRET-KEY-1"
 #define AGE_SECRET_KEY_STRLEN 74
 
 void age_export_recipient(const identity_keypair_t *idkp, char out[AGE_RECIPIENT_STRLEN + 1]);
