@@ -22,9 +22,24 @@
 
 // The sealed forms. "NCPT": the padding (an index into PADS), the length of the TPM key's name,
 // the name, the ciphertext's length (2 bytes, big-endian) and the ciphertext. "DPAP": a DPAPI blob.
+#define TPM_MAGIC "NCPT"
+#define DPAPI_MAGIC "DPAP"
+#define MAGIC_LEN 4
+enum { PAD_AT = MAGIC_LEN, NAME_LEN_AT, NAME_AT };
+// All of the TPM form but the name and the ciphertext.
+#define TPM_HEAD (NAME_AT + 2)
+_Static_assert(sizeof TPM_MAGIC - 1 == MAGIC_LEN && sizeof DPAPI_MAGIC - 1 == MAGIC_LEN, "magics are MAGIC_LEN long");
+
+// A TPM key's name: the prefix, then random bytes in hex.
 #define KEY_PREFIX "chat-"
-#define KEY_NAME_LEN (5 + 32)
+#define KEY_PREFIX_LEN (sizeof KEY_PREFIX - 1)
+#define KEY_RANDOM_LEN 16
+#define KEY_NAME_LEN (KEY_PREFIX_LEN + KEY_RANDOM_LEN * 2)
+#define RSA_BITS 2048
 #define CT_MAX 512
+// An RSA_BITS key's public blob, and the TPM's platform type, with room to spare.
+#define PUB_BLOB_MAX 1024
+#define TPM_TYPE_MAX 256
 
 typedef struct { DWORD flag; const wchar_t *hash; } pad_t;
 // TPMs and their drivers differ in which paddings they take, so the first one that works both
@@ -34,7 +49,7 @@ static const pad_t PADS[] = {
     { NCRYPT_PAD_OAEP_FLAG, BCRYPT_SHA1_ALGORITHM },
     { NCRYPT_PAD_PKCS1_FLAG, NULL },
 };
-#define N_PADS ((int)(sizeof PADS / sizeof PADS[0]))
+#define N_PADS ((int)COUNT_OF(PADS))
 
 static const char DPAPI_LABEL[] = "chat device lock v1";
 
@@ -48,7 +63,7 @@ typedef struct {
 // The provider, if there's a TPM behind it: without one, opening it can still work.
 static int open_tpm(NCRYPT_PROV_HANDLE *prov) {
     if (NCryptOpenStorageProvider(prov, MS_PLATFORM_CRYPTO_PROVIDER, 0) != ERROR_SUCCESS) return 0;
-    BYTE type[256];
+    BYTE type[TPM_TYPE_MAX];
     DWORD n = 0;
     if (NCryptGetProperty(*prov, NCRYPT_PCP_PLATFORM_TYPE_PROPERTY, type, sizeof type, &n, 0) == ERROR_SUCCESS && n > 0)
         return 1;
@@ -65,23 +80,23 @@ device_kind_t platform_device_kind(char *why, size_t why_cap) {
 }
 
 static int key_name_ok(const char *name, size_t n) {
-    if (n != KEY_NAME_LEN || memcmp(name, KEY_PREFIX, 5) != 0) return 0;
-    for (size_t i = 5; i < n; i++)
-        if (!((name[i] >= '0' && name[i] <= '9') || (name[i] >= 'a' && name[i] <= 'f'))) return 0;
+    if (n != KEY_NAME_LEN || memcmp(name, KEY_PREFIX, KEY_PREFIX_LEN) != 0) return 0;
+    for (size_t i = KEY_PREFIX_LEN; i < n; i++)
+        if (!memchr(HEX_DIGITS, name[i], sizeof HEX_DIGITS - 1)) return 0;
     return 1;
 }
 
 // Only a name chat made is ever opened, so a planted file can't point it at another program's key.
 static int parse_tpm(const uint8_t *s, size_t len, tpm_sealed_t *t) {
-    if (len < 8 || memcmp(s, "NCPT", 4) != 0 || s[4] >= N_PADS) return -1;
-    size_t nl = s[5];
-    if (len < 8 + nl || !key_name_ok((const char *)s + 6, nl)) return -1;
-    size_t cl = (size_t)s[6 + nl] << 8 | s[7 + nl];
-    if (cl == 0 || cl > CT_MAX || len != 8 + nl + cl) return -1;
-    t->pad = s[4];
-    for (size_t i = 0; i < nl; i++) t->name[i] = (wchar_t)s[6 + i];
+    if (len < TPM_HEAD || memcmp(s, TPM_MAGIC, MAGIC_LEN) != 0 || s[PAD_AT] >= N_PADS) return -1;
+    size_t nl = s[NAME_LEN_AT];
+    if (len < TPM_HEAD + nl || !key_name_ok((const char *)s + NAME_AT, nl)) return -1;
+    size_t cl = load_be16(s + NAME_AT + nl);
+    if (cl == 0 || cl > CT_MAX || len != TPM_HEAD + nl + cl) return -1;
+    t->pad = s[PAD_AT];
+    for (size_t i = 0; i < nl; i++) t->name[i] = (wchar_t)s[NAME_AT + i];
     t->name[nl] = L'\0';
-    t->ct = s + 8 + nl;
+    t->ct = s + TPM_HEAD + nl;
     t->ct_len = (DWORD)cl;
     return 0;
 }
@@ -89,7 +104,7 @@ static int parse_tpm(const uint8_t *s, size_t len, tpm_sealed_t *t) {
 device_kind_t platform_device_sealed_kind(const uint8_t *sealed, size_t len) {
     tpm_sealed_t t;
     if (parse_tpm(sealed, len, &t) == 0) return DEVICE_TPM;
-    return len > 4 && memcmp(sealed, "DPAP", 4) == 0 ? DEVICE_OS : DEVICE_NONE;
+    return len > MAGIC_LEN && memcmp(sealed, DPAPI_MAGIC, MAGIC_LEN) == 0 ? DEVICE_OS : DEVICE_NONE;
 }
 
 const char *platform_device_uses(device_kind_t kind) {
@@ -114,7 +129,7 @@ int platform_device_losses(device_kind_t kind, const char **out, int max) {
         "an administrator resets your Windows password (changing it yourself is fine)",
     };
     const char *const *list = kind == DEVICE_TPM ? TPM : DPAPI;
-    int total = kind == DEVICE_TPM ? 3 : 2, n = 0;
+    int total = kind == DEVICE_TPM ? (int)COUNT_OF(TPM) : (int)COUNT_OF(DPAPI), n = 0;
     for (int i = 0; i < total && n < max; i++) out[n++] = list[i];
     return n;
 }
@@ -126,7 +141,7 @@ static void say_status(char *why, size_t why_cap, const char *what, SECURITY_STA
 // With the key's public half, outside the TPM: the TPM is only needed to unseal.
 static SECURITY_STATUS rsa_encrypt(NCRYPT_KEY_HANDLE key, const pad_t *pad, const uint8_t *in, ULONG n,
                                    uint8_t *out, ULONG cap, ULONG *out_len) {
-    BYTE pub[1024];
+    BYTE pub[PUB_BLOB_MAX];
     DWORD pub_len = 0;
     SECURITY_STATUS s = NCryptExportKey(key, 0, BCRYPT_RSAPUBLIC_BLOB, NULL, pub, sizeof pub, &pub_len, 0);
     if (s != ERROR_SUCCESS) return s;
@@ -158,7 +173,7 @@ static SECURITY_STATUS tpm_decrypt(NCRYPT_KEY_HANDLE key, const pad_t *pad, cons
 }
 
 static int dpapi_unseal(const uint8_t *s, size_t len, uint8_t secret[DEVICE_SECRET_LEN], char *why, size_t why_cap) {
-    DATA_BLOB in = { (DWORD)(len - 4), (BYTE *)s + 4 }, entropy = { sizeof DPAPI_LABEL - 1, (BYTE *)DPAPI_LABEL };
+    DATA_BLOB in = { (DWORD)(len - MAGIC_LEN), (BYTE *)s + MAGIC_LEN }, entropy = { sizeof DPAPI_LABEL - 1, (BYTE *)DPAPI_LABEL };
     DATA_BLOB plain = { 0, NULL };
     if (!CryptUnprotectData(&in, NULL, &entropy, NULL, NULL, CRYPTPROTECT_UI_FORBIDDEN, &plain)) {
         snprintf(why, why_cap, "DPAPI couldn't unseal it (error %lu): it was sealed on another device or Windows "
@@ -208,10 +223,10 @@ static long dpapi_seal(const uint8_t secret[DEVICE_SECRET_LEN], uint8_t *out, si
         return -1;
     }
     long n = -1;
-    if (4 + (size_t)blob.cbData <= cap) {
-        memcpy(out, "DPAP", 4);
-        memcpy(out + 4, blob.pbData, blob.cbData);
-        n = (long)(4 + blob.cbData);
+    if (MAGIC_LEN + (size_t)blob.cbData <= cap) {
+        memcpy(out, DPAPI_MAGIC, MAGIC_LEN);
+        memcpy(out + MAGIC_LEN, blob.pbData, blob.cbData);
+        n = (long)(MAGIC_LEN + blob.cbData);
     } else {
         snprintf(why, why_cap, "DPAPI's sealed form is too big to keep");
     }
@@ -222,18 +237,18 @@ static long dpapi_seal(const uint8_t secret[DEVICE_SECRET_LEN], uint8_t *out, si
 // A key the TPM makes and never lets out, then the first padding it unseals with.
 static long tpm_seal(NCRYPT_PROV_HANDLE prov, const uint8_t secret[DEVICE_SECRET_LEN], uint8_t *out, size_t cap,
                      char *why, size_t why_cap) {
-    uint8_t rnd[16];
+    uint8_t rnd[KEY_RANDOM_LEN];
     char name[KEY_NAME_LEN + 1];
     gen_random(rnd, sizeof rnd);
-    memcpy(name, KEY_PREFIX, 5);
-    hex_encode(rnd, sizeof rnd, name + 5);
+    memcpy(name, KEY_PREFIX, KEY_PREFIX_LEN);
+    hex_encode(rnd, sizeof rnd, name + KEY_PREFIX_LEN);
     wchar_t wname[KEY_NAME_LEN + 1];
-    for (int i = 0; i <= KEY_NAME_LEN; i++) wname[i] = (wchar_t)name[i];
+    for (size_t i = 0; i <= KEY_NAME_LEN; i++) wname[i] = (wchar_t)name[i];
     NCRYPT_KEY_HANDLE key;
     SECURITY_STATUS s = NCryptCreatePersistedKey(prov, &key, BCRYPT_RSA_ALGORITHM, wname, 0, 0);
     if (s != ERROR_SUCCESS) { say_status(why, why_cap, "the TPM couldn't make a key", s); return -1; }
     // The provider never lets a TPM key's private half out, so there's no export policy to set.
-    DWORD bits = 2048, usage = NCRYPT_ALLOW_DECRYPT_FLAG;
+    DWORD bits = RSA_BITS, usage = NCRYPT_ALLOW_DECRYPT_FLAG;
     s = NCryptSetProperty(key, NCRYPT_LENGTH_PROPERTY, (PBYTE)&bits, sizeof bits, 0);
     if (s == ERROR_SUCCESS) s = NCryptSetProperty(key, NCRYPT_KEY_USAGE_PROPERTY, (PBYTE)&usage, sizeof usage, 0);
     if (s == ERROR_SUCCESS) s = NCryptFinalizeKey(key, NCRYPT_SILENT_FLAG);
@@ -253,20 +268,19 @@ static long tpm_seal(NCRYPT_PROV_HANDLE prov, const uint8_t secret[DEVICE_SECRET
         if (last == ERROR_SUCCESS && crypto_equal(back, secret, DEVICE_SECRET_LEN) == 0) pad = i;
         SecureZeroMemory(back, sizeof back);
     }
-    size_t n = 8 + KEY_NAME_LEN + ct_len;
+    size_t n = TPM_HEAD + KEY_NAME_LEN + ct_len;
     if (pad < 0 || ct_len > CT_MAX || n > cap) {
         NCryptDeleteKey(key, NCRYPT_SILENT_FLAG);
         say_status(why, why_cap, "the TPM's key couldn't unseal what it sealed", last);
         return -1;
     }
     NCryptFreeObject(key);
-    memcpy(out, "NCPT", 4);
-    out[4] = (uint8_t)pad;
-    out[5] = (uint8_t)KEY_NAME_LEN;
-    memcpy(out + 6, name, KEY_NAME_LEN);
-    out[6 + KEY_NAME_LEN] = (uint8_t)(ct_len >> 8);
-    out[7 + KEY_NAME_LEN] = (uint8_t)ct_len;
-    memcpy(out + 8 + KEY_NAME_LEN, ct, ct_len);
+    memcpy(out, TPM_MAGIC, MAGIC_LEN);
+    out[PAD_AT] = (uint8_t)pad;
+    out[NAME_LEN_AT] = (uint8_t)KEY_NAME_LEN;
+    memcpy(out + NAME_AT, name, KEY_NAME_LEN);
+    store_be16(out + NAME_AT + KEY_NAME_LEN, (uint16_t)ct_len);
+    memcpy(out + TPM_HEAD + KEY_NAME_LEN, ct, ct_len);
     return (long)n;
 }
 

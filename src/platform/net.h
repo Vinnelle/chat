@@ -13,16 +13,22 @@
 // Where a datagram goes. ADDR_UDP is a real address. The others name a peer on a relayed
 // transport. ip holds an id the transport picked (a Nostr key prefix, a Tor stream id) and port is 1.
 typedef enum { ADDR_UDP = 0, ADDR_NOSTR = 1, ADDR_TOR = 2 } addr_kind_t;
+#define ADDR_KINDS 3
+
+#define IP4_LEN 4
+#define IP6_LEN 16
 
 typedef struct {
-    uint8_t ip[16];
+    uint8_t ip[IP6_LEN];
     uint32_t scope;
     uint16_t port;
     uint8_t is_v6;
     uint8_t kind;
 } addr_t;
 
-addr_t addr_virtual(addr_kind_t kind, const uint8_t id[16]);
+static inline size_t addr_ip_len(addr_t a) { return a.is_v6 ? IP6_LEN : IP4_LEN; }
+
+addr_t addr_virtual(addr_kind_t kind, const uint8_t id[IP6_LEN]);
 
 #define NET_REUSE 1u
 #define NET_DUAL  2u
@@ -50,7 +56,7 @@ int net_tcp_recv(sock_t s, void *buf, size_t cap);
 int net_local_addr_toward(addr_t dest, addr_t *out);
 // Sends this IPv4 socket's multicast out of the interface holding local_ip, not wherever the
 // routing table points (a VPN, often).
-int net_set_multicast_if(sock_t s, const uint8_t local_ip[4]);
+int net_set_multicast_if(sock_t s, const uint8_t local_ip[IP4_LEN]);
 
 void net_wait(sock_t *socks, int *ready, int n, int timeout_ms);
 

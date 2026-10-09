@@ -39,6 +39,38 @@
 #define RC_RETRY 0x922
 // fixedTPM, fixedParent, userWithAuth, restricted, decrypt: what a key needs to be a parent.
 #define STORAGE_ATTRS 0x00030052u
+// A format-one response code: the error in its low bits, TPM_RC_BAD_AUTH or TPM_RC_AUTH_FAIL among them.
+#define RC_FMT1 0x080
+#define RC_FMT1_ERROR 0x3F
+#define RC_BAD_AUTH 0x22
+#define RC_AUTH_FAIL 0x0E
+
+// Every command and response starts with its tag, its size, and its command or response code.
+#define TPM_HEADER_LEN 10
+#define TPM_SIZE_AT 2
+#define TPM_RC_AT 6
+// A TPM that's busy or testing itself is asked again, this often and this many times.
+#define TPM_RETRIES 50
+#define TPM_RETRY_MS 20
+// A password session's authorization: its handle, an empty nonce, its attributes and an empty password.
+#define PW_AUTH_LEN 9
+// An HMAC session's: its handle, the nonce, the attributes and the HMAC, each 2B with its size.
+#define SESSION_AUTH_LEN (4 + 2 + NONCE_LEN + 1 + 2 + SHA256_LEN)
+#define SESSION_KEY_LEN SHA256_LEN
+// The nonce the TPM picks is at least this long.
+#define TPM_NONCE_MIN 16
+#define KDF_LABEL_MAX 8
+#define P256_BITS 256
+#define P256_COORD_LEN 32
+#define P256_POINT_LEN (1 + 2 * P256_COORD_LEN)   // uncompressed: the 0x04 prefix, x and y
+#define POINT_UNCOMPRESSED 0x04
+#define RSA_BITS 2048
+#define RSA_LEN (RSA_BITS / 8)
+#define RSA_EXPONENT 65537
+#define AES_BITS 128
+#define SALT_LEN SHA256_LEN
+// The label a session's salt is encrypted with, its NUL included for RSA-OAEP.
+#define SALT_LABEL "SECRET"
 
 #define NAME_LEN 34
 #define NONCE_LEN 32
@@ -77,18 +109,13 @@ static void w_n(wr_t *w, const void *p, size_t n) {
     w->n += n;
 }
 static void w8(wr_t *w, uint8_t v) { w_n(w, &v, 1); }
-static void w16(wr_t *w, uint16_t v) { uint8_t b[2] = { (uint8_t)(v >> 8), (uint8_t)v }; w_n(w, b, 2); }
-static void w32(wr_t *w, uint32_t v) {
-    uint8_t b[4] = { (uint8_t)(v >> 24), (uint8_t)(v >> 16), (uint8_t)(v >> 8), (uint8_t)v };
-    w_n(w, b, 4);
-}
+static void w16(wr_t *w, uint16_t v) { uint8_t b[2]; store_be16(b, v); w_n(w, b, sizeof b); }
+static void w32(wr_t *w, uint32_t v) { uint8_t b[4]; store_be32(b, v); w_n(w, b, sizeof b); }
 static void w2b(wr_t *w, const void *p, size_t n) {
-    if (n > 0xffff) { w->bad = 1; return; }
+    if (n > UINT16_MAX) { w->bad = 1; return; }
     w16(w, (uint16_t)n);
     w_n(w, p, n);
 }
-
-static uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
 
 static const uint8_t *r_n(rd_t *r, size_t n) {
     if (r->bad || n > r->n - r->i) { r->bad = 1; return NULL; }
@@ -97,8 +124,10 @@ static const uint8_t *r_n(rd_t *r, size_t n) {
     return p;
 }
 static uint8_t r8(rd_t *r) { const uint8_t *p = r_n(r, 1); return p ? p[0] : 0; }
-static uint16_t r16(rd_t *r) { const uint8_t *p = r_n(r, 2); return p ? (uint16_t)(p[0] << 8 | p[1]) : 0; }
-static uint32_t r32(rd_t *r) { const uint8_t *p = r_n(r, 4); return p ? be32(p) : 0; }
+static uint16_t r16(rd_t *r) { const uint8_t *p = r_n(r, 2); return p ? load_be16(p) : 0; }
+static uint32_t r32(rd_t *r) { const uint8_t *p = r_n(r, 4); return p ? load_be32(p) : 0; }
+// A response's parameters (or handles), after its header.
+static rd_t response(const uint8_t *rsp, size_t len) { return (rd_t){ rsp, len, TPM_HEADER_LEN, 0 }; }
 static const uint8_t *r2b(rd_t *r, size_t *len) {
     *len = r16(r);
     return r_n(r, *len);
@@ -106,14 +135,13 @@ static const uint8_t *r2b(rd_t *r, size_t *len) {
 
 static void begin(wr_t *w, uint16_t tag, uint32_t cc) { w16(w, tag); w32(w, 0); w32(w, cc); }
 static void end(wr_t *w) {
-    if (w->bad || w->n < 10) return;
-    uint32_t n = (uint32_t)w->n;
-    w->b[2] = (uint8_t)(n >> 24); w->b[3] = (uint8_t)(n >> 16); w->b[4] = (uint8_t)(n >> 8); w->b[5] = (uint8_t)n;
+    if (w->bad || w->n < TPM_HEADER_LEN) return;
+    store_be32(w->b + TPM_SIZE_AT, (uint32_t)w->n);
 }
 
 // The owner's password, and every key chat makes or uses, is empty.
 static void password_auth(wr_t *w) {
-    w32(w, 9);
+    w32(w, PW_AUTH_LEN);
     w32(w, RS_PW);
     w16(w, 0);
     w8(w, SA_CONTINUE);
@@ -123,17 +151,17 @@ static void password_auth(wr_t *w) {
 // KDFa (SP 800-108 counter mode, HMAC-SHA256), as TPM 2.0 has it: one zero byte after the label.
 static void kdfa(const uint8_t *key, size_t key_len, const char *label, const uint8_t *u, size_t u_len,
                  const uint8_t *v, size_t v_len, uint8_t *out, size_t out_len) {
-    uint8_t msg[4 + 8 + 1 + 2 * NONCE_LEN + 4], block[32];
+    uint8_t msg[4 + KDF_LABEL_MAX + 1 + 2 * NONCE_LEN + 4], block[SHA256_LEN];
     size_t label_len = strlen(label);
     uint32_t bits = (uint32_t)out_len * 8;
     for (uint32_t i = 1, done = 0; done < out_len; i++) {
         size_t m = 0;
-        msg[m++] = (uint8_t)(i >> 24); msg[m++] = (uint8_t)(i >> 16); msg[m++] = (uint8_t)(i >> 8); msg[m++] = (uint8_t)i;
+        store_be32(msg + m, i); m += 4;
         memcpy(msg + m, label, label_len); m += label_len;
         msg[m++] = 0;
         memcpy(msg + m, u, u_len); m += u_len;
         memcpy(msg + m, v, v_len); m += v_len;
-        msg[m++] = (uint8_t)(bits >> 24); msg[m++] = (uint8_t)(bits >> 16); msg[m++] = (uint8_t)(bits >> 8); msg[m++] = (uint8_t)bits;
+        store_be32(msg + m, bits); m += 4;
         hmac_sha256(key, key_len, msg, m, block);
         size_t take = out_len - done < sizeof block ? out_len - done : sizeof block;
         memcpy(out + done, block, take);
@@ -145,19 +173,19 @@ static void kdfa(const uint8_t *key, size_t key_len, const char *label, const ui
 
 // Parameter encryption with TPM_ALG_XOR: a KDFa stream keyed with the session key, fresh for each
 // command and answer since the nonces are.
-static int xor_param(const uint8_t key[32], const uint8_t *newer, size_t newer_len, const uint8_t *older,
+static int xor_param(const uint8_t key[SESSION_KEY_LEN], const uint8_t *newer, size_t newer_len, const uint8_t *older,
                      size_t older_len, uint8_t *data, size_t len) {
     uint8_t mask[256];
     if (len > sizeof mask) return -1;
-    kdfa(key, 32, "XOR", newer, newer_len, older, older_len, mask, len);
+    kdfa(key, SESSION_KEY_LEN, "XOR", newer, newer_len, older, older_len, mask, len);
     for (size_t i = 0; i < len; i++) data[i] ^= mask[i];
     crypto_wipe(mask, sizeof mask);
     return 0;
 }
 
+// An object's name: its name algorithm, then the hash of its public area.
 static void name_of(const uint8_t *pub, size_t len, uint8_t name[NAME_LEN]) {
-    name[0] = 0x00;
-    name[1] = 0x0B;
+    store_be16(name, ALG_SHA256);
     sha256_hash(pub, len, name + 2);
 }
 
@@ -176,14 +204,14 @@ typedef struct {
 static int call(tpm_t *t, const wr_t *cmd) {
     for (int tries = 0; ; tries++) {
         long n = cmd->bad ? -1 : t->io(t->ctx, cmd->b, cmd->n, t->rsp, sizeof t->rsp);
-        if (n < 10 || (size_t)n > sizeof t->rsp || be32(t->rsp + 2) != (uint32_t)n) {
+        if (n < TPM_HEADER_LEN || (size_t)n > sizeof t->rsp || load_be32(t->rsp + TPM_SIZE_AT) != (uint32_t)n) {
             snprintf(t->why, t->why_cap, "the TPM didn't answer properly");
             return -1;
         }
         t->rlen = (size_t)n;
-        t->rc = be32(t->rsp + 6);
-        if ((t->rc == RC_RETRY || t->rc == RC_YIELDED || t->rc == RC_TESTING) && tries < 50) {
-            platform_sleep_ms(20);
+        t->rc = load_be32(t->rsp + TPM_RC_AT);
+        if ((t->rc == RC_RETRY || t->rc == RC_YIELDED || t->rc == RC_TESTING) && tries < TPM_RETRIES) {
+            platform_sleep_ms(TPM_RETRY_MS);
             continue;
         }
         return t->rc == 0 ? 0 : 1;
@@ -192,7 +220,7 @@ static int call(tpm_t *t, const wr_t *cmd) {
 
 static int auth_error(uint32_t rc) {
     // Format one: TPM_RC_BAD_AUTH or TPM_RC_AUTH_FAIL, for any handle or session.
-    return (rc & 0x080) && ((rc & 0x3F) == 0x22 || (rc & 0x3F) == 0x0E);
+    return (rc & RC_FMT1) && ((rc & RC_FMT1_ERROR) == RC_BAD_AUTH || (rc & RC_FMT1_ERROR) == RC_AUTH_FAIL);
 }
 
 static int failed(tpm_t *t, int rc, const char *what) {
@@ -218,7 +246,7 @@ static int session_failed(tpm_t *t, int rc, const char *what) {
 }
 
 static void flush(tpm_t *t, uint32_t handle) {
-    uint8_t b[14];
+    uint8_t b[TPM_HEADER_LEN + 4];
     wr_t w = { b, sizeof b, 0, 0 };
     begin(&w, ST_NO_SESSIONS, CC_FLUSH_CONTEXT);
     w32(&w, handle);
@@ -237,8 +265,8 @@ typedef struct {
     uint32_t handle;
     int persistent, rsa;
     uint8_t name[NAME_LEN];
-    uint8_t x[32], y[32];
-    uint8_t n[256];
+    uint8_t x[P256_COORD_LEN], y[P256_COORD_LEN];
+    uint8_t n[RSA_LEN];
     uint32_t e;
 } parent_t;
 
@@ -249,26 +277,27 @@ static int parse_parent(const uint8_t *pub, size_t n, parent_t *p) {
     size_t policy_len;
     r2b(&r, &policy_len);
     uint16_t sym = r16(&r), bits = r16(&r), mode = r16(&r), scheme = r16(&r);
-    if (r.bad || name_alg != ALG_SHA256 || (attrs & STORAGE_ATTRS) != STORAGE_ATTRS || sym != ALG_AES || bits != 128
+    if (r.bad || name_alg != ALG_SHA256 || (attrs & STORAGE_ATTRS) != STORAGE_ATTRS || sym != ALG_AES || bits != AES_BITS
         || mode != ALG_CFB || scheme != ALG_NULL)
         return -1;
     if (type == ALG_ECC) {
         uint16_t curve = r16(&r), kdf = r16(&r);
         size_t xl, yl;
         const uint8_t *x = r2b(&r, &xl), *y = r2b(&r, &yl);
-        if (r.bad || r.i != n || curve != ECC_NIST_P256 || kdf != ALG_NULL || xl != 32 || yl != 32) return -1;
+        if (r.bad || r.i != n || curve != ECC_NIST_P256 || kdf != ALG_NULL || xl != P256_COORD_LEN || yl != P256_COORD_LEN)
+            return -1;
         p->rsa = 0;
-        memcpy(p->x, x, 32);
-        memcpy(p->y, y, 32);
+        memcpy(p->x, x, P256_COORD_LEN);
+        memcpy(p->y, y, P256_COORD_LEN);
     } else if (type == ALG_RSA) {
         uint16_t key_bits = r16(&r);
         uint32_t e = r32(&r);
         size_t ml;
         const uint8_t *m = r2b(&r, &ml);
-        if (r.bad || r.i != n || key_bits != 2048 || ml != 256) return -1;
+        if (r.bad || r.i != n || key_bits != RSA_BITS || ml != RSA_LEN) return -1;
         p->rsa = 1;
-        memcpy(p->n, m, 256);
-        p->e = e ? e : 65537;
+        memcpy(p->n, m, RSA_LEN);
+        p->e = e ? e : RSA_EXPONENT;
     } else {
         return -1;
     }
@@ -291,7 +320,7 @@ static int create_primary(tpm_t *t, parent_t *p) {
     end(&w);
     int rc = call(t, &w);
     if (rc != 0) return rc;
-    rd_t r = { t->rsp, t->rlen, 10, 0 };
+    rd_t r = response(t->rsp, t->rlen);
     p->handle = r32(&r);
     p->persistent = 0;
     r32(&r);
@@ -306,14 +335,14 @@ static int create_primary(tpm_t *t, parent_t *p) {
 }
 
 static int read_persistent(tpm_t *t, parent_t *p) {
-    uint8_t b[14];
+    uint8_t b[TPM_HEADER_LEN + 4];
     wr_t w = { b, sizeof b, 0, 0 };
     begin(&w, ST_NO_SESSIONS, CC_READ_PUBLIC);
     w32(&w, SRK_PERSISTENT);
     end(&w);
     int rc = call(t, &w);
     if (rc != 0) return rc;
-    rd_t r = { t->rsp, t->rlen, 10, 0 };
+    rd_t r = response(t->rsp, t->rlen);
     size_t n;
     const uint8_t *pub = r2b(&r, &n);
     if (r.bad || parse_parent(pub, n, p) != 0) {
@@ -329,45 +358,40 @@ static void put_parent_away(tpm_t *t, const parent_t *p) {
     if (!p->persistent) flush(t, p->handle);
 }
 
-static int rng(void *ctx, unsigned char *out, size_t len) {
-    (void)ctx;
-    gen_random(out, len);
-    return 0;
-}
-
 // A session's salt, and the salt encrypted to the parent so only the TPM can read it: RSA-OAEP with
 // the label "SECRET", or ECDH with a fresh key and KDFe, as TPM 2.0 has them.
-static int make_salt(const parent_t *p, uint8_t salt[32], uint8_t enc[256], size_t *enc_len) {
+static int make_salt(const parent_t *p, uint8_t salt[SALT_LEN], uint8_t enc[RSA_LEN], size_t *enc_len) {
     if (p->rsa) {
-        uint8_t e[4] = { (uint8_t)(p->e >> 24), (uint8_t)(p->e >> 16), (uint8_t)(p->e >> 8), (uint8_t)p->e };
+        uint8_t e[4];
+        store_be32(e, p->e);
         mbedtls_rsa_context rsa;
         mbedtls_rsa_init(&rsa);
-        gen_random(salt, 32);
+        gen_random(salt, SALT_LEN);
         int ok = mbedtls_rsa_set_padding(&rsa, MBEDTLS_RSA_PKCS_V21, MBEDTLS_MD_SHA256) == 0
-              && mbedtls_rsa_import_raw(&rsa, p->n, 256, NULL, 0, NULL, 0, NULL, 0, e, sizeof e) == 0
+              && mbedtls_rsa_import_raw(&rsa, p->n, RSA_LEN, NULL, 0, NULL, 0, NULL, 0, e, sizeof e) == 0
               && mbedtls_rsa_complete(&rsa) == 0
-              && mbedtls_rsa_rsaes_oaep_encrypt(&rsa, rng, NULL, (const unsigned char *)"SECRET", sizeof "SECRET",
-                                                32, salt, enc) == 0;
+              && mbedtls_rsa_rsaes_oaep_encrypt(&rsa, crypto_rng, NULL, (const unsigned char *)SALT_LABEL, sizeof SALT_LABEL,
+                                                SALT_LEN, salt, enc) == 0;
         mbedtls_rsa_free(&rsa);
-        *enc_len = 256;
+        *enc_len = RSA_LEN;
         return ok ? 0 : -1;
     }
     if (psa_crypto_init() != PSA_SUCCESS) return -1;
     psa_key_attributes_t a = PSA_KEY_ATTRIBUTES_INIT;
     psa_set_key_type(&a, PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_SECP_R1));
-    psa_set_key_bits(&a, 256);
+    psa_set_key_bits(&a, P256_BITS);
     psa_set_key_usage_flags(&a, PSA_KEY_USAGE_DERIVE);
     psa_set_key_algorithm(&a, PSA_ALG_ECDH);
     mbedtls_svc_key_id_t id;
     if (psa_generate_key(&a, &id) != PSA_SUCCESS) return -1;
-    uint8_t mine[65], theirs[65], z[32];
+    uint8_t mine[P256_POINT_LEN], theirs[P256_POINT_LEN], z[P256_COORD_LEN];
     size_t mine_len = 0, z_len = 0;
-    theirs[0] = 0x04;
-    memcpy(theirs + 1, p->x, 32);
-    memcpy(theirs + 33, p->y, 32);
-    int ok = psa_export_public_key(id, mine, sizeof mine, &mine_len) == PSA_SUCCESS && mine_len == 65
+    theirs[0] = POINT_UNCOMPRESSED;
+    memcpy(theirs + 1, p->x, P256_COORD_LEN);
+    memcpy(theirs + 1 + P256_COORD_LEN, p->y, P256_COORD_LEN);
+    int ok = psa_export_public_key(id, mine, sizeof mine, &mine_len) == PSA_SUCCESS && mine_len == sizeof mine
           && psa_raw_key_agreement(PSA_ALG_ECDH, id, theirs, sizeof theirs, z, sizeof z, &z_len) == PSA_SUCCESS
-          && z_len == 32;
+          && z_len == sizeof z;
     psa_destroy_key(id);
     if (ok) {
         // KDFe: SHA-256 over a counter, Z, the label and a zero byte, then both x coordinates.
@@ -376,16 +400,16 @@ static int make_salt(const parent_t *p, uint8_t salt[32], uint8_t enc[256], size
         sha256_init(&h);
         sha256_update(&h, one, sizeof one);
         sha256_update(&h, z, sizeof z);
-        sha256_update(&h, "SECRET", 6);
+        sha256_update(&h, SALT_LABEL, sizeof SALT_LABEL - 1);
         sha256_update(&h, &zero, 1);
-        sha256_update(&h, mine + 1, 32);
-        sha256_update(&h, p->x, 32);
+        sha256_update(&h, mine + 1, P256_COORD_LEN);
+        sha256_update(&h, p->x, P256_COORD_LEN);
         sha256_final(&h, salt);
         crypto_wipe(&h, sizeof h);
         // The encrypted salt is the fresh key's point.
-        wr_t w = { enc, 256, 0, 0 };
-        w2b(&w, mine + 1, 32);
-        w2b(&w, mine + 33, 32);
+        wr_t w = { enc, RSA_LEN, 0, 0 };
+        w2b(&w, mine + 1, P256_COORD_LEN);
+        w2b(&w, mine + 1 + P256_COORD_LEN, P256_COORD_LEN);
         *enc_len = w.n;
     }
     crypto_wipe(z, sizeof z);
@@ -394,14 +418,14 @@ static int make_salt(const parent_t *p, uint8_t salt[32], uint8_t enc[256], size
 
 typedef struct {
     uint32_t handle;
-    uint8_t key[32];
+    uint8_t key[SESSION_KEY_LEN];
     uint8_t nonce_tpm[NONCE_LEN];
     size_t nonce_tpm_len;
 } session_t;
 
 // An HMAC session salted to the parent, with XOR parameter encryption and SHA-256 throughout.
 static int start_session(tpm_t *t, const parent_t *p, session_t *s) {
-    uint8_t nonce[NONCE_LEN], salt[32], enc[256];
+    uint8_t nonce[NONCE_LEN], salt[SALT_LEN], enc[RSA_LEN];
     size_t enc_len = 0;
     gen_random(nonce, sizeof nonce);
     if (make_salt(p, salt, enc, &enc_len) != 0) {
@@ -426,11 +450,11 @@ static int start_session(tpm_t *t, const parent_t *p, session_t *s) {
         crypto_wipe(salt, sizeof salt);
         return failed(t, rc, "the TPM couldn't start an encrypted session");
     }
-    rd_t r = { t->rsp, t->rlen, 10, 0 };
+    rd_t r = response(t->rsp, t->rlen);
     s->handle = r32(&r);
     size_t nl;
     const uint8_t *nt = r2b(&r, &nl);
-    if (r.bad || nl < 16 || nl > NONCE_LEN) {
+    if (r.bad || nl < TPM_NONCE_MIN || nl > NONCE_LEN) {
         crypto_wipe(salt, sizeof salt);
         snprintf(t->why, t->why_cap, "the TPM's session didn't make sense");
         return -1;
@@ -447,10 +471,11 @@ static int start_session(tpm_t *t, const parent_t *p, session_t *s) {
 // left on its parameters.
 static int session_call(tpm_t *t, session_t *s, uint32_t cc, uint32_t handle, const uint8_t name[NAME_LEN],
                         uint8_t *params, size_t plen, uint8_t attrs, rd_t *out) {
-    uint8_t nonce[NONCE_LEN], cc_be[4] = { (uint8_t)(cc >> 24), (uint8_t)(cc >> 16), (uint8_t)(cc >> 8), (uint8_t)cc };
+    uint8_t nonce[NONCE_LEN], cc_be[4];
+    store_be32(cc_be, cc);
     gen_random(nonce, sizeof nonce);
     if (attrs & SA_DECRYPT) {
-        size_t n = plen >= 2 ? (size_t)params[0] << 8 | params[1] : 0;
+        size_t n = plen >= 2 ? load_be16(params) : 0;
         if (plen < 2 || 2 + n > plen
             || xor_param(s->key, nonce, sizeof nonce, s->nonce_tpm, s->nonce_tpm_len, params + 2, n) != 0) {
             snprintf(t->why, t->why_cap, "couldn't encrypt what goes to the TPM");
@@ -458,7 +483,7 @@ static int session_call(tpm_t *t, session_t *s, uint32_t cc, uint32_t handle, co
         }
     }
     // The HMAC covers the command's parameters as sent, so after they're encrypted.
-    uint8_t cp[32], hmac[32], msg[32 + 2 * NONCE_LEN + 1];
+    uint8_t cp[SHA256_LEN], hmac[SHA256_LEN], msg[SHA256_LEN + 2 * NONCE_LEN + 1];
     sha256_ctx_t h;
     sha256_init(&h);
     sha256_update(&h, cc_be, sizeof cc_be);
@@ -466,7 +491,7 @@ static int session_call(tpm_t *t, session_t *s, uint32_t cc, uint32_t handle, co
     if (plen) sha256_update(&h, params, plen);
     sha256_final(&h, cp);
     size_t m = 0;
-    memcpy(msg, cp, 32); m += 32;
+    memcpy(msg, cp, SHA256_LEN); m += SHA256_LEN;
     memcpy(msg + m, nonce, sizeof nonce); m += sizeof nonce;
     memcpy(msg + m, s->nonce_tpm, s->nonce_tpm_len); m += s->nonce_tpm_len;
     msg[m++] = attrs;
@@ -476,7 +501,7 @@ static int session_call(tpm_t *t, session_t *s, uint32_t cc, uint32_t handle, co
     wr_t w = { b, sizeof b, 0, 0 };
     begin(&w, ST_SESSIONS, cc);
     w32(&w, handle);
-    w32(&w, 4 + 2 + NONCE_LEN + 1 + 2 + 32);
+    w32(&w, SESSION_AUTH_LEN);
     w32(&w, s->handle);
     w2b(&w, nonce, sizeof nonce);
     w8(&w, attrs);
@@ -487,26 +512,26 @@ static int session_call(tpm_t *t, session_t *s, uint32_t cc, uint32_t handle, co
     crypto_wipe(b, sizeof b);
     if (rc != 0) return rc;
 
-    rd_t r = { t->rsp, t->rlen, 10, 0 };
+    rd_t r = response(t->rsp, t->rlen);
     uint32_t psize = r32(&r);
     const uint8_t *rp = r_n(&r, psize);
     size_t ntl, hl;
     const uint8_t *nt = r2b(&r, &ntl);
     uint8_t rattrs = r8(&r);
     const uint8_t *rh = r2b(&r, &hl);
-    if (r.bad || r.i != t->rlen || ntl < 16 || ntl > NONCE_LEN || hl != 32) {
+    if (r.bad || r.i != t->rlen || ntl < TPM_NONCE_MIN || ntl > NONCE_LEN || hl != SHA256_LEN) {
         snprintf(t->why, t->why_cap, "the TPM's answer didn't make sense");
         return -1;
     }
     static const uint8_t ok_rc[4] = { 0, 0, 0, 0 };
-    uint8_t rph[32], expect[32];
+    uint8_t rph[SHA256_LEN], expect[SHA256_LEN];
     sha256_init(&h);
     sha256_update(&h, ok_rc, sizeof ok_rc);
     sha256_update(&h, cc_be, sizeof cc_be);
     if (psize) sha256_update(&h, rp, psize);
     sha256_final(&h, rph);
     m = 0;
-    memcpy(msg, rph, 32); m += 32;
+    memcpy(msg, rph, SHA256_LEN); m += SHA256_LEN;
     memcpy(msg + m, nt, ntl); m += ntl;
     memcpy(msg + m, nonce, sizeof nonce); m += sizeof nonce;
     msg[m++] = rattrs;
@@ -519,7 +544,7 @@ static int session_call(tpm_t *t, session_t *s, uint32_t cc, uint32_t handle, co
     s->nonce_tpm_len = ntl;
     if (attrs & SA_ENCRYPT) {
         uint8_t *first = t->rsp + (rp - t->rsp);
-        size_t n = psize >= 2 ? (size_t)first[0] << 8 | first[1] : 0;
+        size_t n = psize >= 2 ? load_be16(first) : 0;
         if (psize < 2 || 2 + n > psize
             || xor_param(s->key, s->nonce_tpm, s->nonce_tpm_len, nonce, sizeof nonce, first + 2, n) != 0) {
             snprintf(t->why, t->why_cap, "the TPM's answer didn't make sense");
@@ -629,7 +654,7 @@ int tpm2_unseal(tpm2_transmit_fn io, void *ctx, const uint8_t *sealed, size_t le
         put_parent_away(&t, &p);
         return -1;
     }
-    rd_t r = { t.rsp, t.rlen, 10, 0 };
+    rd_t r = response(t.rsp, t.rlen);
     uint32_t item = r32(&r);
     int ok = -1;
     session_t s;

@@ -55,22 +55,47 @@ int ptrace(int request, pid_t pid, char *addr, int data);
 #endif
 
 #define SECRET_ENV_MAX 4
+#define SECRET_ENV_VALUE_MAX 512
+// Files and folders only this user can open, and a program's permission bits.
+#define MODE_PRIVATE_FILE 0600
+#define MODE_PRIVATE_DIR 0700
+#define MODE_GROUP_OTHER 077
+#define MODE_BITS 07777
+#define MODE_PROGRAM 0755
+// A buffer for a path, a PATH list, and the most folders deep a tree is removed.
+#define PATH_BUF 4096
+#define PATH_LIST_MAX 8192
+#define REMOVE_DEPTH_MAX 16
+#define REMOVE_PASSES 4
+// A temporary folder younger than this may still be being set up by another chat.
+#define STALE_AFTER 60
+#define STOP_POLL_MS 20
+// A process killed by a signal exits with this plus the signal's number, as shells report it.
+#define SIGNAL_EXIT_BASE 128
+#define DEFAULT_ROWS 24
+#define DEFAULT_COLS 80
+#define MACHINE_ID_LEN 32
+#ifndef RENAME_NOREPLACE
+#define RENAME_NOREPLACE 1u
+#endif
 
-static struct { const char *name; int set; char value[512]; } g_secret_env[SECRET_ENV_MAX];
+static struct { const char *name; int set; char value[SECRET_ENV_VALUE_MAX]; } g_secret_env[SECRET_ENV_MAX];
+
+// Zeroes a string in place, so it doesn't stay readable in our memory.
+static void wipe_string(char *s) {
+    for (volatile char *p = s; *p; p++) *p = 0;
+}
 
 static int env_take_now(const char *name, char *out, size_t outlen) {
     char *v = getenv(name);
     if (!v) { if (outlen) out[0] = '\0'; return -1; }
     copy_str(out, v, outlen);
-
-    volatile char *p = v;
-    while (*p) *p++ = 0;
+    wipe_string(v);
     unsetenv(name);
     return 0;
 }
 
 void platform_harden_process(const char *const secret_env[]) {
-
     struct rlimit no_core = { 0, 0 };
     setrlimit(RLIMIT_CORE, &no_core);
 
@@ -121,10 +146,7 @@ int platform_env_take(const char *name, char *out, size_t outlen) {
 // /proc/PID/cmdline (what ps shows) is read from the argument strings in our own memory, so
 // zeroing them blanks it for everyone. Only their total length still shows.
 void platform_hide_args(int argc, char **argv) {
-    for (int i = 1; i < argc; i++) {
-        volatile char *p = argv[i];
-        while (*p) *p++ = 0;
-    }
+    for (int i = 1; i < argc; i++) wipe_string(argv[i]);
 }
 
 int term_is_tty(void) { return isatty(STDIN_FILENO); }
@@ -164,8 +186,17 @@ static int spawn_quiet(pid_t *pid, const char *path, char *const argv[]) {
 static int g_bus = -1;
 static uint32_t g_bus_serial;
 
+// A D-Bus message: its header (byte order, type, flags, version, body length, serial, then the
+// header fields), padded to 8, then the body. A field is its code and a variant.
+#define DBUS_MSG_MAX 4096
+#define DBUS_ALIGN 8
+enum { DBUS_METHOD_CALL = 1, DBUS_VERSION = 1, DBUS_NO_REPLY = 1 };
+enum { DF_PATH = 1, DF_INTERFACE = 2, DF_MEMBER = 3, DF_DESTINATION = 6, DF_SIGNATURE = 8 };
+// A connection's timeouts. This runs on the UI's thread: a hung bus costs a moment, not the run.
+#define BUS_TIMEOUT_US 300000
+
 // A D-Bus message being written. Values are aligned from the start of the message.
-typedef struct { uint8_t b[4096]; size_t n; int bad; } dmsg_t;
+typedef struct { uint8_t b[DBUS_MSG_MAX]; size_t n; int bad; } dmsg_t;
 
 static void d_put(dmsg_t *d, const void *p, size_t len) {
     if (d->bad || d->n + len > sizeof d->b) { d->bad = 1; return; }
@@ -174,11 +205,11 @@ static void d_put(dmsg_t *d, const void *p, size_t len) {
 }
 
 static void d_pad(dmsg_t *d, size_t align) {
-    static const uint8_t zero[8];
+    static const uint8_t zero[DBUS_ALIGN];
     if (d->n % align) d_put(d, zero, align - d->n % align);
 }
 
-static void d_u32(dmsg_t *d, uint32_t v) { d_pad(d, 4); d_put(d, &v, 4); }
+static void d_u32(dmsg_t *d, uint32_t v) { d_pad(d, sizeof v); d_put(d, &v, sizeof v); }
 
 static void d_str(dmsg_t *d, const char *s) {
     size_t len = strlen(s);
@@ -194,7 +225,7 @@ static void d_sig(dmsg_t *d, const char *s) {
 
 // A header field: its code, then its value as a variant.
 static void d_field(dmsg_t *d, uint8_t code, const char *type, const char *value) {
-    d_pad(d, 8);
+    d_pad(d, DBUS_ALIGN);
     d_put(d, &code, 1);
     d_sig(d, type);
     if (type[0] == 'g') d_sig(d, value);
@@ -206,7 +237,7 @@ static void d_field(dmsg_t *d, uint8_t code, const char *type, const char *value
 static int d_call(dmsg_t *m, uint8_t flags, const char *dest, const char *path, const char *iface, const char *member,
                   const char *sig, const dmsg_t *args) {
     static const uint16_t one = 1;
-    const uint8_t head[4] = { *(const uint8_t *)&one ? 'l' : 'B', 1 /* method call */, flags, 1 /* version */ };
+    const uint8_t head[4] = { *(const uint8_t *)&one ? 'l' : 'B', DBUS_METHOD_CALL, flags, DBUS_VERSION };
     m->n = 0;
     m->bad = 0;
     d_put(m, head, sizeof head);
@@ -214,16 +245,16 @@ static int d_call(dmsg_t *m, uint8_t flags, const char *dest, const char *path, 
     d_u32(m, ++g_bus_serial);
     size_t len_at = m->n;
     d_u32(m, 0);
-    d_pad(m, 8);
+    d_pad(m, DBUS_ALIGN);
     size_t start = m->n;
-    d_field(m, 1, "o", path);
-    d_field(m, 2, "s", iface);
-    d_field(m, 3, "s", member);
-    d_field(m, 6, "s", dest);
-    if (sig) d_field(m, 8, "g", sig);
+    d_field(m, DF_PATH, "o", path);
+    d_field(m, DF_INTERFACE, "s", iface);
+    d_field(m, DF_MEMBER, "s", member);
+    d_field(m, DF_DESTINATION, "s", dest);
+    if (sig) d_field(m, DF_SIGNATURE, "g", sig);
     uint32_t fields = (uint32_t)(m->n - start);
-    if (!m->bad) memcpy(m->b + len_at, &fields, 4);
-    d_pad(m, 8);
+    if (!m->bad) memcpy(m->b + len_at, &fields, sizeof fields);
+    d_pad(m, DBUS_ALIGN);
     if (args) d_put(m, args->b, args->n);
     return m->bad || (args && args->bad) ? -1 : 0;
 }
@@ -252,13 +283,6 @@ static int recv_line(int fd, char *out, size_t cap) {
     return -1;
 }
 
-static int hex_digit(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
 // The session bus's socket: the first unix: path or abstract name in DBUS_SESSION_BUS_ADDRESS
 // (its values %-escaped), otherwise $XDG_RUNTIME_DIR/bus.
 static int bus_address(struct sockaddr_un *sa, socklen_t *len) {
@@ -267,17 +291,18 @@ static int bus_address(struct sockaddr_un *sa, socklen_t *len) {
     const char *env = getenv("DBUS_SESSION_BUS_ADDRESS");
     char addr[1024];
     copy_str(addr, env ? env : "", sizeof addr);
+    static const char BUS_UNIX[] = "unix:", KEY_ABSTRACT[] = "abstract=", KEY_PATH[] = "path=";
     for (char *s1 = NULL, *a = strtok_r(addr, ";", &s1); a; a = strtok_r(NULL, ";", &s1)) {
-        if (strncmp(a, "unix:", 5) != 0) continue;
-        for (char *s2 = NULL, *kv = strtok_r(a + 5, ",", &s2); kv; kv = strtok_r(NULL, ",", &s2)) {
-            size_t abstract = strncmp(kv, "abstract=", 9) == 0;
-            if (!abstract && strncmp(kv, "path=", 5) != 0) continue;
-            const char *v = kv + (abstract ? 9 : 5);
+        if (!starts_with(a, BUS_UNIX)) continue;
+        for (char *s2 = NULL, *kv = strtok_r(a + sizeof BUS_UNIX - 1, ",", &s2); kv; kv = strtok_r(NULL, ",", &s2)) {
+            size_t abstract = starts_with(kv, KEY_ABSTRACT);
+            if (!abstract && !starts_with(kv, KEY_PATH)) continue;
+            const char *v = kv + (abstract ? sizeof KEY_ABSTRACT - 1 : sizeof KEY_PATH - 1);
             char *out = sa->sun_path + abstract;
             size_t cap = sizeof sa->sun_path - abstract - 1, o = 0;
             for (; *v && o < cap; v++) {
-                if (*v == '%' && hex_digit(v[1]) >= 0 && hex_digit(v[2]) >= 0) {
-                    out[o++] = (char)(hex_digit(v[1]) * 16 + hex_digit(v[2]));
+                if (*v == '%' && hex_value(v[1]) >= 0 && hex_value(v[2]) >= 0) {
+                    out[o++] = (char)(hex_value(v[1]) * 16 + hex_value(v[2]));
                     v += 2;
                 } else out[o++] = *v;
             }
@@ -308,8 +333,7 @@ static int bus_connect(void) {
     if (fd >= 0) fcntl(fd, F_SETFD, FD_CLOEXEC);
 #endif
     if (fd < 0) return -1;
-    // This runs on the UI's thread: a hung bus costs a moment, not the run.
-    struct timeval tv = { 0, 300000 };
+    struct timeval tv = { 0, BUS_TIMEOUT_US };
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
     // EXTERNAL: the bus checks the uid the kernel reports for the socket, sent as hex of its digits.
@@ -322,7 +346,7 @@ static int bus_connect(void) {
     n += (size_t)snprintf(auth + n, sizeof auth - n, "\r\n");
     dmsg_t hello;
     if (connect(fd, (struct sockaddr *)&sa, salen) != 0 || send_all(fd, auth, n) != 0
-        || recv_line(fd, line, sizeof line) != 0 || strncmp(line, "OK ", 3) != 0 || send_all(fd, "BEGIN\r\n", 7) != 0
+        || recv_line(fd, line, sizeof line) != 0 || !starts_with(line, "OK ") || send_all(fd, "BEGIN\r\n", sizeof "BEGIN\r\n" - 1) != 0
         || d_call(&hello, 0, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "Hello", NULL, NULL) != 0
         || send_all(fd, hello.b, hello.n) != 0) {
         close(fd);
@@ -392,9 +416,9 @@ void platform_notify(const char *title, const char *body) {
     d_sig(&args, "b");
     d_u32(&args, 1);
     uint32_t hints_len = (uint32_t)(args.n - hints_at);
-    if (!args.bad) memcpy(args.b + hints_len_at, &hints_len, 4);
-    d_u32(&args, 0xffffffffu);   // expire_timeout -1: the desktop's default
-    if (d_call(&call, 1 /* no reply expected */, "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+    if (!args.bad) memcpy(args.b + hints_len_at, &hints_len, sizeof hints_len);
+    d_u32(&args, UINT32_MAX);   // expire_timeout -1: the desktop's default
+    if (d_call(&call, DBUS_NO_REPLY, "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
                "org.freedesktop.Notifications", "Notify", "susssasa{sv}i", &args) == 0) {
         // Once more on a new connection if the bus has dropped the old one.
         for (int attempt = 0; attempt < 2; attempt++) {
@@ -465,7 +489,7 @@ void term_get_size(int *rows, int *cols) {
     struct winsize ws;
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0) {
         *rows = ws.ws_row; *cols = ws.ws_col;
-    } else { *rows = 24; *cols = 80; }
+    } else { *rows = DEFAULT_ROWS; *cols = DEFAULT_COLS; }
 }
 
 void term_watch_resize(void) {
@@ -518,49 +542,42 @@ int term_read_password(const char *prompt, char *out, size_t outlen) {
     return rc;
 }
 
-  typedef pthread_mutex_t mutex_t;
-  #define mutex_init(m)   pthread_mutex_init(m, NULL)
-  #define mutex_lock(m)   pthread_mutex_lock(m)
-  #define mutex_unlock(m) pthread_mutex_unlock(m)
-  #define READER_FN static void *
-  #define READER_RET NULL
-
 #define QUEUE_SLOTS 16
 #define READER_LINE_MAX 1024
 
 struct stdin_reader {
-    mutex_t lock;
+    pthread_mutex_t lock;
     char lines[QUEUE_SLOTS][READER_LINE_MAX];
     int head, tail, count;
     int eof;
     volatile int stop;
 };
 
-READER_FN reader_main(void *arg) {
+static void *reader_main(void *arg) {
     stdin_reader_t *r = (stdin_reader_t *)arg;
     char buf[READER_LINE_MAX];
     while (!r->stop) {
         if (read_line_stdin(buf, sizeof buf) != 0) {
-            mutex_lock(&r->lock);
+            pthread_mutex_lock(&r->lock);
             r->eof = 1;
-            mutex_unlock(&r->lock);
+            pthread_mutex_unlock(&r->lock);
             break;
         }
-        mutex_lock(&r->lock);
+        pthread_mutex_lock(&r->lock);
         if (r->count < QUEUE_SLOTS) {
             copy_str(r->lines[r->tail], buf, sizeof r->lines[r->tail]);
             r->tail = (r->tail + 1) % QUEUE_SLOTS;
             r->count++;
         }
-        mutex_unlock(&r->lock);
+        pthread_mutex_unlock(&r->lock);
     }
-    return READER_RET;
+    return NULL;
 }
 
 stdin_reader_t *stdin_reader_start(void) {
     stdin_reader_t *r = calloc(1, sizeof *r);
     if (!r) return NULL;
-    mutex_init(&r->lock);
+    pthread_mutex_init(&r->lock, NULL);
     pthread_t th;
     if (pthread_create(&th, NULL, reader_main, r) != 0) { pthread_mutex_destroy(&r->lock); free(r); return NULL; }
     pthread_detach(th);
@@ -568,13 +585,12 @@ stdin_reader_t *stdin_reader_start(void) {
 }
 
 void stdin_reader_stop(stdin_reader_t *r) {
-
     if (r) r->stop = 1;
 }
 
 int stdin_reader_poll(stdin_reader_t *r, char *line, size_t linelen) {
     if (!r) return -1;
-    mutex_lock(&r->lock);
+    pthread_mutex_lock(&r->lock);
     int ret = 0;
     if (r->count > 0) {
         copy_str(line, r->lines[r->head], linelen);
@@ -584,7 +600,7 @@ int stdin_reader_poll(stdin_reader_t *r, char *line, size_t linelen) {
     } else if (r->eof) {
         ret = -1;
     }
-    mutex_unlock(&r->lock);
+    pthread_mutex_unlock(&r->lock);
     return ret;
 }
 
@@ -614,7 +630,7 @@ int platform_file_info(const char *utf8_path, file_info_t *out) {
     time_t t = st.st_mtime;
     if (localtime_r(&t, &tmv)) strftime(out->modified, sizeof out->modified, "%Y-%m-%d %H:%M", &tmv);
     else out->modified[0] = '\0';
-    out->mode = (int)(st.st_mode & 07777);
+    out->mode = (int)(st.st_mode & MODE_BITS);
     return 0;
 }
 
@@ -628,12 +644,12 @@ int platform_machine_id(char *out, size_t cap) {
     // The hardware UUID, which, like a Linux machine id, any program can read.
     uuid_t u;
     struct timespec wait = { 0, 0 };
-    if (cap <= 32 || gethostuuid(u, &wait) != 0) return -1;
+    if (cap <= MACHINE_ID_LEN || gethostuuid(u, &wait) != 0) return -1;
     hex_encode(u, sizeof u, out);
     return 0;
 #endif
     static const char *const PATHS[] = { "/etc/machine-id", "/var/lib/dbus/machine-id" };
-    for (size_t i = 0; i < sizeof PATHS / sizeof PATHS[0]; i++) {
+    for (size_t i = 0; i < COUNT_OF(PATHS); i++) {
         FILE *f = fopen(PATHS[i], "r");
         if (!f) continue;
         char line[64];
@@ -642,7 +658,7 @@ int platform_machine_id(char *out, size_t cap) {
         if (!got) continue;
         line[strcspn(line, "\r\n")] = '\0';
         // 32 hex digits; systemd writes "uninitialized" there until the first boot is done.
-        if (strlen(line) == 32 && strspn(line, "0123456789abcdef") == 32 && cap > 32) {
+        if (strlen(line) == MACHINE_ID_LEN && strspn(line, HEX_DIGITS) == MACHINE_ID_LEN && cap > MACHINE_ID_LEN) {
             copy_str(out, line, cap);
             return 0;
         }
@@ -660,11 +676,9 @@ FILE *platform_fopen_private(const char *utf8_path, const char *mode) {
     else if (mode[0] == 'w') flags = O_CREAT | O_TRUNC | (strchr(mode, '+') ? O_RDWR : O_WRONLY);
     else if (mode[0] == 'a') flags = O_CREAT | O_APPEND | (strchr(mode, '+') ? O_RDWR : O_WRONLY);
     else return NULL;
-
-    int fd = open(utf8_path, flags | O_NOFOLLOW | O_CLOEXEC, 0600);
+    int fd = open(utf8_path, flags | O_NOFOLLOW | O_CLOEXEC, MODE_PRIVATE_FILE);
     if (fd < 0) return NULL;
-
-    fchmod(fd, 0600);
+    fchmod(fd, MODE_PRIVATE_FILE);
     FILE *f = fdopen(fd, mode);
     if (!f) close(fd);
     return f;
@@ -724,13 +738,13 @@ int platform_downloads_dir(char *out, size_t cap) {
     if (!home || home[0] != '/') return -1;
     int n = snprintf(out, cap, "%s/Downloads", home);
     if (n <= 0 || (size_t)n >= cap) return -1;
-    if (mkdir(out, 0700) != 0 && errno != EEXIST) return -1;
+    if (mkdir(out, MODE_PRIVATE_DIR) != 0 && errno != EEXIST) return -1;
     struct stat st;
     return stat(out, &st) == 0 && S_ISDIR(st.st_mode) ? 0 : -1;
 }
 
 FILE *platform_create_new(const char *utf8_path) {
-    int fd = open(utf8_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_NOCTTY | O_CLOEXEC, 0600);
+    int fd = open(utf8_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_NOCTTY | O_CLOEXEC, MODE_PRIVATE_FILE);
     if (fd < 0) return NULL;
     FILE *f = fdopen(fd, "wb");
     if (!f) close(fd);
@@ -743,7 +757,7 @@ int platform_move_new(const char *from, const char *to) {
     if (errno == EEXIST) return -1;
 #ifdef SYS_renameat2
     // A filesystem without hard links (FAT, some FUSE ones): use a rename that won't replace.
-    if (syscall(SYS_renameat2, AT_FDCWD, from, AT_FDCWD, to, 1u /* RENAME_NOREPLACE */) == 0) return 0;
+    if (syscall(SYS_renameat2, AT_FDCWD, from, AT_FDCWD, to, RENAME_NOREPLACE) == 0) return 0;
 #endif
     return -1;
 }
@@ -760,24 +774,24 @@ int platform_config_dir(char *out, size_t cap, int create) {
     n = snprintf(out, cap, "%s/chat", base);
     if (n <= 0 || (size_t)n >= cap) return -1;
     if (!create) return 0;
-    if (mkdir(base, 0700) != 0 && errno != EEXIST) return -1;
+    if (mkdir(base, MODE_PRIVATE_DIR) != 0 && errno != EEXIST) return -1;
     return platform_private_dir(out);
 }
 
 int platform_private_dir(const char *utf8_path) {
-    if (mkdir(utf8_path, 0700) != 0 && errno != EEXIST) return -1;
+    if (mkdir(utf8_path, MODE_PRIVATE_DIR) != 0 && errno != EEXIST) return -1;
     // Not a link to somewhere else.
     struct stat st;
     if (lstat(utf8_path, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != geteuid()) return -1;
-    return (st.st_mode & 077) && chmod(utf8_path, 0700) != 0 ? -1 : 0;
+    return (st.st_mode & MODE_GROUP_OTHER) && chmod(utf8_path, MODE_PRIVATE_DIR) != 0 ? -1 : 0;
 }
 
 int platform_write_private(const char *utf8_path, const void *data, size_t len) {
-    char tmp[4096];
+    char tmp[PATH_BUF];
     int n = snprintf(tmp, sizeof tmp, "%s.new", utf8_path);
     if (n <= 0 || (size_t)n >= sizeof tmp) return -1;
     unlink(tmp);
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_NOCTTY | O_CLOEXEC, 0600);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_NOCTTY | O_CLOEXEC, MODE_PRIVATE_FILE);
     if (fd < 0) return -1;
     const char *p = data;
     int ok = 1;
@@ -791,7 +805,7 @@ int platform_write_private(const char *utf8_path, const void *data, size_t len) 
     if (close(fd) != 0) ok = 0;
     if (!ok || rename(tmp, utf8_path) != 0) { unlink(tmp); return -1; }
     // The rename is only on disk once the folder is synced.
-    char dir[4096];
+    char dir[PATH_BUF];
     copy_str(dir, utf8_path, sizeof dir);
     char *slash = strrchr(dir, '/');
     if (slash && slash != dir) {
@@ -808,18 +822,18 @@ double now_seconds(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
-void current_hhmm(char out[6]) {
+void current_hhmm(char out[HHMM_LEN]) {
     time_t t = time(NULL);
     struct tm tmv;
     localtime_r(&t, &tmv);
-    snprintf(out, 6, "%02d:%02d", tmv.tm_hour, tmv.tm_min);
+    snprintf(out, HHMM_LEN, "%02d:%02d", tmv.tm_hour, tmv.tm_min);
 }
 
-void current_stamp(char out[17]) {
+void current_stamp(char out[STAMP_LEN]) {
     time_t t = time(NULL);
     struct tm tmv;
     localtime_r(&t, &tmv);
-    if (strftime(out, 17, "%Y-%m-%d %H:%M", &tmv) != 16) out[0] = '\0';
+    if (strftime(out, STAMP_LEN, "%Y-%m-%d %H:%M", &tmv) != STAMP_LEN - 1) out[0] = '\0';
 }
 
 typedef struct { void (*fn)(void *); void *arg; } thread_boot_t;
@@ -847,7 +861,7 @@ int platform_remove(const char *utf8_path) {
 
 int platform_exe_path(char *out, size_t cap) {
 #ifdef __APPLE__
-    char found[4096], real[4096];
+    char found[PATH_BUF], real[PATH_BUF];
     uint32_t len = sizeof found;
     if (_NSGetExecutablePath(found, &len) != 0 || !realpath(found, real) || strlen(real) >= cap) return -1;
     copy_str(out, real, cap);
@@ -867,7 +881,7 @@ int platform_exe_path(char *out, size_t cap) {
 int platform_run_quiet(const char *const argv[]) {
     // Found the same way as tor: from an absolute PATH entry or a standard folder, and only a program
     // that root or this user can change. posix_spawnp would also try relative entries, including ".".
-    char path[4096];
+    char path[PATH_BUF];
     if (platform_find_program(argv[0], NULL, path, sizeof path) != 0) return -1;
     pid_t pid;
     int status = -1;
@@ -878,13 +892,17 @@ int platform_run_quiet(const char *const argv[]) {
 
 int platform_replace_exe(const char *new_path, const char *exe_path) {
     struct stat st;
-    mode_t mode = (stat(exe_path, &st) == 0) ? (st.st_mode & 07777) : 0755;
-    if (chmod(new_path, mode | 0100) != 0) return -1;
+    mode_t mode = (stat(exe_path, &st) == 0) ? (st.st_mode & MODE_BITS) : MODE_PROGRAM;
+    if (chmod(new_path, mode | S_IXUSR) != 0) return -1;
     return rename(new_path, exe_path);
 }
 
+// A route's flags in /proc/net/route: it's up, and it goes through a gateway.
+#define ROUTE_UP 0x1
+#define ROUTE_GATEWAY 0x2
+
 // macOS has no /proc: there the router is asked over UPnP alone, which finds it by multicast.
-int platform_default_gateway(uint8_t ip[4]) {
+int platform_default_gateway(uint8_t ip[IP4_LEN]) {
     FILE *f = fopen("/proc/net/route", "r");
     if (!f) return -1;
     char line[256];
@@ -895,9 +913,9 @@ int platform_default_gateway(uint8_t ip[4]) {
         char iface[64];
         unsigned dest, gw, flags, refcnt, use, metric, mask;
         if (sscanf(line, "%63s %x %x %x %u %u %u %x", iface, &dest, &gw, &flags, &refcnt, &use, &metric, &mask) != 8) continue;
-        if (dest != 0 || mask != 0 || !(flags & 0x2) || !(flags & 0x1) || gw == 0) continue;
+        if (dest != 0 || mask != 0 || !(flags & ROUTE_GATEWAY) || !(flags & ROUTE_UP) || gw == 0) continue;
         if (found == 0 && metric >= best_metric) continue;
-        memcpy(ip, &gw, 4);
+        memcpy(ip, &gw, IP4_LEN);
         best_metric = metric;
         found = 0;
     }
@@ -918,7 +936,7 @@ void platform_ca_roots(void (*add_der)(void *ctx, const uint8_t *der, size_t len
     };
     const char *env = getenv("SSL_CERT_FILE");
     if (env && env[0] && add_file(ctx, env) == 0) return;
-    for (size_t i = 0; i < sizeof BUNDLES / sizeof BUNDLES[0]; i++)
+    for (size_t i = 0; i < COUNT_OF(BUNDLES); i++)
         if (add_file(ctx, BUNDLES[i]) == 0) return;
 }
 
@@ -933,11 +951,11 @@ static int only_ours(const struct stat *st) {
 // A program chat will run: a regular executable file nobody else can replace, in a folder nobody
 // else can write to.
 static int program_ok(const char *path, char *out, size_t cap) {
-    char real[4096];
+    char real[PATH_BUF];
     if (path[0] != '/' || !realpath(path, real)) return -1;
     struct stat st;
     if (stat(real, &st) != 0 || !S_ISREG(st.st_mode) || access(real, X_OK) != 0 || !only_ours(&st)) return -1;
-    char dir[4096];
+    char dir[PATH_BUF];
     copy_str(dir, real, sizeof dir);
     char *slash = strrchr(dir, '/');
     if (!slash) return -1;
@@ -951,10 +969,10 @@ static int program_ok(const char *path, char *out, size_t cap) {
 
 int platform_find_program(const char *name, const char *path, char *out, size_t cap) {
     if (path && path[0]) return program_ok(path, out, cap);
-    char cand[4096];
+    char cand[PATH_BUF];
     const char *env = getenv("PATH");
     if (env) {
-        char list[8192];
+        char list[PATH_LIST_MAX];
         copy_str(list, env, sizeof list);
         for (char *save = NULL, *dir = strtok_r(list, ":", &save); dir; dir = strtok_r(NULL, ":", &save)) {
             // A relative entry ("." or "bin") would run whatever is in the current folder.
@@ -965,7 +983,7 @@ int platform_find_program(const char *name, const char *path, char *out, size_t 
     }
     static const char *const DIRS[] = { "/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin", "/bin", "/sbin",
                                         "/opt/homebrew/bin" };
-    for (size_t i = 0; i < sizeof DIRS / sizeof DIRS[0]; i++) {
+    for (size_t i = 0; i < COUNT_OF(DIRS); i++) {
         snprintf(cand, sizeof cand, "%s/%s", DIRS[i], name);
         if (program_ok(cand, out, cap) == 0) return 0;
     }
@@ -975,7 +993,7 @@ int platform_find_program(const char *name, const char *path, char *out, size_t 
 static int private_dir_ok(const char *dir) {
     struct stat st;
     return dir && dir[0] == '/' && stat(dir, &st) == 0 && S_ISDIR(st.st_mode) && st.st_uid == geteuid()
-        && (st.st_mode & 077) == 0;
+        && (st.st_mode & MODE_GROUP_OTHER) == 0;
 }
 
 static const char *tempdir_base(void) {
@@ -990,7 +1008,7 @@ static const char *tempdir_base(void) {
 
 int platform_private_tempdir(const char *prefix, char *out, size_t cap) {
     const char *base = tempdir_base();
-    char tmpl[4096];
+    char tmpl[PATH_BUF];
     int n = snprintf(tmpl, sizeof tmpl, "%s/%s-XXXXXX", base, prefix);
     if (n <= 0 || (size_t)n >= sizeof tmpl || (size_t)n >= cap) return -1;
     if (!mkdtemp(tmpl)) return -1;
@@ -1002,12 +1020,12 @@ static int remove_at(int dirfd, const char *name, int depth) {
     struct stat st;
     if (fstatat(dirfd, name, &st, AT_SYMLINK_NOFOLLOW) != 0) return -1;
     if (!S_ISDIR(st.st_mode)) return unlinkat(dirfd, name, 0);
-    if (depth < 16) {
+    if (depth < REMOVE_DEPTH_MAX) {
         int fd = openat(dirfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         DIR *d = fd >= 0 ? fdopendir(fd) : NULL;
         if (!d && fd >= 0) close(fd);
         // Deleting while reading can skip entries, so repeat until a pass finds none.
-        for (int pass = 0; d && pass < 4; pass++) {
+        for (int pass = 0; d && pass < REMOVE_PASSES; pass++) {
             int found = 0;
             rewinddir(d);
             struct dirent *e;
@@ -1034,7 +1052,8 @@ platform_proc_t *platform_spawn(const char *const argv[], const char *out_path) 
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
     posix_spawn_file_actions_addopen(&fa, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
-    if (out_path) posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, out_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    if (out_path)
+        posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, out_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, MODE_PRIVATE_FILE);
     else posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
     posix_spawn_file_actions_adddup2(&fa, STDOUT_FILENO, STDERR_FILENO);
     // Its own process group, so Ctrl+C in the terminal goes to chat, which then stops it.
@@ -1053,12 +1072,12 @@ platform_proc_t *platform_spawn(const char *const argv[], const char *out_path) 
     while (environ[n]) n++;
     char **env = calloc(n + 1, sizeof *env);
     if (!env) { posix_spawnattr_destroy(&attr); posix_spawn_file_actions_destroy(&fa); free(p); return NULL; }
+    static const char *const SYSTEMD_VARS[] = { "NOTIFY_SOCKET=", "LISTEN_PID=", "LISTEN_FDS=", "LISTEN_FDNAMES=" };
     size_t k = 0;
     for (size_t i = 0; i < n; i++) {
-        const char *e = environ[i];
-        if (strncmp(e, "NOTIFY_SOCKET=", 14) == 0 || strncmp(e, "LISTEN_PID=", 11) == 0
-            || strncmp(e, "LISTEN_FDS=", 11) == 0 || strncmp(e, "LISTEN_FDNAMES=", 15) == 0) continue;
-        env[k++] = environ[i];
+        int skip = 0;
+        for (size_t j = 0; j < COUNT_OF(SYSTEMD_VARS) && !skip; j++) skip = starts_with(environ[i], SYSTEMD_VARS[j]);
+        if (!skip) env[k++] = environ[i];
     }
     int rc = posix_spawn(&p->pid, argv[0], &fa, &attr, (char *const *)argv, env);
     free(env);
@@ -1072,7 +1091,10 @@ int platform_proc_exited(platform_proc_t *p, int *code) {
     if (!p->exited) {
         int status;
         pid_t r = waitpid(p->pid, &status, WNOHANG);
-        if (r == p->pid) { p->exited = 1; p->code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0); }
+        if (r == p->pid) {
+            p->exited = 1;
+            p->code = WIFEXITED(status) ? WEXITSTATUS(status) : SIGNAL_EXIT_BASE + (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+        }
         else if (r < 0 && errno == ECHILD) { p->exited = 1; p->code = -1; }
     }
     if (p->exited && code) *code = p->code;
@@ -1088,7 +1110,8 @@ void platform_proc_stop(platform_proc_t *p, int wait_ms) {
     if (!p) return;
     if (!platform_proc_exited(p, NULL)) {
         kill(p->pid, SIGTERM);
-        for (int waited = 0; waited < wait_ms && !platform_proc_exited(p, NULL); waited += 20) platform_sleep_ms(20);
+        for (int waited = 0; waited < wait_ms && !platform_proc_exited(p, NULL); waited += STOP_POLL_MS)
+            platform_sleep_ms(STOP_POLL_MS);
         if (!platform_proc_exited(p, NULL)) {
             kill(p->pid, SIGKILL);
             int status;
@@ -1109,12 +1132,12 @@ void platform_remove_stale_tempdirs(const char *prefix, const char *lock_rel) {
     time_t now = time(NULL);
     while ((e = readdir(d)) != NULL) {
         if (strncmp(e->d_name, prefix, pl) != 0 || e->d_name[pl] != '-') continue;
-        char path[4096], lock[4200];
+        char path[PATH_BUF], lock[PATH_BUF + 104];
         snprintf(path, sizeof path, "%s/%s", base, e->d_name);
         struct stat st;
         // Only ours, created by mkdtemp (0700), and not one another chat is in the middle of setting up.
-        if (lstat(path, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != geteuid() || (st.st_mode & 077)
-            || now - st.st_mtime < 60) continue;
+        if (lstat(path, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != geteuid() || (st.st_mode & MODE_GROUP_OTHER)
+            || now - st.st_mtime < STALE_AFTER) continue;
         snprintf(lock, sizeof lock, "%s/%s", path, lock_rel);
         int fd = open(lock, O_RDWR | O_NOFOLLOW | O_CLOEXEC);
         if (fd >= 0) {

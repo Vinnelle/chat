@@ -24,7 +24,18 @@
 #define ASSERTION_VERSION_3 3
 // The salts go to the security key as they are, rather than hashed as WebAuthn's PRF would.
 #define HMAC_SECRET_VALUES_FLAG 0x00100000
+// Authenticator data: the RP id's hash, then the flags.
+#define AD_FLAGS_AT 32
 #define FLAG_UV 0x04
+
+#define WAIT_MS (SECKEY_WAIT_S * 1000)
+#define USER_ID_LEN 16
+#define CREDS_MAX 8
+#define CHALLENGE_LEN 16
+#define CLIENT_DATA_MAX 96
+// How often the watcher looks at w->cancel, and how long ending a watch gives it to stop.
+#define CANCEL_POLL_MS 100
+#define WATCH_STOP_MS 150
 
 typedef struct {
     DWORD cbFirst;
@@ -136,7 +147,7 @@ static void watch_cancel(void *arg) {
             g_wa.cancel(&g_cancel_id);
             break;
         }
-        Sleep(100);
+        Sleep(CANCEL_POLL_MS);
     }
 }
 
@@ -150,16 +161,16 @@ static void begin_watch(seckey_wait_t *w) {
 
 static void end_watch(void) {
     __atomic_store_n(&g_watching, 0, __ATOMIC_RELEASE);
-    Sleep(150);
+    Sleep(WATCH_STOP_MS);
 }
 
 // A random challenge in client data Windows only hashes: nothing checks this assertion's signature.
-static void client_data(WEBAUTHN_CLIENT_DATA *cd, char json[96]) {
-    uint8_t challenge[16];
-    char hex[33];
+static void client_data(WEBAUTHN_CLIENT_DATA *cd, char json[CLIENT_DATA_MAX]) {
+    uint8_t challenge[CHALLENGE_LEN];
+    char hex[CHALLENGE_LEN * 2 + 1];
     gen_random(challenge, sizeof challenge);
     hex_encode(challenge, sizeof challenge, hex);
-    snprintf(json, 96, "{\"type\":\"chat\",\"challenge\":\"%s\"}", hex);
+    snprintf(json, CLIENT_DATA_MAX, "{\"type\":\"chat\",\"challenge\":\"%s\"}", hex);
     *cd = (WEBAUTHN_CLIENT_DATA){ WEBAUTHN_CLIENT_DATA_CURRENT_VERSION, (DWORD)strlen(json), (PBYTE)json,
                                   WEBAUTHN_HASH_ALGORITHM_SHA_256 };
 }
@@ -172,7 +183,7 @@ static int get_secret(WEBAUTHN_CREDENTIAL *list, int n, const uint8_t salt[SECKE
     ga_options_t o;
     memset(&o, 0, sizeof o);
     o.v5.dwVersion = GA_OPTIONS_VERSION_6;
-    o.v5.dwTimeoutMilliseconds = SECKEY_WAIT_S * 1000;
+    o.v5.dwTimeoutMilliseconds = WAIT_MS;
     o.v5.CredentialList.cCredentials = (DWORD)n;
     o.v5.CredentialList.pCredentials = list;
     o.v5.dwAuthenticatorAttachment = WEBAUTHN_AUTHENTICATOR_ATTACHMENT_CROSS_PLATFORM;
@@ -181,7 +192,7 @@ static int get_secret(WEBAUTHN_CREDENTIAL *list, int n, const uint8_t salt[SECKE
     o.v5.dwFlags = HMAC_SECRET_VALUES_FLAG;
     o.pHmacSecretSaltValues = &values;
     WEBAUTHN_CLIENT_DATA cd;
-    char json[96];
+    char json[CLIENT_DATA_MAX];
     client_data(&cd, json);
     begin_watch(w);
     o.v5.pCancellationId = g_have_cancel_id ? &g_cancel_id : NULL;
@@ -197,7 +208,7 @@ static int get_secret(WEBAUTHN_CREDENTIAL *list, int n, const uint8_t salt[SECKE
     if (a->dwVersion >= ASSERTION_VERSION_3 && ax->pHmacSecret && ax->pHmacSecret->cbFirst == SECKEY_SECRET_LEN
         && ax->pHmacSecret->pbFirst && *which >= 0) {
         memcpy(secret, ax->pHmacSecret->pbFirst, SECKEY_SECRET_LEN);
-        if (used_uv) *used_uv = a->cbAuthenticatorData > 32 && (a->pbAuthenticatorData[32] & FLAG_UV);
+        if (used_uv) *used_uv = a->cbAuthenticatorData > AD_FLAGS_AT && (a->pbAuthenticatorData[AD_FLAGS_AT] & FLAG_UV);
         rc = 0;
     } else {
         snprintf(why, why_cap, "Windows gave back no hmac-secret from the security key");
@@ -211,7 +222,7 @@ int platform_seckey_make(const uint8_t salt[SECKEY_SALT_LEN], const char *pin, u
                          size_t why_cap) {
     (void)pin;
     if (load(why, why_cap) != 0) return -1;
-    uint8_t uid[16];
+    uint8_t uid[USER_ID_LEN];
     gen_random(uid, sizeof uid);
     WEBAUTHN_RP_ENTITY_INFORMATION rp = { WEBAUTHN_RP_ENTITY_INFORMATION_CURRENT_VERSION, RP_ID, L"chat", NULL };
     WEBAUTHN_USER_ENTITY_INFORMATION user = { WEBAUTHN_USER_ENTITY_INFORMATION_CURRENT_VERSION, sizeof uid, uid, L"chat",
@@ -224,14 +235,14 @@ int platform_seckey_make(const uint8_t salt[SECKEY_SALT_LEN], const char *pin, u
     WEBAUTHN_AUTHENTICATOR_MAKE_CREDENTIAL_OPTIONS o;
     memset(&o, 0, sizeof o);
     o.dwVersion = WEBAUTHN_AUTHENTICATOR_MAKE_CREDENTIAL_OPTIONS_VERSION_4;
-    o.dwTimeoutMilliseconds = SECKEY_WAIT_S * 1000;
+    o.dwTimeoutMilliseconds = WAIT_MS;
     o.Extensions.cExtensions = 1;
     o.Extensions.pExtensions = &ext;
     o.dwAuthenticatorAttachment = WEBAUTHN_AUTHENTICATOR_ATTACHMENT_CROSS_PLATFORM;
     o.dwUserVerificationRequirement = WEBAUTHN_USER_VERIFICATION_REQUIREMENT_DISCOURAGED;
     o.dwAttestationConveyancePreference = WEBAUTHN_ATTESTATION_CONVEYANCE_PREFERENCE_NONE;
     WEBAUTHN_CLIENT_DATA cd;
-    char json[96];
+    char json[CLIENT_DATA_MAX];
     client_data(&cd, json);
     begin_watch(w);
     o.pCancellationId = g_have_cancel_id ? &g_cancel_id : NULL;
@@ -271,9 +282,9 @@ int platform_seckey_secret(const uint8_t *const *creds, const size_t *lens, cons
                            seckey_wait_t *w, char *why, size_t why_cap) {
     (void)pin;
     if (load(why, why_cap) != 0) return -1;
-    WEBAUTHN_CREDENTIAL list[8];
+    WEBAUTHN_CREDENTIAL list[CREDS_MAX];
     int any_uv = 0;
-    if (n > 8) n = 8;
+    if (n > CREDS_MAX) n = CREDS_MAX;
     for (int i = 0; i < n; i++) {
         list[i] = (WEBAUTHN_CREDENTIAL){ WEBAUTHN_CREDENTIAL_CURRENT_VERSION, (DWORD)lens[i], (PBYTE)creds[i],
                                          WEBAUTHN_CREDENTIAL_TYPE_PUBLIC_KEY };

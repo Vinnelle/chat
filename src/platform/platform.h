@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "platform/net.h"
+#include "common/util.h"
 
 // Called first. Other programs, even ones running as this user, can't read chat's memory or
 // attach to it, and it's never dumped. The variables named in secret_env (passwords) leave the
@@ -63,7 +64,7 @@ int platform_list_dir(const char *path, dir_entry_cb cb, void *ctx);
 typedef struct {
     int is_dir, is_link;
     uint64_t size;
-    char modified[17];   // when it was last changed, local time: "YYYY-MM-DD HH:MM"
+    char modified[STAMP_LEN];   // when it was last changed, local time: "YYYY-MM-DD HH:MM"
     int mode;
 } file_info_t;
 int platform_file_info(const char *utf8_path, file_info_t *out);
@@ -207,7 +208,7 @@ long platform_pid(void);
 void platform_sleep_ms(int ms);
 
 // The IPv4 default gateway. Returns -1 when there is none.
-int platform_default_gateway(uint8_t ip[4]);
+int platform_default_gateway(uint8_t ip[IP4_LEN]);
 
 // Passes the system's trusted root certificates to one of the callbacks: add_der for each
 // certificate in a store, add_file for a PEM bundle (it returns 0 once one loads).

@@ -32,7 +32,9 @@
 // The sealed form: this, 'T' (TPM and systemd's key) or 'H' (systemd's key), then the credential
 // in base64, as systemd gave it.
 #define SEALED_MAGIC "SYSD"
-#define SEALED_HEAD 5
+#define MAGIC_LEN 4
+#define SEALED_KIND_AT MAGIC_LEN
+#define SEALED_HEAD (MAGIC_LEN + 1)
 #define REQUEST_MAX (DEVICE_SEALED_MAX + 512)
 #define REPLY_MAX 65536
 // The first call starts the service, and some TPMs are slow.
@@ -41,6 +43,9 @@
 #define TPM_DEVICE "/dev/tpmrm0"
 // The sealed form when chat speaks to the TPM itself: this, then tpm2_seal's.
 #define DIRECT_MAGIC "TPMD"
+// statfs's f_type for a tmpfs.
+#define TMPFS_FS_MAGIC 0x01021994UL
+_Static_assert(sizeof SEALED_MAGIC - 1 == MAGIC_LEN && sizeof DIRECT_MAGIC - 1 == MAGIC_LEN, "magics are MAGIC_LEN long");
 
 _Static_assert(TPM2_SECRET_LEN == DEVICE_SECRET_LEN, "the TPM seals the device's secret");
 
@@ -60,7 +65,7 @@ static int machine_id_transient(void) {
     struct statfs fs;
     if (stat("/etc/machine-id", &id) != 0 || stat("/etc", &etc) != 0) return 0;
     if (id.st_dev != etc.st_dev) return 1;
-    return statfs("/etc/machine-id", &fs) == 0 && (unsigned long)fs.f_type == 0x01021994UL;   // tmpfs
+    return statfs("/etc/machine-id", &fs) == 0 && (unsigned long)fs.f_type == TMPFS_FS_MAGIC;
 }
 
 // The kernel's resource manager is only there for a TPM 2.0.
@@ -79,7 +84,8 @@ static void tpm_closed(char *why, size_t why_cap) {
                                            : "there's no TPM 2.0 here, and " NO_SERVICE);
         return;
     }
-    const struct group *g = st.st_gid != 0 && (st.st_mode & 060) == 060 ? getgrgid(st.st_gid) : NULL;
+    const mode_t group_rw = S_IRGRP | S_IWGRP;
+    const struct group *g = st.st_gid != 0 && (st.st_mode & group_rw) == group_rw ? getgrgid(st.st_gid) : NULL;
     const char *user = getenv("USER");
     if (g)
         snprintf(why, why_cap, TPM_DEVICE ", the TPM, is only open to the %s group: join it (as root, usermod -aG %s %s) "
@@ -109,9 +115,9 @@ device_kind_t platform_device_kind(char *why, size_t why_cap) {
 }
 
 device_kind_t platform_device_sealed_kind(const uint8_t *sealed, size_t len) {
-    if (len > 4 && memcmp(sealed, DIRECT_MAGIC, 4) == 0) return DEVICE_TPM;
-    if (len <= SEALED_HEAD || memcmp(sealed, SEALED_MAGIC, 4) != 0) return DEVICE_NONE;
-    return sealed[4] == 'T' ? DEVICE_TPM : sealed[4] == 'H' ? DEVICE_OS : DEVICE_NONE;
+    if (len > MAGIC_LEN && memcmp(sealed, DIRECT_MAGIC, MAGIC_LEN) == 0) return DEVICE_TPM;
+    if (len <= SEALED_HEAD || memcmp(sealed, SEALED_MAGIC, MAGIC_LEN) != 0) return DEVICE_NONE;
+    return sealed[SEALED_KIND_AT] == 'T' ? DEVICE_TPM : sealed[SEALED_KIND_AT] == 'H' ? DEVICE_OS : DEVICE_NONE;
 }
 
 // What sealing here would use: the kind alone doesn't say whether systemd's service is there.
@@ -251,7 +257,7 @@ static const js_value *creds_reply(const char *reply, size_t len, js_arena *aren
 }
 
 static int systemd_unseal(const uint8_t *sealed, size_t len, uint8_t secret[DEVICE_SECRET_LEN], char *why, size_t why_cap) {
-    if (len <= SEALED_HEAD || memcmp(sealed, SEALED_MAGIC, 4) != 0
+    if (len <= SEALED_HEAD || memcmp(sealed, SEALED_MAGIC, MAGIC_LEN) != 0
         || !blob_ok((const char *)sealed + SEALED_HEAD, len - SEALED_HEAD)) {
         snprintf(why, why_cap, "it isn't sealed in a way chat on Linux knows");
         return -1;
@@ -282,7 +288,7 @@ static int systemd_unseal(const uint8_t *sealed, size_t len, uint8_t secret[DEVI
 
 static long systemd_seal(int tpm, const uint8_t secret[DEVICE_SECRET_LEN], uint8_t *out, size_t cap, char *why,
                          size_t why_cap) {
-    char data[64];
+    char data[BASE64_LEN(DEVICE_SECRET_LEN) + 1];
     base64_encode(secret, DEVICE_SECRET_LEN, data);
     // No withKey: given one, even "auto", systemd 262 seals for the whole system whatever the scope, and
     // unsealing for this user then fails with BadScope. Left to itself, a user-scoped credential takes
@@ -299,8 +305,8 @@ static long systemd_seal(int tpm, const uint8_t secret[DEVICE_SECRET_LEN], uint8
         if (!blob || blob->type != JS_STR || !blob_ok(blob->s, blob->slen) || SEALED_HEAD + blob->slen > cap) {
             snprintf(why, why_cap, "systemd's credential service gave back something chat can't keep");
         } else {
-            memcpy(out, SEALED_MAGIC, 4);
-            out[4] = tpm ? 'T' : 'H';
+            memcpy(out, SEALED_MAGIC, MAGIC_LEN);
+            out[SEALED_KIND_AT] = tpm ? 'T' : 'H';
             memcpy(out + SEALED_HEAD, blob->s, blob->slen);
             len = (long)(SEALED_HEAD + blob->slen);
         }
@@ -322,23 +328,23 @@ static long tpm_io(void *ctx, const uint8_t *cmd, size_t len, uint8_t *rsp, size
 static long direct_seal(const uint8_t secret[DEVICE_SECRET_LEN], uint8_t *out, size_t cap, char *why, size_t why_cap) {
     int fd = open(TPM_DEVICE, O_RDWR | O_CLOEXEC);
     if (fd < 0) { tpm_closed(why, why_cap); return -1; }
-    long n = cap > 4 ? tpm2_seal(tpm_io, &fd, secret, out + 4, cap - 4, why, why_cap) : -1;
+    long n = cap > MAGIC_LEN ? tpm2_seal(tpm_io, &fd, secret, out + MAGIC_LEN, cap - MAGIC_LEN, why, why_cap) : -1;
     close(fd);
     if (n < 0) return -1;
-    memcpy(out, DIRECT_MAGIC, 4);
-    return n + 4;
+    memcpy(out, DIRECT_MAGIC, MAGIC_LEN);
+    return n + MAGIC_LEN;
 }
 
 static int direct_unseal(const uint8_t *sealed, size_t len, uint8_t secret[DEVICE_SECRET_LEN], char *why, size_t why_cap) {
     int fd = open(TPM_DEVICE, O_RDWR | O_CLOEXEC);
     if (fd < 0) { tpm_closed(why, why_cap); return -1; }
-    int rc = tpm2_unseal(tpm_io, &fd, sealed + 4, len - 4, secret, why, why_cap);
+    int rc = tpm2_unseal(tpm_io, &fd, sealed + MAGIC_LEN, len - MAGIC_LEN, secret, why, why_cap);
     close(fd);
     return rc;
 }
 
 int platform_device_unseal(const uint8_t *sealed, size_t len, uint8_t secret[DEVICE_SECRET_LEN], char *why, size_t why_cap) {
-    if (len > 4 && memcmp(sealed, DIRECT_MAGIC, 4) == 0) return direct_unseal(sealed, len, secret, why, why_cap);
+    if (len > MAGIC_LEN && memcmp(sealed, DIRECT_MAGIC, MAGIC_LEN) == 0) return direct_unseal(sealed, len, secret, why, why_cap);
     return systemd_unseal(sealed, len, secret, why, why_cap);
 }
 

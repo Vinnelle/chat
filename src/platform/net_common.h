@@ -3,8 +3,11 @@
 #ifndef CHAT_NET_COMMON_H
 #define CHAT_NET_COMMON_H
 
+#include "common/util.h"
+
 #define NET_WAIT_MAX 16
 #define NET_FAM_SLOTS 64
+#define NET_HOST_MAX 256
 
 static struct { sock_t s; int v6; int used; } g_fam[NET_FAM_SLOTS];
 
@@ -26,24 +29,25 @@ static int fam_is_v6(sock_t s) {
     return 0;
 }
 
-static const uint8_t V4MAP_PREFIX[12] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff };
+// An IPv4 address as IPv6 starts with these: ::ffff:a.b.c.d.
+static const uint8_t V4MAP_PREFIX[IP6_LEN - IP4_LEN] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff };
 
 void addr_set_v4(addr_t *a, const void *net_order_4, uint16_t port) {
     memset(a, 0, sizeof *a);
-    memcpy(a->ip, net_order_4, 4);
+    memcpy(a->ip, net_order_4, IP4_LEN);
     a->port = port;
     a->is_v6 = 0;
 }
 
-static void addr_set_v6(addr_t *a, const uint8_t ip16[16], uint16_t port) {
+static void addr_set_v6(addr_t *a, const uint8_t ip16[IP6_LEN], uint16_t port) {
     memset(a, 0, sizeof *a);
-    if (memcmp(ip16, V4MAP_PREFIX, 12) == 0) {
-        memcpy(a->ip, ip16 + 12, 4);
+    if (memcmp(ip16, V4MAP_PREFIX, sizeof V4MAP_PREFIX) == 0) {
+        memcpy(a->ip, ip16 + sizeof V4MAP_PREFIX, IP4_LEN);
         a->port = port;
         a->is_v6 = 0;
         return;
     }
-    memcpy(a->ip, ip16, 16);
+    memcpy(a->ip, ip16, IP6_LEN);
     a->port = port;
     a->is_v6 = 1;
 }
@@ -52,15 +56,15 @@ int addr_is_v4(addr_t a) { return !a.is_v6; }
 
 int addr_equal(addr_t a, addr_t b) {
     if (a.kind != b.kind || a.port != b.port || a.is_v6 != b.is_v6) return 0;
-    if (a.kind != ADDR_UDP) return memcmp(a.ip, b.ip, 16) == 0;
-    if (a.is_v6) return a.scope == b.scope && memcmp(a.ip, b.ip, 16) == 0;
-    return memcmp(a.ip, b.ip, 4) == 0;
+    if (a.kind != ADDR_UDP) return memcmp(a.ip, b.ip, IP6_LEN) == 0;
+    if (a.is_v6) return a.scope == b.scope && memcmp(a.ip, b.ip, IP6_LEN) == 0;
+    return memcmp(a.ip, b.ip, IP4_LEN) == 0;
 }
 
-addr_t addr_virtual(addr_kind_t kind, const uint8_t id[16]) {
+addr_t addr_virtual(addr_kind_t kind, const uint8_t id[IP6_LEN]) {
     addr_t a;
     memset(&a, 0, sizeof a);
-    memcpy(a.ip, id, 16);
+    memcpy(a.ip, id, IP6_LEN);
     a.port = 1;
     a.kind = (uint8_t)kind;
     return a;
@@ -69,18 +73,17 @@ addr_t addr_virtual(addr_kind_t kind, const uint8_t id[16]) {
 // "nostr:..." or "tor:..." for a relayed address; 0 for a real one, left to the caller.
 static int virtual_to_string(addr_t a, char out[ADDR_STR_LEN]) {
     if (a.kind == ADDR_UDP) return 0;
-    static const char *H = "0123456789abcdef";
-    char hex[33];
-    for (int i = 0; i < 16; i++) { hex[i * 2] = H[a.ip[i] >> 4]; hex[i * 2 + 1] = H[a.ip[i] & 15]; }
-    hex[32] = '\0';
+    char hex[IP6_LEN * 2 + 1];
+    hex_encode(a.ip, IP6_LEN, hex);
     snprintf(out, ADDR_STR_LEN, "%s:%s", a.kind == ADDR_NOSTR ? "nostr" : "tor", hex);
     return 1;
 }
 
 int host_is_onion(const char *host) {
-    size_t n = strlen(host);
+    static const char ONION[] = ".onion";
+    size_t n = strlen(host), sl = sizeof ONION - 1;
     while (n > 0 && host[n - 1] == '.') n--;
-    return n >= 6 && strncasecmp(host + n - 6, ".onion", 6) == 0;
+    return n >= sl && strncasecmp(host + n - sl, ONION, sl) == 0;
 }
 
 addr_t addr_broadcast_lan(uint16_t port) {
@@ -100,7 +103,7 @@ addr_t addr_loopback(uint16_t port) {
 static void to_sockaddr4(addr_t a, struct sockaddr_in *sa) {
     memset(sa, 0, sizeof *sa);
     sa->sin_family = AF_INET;
-    memcpy(&sa->sin_addr.s_addr, a.ip, 4);
+    memcpy(&sa->sin_addr.s_addr, a.ip, IP4_LEN);
     sa->sin_port = htons(a.port);
 }
 
@@ -109,13 +112,13 @@ static void to_sockaddr6(addr_t a, struct sockaddr_in6 *sa) {
     sa->sin6_family = AF_INET6;
     sa->sin6_port = htons(a.port);
     if (a.is_v6) {
-        memcpy(&sa->sin6_addr, a.ip, 16);
+        memcpy(&sa->sin6_addr, a.ip, IP6_LEN);
         sa->sin6_scope_id = a.scope;
     } else {
-        uint8_t mapped[16];
-        memcpy(mapped, V4MAP_PREFIX, 12);
-        memcpy(mapped + 12, a.ip, 4);
-        memcpy(&sa->sin6_addr, mapped, 16);
+        uint8_t mapped[IP6_LEN];
+        memcpy(mapped, V4MAP_PREFIX, sizeof V4MAP_PREFIX);
+        memcpy(mapped + sizeof V4MAP_PREFIX, a.ip, IP4_LEN);
+        memcpy(&sa->sin6_addr, mapped, IP6_LEN);
     }
 }
 
@@ -141,14 +144,13 @@ int addr_resolve(const char *host, uint16_t port, addr_t *out) {
 }
 
 // Splits "HOST:PORT" or "[IPv6]:PORT", with an optional %scope on the host. Looks nothing up.
-static int split_hostport(const char *hostport, char host[256], uint16_t *port_out, uint32_t *scope_out) {
+static int split_hostport(const char *hostport, char host[NET_HOST_MAX], uint16_t *port_out, uint32_t *scope_out) {
     const char *portstr;
-
     if (hostport[0] == '[') {
         const char *close = strchr(hostport, ']');
         if (!close || close[1] != ':') return -1;
         size_t hlen = (size_t)(close - hostport - 1);
-        if (hlen == 0 || hlen >= 256) return -1;
+        if (hlen == 0 || hlen >= NET_HOST_MAX) return -1;
         memcpy(host, hostport + 1, hlen);
         host[hlen] = '\0';
         portstr = close + 2;
@@ -156,16 +158,15 @@ static int split_hostport(const char *hostport, char host[256], uint16_t *port_o
         const char *colon = strchr(hostport, ':');
         if (!colon || strchr(colon + 1, ':')) return -1;
         size_t hlen = (size_t)(colon - hostport);
-        if (hlen == 0 || hlen >= 256) return -1;
+        if (hlen == 0 || hlen >= NET_HOST_MAX) return -1;
         memcpy(host, hostport, hlen);
         host[hlen] = '\0';
         portstr = colon + 1;
     }
-
     if (!*portstr) return -1;
     for (const char *p = portstr; *p; p++) if (*p < '0' || *p > '9') return -1;
     long port = strtol(portstr, NULL, 10);
-    if (port <= 0 || port > 65535) return -1;
+    if (port <= 0 || port > UINT16_MAX) return -1;
 
     uint32_t scope = 0;
     char *pct = strchr(host, '%');
@@ -182,7 +183,7 @@ static int split_hostport(const char *hostport, char host[256], uint16_t *port_o
 }
 
 static int parse_hostport(const char *hostport, addr_t *out, int numeric) {
-    char host[256];
+    char host[NET_HOST_MAX];
     uint16_t port;
     uint32_t scope;
     if (split_hostport(hostport, host, &port, &scope) != 0) return -1;
@@ -193,7 +194,7 @@ static int parse_hostport(const char *hostport, addr_t *out, int numeric) {
 }
 
 int addr_check_hostport(const char *hostport) {
-    char host[256];
+    char host[NET_HOST_MAX];
     uint16_t port;
     uint32_t scope;
     return split_hostport(hostport, host, &port, &scope);

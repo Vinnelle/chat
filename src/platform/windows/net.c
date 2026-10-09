@@ -233,9 +233,9 @@ int net_local_addr_toward(addr_t dest, addr_t *out) {
     return 0;
 }
 
-int net_set_multicast_if(sock_t s, const uint8_t local_ip[4]) {
+int net_set_multicast_if(sock_t s, const uint8_t local_ip[IP4_LEN]) {
     struct in_addr a;
-    memcpy(&a.s_addr, local_ip, 4);
+    memcpy(&a.s_addr, local_ip, IP4_LEN);
     return setsockopt(s, IPPROTO_IP, IP_MULTICAST_IF, (const char *)&a, sizeof a) == 0 ? 0 : -1;
 }
 
@@ -276,13 +276,13 @@ void addr_to_string(addr_t a, char out[ADDR_STR_LEN]) {
     char ipbuf[INET6_ADDRSTRLEN];
     if (a.is_v6) {
         struct in6_addr ia;
-        memcpy(&ia, a.ip, 16);
+        memcpy(&ia, a.ip, IP6_LEN);
         InetNtopA(AF_INET6, &ia, ipbuf, sizeof ipbuf);
         if (a.scope) snprintf(out, ADDR_STR_LEN, "[%s%%%u]:%u", ipbuf, (unsigned)a.scope, (unsigned)a.port);
         else snprintf(out, ADDR_STR_LEN, "[%s]:%u", ipbuf, (unsigned)a.port);
     } else {
         struct in_addr ia;
-        memcpy(&ia.s_addr, a.ip, 4);
+        memcpy(&ia.s_addr, a.ip, IP4_LEN);
         InetNtopA(AF_INET, &ia, ipbuf, sizeof ipbuf);
         snprintf(out, ADDR_STR_LEN, "%s:%u", ipbuf, (unsigned)a.port);
     }
