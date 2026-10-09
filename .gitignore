@@ -9,6 +9,7 @@
 /build-macos-aarch64/
 /build-macos-x86_64/
 /dist/
+/graphify-out
 /test-builds/
 build_stamp.h
 *.o
