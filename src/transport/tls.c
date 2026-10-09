@@ -3,7 +3,7 @@
 #include "transport/tls.h"
 #include "platform/platform.h"
 #include "common/util.h"
-#include <sodium.h>
+#include "crypto/crypto.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,23 +14,19 @@
 #include <mbedtls/net_sockets.h>
 #include <psa/crypto.h>
 
+#define TLS_ERR_MAX 160
+
 struct tls_conn {
     mbedtls_ssl_context ssl;
     tls_io_t io;
     sock_t s;
-    char err[160];
+    char err[TLS_ERR_MAX];
 };
 
 static mbedtls_x509_crt g_roots;
 static mbedtls_ssl_config g_conf;
 static int g_ready;   // 0 not tried, 1 ready, -1 failed
-static char g_setup_err[160];
-
-static int rng(void *ctx, unsigned char *out, size_t len) {
-    (void)ctx;
-    randombytes_buf(out, len);
-    return 0;
-}
+static char g_setup_err[TLS_ERR_MAX];
 
 static void add_der(void *ctx, const uint8_t *der, size_t len) {
     // A certificate mbedTLS can't read (an unusual algorithm, for example) is just skipped.
@@ -63,7 +59,7 @@ int tls_setup(char *err, size_t cap) {
                 } else {
                     mbedtls_ssl_conf_authmode(&g_conf, MBEDTLS_SSL_VERIFY_REQUIRED);
                     mbedtls_ssl_conf_ca_chain(&g_conf, &g_roots, NULL);
-                    mbedtls_ssl_conf_rng(&g_conf, rng, NULL);
+                    mbedtls_ssl_conf_rng(&g_conf, crypto_rng, NULL);
                     mbedtls_ssl_conf_min_tls_version(&g_conf, MBEDTLS_SSL_VERSION_TLS1_2);
                     g_ready = 1;
                 }
@@ -163,6 +159,6 @@ const char *tls_error(const tls_conn_t *t) { return t->err[0] ? t->err : "failed
 void tls_free(tls_conn_t *t) {
     if (!t) return;
     mbedtls_ssl_free(&t->ssl);
-    sodium_memzero(t, sizeof *t);
+    crypto_wipe(t, sizeof *t);
     free(t);
 }

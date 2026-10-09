@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
 #include "transport/tor.h"
+#include "transport/socks.h"
 #include "crypto/crypto.h"
 #include "platform/platform.h"
 #include "common/util.h"
@@ -14,19 +15,42 @@
 
 #define TOR_FRAME_MAX 4096
 #define TX_CAP 32768
-#define RX_CAP (TOR_FRAME_MAX + 2)
+#define RX_CAP (TOR_FRAME_MAX + FRAME_LEN_PREFIX)
 #define MAX_STREAMS 64
 #define MAX_TARGETS 64
 #define CTL_BUF 8192
 #define STREAM_OPEN_TIMEOUT 120.0
 #define STREAM_IDLE_TIMEOUT 150.0
 #define CTL_RETRY 10.0
+#define CTL_CONNECT_TIMEOUT 10.0
+// A login that failed for a reason that needs fixing (a password, a permission) is retried this
+// much less often.
+#define CTL_FAILED_RETRY 50.0
 #define REPUBLISH_MIN_GAP 60.0
+#define ROOM_RETRY 60.0
+// A target whose streams fail is tried again after a delay that doubles each time, up to the max.
+#define TARGET_RETRY_BASE 5.0
+#define TARGET_RETRY_SHIFT 4
+#define TARGET_RETRY_MAX 80.0
+#define ACCEPT_BATCH 8
+#define CTL_OK 250
+// A stream's frames start with their length.
+#define FRAME_LEN_PREFIX 2
+#define TARGET_ID_LEN 16
+#define AUTH_COOKIE_LEN 32
+#define AUTH_NONCE_LEN 32
+
+// v3 onion addresses (rend-spec-v3): the public key, two bytes of checksum and the version, in base32.
+#define ONION_VERSION 3
+#define ONION_CHECKSUM_LEN 2
+#define ONION_RAW_LEN (TOR_PUB_LEN + ONION_CHECKSUM_LEN + 1)
+#define ONION_CHECKSUM_LABEL ".onion checksum"
+#define SHA3_256_LEN 32
 
 const tor_opts_t TOR_DEFAULTS = { "127.0.0.1:9050", "127.0.0.1:9051", "" };
 // Tor Browser runs its own tor on these. Tried when the defaults above don't answer.
-static const char *const BROWSER_SOCKS = "127.0.0.1:9150";
-static const char *const BROWSER_CONTROL = "127.0.0.1:9151";
+#define BROWSER_SOCKS "127.0.0.1:9150"
+#define BROWSER_CONTROL "127.0.0.1:9151"
 
 enum { S_FREE, S_CONNECTING, S_METHOD, S_AUTH, S_CONNECT, S_OPEN };
 
@@ -34,7 +58,7 @@ typedef struct {
     int state;
     sock_t s;
     int target;          // outgoing: index into targets; incoming: -1
-    uint8_t id[16];
+    uint8_t id[TARGET_ID_LEN];
     uint8_t rx[RX_CAP];
     size_t rx_len;
     uint8_t tx[TX_CAP];
@@ -46,7 +70,7 @@ typedef struct {
     int used;
     int room;            // one of the room's own onion services: never released
     char host[TOR_ADDR_LEN + 1];
-    uint8_t id[16];
+    uint8_t id[TARGET_ID_LEN];
     double next_try, last_used;
     int fails, opened;
 } target_t;
@@ -68,20 +92,20 @@ struct tor {
     double ctl_next_try, ctl_deadline;
     int ctl_fails, ctl_warned;
     char cookie_path[512];
-    uint8_t client_nonce[32];
-    uint8_t cookie[32];
+    uint8_t client_nonce[AUTH_NONCE_LEN];
+    uint8_t cookie[AUTH_COOKIE_LEN];
 
     sock_t listener;
     uint16_t listen_port;
     char my_onion[TOR_ADDR_LEN + 1];
     char room_onion[TOR_ROOM_SLOTS][TOR_ADDR_LEN + 1];
-    uint8_t room_keys[TOR_ROOM_SLOTS][64];
+    uint8_t room_keys[TOR_ROOM_SLOTS][TOR_KEY_LEN];
     int room_targets[TOR_ROOM_SLOTS];
     int host_slot;
     int want_room, room_up, room_republish;
     double room_published_at, room_retry_at;
 
-    char socks_user[17];
+    char socks_user[SOCKS_USER_LEN + 1];
     stream_t *streams[MAX_STREAMS];
     // The stream whose frames are being passed up. A send to it mustn't close it while that happens.
     int busy;
@@ -101,40 +125,28 @@ static void logf_(tor_t *t, int verbose_only, const char *fmt, ...) {
 
 static const char B32[] = "abcdefghijklmnopqrstuvwxyz234567";
 
-static void base32(const uint8_t *in, size_t n, char *out) {
-    size_t o = 0;
-    uint32_t buf = 0;
-    int bits = 0;
-    for (size_t i = 0; i < n; i++) {
-        buf = (buf << 8) | in[i];
-        bits += 8;
-        while (bits >= 5) { out[o++] = B32[(buf >> (bits - 5)) & 31]; bits -= 5; }
-    }
-    if (bits > 0) out[o++] = B32[(buf << (5 - bits)) & 31];
-    out[o] = '\0';
-}
-
-static void onion_checksum(const uint8_t pub[32], uint8_t out[2]) {
-    uint8_t in[15 + 32 + 1], digest[32];
-    memcpy(in, ".onion checksum", 15);
-    memcpy(in + 15, pub, 32);
-    in[47] = 3;
+static void onion_checksum(const uint8_t pub[TOR_PUB_LEN], uint8_t out[ONION_CHECKSUM_LEN]) {
+    enum { LABEL_LEN = sizeof ONION_CHECKSUM_LABEL - 1 };
+    uint8_t in[LABEL_LEN + TOR_PUB_LEN + 1], digest[SHA3_256_LEN];
+    memcpy(in, ONION_CHECKSUM_LABEL, LABEL_LEN);
+    memcpy(in + LABEL_LEN, pub, TOR_PUB_LEN);
+    in[LABEL_LEN + TOR_PUB_LEN] = ONION_VERSION;
     mbedtls_sha3(MBEDTLS_SHA3_256, in, sizeof in, digest, sizeof digest);
-    out[0] = digest[0];
-    out[1] = digest[1];
+    memcpy(out, digest, ONION_CHECKSUM_LEN);
 }
 
-void onion_address(const uint8_t pub[32], char out[TOR_ADDR_LEN + 1]) {
-    uint8_t raw[35];
-    memcpy(raw, pub, 32);
-    onion_checksum(pub, raw + 32);
-    raw[34] = 3;
-    base32(raw, sizeof raw, out);
+void onion_address(const uint8_t pub[TOR_PUB_LEN], char out[TOR_ADDR_LEN + 1]) {
+    uint8_t raw[ONION_RAW_LEN];
+    memcpy(raw, pub, TOR_PUB_LEN);
+    onion_checksum(pub, raw + TOR_PUB_LEN);
+    raw[ONION_RAW_LEN - 1] = ONION_VERSION;
+    base32_encode(raw, sizeof raw, out);
+    for (char *c = out; *c; c++) *c = (char)tolower((unsigned char)*c);
 }
 
 int onion_valid(const char *s) {
     if (!s || strlen(s) != TOR_ADDR_LEN) return 0;
-    uint8_t raw[35];
+    uint8_t raw[ONION_RAW_LEN];
     uint32_t buf = 0;
     int bits = 0;
     size_t o = 0;
@@ -145,16 +157,16 @@ int onion_valid(const char *s) {
         bits += 5;
         if (bits >= 8) { raw[o++] = (uint8_t)(buf >> (bits - 8)); bits -= 8; }
     }
-    if (o != 35 || raw[34] != 3) return 0;
-    uint8_t sum[2];
+    if (o != ONION_RAW_LEN || raw[ONION_RAW_LEN - 1] != ONION_VERSION) return 0;
+    uint8_t sum[ONION_CHECKSUM_LEN];
     onion_checksum(raw, sum);
-    return sum[0] == raw[32] && sum[1] == raw[33];
+    return memcmp(sum, raw + TOR_PUB_LEN, ONION_CHECKSUM_LEN) == 0;
 }
 
-static void target_id(const char *host, uint8_t id[16]) {
-    uint8_t h[32];
+static void target_id(const char *host, uint8_t id[TARGET_ID_LEN]) {
+    uint8_t h[SHA256_LEN];
     sha256_hash(host, strlen(host), h);
-    memcpy(id, h, 16);
+    memcpy(id, h, TARGET_ID_LEN);
 }
 
 static int target_has_stream(const tor_t *t, int target) {
@@ -188,26 +200,32 @@ static int add_target(tor_t *t, const char *host) {
     return slot;
 }
 
-tor_t *tor_new(const tor_opts_t *o, const uint8_t room_keys[TOR_ROOM_SLOTS][64],
-               const uint8_t room_pubs[TOR_ROOM_SLOTS][32], tor_deliver_fn deliver, tor_log_fn log, void *ctx) {
+static tor_t *tor_alloc(const tor_opts_t *o) {
     tor_t *t = calloc(1, sizeof *t);
     if (!t) return NULL;
     t->o = *o;
     t->ctl = SOCK_INVALID;
     t->listener = SOCK_INVALID;
     t->busy = -1;
+    t->host_slot = -1;
+    return t;
+}
+
+tor_t *tor_new(const tor_opts_t *o, const uint8_t room_keys[TOR_ROOM_SLOTS][TOR_KEY_LEN],
+               const uint8_t room_pubs[TOR_ROOM_SLOTS][TOR_PUB_LEN], tor_deliver_fn deliver, tor_log_fn log, void *ctx) {
+    tor_t *t = tor_alloc(o);
+    if (!t) return NULL;
     t->deliver = deliver;
     t->log = log;
     t->ctx = ctx;
     crypto_lock(t->room_keys, sizeof t->room_keys);
     memcpy(t->room_keys, room_keys, sizeof t->room_keys);
-    t->host_slot = -1;
     for (int i = 0; i < TOR_ROOM_SLOTS; i++) {
         onion_address(room_pubs[i], t->room_onion[i]);
         t->room_targets[i] = add_target(t, t->room_onion[i]);
         t->targets[t->room_targets[i]].room = 1;
     }
-    uint8_t user[8];
+    uint8_t user[SOCKS_USER_LEN / 2];
     gen_random(user, sizeof user);
     hex_encode(user, sizeof user, t->socks_user);
     t->listener = net_tcp_listen_loopback(&t->listen_port);
@@ -222,17 +240,10 @@ tor_t *tor_new(const tor_opts_t *o, const uint8_t room_keys[TOR_ROOM_SLOTS][64],
 }
 
 tor_t *tor_probe_new(const tor_opts_t *o) {
-    tor_t *t = calloc(1, sizeof *t);
-    if (!t) return NULL;
-    t->o = *o;
-    t->probe = 1;
-    t->ctl = SOCK_INVALID;
-    t->listener = SOCK_INVALID;
-    t->busy = -1;
-    t->host_slot = -1;
+    tor_t *t = tor_alloc(o);
+    if (t) t->probe = 1;
     return t;
 }
-
 
 static void close_stream(tor_t *t, int i) {
     stream_t *s = t->streams[i];
@@ -285,6 +296,10 @@ static const char *socks_addr(const tor_t *t) {
     return t->use_browser_ports ? BROWSER_SOCKS : t->o.socks;
 }
 
+static int default_ports(const tor_t *t) {
+    return strcmp(t->o.control, TOR_DEFAULTS.control) == 0 && strcmp(t->o.socks, TOR_DEFAULTS.socks) == 0;
+}
+
 static void ctl_send(tor_t *t, const char *line) {
     size_t len = strlen(line);
     // The control connection is local and these lines are short, so a partial write means tor is dead.
@@ -301,8 +316,7 @@ static void ctl_fail(tor_t *t, double now, const char *why, int fatal) {
     t->ctl_next_try = now + CTL_RETRY;
     if (t->probe) {
         // A probe tries the configured ports and, with the defaults, Tor Browser's, then stops.
-        int defaults = strcmp(t->o.control, TOR_DEFAULTS.control) == 0 && strcmp(t->o.socks, TOR_DEFAULTS.socks) == 0;
-        if (fatal || t->ctl_fails >= (defaults ? 2 : 1)) t->probe_done = -1;
+        if (fatal || t->ctl_fails >= (default_ports(t) ? 2 : 1)) t->probe_done = -1;
         t->ctl_next_try = now;
         return;
     }
@@ -323,8 +337,8 @@ static void send_add_me(tor_t *t) {
 }
 
 static void send_add_room(tor_t *t) {
-    char b64[89];
-    base64_encode(t->room_keys[t->host_slot], 64, b64);
+    char b64[BASE64_LEN(TOR_KEY_LEN) + 1];
+    base64_encode(t->room_keys[t->host_slot], TOR_KEY_LEN, b64);
     char line[200];
     snprintf(line, sizeof line, "ADD_ONION ED25519-V3:%s Port=%d,127.0.0.1:%u\r\n", b64, TOR_VPORT, (unsigned)t->listen_port);
     t->cmd = CMD_ADD_ROOM;
@@ -373,7 +387,7 @@ static void on_protocolinfo(tor_t *t, double now) {
     for (char *line = t->reply; line && *line; ) {
         char *eol = strstr(line, "\r\n");
         if (eol) *eol = '\0';
-        if (strncmp(line, "250-AUTH ", 9) == 0) {
+        if (starts_with(line, "250-AUTH ")) {
             reply_field(line, "METHODS", methods, sizeof methods);
             reply_field(line, "COOKIEFILE", t->cookie_path, sizeof t->cookie_path);
         }
@@ -389,8 +403,8 @@ static void on_protocolinfo(tor_t *t, double now) {
         // port, and anything can listen there while tor isn't running. Every tor since 0.2.3 offers
         // SAFECOOKIE, where the other side has to prove it read the cookie first.
         gen_random(t->client_nonce, sizeof t->client_nonce);
-        char hex[65], line[120];
-        hex_encode(t->client_nonce, 32, hex);
+        char hex[AUTH_NONCE_LEN * 2 + 1], line[120];
+        hex_encode(t->client_nonce, sizeof t->client_nonce, hex);
         snprintf(line, sizeof line, "AUTHCHALLENGE SAFECOOKIE %s\r\n", hex);
         t->ctl_state = C_CHALLENGE;
         ctl_send(t, line);
@@ -428,21 +442,22 @@ static void on_challenge(tor_t *t, double now) {
     // Tor writes these in upper case.
     for (char *c = server_hash_hex; *c; c++) *c = (char)tolower((unsigned char)*c);
     for (char *c = server_nonce_hex; *c; c++) *c = (char)tolower((unsigned char)*c);
-    uint8_t server_hash[32], server_nonce[32];
-    if (strlen(server_hash_hex) != 64 || strlen(server_nonce_hex) != 64
-        || hex_decode(server_hash_hex, 64, server_hash) != 0 || hex_decode(server_nonce_hex, 64, server_nonce) != 0) {
+    uint8_t server_hash[SHA256_LEN], server_nonce[AUTH_NONCE_LEN];
+    if (strlen(server_hash_hex) != sizeof server_hash * 2 || strlen(server_nonce_hex) != sizeof server_nonce * 2
+        || hex_decode(server_hash_hex, sizeof server_hash * 2, server_hash) != 0
+        || hex_decode(server_nonce_hex, sizeof server_nonce * 2, server_nonce) != 0) {
         ctl_fail(t, now, "Tor's SAFECOOKIE reply didn't parse", 1);
         return;
     }
-    uint8_t msg[96], want[32], mine[32];
-    memcpy(msg, t->cookie, 32);
-    memcpy(msg + 32, t->client_nonce, 32);
-    memcpy(msg + 64, server_nonce, 32);
+    uint8_t msg[AUTH_COOKIE_LEN + 2 * AUTH_NONCE_LEN], want[SHA256_LEN], mine[SHA256_LEN];
+    memcpy(msg, t->cookie, AUTH_COOKIE_LEN);
+    memcpy(msg + AUTH_COOKIE_LEN, t->client_nonce, AUTH_NONCE_LEN);
+    memcpy(msg + AUTH_COOKIE_LEN + AUTH_NONCE_LEN, server_nonce, AUTH_NONCE_LEN);
     static const char SK[] = "Tor safe cookie authentication server-to-controller hash";
     static const char CK[] = "Tor safe cookie authentication controller-to-server hash";
     hmac_sha256((const uint8_t *)SK, sizeof SK - 1, msg, sizeof msg, want);
     // The server proves it read the same cookie before we show our half.
-    if (crypto_equal(want, server_hash, 32) != 0) {
+    if (crypto_equal(want, server_hash, SHA256_LEN) != 0) {
         crypto_wipe(msg, sizeof msg);
         ctl_fail(t, now, "the control port failed Tor's cookie check - it may not be Tor", 1);
         return;
@@ -450,8 +465,8 @@ static void on_challenge(tor_t *t, double now) {
     hmac_sha256((const uint8_t *)CK, sizeof CK - 1, msg, sizeof msg, mine);
     crypto_wipe(msg, sizeof msg);
     crypto_wipe(t->cookie, sizeof t->cookie);
-    char hex[65], line[100];
-    hex_encode(mine, 32, hex);
+    char hex[SHA256_LEN * 2 + 1], line[100];
+    hex_encode(mine, sizeof mine, hex);
     snprintf(line, sizeof line, "AUTHENTICATE %s\r\n", hex);
     t->ctl_state = C_AUTH;
     ctl_send(t, line);
@@ -481,7 +496,7 @@ static void on_command_reply(tor_t *t, double now, int ok) {
             t->room_published_at = now;
             logf_(t, 1, "* tor: publishing room slot %d, %s.onion", t->host_slot, room);
         } else {
-            t->room_retry_at = now + 60.0;
+            t->room_retry_at = now + ROOM_RETRY;
             logf_(t, 1, "* tor: couldn't publish the room's onion service: %.80s", t->reply);
         }
     } else if (cmd == CMD_DEL_ROOM) {
@@ -491,7 +506,7 @@ static void on_command_reply(tor_t *t, double now, int ok) {
 
 // A complete reply has arrived when its last line has a space after the status code.
 static void on_reply(tor_t *t, double now) {
-    int ok = atoi(t->reply) == 250;
+    int ok = atoi(t->reply) == CTL_OK;
     switch (t->ctl_state) {
         case C_PROTOCOLINFO:
             if (!ok) { ctl_fail(t, now, "Tor's control port didn't answer PROTOCOLINFO", 0); return; }
@@ -532,7 +547,7 @@ static void ctl_read(tor_t *t, double now) {
             t->reply[t->reply_len] = '\0';
             int final = llen >= 6 && isdigit((unsigned char)t->ctl_in[0]) && t->ctl_in[3] == ' ';
             // Asynchronous events (650) aren't requested, and any that arrive are ignored.
-            int async = strncmp(t->ctl_in, "650", 3) == 0;
+            int async = starts_with(t->ctl_in, "650");
             memmove(t->ctl_in, t->ctl_in + llen, t->ctl_in_len - llen + 1);
             t->ctl_in_len -= llen;
             if (async) { if (final) t->reply_len = 0; continue; }
@@ -549,7 +564,7 @@ static void ctl_step(tor_t *t, double now) {
     switch (t->ctl_state) {
         case C_FAILED:
             // A fixable problem (a password, a permission), so retry every so often without logging.
-            if (now < t->ctl_next_try + 50.0) return;
+            if (now < t->ctl_next_try + CTL_FAILED_RETRY) return;
             t->ctl_state = C_IDLE;
             /* fall through */
         case C_IDLE: {
@@ -558,14 +573,13 @@ static void ctl_step(tor_t *t, double now) {
             if (!t->o.control[0]) return;
             // Each failure switches between the configured ports and Tor Browser's, while the
             // configured ones are the defaults.
-            int defaults = strcmp(t->o.control, TOR_DEFAULTS.control) == 0 && strcmp(t->o.socks, TOR_DEFAULTS.socks) == 0;
-            t->use_browser_ports = defaults && (t->ctl_fails % 2 == 1);
+            t->use_browser_ports = default_ports(t) && (t->ctl_fails % 2 == 1);
             addr_t a;
             if (addr_parse_hostport(control_addr(t), &a) != 0) { ctl_fail(t, now, "the Tor control port setting isn't host:port", 1); return; }
             t->ctl = net_tcp_connect(a);
             if (t->ctl == SOCK_INVALID) { ctl_fail(t, now, "can't open a connection to Tor's control port", 0); return; }
             t->ctl_state = C_CONNECTING;
-            t->ctl_deadline = now + 10.0;
+            t->ctl_deadline = now + CTL_CONNECT_TIMEOUT;
             return;
         }
         case C_CONNECTING: {
@@ -575,7 +589,7 @@ static void ctl_step(tor_t *t, double now) {
                 char why[320];
                 int defaults = strcmp(t->o.control, TOR_DEFAULTS.control) == 0;
                 snprintf(why, sizeof why, "can't reach Tor's control port at %s%s - is tor running with ControlPort on? "
-                         "(retrying; :set torsocks and :set torcontrol change the ports)", t->o.control, defaults ? " or Tor Browser's " "at 127.0.0.1:9151" : "");
+                         "(retrying; :set torsocks and :set torcontrol change the ports)", t->o.control, defaults ? " or Tor Browser's at " BROWSER_CONTROL : "");
                 ctl_fail(t, now, why, 0);
                 return;
             }
@@ -621,8 +635,7 @@ static void stream_fail(tor_t *t, int i, double now, const char *why) {
     stream_t *s = t->streams[i];
     if (s->target >= 0) {
         target_t *g = &t->targets[s->target];
-        int shift = g->fails < 4 ? g->fails : 4;
-        g->next_try = now + 5.0 * (double)(1u << shift);
+        g->next_try = now + backoff(g->fails, TARGET_RETRY_BASE, TARGET_RETRY_SHIFT, TARGET_RETRY_MAX);
         g->fails++;
         logf_(t, 1, "* tor: stream to %.16s... %s", g->host, why);
     }
@@ -663,8 +676,9 @@ static void stream_step(tor_t *t, int i, double now) {
         if (rc == 0) { if (now > s->deadline) stream_fail(t, i, now, "timed out reaching Tor's SOCKS port"); return; }
         if (rc < 0) { stream_fail(t, i, now, "can't reach Tor's SOCKS port"); return; }
         // Username/password "auth" isolates this session's circuits from every other's.
-        static const uint8_t hello[3] = { 5, 1, 2 };
-        if (net_tcp_send(s->s, hello, 3) != 3) { stream_fail(t, i, now, "SOCKS write failed"); return; }
+        uint8_t hello[SOCKS_HELLO_LEN];
+        socks_hello(hello);
+        if (net_tcp_send(s->s, hello, sizeof hello) != (int)sizeof hello) { stream_fail(t, i, now, "SOCKS write failed"); return; }
         s->state = S_METHOD;
         return;
     }
@@ -677,33 +691,27 @@ static void stream_step(tor_t *t, int i, double now) {
         s->last_rx = now;
         for (;;) {
             if (s->state == S_METHOD) {
-                if (s->rx_len < 2) break;
-                if (s->rx[0] != 5 || s->rx[1] != 2) { stream_fail(t, i, now, "SOCKS port refused (is it Tor's?)"); return; }
-                uint8_t auth[3 + 16 + 1];
-                auth[0] = 1; auth[1] = 16;
-                memcpy(auth + 2, t->socks_user, 16);
-                auth[18] = 1; auth[19] = 'x';
-                if (net_tcp_send(s->s, auth, 20) != 20) { stream_fail(t, i, now, "SOCKS write failed"); return; }
-                memmove(s->rx, s->rx + 2, s->rx_len - 2); s->rx_len -= 2;
+                if (s->rx_len < SOCKS_REPLY_LEN) break;
+                if (!socks_hello_ok(s->rx)) { stream_fail(t, i, now, "SOCKS port refused (is it Tor's?)"); return; }
+                uint8_t auth[SOCKS_LOGIN_LEN];
+                socks_login(auth, t->socks_user);
+                if (net_tcp_send(s->s, auth, sizeof auth) != (int)sizeof auth) { stream_fail(t, i, now, "SOCKS write failed"); return; }
+                memmove(s->rx, s->rx + SOCKS_REPLY_LEN, s->rx_len - SOCKS_REPLY_LEN); s->rx_len -= SOCKS_REPLY_LEN;
                 s->state = S_AUTH;
             } else if (s->state == S_AUTH) {
-                if (s->rx_len < 2) break;
+                if (s->rx_len < SOCKS_REPLY_LEN) break;
                 if (s->rx[1] != 0) { stream_fail(t, i, now, "SOCKS login refused"); return; }
-                memmove(s->rx, s->rx + 2, s->rx_len - 2); s->rx_len -= 2;
-                const char *host = t->targets[s->target].host;
-                uint8_t req[7 + TOR_ADDR_LEN + 6];
-                size_t hl = strlen(host) + 6;
-                req[0] = 5; req[1] = 1; req[2] = 0; req[3] = 3; req[4] = (uint8_t)hl;
-                memcpy(req + 5, host, hl - 6);
-                memcpy(req + 5 + hl - 6, ".onion", 6);
-                req[5 + hl] = (uint8_t)(TOR_VPORT >> 8);
-                req[6 + hl] = (uint8_t)(TOR_VPORT & 0xff);
-                if (net_tcp_send(s->s, req, 7 + hl) != (int)(7 + hl)) { stream_fail(t, i, now, "SOCKS write failed"); return; }
+                memmove(s->rx, s->rx + SOCKS_REPLY_LEN, s->rx_len - SOCKS_REPLY_LEN); s->rx_len -= SOCKS_REPLY_LEN;
+                char name[TOR_ADDR_LEN + sizeof ".onion"];
+                snprintf(name, sizeof name, "%s.onion", t->targets[s->target].host);
+                uint8_t req[SOCKS_CONNECT_LEN(sizeof name)];
+                size_t len = socks_connect(req, name, strlen(name), TOR_VPORT);
+                if (net_tcp_send(s->s, req, len) != (int)len) { stream_fail(t, i, now, "SOCKS write failed"); return; }
                 s->state = S_CONNECT;
             } else if (s->state == S_CONNECT) {
-                if (s->rx_len < 5) break;
+                if (s->rx_len < SOCKS_CONNECT_HEAD) break;
                 if (s->rx[1] != 0) { stream_fail(t, i, now, socks_error(s->rx[1])); return; }
-                size_t need = s->rx[3] == 1 ? 10 : s->rx[3] == 4 ? 22 : s->rx[3] == 3 ? (size_t)7 + s->rx[4] : 0;
+                size_t need = socks_connect_reply_len(s->rx);
                 if (need == 0) { stream_fail(t, i, now, "bad SOCKS reply"); return; }
                 if (s->rx_len < need) break;
                 memmove(s->rx, s->rx + need, s->rx_len - need); s->rx_len -= need;
@@ -713,14 +721,14 @@ static void stream_step(tor_t *t, int i, double now) {
                 g->opened = 1;
                 logf_(t, 1, "* tor: stream open to %.16s...", g->host);
             } else {
-                if (s->rx_len < 2) break;
-                size_t flen = ((size_t)s->rx[0] << 8) | s->rx[1];
+                if (s->rx_len < FRAME_LEN_PREFIX) break;
+                size_t flen = load_be16(s->rx);
                 if (flen == 0 || flen > TOR_FRAME_MAX) { stream_fail(t, i, now, "bad frame"); return; }
-                if (s->rx_len < 2 + flen) break;
+                if (s->rx_len < FRAME_LEN_PREFIX + flen) break;
                 uint8_t frame[TOR_FRAME_MAX];
-                memcpy(frame, s->rx + 2, flen);
-                memmove(s->rx, s->rx + 2 + flen, s->rx_len - 2 - flen);
-                s->rx_len -= 2 + flen;
+                memcpy(frame, s->rx + FRAME_LEN_PREFIX, flen);
+                memmove(s->rx, s->rx + FRAME_LEN_PREFIX + flen, s->rx_len - FRAME_LEN_PREFIX - flen);
+                s->rx_len -= FRAME_LEN_PREFIX + flen;
                 t->busy = i;
                 if (t->deliver) t->deliver(t->ctx, frame, flen, addr_virtual(ADDR_TOR, s->id), now);
                 t->busy = -1;
@@ -736,7 +744,7 @@ static void stream_step(tor_t *t, int i, double now) {
 
 static void accept_streams(tor_t *t, double now) {
     if (t->listener == SOCK_INVALID) return;
-    for (int k = 0; k < 8; k++) {
+    for (int k = 0; k < ACCEPT_BATCH; k++) {
         sock_t a = net_tcp_accept(t->listener);
         if (a == SOCK_INVALID) return;
         int idx;
@@ -745,7 +753,7 @@ static void accept_streams(tor_t *t, double now) {
         s->s = a;
         s->state = S_OPEN;
         s->last_rx = now;
-        gen_random(s->id, 16);
+        gen_random(s->id, TARGET_ID_LEN);
     }
 }
 
@@ -784,10 +792,10 @@ static int open_stream(tor_t *t, int target, double now) {
     stream_t *s = new_stream(t, &idx);
     if (!s) return -1;
     s->s = net_tcp_connect(proxy);
-    if (s->s == SOCK_INVALID) { close_stream(t, idx); g->next_try = now + 5.0; return -1; }
+    if (s->s == SOCK_INVALID) { close_stream(t, idx); g->next_try = now + TARGET_RETRY_BASE; return -1; }
     s->state = S_CONNECTING;
     s->target = target;
-    memcpy(s->id, g->id, 16);
+    memcpy(s->id, g->id, TARGET_ID_LEN);
     s->deadline = now + STREAM_OPEN_TIMEOUT;
     s->last_rx = now;
     // Until it opens, stream_fail's backoff applies, and a second one isn't opened.
@@ -800,13 +808,13 @@ int tor_send(tor_t *t, addr_t to, const uint8_t *data, size_t len, double now) {
     int idx = -1;
     for (int i = 0; i < MAX_STREAMS; i++) {
         stream_t *s = t->streams[i];
-        if (!s || memcmp(s->id, to.ip, 16) != 0) continue;
+        if (!s || memcmp(s->id, to.ip, TARGET_ID_LEN) != 0) continue;
         if (idx < 0 || s->state == S_OPEN) idx = i;
     }
     if (idx < 0) {
         int target = -1;
         for (int i = 0; i < MAX_TARGETS; i++)
-            if (t->targets[i].used && memcmp(t->targets[i].id, to.ip, 16) == 0) { target = i; break; }
+            if (t->targets[i].used && memcmp(t->targets[i].id, to.ip, TARGET_ID_LEN) == 0) { target = i; break; }
         if (target < 0) return -1;
         t->targets[target].last_used = now;
         idx = open_stream(t, target, now);
@@ -815,9 +823,9 @@ int tor_send(tor_t *t, addr_t to, const uint8_t *data, size_t len, double now) {
     stream_t *s = t->streams[idx];
     if (s->target >= 0) t->targets[s->target].last_used = now;
     // A stream that's still opening holds a few datagrams. Any more are lost, as with UDP.
-    if (s->tx_len + 2 + len > TX_CAP) return -1;
-    s->tx[s->tx_len++] = (uint8_t)(len >> 8);
-    s->tx[s->tx_len++] = (uint8_t)len;
+    if (s->tx_len + FRAME_LEN_PREFIX + len > TX_CAP) return -1;
+    store_be16(s->tx + s->tx_len, (uint16_t)len);
+    s->tx_len += FRAME_LEN_PREFIX;
     memcpy(s->tx + s->tx_len, data, len);
     s->tx_len += len;
     if (s->state == S_OPEN && idx != t->busy) stream_flush(t, idx, now);
@@ -842,9 +850,7 @@ void tor_host_room(tor_t *t, int slot) {
         // A slot nobody answered on, and not the creator's while others are free.
         int free_slots[TOR_ROOM_SLOTS], n = 0;
         for (int i = 1; i < TOR_ROOM_SLOTS; i++) if (!t->targets[t->room_targets[i]].opened) free_slots[n++] = i;
-        uint8_t r;
-        gen_random(&r, 1);
-        slot = n > 0 ? free_slots[r % n] : 1 + r % (TOR_ROOM_SLOTS - 1);
+        slot = n > 0 ? free_slots[gen_uniform((uint32_t)n)] : 1 + (int)gen_uniform(TOR_ROOM_SLOTS - 1);
     }
     t->host_slot = slot;
     t->want_room = 1;

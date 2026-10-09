@@ -24,6 +24,9 @@
 // bootstrap servers while fewer than DHT_KNOWN_ENOUGH are known.
 #define DHT_KNOWN_MAX 32
 #define DHT_KNOWN_ENOUGH 8
+#define DHT_NODE_ID_LEN 20
+#define DHT_TID_LEN 2
+#define DHT_TOKEN_MAX 64
 
 // Where the DHT's datagrams go: to an address, or (host not NULL) to a name that a proxy looks up
 // at its end, so local DNS is never used.
@@ -31,18 +34,18 @@ typedef void (*dht_send_fn)(void *ctx, const void *data, size_t len, const addr_
 
 typedef struct {
     addr_t addr;
-    uint8_t node_id[20];
+    uint8_t node_id[DHT_NODE_ID_LEN];
     int have_id;
     int queried;
     // 1 + the bootstrap server's index when this one is only a name, for the proxy to look up.
     int named;
-    uint8_t token[64];
+    uint8_t token[DHT_TOKEN_MAX];
     size_t token_len;
     int have_token;
 } dht_cand_t;
 
 typedef struct {
-    uint8_t tid[2];
+    uint8_t tid[DHT_TID_LEN];
     addr_t addr;
     int named;   // sent to a name: whatever address answers with its transaction id is it
     double sent_at;
@@ -52,7 +55,7 @@ typedef struct {
 typedef struct {
     int used;
     addr_t addr;
-    uint8_t node_id[20];
+    uint8_t node_id[DHT_NODE_ID_LEN];
     double ok_at;
 } dht_known_t;
 
@@ -71,6 +74,7 @@ typedef struct {
 // One lookup per address family: IPv4 nodes make up one DHT, IPv6 nodes another (BEP 32).
 #define DHT_V4 0
 #define DHT_V6 1
+#define DHT_FAMILIES 2
 
 typedef struct dht_boot_job dht_boot_job_t;
 
@@ -85,15 +89,15 @@ typedef struct {
     int resolve_tries;
     // The node id of the current round. Each hour's lookup key has its own random id, so nothing in
     // the DHT messages links one hour's lookups to another's.
-    uint8_t node_id[20];
-    struct { int set; long long epoch; uint8_t id[20]; } ids[2];
+    uint8_t node_id[DHT_NODE_ID_LEN];
+    struct { int set; long long epoch; uint8_t id[DHT_NODE_ID_LEN]; } ids[2];
     // The room's DHT key, and the hourly lookup key of the current round. Near the change of hour a
     // second round follows for the other hour's key (alt_epoch).
     uint8_t key[DHT_KEY_LEN];
-    uint8_t infohash[20];
+    uint8_t infohash[DHT_INFOHASH_LEN];
     long long alt_epoch;
     int alt_pending;
-    dht_known_t known[2][DHT_KNOWN_MAX];
+    dht_known_t known[DHT_FAMILIES][DHT_KNOWN_MAX];
     dht_send_fn send;
     void *send_ctx;
     // Bootstrap servers go out by name, never through local DNS (a proxy resolves them).
@@ -102,8 +106,8 @@ typedef struct {
     // Announce my_port as given (a port mapping's external port) instead of the source port the
     // node sees.
     int explicit_port;
-    int want[2];
-    dht_lookup_t lk[2];
+    int want[DHT_FAMILIES];
+    dht_lookup_t lk[DHT_FAMILIES];
     double next_lookup;
     int told_dht;
     int peers_now;

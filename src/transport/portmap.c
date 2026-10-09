@@ -17,16 +17,59 @@
 #define HTTP_TIMEOUT 5.0
 #define SSDP_WAIT 3.0
 #define RETRY_AFTER_FAIL 600.0
+// A permanent UPnP mapping (no lease) is checked this often.
+#define PERMANENT_RECHECK 3600.0
+#define UPNP_RENEW_RETRY 60.0
+// PCP and NAT-PMP requests go a few times, each wait twice the one before.
+#define GW_TRIES 3
+#define GW_RETRY_BASE 0.25
+#define RENEW_TRIES 4
+#define RENEW_RETRY_BASE 0.5
+#define SSDP_SENDS 2
+#define SSDP_RESEND 1.0
+// A mapping is removed on exit with a request that waits this long at most.
+#define DELETE_WAIT 1.0
+#define DELETE_POLL_MS 20
+#define RECV_BATCH 16
+#define DGRAM_MAX 1500
+#define HTTP_REQ_MAX 2048
+#define HTTP_PORT 80
+#define HTTP_OK 200
+// Where a status line's code starts: "HTTP/1.1 200".
+#define HTTP_STATUS_AT 9
+#define CHUNK_DIGITS_MAX 7
+#define IP4_STR_LEN 16
+#define SSDP_HOST "239.255.255.250:1900"
+
+// PCP (RFC 6887): a 24-byte header (version, opcode, result, lifetime, our address as IPv4-mapped
+// IPv6), then MAP's nonce, protocol, internal port, external port and external address.
+enum { PCP_VERSION = 2, PCP_OP_MAP = 1, PCP_RESPONSE = 0x80, PROTO_UDP = 17 };
+enum { PCP_RESULT_AT = 3, PCP_LIFETIME_AT = 4, PCP_CLIENT_IP_AT = 8, PCP_NONCE_AT = 24, PCP_PROTO_AT = 36,
+       PCP_INTERNAL_AT = 40, PCP_EXTERNAL_AT = 42, PCP_EXT_IP_AT = 44, PCP_MAP_LEN = 60, PCP_NONCE_LEN = 12 };
+// NAT-PMP (RFC 6886): version 0, an opcode (plus 128 in a reply), then a request's ports and
+// lifetime, or a reply's result, time since the router started, and the external address or ports.
+enum { NATPMP_OP_EXTIP = 0, NATPMP_OP_MAP_UDP = 1, NATPMP_RESPONSE = 128 };
+enum { NATPMP_INTERNAL_AT = 4, NATPMP_EXTERNAL_AT = 6, NATPMP_LIFETIME_AT = 8, NATPMP_MAP_LEN = 12 };
+enum { NATPMP_RESULT_AT = 2, NATPMP_EXTIP_AT = 8, NATPMP_EXTIP_REPLY_LEN = 12, NATPMP_MAPPED_AT = 10,
+       NATPMP_MAPPED_LIFETIME_AT = 12, NATPMP_MAP_REPLY_LEN = 16 };
+// UPnP's errors: the router only takes permanent mappings, or the port is someone else's.
+#define UPNP_ONLY_PERMANENT 725
+#define UPNP_CONFLICT 718
+#define CONFLICT_TRIES 3
+// After a conflict, another port is picked from these.
+#define RANDOM_PORT_MIN 20000
+#define RANDOM_PORTS 40000
 
 enum {
     P_START, P_PCP, P_NATPMP, P_SSDP, P_DESC, P_ADD, P_EXTIP, P_MAPPED, P_FAILED
 };
 enum { VIA_NONE, VIA_PCP, VIA_NATPMP, VIA_UPNP };
+enum { HTTP_CONNECTING, HTTP_SENDING, HTTP_RECEIVING };
 
 typedef struct {
     sock_t s;
-    int stage;        // 0 connecting, 1 sending, 2 receiving
-    char req[2048];
+    int stage;
+    char req[HTTP_REQ_MAX];
     size_t req_len, sent;
     char *resp;
     size_t resp_len;
@@ -36,18 +79,18 @@ typedef struct {
 struct portmap {
     int state, via;
     uint16_t internal_port, external_port, want_external;
-    uint8_t gw[4];
+    uint8_t gw[IP4_LEN];
     int have_gw;
-    uint8_t local_ip[4];
-    uint8_t ext_ip[4];
+    uint8_t local_ip[IP4_LEN];
+    uint8_t ext_ip[IP4_LEN];
     int have_ext_ip;
     sock_t udp;
-    uint8_t nonce[12];
+    uint8_t nonce[PCP_NONCE_LEN];
     int tries;
     double next_send, deadline, renew_at;
     int renewing;
     // UPnP
-    uint8_t igd_ip[4];
+    uint8_t igd_ip[IP4_LEN];
     uint16_t igd_port;
     char desc_path[256];
     char ctl_path[256];
@@ -65,18 +108,22 @@ static void logf_(portmap_t *p, int verbose_only, const char *fmt, ...) {
     if (p->log) p->log(p->ctx, verbose_only, msg);
 }
 
-static void put16(uint8_t *b, uint16_t v) { b[0] = (uint8_t)(v >> 8); b[1] = (uint8_t)v; }
-static void put32(uint8_t *b, uint32_t v) { b[0] = (uint8_t)(v >> 24); b[1] = (uint8_t)(v >> 16); b[2] = (uint8_t)(v >> 8); b[3] = (uint8_t)v; }
-static uint16_t get16(const uint8_t *b) { return (uint16_t)((b[0] << 8) | b[1]); }
-static uint32_t get32(const uint8_t *b) { return ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) | ((uint32_t)b[2] << 8) | b[3]; }
-
-static int is_private_v4(const uint8_t ip[4]) {
+static int is_private_v4(const uint8_t ip[IP4_LEN]) {
     return ip[0] == 10 || (ip[0] == 172 && (ip[1] & 0xf0) == 16) || (ip[0] == 192 && ip[1] == 168)
         || (ip[0] == 169 && ip[1] == 254) || (ip[0] == 100 && (ip[1] & 0xc0) == 64);
 }
 
-static void ip_str(const uint8_t ip[4], char out[16]) {
-    snprintf(out, 16, "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+static void ip_str(const uint8_t ip[IP4_LEN], char out[IP4_STR_LEN]) {
+    snprintf(out, IP4_STR_LEN, "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+}
+
+static const char *via_name(int via) { return via == VIA_PCP ? "PCP" : via == VIA_NATPMP ? "NAT-PMP" : "UPnP"; }
+
+// An IPv4 address in the IPv6 form PCP carries: ::ffff:a.b.c.d.
+static void v4_mapped(uint8_t out[IP6_LEN], const uint8_t ip[IP4_LEN]) {
+    memset(out, 0, IP6_LEN - IP4_LEN - 2);
+    out[IP6_LEN - IP4_LEN - 2] = out[IP6_LEN - IP4_LEN - 1] = 0xff;
+    memcpy(out + IP6_LEN - IP4_LEN, ip, IP4_LEN);
 }
 
 portmap_t *portmap_new(uint16_t internal_port, portmap_log_fn log, void *ctx) {
@@ -120,12 +167,11 @@ static void mapped(portmap_t *p, double now, int via, uint16_t ext, uint32_t lif
     p->state = P_MAPPED;
     p->renewing = 0;
     // Renew at half the lease. A permanent UPnP mapping (lifetime 0) is only checked every hour.
-    p->renew_at = now + (lifetime ? (double)lifetime / 2.0 : 3600.0);
+    p->renew_at = now + (lifetime ? (double)lifetime / 2.0 : PERMANENT_RECHECK);
     if (fresh) {
-        char ext_ip[16] = "?";
+        char ext_ip[IP4_STR_LEN] = "?";
         if (p->have_ext_ip) ip_str(p->ext_ip, ext_ip);
-        logf_(p, 0, "* port mapping: the router forwards %s:%u to this session (%s)", ext_ip, (unsigned)ext,
-              via == VIA_PCP ? "PCP" : via == VIA_NATPMP ? "NAT-PMP" : "UPnP");
+        logf_(p, 0, "* port mapping: the router forwards %s:%u to this session (%s)", ext_ip, (unsigned)ext, via_name(via));
     }
 }
 
@@ -136,30 +182,30 @@ static void send_gw(portmap_t *p, const uint8_t *msg, size_t len) {
 }
 
 static void send_pcp(portmap_t *p, uint32_t lifetime) {
-    uint8_t m[60];
+    static const uint8_t ANY_IP[IP4_LEN];
+    uint8_t m[PCP_MAP_LEN];
     memset(m, 0, sizeof m);
-    m[0] = 2;
-    m[1] = 1;
-    put32(m + 4, lifetime);
-    m[18] = 0xff; m[19] = 0xff;
-    memcpy(m + 20, p->local_ip, 4);
-    memcpy(m + 24, p->nonce, 12);
-    m[36] = 17;
-    put16(m + 40, p->internal_port);
-    put16(m + 42, p->want_external);
-    m[54] = 0xff; m[55] = 0xff;
+    m[0] = PCP_VERSION;
+    m[1] = PCP_OP_MAP;
+    store_be32(m + PCP_LIFETIME_AT, lifetime);
+    v4_mapped(m + PCP_CLIENT_IP_AT, p->local_ip);
+    memcpy(m + PCP_NONCE_AT, p->nonce, PCP_NONCE_LEN);
+    m[PCP_PROTO_AT] = PROTO_UDP;
+    store_be16(m + PCP_INTERNAL_AT, p->internal_port);
+    store_be16(m + PCP_EXTERNAL_AT, p->want_external);
+    v4_mapped(m + PCP_EXT_IP_AT, ANY_IP);
     send_gw(p, m, sizeof m);
 }
 
 static void send_natpmp(portmap_t *p, uint32_t lifetime) {
-    uint8_t ext_req[2] = { 0, 0 };
+    uint8_t ext_req[2] = { 0, NATPMP_OP_EXTIP };
     send_gw(p, ext_req, sizeof ext_req);
-    uint8_t m[12];
+    uint8_t m[NATPMP_MAP_LEN];
     memset(m, 0, sizeof m);
-    m[1] = 1;
-    put16(m + 4, p->internal_port);
-    put16(m + 6, p->want_external);
-    put32(m + 8, lifetime);
+    m[1] = NATPMP_OP_MAP_UDP;
+    store_be16(m + NATPMP_INTERNAL_AT, p->internal_port);
+    store_be16(m + NATPMP_EXTERNAL_AT, p->want_external);
+    store_be32(m + NATPMP_LIFETIME_AT, lifetime);
     send_gw(p, m, sizeof m);
 }
 
@@ -172,9 +218,9 @@ static void send_ssdp(portmap_t *p) {
     addr_t to;
     uint8_t mc[4] = { 239, 255, 255, 250 };
     addr_set_v4(&to, mc, SSDP_PORT);
-    for (size_t i = 0; i < sizeof TARGETS / sizeof TARGETS[0]; i++) {
+    for (size_t i = 0; i < COUNT_OF(TARGETS); i++) {
         char msg[256];
-        int n = snprintf(msg, sizeof msg, "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\n"
+        int n = snprintf(msg, sizeof msg, "M-SEARCH * HTTP/1.1\r\nHOST: " SSDP_HOST "\r\nMAN: \"ssdp:discover\"\r\n"
                                           "MX: 2\r\nST: %s\r\n\r\n", TARGETS[i]);
         net_send(p->udp, msg, (size_t)n, to);
     }
@@ -192,7 +238,7 @@ static int start_http(portmap_t *p, double now, const char *req, size_t len) {
     memcpy(p->http.req, req, len);
     p->http.req_len = len;
     p->http.sent = 0;
-    p->http.stage = 0;
+    p->http.stage = HTTP_CONNECTING;
     p->http.deadline = now + HTTP_TIMEOUT;
     return 0;
 }
@@ -201,20 +247,20 @@ static int start_http(portmap_t *p, double now, const char *req, size_t len) {
 static int http_step(http_t *h, double now) {
     if (h->s == SOCK_INVALID) return -1;
     if (now > h->deadline) return -1;
-    if (h->stage == 0) {
+    if (h->stage == HTTP_CONNECTING) {
         int rc = net_tcp_connect_done(h->s);
         if (rc < 0) return -1;
         if (rc == 0) return 0;
-        h->stage = 1;
+        h->stage = HTTP_SENDING;
     }
-    if (h->stage == 1) {
+    if (h->stage == HTTP_SENDING) {
         while (h->sent < h->req_len) {
             int n = net_tcp_send(h->s, h->req + h->sent, h->req_len - h->sent);
             if (n < 0) return -1;
             if (n == 0) return 0;
             h->sent += (size_t)n;
         }
-        h->stage = 2;
+        h->stage = HTTP_RECEIVING;
     }
     for (;;) {
         if (h->resp_len >= HTTP_CAP) return -1;
@@ -235,8 +281,8 @@ static int find_ci(const char *hay, size_t len, const char *needle) {
 }
 
 int portmap_http_body(const char *resp, size_t len, int *status, char *body, size_t cap) {
-    if (len < 12 || strncmp(resp, "HTTP/1.", 7) != 0) return -1;
-    *status = atoi(resp + 9);
+    if (len < 12 || !starts_with(resp, "HTTP/1.")) return -1;
+    *status = atoi(resp + HTTP_STATUS_AT);
     int head_end = -1;
     for (size_t i = 0; i + 3 < len; i++) if (memcmp(resp + i, "\r\n\r\n", 4) == 0) { head_end = (int)i; break; }
     if (head_end < 0) return -1;
@@ -253,10 +299,9 @@ int portmap_http_body(const char *resp, size_t len, int *status, char *body, siz
         size_t i = 0;
         for (;;) {
             size_t sz = 0, digits = 0;
-            while (i < blen && isxdigit((unsigned char)b[i])) {
-                char ch = b[i++];
-                sz = sz * 16 + (size_t)(isdigit((unsigned char)ch) ? ch - '0' : (tolower((unsigned char)ch) - 'a' + 10));
-                if (++digits > 7) return -1;
+            for (int h; i < blen && (h = hex_value(b[i])) >= 0; i++) {
+                sz = sz * 16 + (size_t)h;
+                if (++digits > CHUNK_DIGITS_MAX) return -1;
             }
             if (digits == 0) return -1;
             while (i < blen && b[i] != '\n') i++;
@@ -299,7 +344,7 @@ int portmap_parse_control_url(const char *xml, size_t len, char *service, size_t
         "urn:schemas-upnp-org:service:WANIPConnection:1",
         "urn:schemas-upnp-org:service:WANPPPConnection:1",
     };
-    for (size_t w = 0; w < sizeof WANTED / sizeof WANTED[0]; w++) {
+    for (size_t w = 0; w < COUNT_OF(WANTED); w++) {
         size_t pos = 0;
         while (pos < len) {
             int a = find_ci(xml + pos, len - pos, "<service>");
@@ -314,7 +359,7 @@ int portmap_parse_control_url(const char *xml, size_t len, char *service, size_t
                 copy_str(service, type, scap);
                 return 0;
             }
-            pos = start + blen + 10;
+            pos = start + blen + sizeof "</service>" - 1;
         }
     }
     return -1;
@@ -322,21 +367,22 @@ int portmap_parse_control_url(const char *xml, size_t len, char *service, size_t
 
 // "http://IP[:PORT]/path" for a gateway at ip, or a path alone. Hosts other than the gateway are
 // refused, so a device on the LAN can't point chat's requests anywhere else.
-static int url_path(const char *url, const uint8_t ip[4], uint16_t *port, char *path, size_t cap) {
-    if (strncasecmp(url, "http://", 7) == 0) {
-        const char *h = url + 7;
+static int url_path(const char *url, const uint8_t ip[IP4_LEN], uint16_t *port, char *path, size_t cap) {
+    static const char HTTP[] = "http://";
+    if (strncasecmp(url, HTTP, sizeof HTTP - 1) == 0) {
+        const char *h = url + sizeof HTTP - 1;
         size_t hl = strcspn(h, ":/");
         char host[32];
         if (hl == 0 || hl >= sizeof host) return -1;
         memcpy(host, h, hl);
         host[hl] = '\0';
-        char want[16];
+        char want[IP4_STR_LEN];
         ip_str(ip, want);
         if (strcmp(host, want) != 0) return -1;
         h += hl;
-        long pt = 80;
+        long pt = HTTP_PORT;
         if (*h == ':') { pt = strtol(h + 1, NULL, 10); h += 1 + strspn(h + 1, "0123456789"); }
-        if (pt <= 0 || pt > 65535) return -1;
+        if (pt <= 0 || pt > UINT16_MAX) return -1;
         *port = (uint16_t)pt;
         url = *h ? h : "/";
     }
@@ -358,7 +404,7 @@ static size_t soap(portmap_t *p, char *out, size_t cap, const char *action, cons
         "s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:%s xmlns:u=\"%s\">%s</u:%s>"
         "</s:Body></s:Envelope>\r\n", action, p->service, args, action);
     if (bl <= 0 || (size_t)bl >= sizeof body) return 0;
-    char ip[16];
+    char ip[IP4_STR_LEN];
     ip_str(p->igd_ip, ip);
     int n = snprintf(out, cap, "POST %s HTTP/1.1\r\nHost: %s:%u\r\nContent-Type: text/xml; charset=\"utf-8\"\r\n"
                                "SOAPAction: \"%s#%s\"\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
@@ -367,7 +413,7 @@ static size_t soap(portmap_t *p, char *out, size_t cap, const char *action, cons
 }
 
 static int send_add(portmap_t *p, double now) {
-    char args[700], lan[16], req[2048];
+    char args[700], lan[IP4_STR_LEN], req[HTTP_REQ_MAX];
     ip_str(p->local_ip, lan);
     snprintf(args, sizeof args,
              "<NewRemoteHost></NewRemoteHost><NewExternalPort>%u</NewExternalPort><NewProtocol>UDP</NewProtocol>"
@@ -379,7 +425,7 @@ static int send_add(portmap_t *p, double now) {
 }
 
 static int send_extip(portmap_t *p, double now) {
-    char req[2048];
+    char req[HTTP_REQ_MAX];
     size_t n = soap(p, req, sizeof req, "GetExternalIPAddress", "");
     return n ? start_http(p, now, req, n) : -1;
 }
@@ -393,21 +439,33 @@ static void begin_ssdp(portmap_t *p, double now) {
 
 static void on_udp(portmap_t *p, const uint8_t *d, size_t len, addr_t from, double now) {
     if (p->state == P_PCP || p->state == P_NATPMP || (p->state == P_MAPPED && p->renewing)) {
-        if (from.is_v6 || from.port != PCP_PORT || memcmp(from.ip, p->gw, 4) != 0) return;
-        if (len >= 60 && d[0] == 2 && d[1] == 0x81 && memcmp(d + 24, p->nonce, 12) == 0) {
-            if (d[3] != 0) {
+        if (from.is_v6 || from.port != PCP_PORT || memcmp(from.ip, p->gw, IP4_LEN) != 0) return;
+        if (len >= PCP_MAP_LEN && d[0] == PCP_VERSION && d[1] == (PCP_RESPONSE | PCP_OP_MAP)
+            && memcmp(d + PCP_NONCE_AT, p->nonce, PCP_NONCE_LEN) == 0) {
+            if (d[PCP_RESULT_AT] != 0) {
                 if (p->state == P_PCP) { p->state = P_NATPMP; p->tries = 0; p->next_send = now; }
                 else fail(p, now, "the router refused to renew the mapping");
                 return;
             }
-            if (d[56] == 0 && d[57] == 0 && d[58] == 0 && d[59] == 0) {} // address unknown
-            else if (d[54] == 0xff && d[55] == 0xff) { memcpy(p->ext_ip, d + 56, 4); p->have_ext_ip = 1; }
-            mapped(p, now, VIA_PCP, get16(d + 42), get32(d + 4));
+            // The external address, unless the router left it all zeros.
+            static const uint8_t UNKNOWN[IP4_LEN];
+            const uint8_t *ext = d + PCP_EXT_IP_AT, *ext4 = ext + IP6_LEN - IP4_LEN;
+            if (memcmp(ext4, UNKNOWN, IP4_LEN) != 0 && ext[IP6_LEN - IP4_LEN - 2] == 0xff && ext[IP6_LEN - IP4_LEN - 1] == 0xff) {
+                memcpy(p->ext_ip, ext4, IP4_LEN);
+                p->have_ext_ip = 1;
+            }
+            mapped(p, now, VIA_PCP, load_be16(d + PCP_EXTERNAL_AT), load_be32(d + PCP_LIFETIME_AT));
         } else if (len >= 2 && d[0] == 0) {
-            if (d[1] == 128 && len >= 12 && get16(d + 2) == 0) { memcpy(p->ext_ip, d + 8, 4); p->have_ext_ip = 1; }
-            else if (d[1] == 129 && len >= 16) {
-                if (get16(d + 2) != 0) { if (p->state == P_NATPMP) begin_ssdp(p, now); else fail(p, now, "the router refused to renew the mapping"); return; }
-                mapped(p, now, VIA_NATPMP, get16(d + 10), get32(d + 12));
+            if (d[1] == (NATPMP_RESPONSE | NATPMP_OP_EXTIP) && len >= NATPMP_EXTIP_REPLY_LEN && load_be16(d + NATPMP_RESULT_AT) == 0) {
+                memcpy(p->ext_ip, d + NATPMP_EXTIP_AT, IP4_LEN);
+                p->have_ext_ip = 1;
+            } else if (d[1] == (NATPMP_RESPONSE | NATPMP_OP_MAP_UDP) && len >= NATPMP_MAP_REPLY_LEN) {
+                if (load_be16(d + NATPMP_RESULT_AT) != 0) {
+                    if (p->state == P_NATPMP) begin_ssdp(p, now);
+                    else fail(p, now, "the router refused to renew the mapping");
+                    return;
+                }
+                mapped(p, now, VIA_NATPMP, load_be16(d + NATPMP_MAPPED_AT), load_be32(d + NATPMP_MAPPED_LIFETIME_AT));
             } else if (p->state == P_PCP) {
                 // A NAT-PMP router answering the PCP request with "unsupported version".
                 p->state = P_NATPMP; p->tries = 0; p->next_send = now;
@@ -415,32 +473,33 @@ static void on_udp(portmap_t *p, const uint8_t *d, size_t len, addr_t from, doub
         }
     } else if (p->state == P_SSDP) {
         if (from.is_v6 || from.port != SSDP_PORT || !is_private_v4(from.ip)) return;
-        char msg[1500];
+        char msg[DGRAM_MAX];
         size_t n = len < sizeof msg - 1 ? len : sizeof msg - 1;
         memcpy(msg, d, n);
         msg[n] = '\0';
-        if (strncmp(msg, "HTTP/1.1 200", 12) != 0) return;
-        int at = find_ci(msg, n, "\r\nlocation:");
+        if (!starts_with(msg, "HTTP/1.1 200")) return;
+        static const char LOCATION[] = "\r\nlocation:";
+        int at = find_ci(msg, n, LOCATION);
         if (at < 0) return;
-        const char *v = msg + at + 11;
+        const char *v = msg + at + sizeof LOCATION - 1;
         while (*v == ' ') v++;
         char loc[300];
         size_t vl = strcspn(v, "\r\n");
         if (vl == 0 || vl >= sizeof loc) return;
         memcpy(loc, v, vl);
         loc[vl] = '\0';
-        uint16_t port = 80;
+        uint16_t port = HTTP_PORT;
         if (url_path(loc, from.ip, &port, p->desc_path, sizeof p->desc_path) != 0 || loc[0] == '/') return;
-        memcpy(p->igd_ip, from.ip, 4);
+        memcpy(p->igd_ip, from.ip, IP4_LEN);
         p->igd_port = port;
         if (!p->have_gw) {
             addr_t gw;
             addr_set_v4(&gw, from.ip, SSDP_PORT);
             addr_t me;
             if (net_local_addr_toward(gw, &me) != 0 || me.is_v6) return;
-            memcpy(p->local_ip, me.ip, 4);
+            memcpy(p->local_ip, me.ip, IP4_LEN);
         }
-        char ip[16], req[512];
+        char ip[IP4_STR_LEN], req[512];
         ip_str(p->igd_ip, ip);
         int rn = snprintf(req, sizeof req, "GET %s HTTP/1.1\r\nHost: %s:%u\r\nConnection: close\r\n\r\n",
                           p->desc_path, ip, (unsigned)p->igd_port);
@@ -457,7 +516,7 @@ static void on_http_done(portmap_t *p, double now) {
     http_close(&p->http);
     if (p->state == P_DESC) {
         char url[256];
-        if (!ok || status != 200 || portmap_parse_control_url(body, strlen(body), p->service, sizeof p->service, url, sizeof url) != 0
+        if (!ok || status != HTTP_OK || portmap_parse_control_url(body, strlen(body), p->service, sizeof p->service, url, sizeof url) != 0
             || url_path(url, p->igd_ip, &p->igd_port, p->ctl_path, sizeof p->ctl_path) != 0) {
             fail(p, now, "the UPnP gateway offers no usable WAN connection service");
         } else if (send_add(p, now) != 0) {
@@ -467,18 +526,17 @@ static void on_http_done(portmap_t *p, double now) {
         }
     } else if (p->state == P_ADD) {
         char code[16] = "";
-        if (ok && status == 200) {
+        if (ok && status == HTTP_OK) {
             if (send_extip(p, now) == 0) p->state = P_EXTIP;
             else mapped(p, now, VIA_UPNP, p->want_external, p->permanent ? 0 : LEASE);
-        } else if (ok && xml_text(body, strlen(body), "errorCode", code, sizeof code) == 0 && atoi(code) == 725 && !p->permanent) {
+        } else if (ok && xml_text(body, strlen(body), "errorCode", code, sizeof code) == 0 && atoi(code) == UPNP_ONLY_PERMANENT
+                   && !p->permanent) {
             // OnlyPermanentLeasesSupported: map without a lease. It's still removed on exit.
             p->permanent = 1;
             if (send_add(p, now) != 0) fail(p, now, "can't reach the UPnP gateway");
-        } else if (ok && atoi(code) == 718 && p->conflicts < 3) {
+        } else if (ok && atoi(code) == UPNP_CONFLICT && p->conflicts < CONFLICT_TRIES) {
             // ConflictInMappingEntry: something else has this port, so try another.
-            uint8_t r[2];
-            gen_random(r, 2);
-            p->want_external = (uint16_t)(20000 + (((unsigned)r[0] << 8 | r[1]) % 40000));
+            p->want_external = (uint16_t)(RANDOM_PORT_MIN + gen_uniform(RANDOM_PORTS));
             p->conflicts++;
             if (send_add(p, now) != 0) fail(p, now, "can't reach the UPnP gateway");
         } else {
@@ -488,10 +546,9 @@ static void on_http_done(portmap_t *p, double now) {
         }
     } else if (p->state == P_EXTIP) {
         char ip[32];
-        uint8_t v[4];
-        if (ok && status == 200 && xml_text(body, strlen(body), "NewExternalIPAddress", ip, sizeof ip) == 0) {
+        if (ok && status == HTTP_OK && xml_text(body, strlen(body), "NewExternalIPAddress", ip, sizeof ip) == 0) {
             addr_t a;
-            if (addr_resolve_numeric(ip, 0, &a) == 0 && !a.is_v6) { memcpy(v, a.ip, 4); memcpy(p->ext_ip, v, 4); p->have_ext_ip = 1; }
+            if (addr_resolve_numeric(ip, 0, &a) == 0 && !a.is_v6) { memcpy(p->ext_ip, a.ip, IP4_LEN); p->have_ext_ip = 1; }
         }
         mapped(p, now, VIA_UPNP, p->want_external, p->permanent ? 0 : LEASE);
     }
@@ -500,9 +557,9 @@ static void on_http_done(portmap_t *p, double now) {
 
 void portmap_step(portmap_t *p, double now) {
     if (p->udp != SOCK_INVALID) {
-        uint8_t buf[1500];
+        uint8_t buf[DGRAM_MAX];
         addr_t from;
-        for (int i = 0; i < 16; i++) {
+        for (int i = 0; i < RECV_BATCH; i++) {
             int n = net_recv(p->udp, buf, sizeof buf, &from);
             if (n < 0) break;
             on_udp(p, buf, (size_t)n, from, now);
@@ -516,7 +573,7 @@ void portmap_step(portmap_t *p, double now) {
             if (p->have_gw) {
                 addr_t gw, me;
                 addr_set_v4(&gw, p->gw, PCP_PORT);
-                if (net_local_addr_toward(gw, &me) == 0 && !me.is_v6) memcpy(p->local_ip, me.ip, 4);
+                if (net_local_addr_toward(gw, &me) == 0 && !me.is_v6) memcpy(p->local_ip, me.ip, IP4_LEN);
                 else p->have_gw = 0;
             }
             // Discovery goes out on the router's side, even when a VPN holds the multicast route.
@@ -528,17 +585,17 @@ void portmap_step(portmap_t *p, double now) {
         case P_PCP:
         case P_NATPMP:
             if (now < p->next_send) return;
-            if (p->tries >= 3) {
+            if (p->tries >= GW_TRIES) {
                 if (p->state == P_PCP) { p->state = P_NATPMP; p->tries = 0; p->next_send = now; }
                 else begin_ssdp(p, now);
                 return;
             }
             if (p->state == P_PCP) send_pcp(p, LEASE); else send_natpmp(p, LEASE);
-            p->next_send = now + 0.25 * (double)(1u << p->tries);
+            p->next_send = now + GW_RETRY_BASE * (double)(1u << p->tries);
             p->tries++;
             return;
         case P_SSDP:
-            if (p->tries < 2 && now >= p->next_send) { send_ssdp(p); p->tries++; p->next_send = now + 1.0; }
+            if (p->tries < SSDP_SENDS && now >= p->next_send) { send_ssdp(p); p->tries++; p->next_send = now + SSDP_RESEND; }
             if (now > p->deadline) fail(p, now, "no UPnP, NAT-PMP or PCP router answered");
             return;
         case P_DESC:
@@ -552,16 +609,16 @@ void portmap_step(portmap_t *p, double now) {
         case P_MAPPED:
             if (p->renewing) {
                 if (now < p->next_send) return;
-                if (p->tries >= 4) { fail(p, now, "the router stopped renewing the mapping"); return; }
+                if (p->tries >= RENEW_TRIES) { fail(p, now, "the router stopped renewing the mapping"); return; }
                 if (p->via == VIA_PCP) send_pcp(p, LEASE); else send_natpmp(p, LEASE);
-                p->next_send = now + 0.5 * (double)(1u << p->tries);
+                p->next_send = now + RENEW_RETRY_BASE * (double)(1u << p->tries);
                 p->tries++;
                 return;
             }
             if (now < p->renew_at) return;
             if (p->via == VIA_UPNP) {
                 if (send_add(p, now) == 0) p->state = P_ADD;
-                else p->renew_at = now + 60.0;
+                else p->renew_at = now + UPNP_RENEW_RETRY;
             } else {
                 p->renewing = 1;
                 p->tries = 0;
@@ -584,19 +641,19 @@ void portmap_step(portmap_t *p, double now) {
 
 // Blocking: runs one SOAP request for up to a second.
 static void upnp_delete(portmap_t *p) {
-    char args[300], req[2048];
+    char args[300], req[HTTP_REQ_MAX];
     snprintf(args, sizeof args, "<NewRemoteHost></NewRemoteHost><NewExternalPort>%u</NewExternalPort><NewProtocol>UDP</NewProtocol>",
              (unsigned)p->external_port);
     size_t n = soap(p, req, sizeof req, "DeletePortMapping", args);
     double start = now_seconds();
     if (!n || start_http(p, start, req, n) != 0) return;
-    p->http.deadline = start + 1.0;
+    p->http.deadline = start + DELETE_WAIT;
     for (;;) {
         double now = now_seconds();
         int rc = http_step(&p->http, now);
         if (rc != 0) break;
         int ready = 0;
-        net_wait(&p->http.s, &ready, 1, 20);
+        net_wait(&p->http.s, &ready, 1, DELETE_POLL_MS);
     }
     http_close(&p->http);
 }
@@ -619,10 +676,9 @@ int portmap_mapped(const portmap_t *p, uint16_t *external_port) {
 
 void portmap_status(const portmap_t *p, char *out, size_t cap) {
     if (p->via != VIA_NONE) {
-        char ip[16] = "?";
+        char ip[IP4_STR_LEN] = "?";
         if (p->have_ext_ip) ip_str(p->ext_ip, ip);
-        snprintf(out, cap, "%s:%u forwarded here by %s", ip, (unsigned)p->external_port,
-                 p->via == VIA_PCP ? "PCP" : p->via == VIA_NATPMP ? "NAT-PMP" : "UPnP");
+        snprintf(out, cap, "%s:%u forwarded here by %s", ip, (unsigned)p->external_port, via_name(p->via));
     } else if (p->state == P_FAILED) {
         snprintf(out, cap, "none - %s", p->why);
     } else {

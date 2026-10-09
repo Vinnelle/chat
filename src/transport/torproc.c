@@ -11,13 +11,27 @@
 #include <string.h>
 
 #define LOG_TAIL 16384
+#define LOG_READ_EVERY 1.0
+#define STOP_WAIT_MS 3000
+#define DIR_MAX 1024
+#define FILE_PATH_MAX (DIR_MAX + 76)
+// The control password: random bytes, as hex.
+#define PASSWORD_SECRET_LEN 32
+
+// OpenPGP's salted and iterated S2K (RFC 4880 3.7.1.3), as tor's HashedControlPassword takes it.
+#define S2K_SALT_LEN 8
+#define S2K_COUNT 0x60
+#define S2K_EXPBIAS 6
+#define S2K_SPEC_LEN (S2K_SALT_LEN + 1 + SHA1_LEN)
+#define S2K_PREFIX "16:"
+#define S2K_PASSWORD_MAX 64
 
 struct torproc {
     platform_proc_t *proc;
-    char dir[1024];
-    char torrc[1100], data[1100], port_file[1100], log[1100];
+    char dir[DIR_MAX];
+    char torrc[FILE_PATH_MAX], data[FILE_PATH_MAX], port_file[FILE_PATH_MAX], log[FILE_PATH_MAX];
     char socks[32], control[32];
-    char password[65];
+    char password[PASSWORD_SECRET_LEN * 2 + 1];
     char version[80];
     char problem[200], last_line[200];
     int code;
@@ -45,14 +59,14 @@ static int path_in(char *out, size_t cap, const char *dir, const char *name) {
 // iterated S2K over SHA-1, written "16:" then in hex the 8 byte salt, the count byte 0x60 (64 KiB
 // hashed) and the hash. out needs 62 bytes.
 static int hash_password(const char *password, char *out, size_t cap) {
-    uint8_t spec[9 + 20], salted[8 + 64];
+    uint8_t spec[S2K_SPEC_LEN], salted[S2K_SALT_LEN + S2K_PASSWORD_MAX];
     size_t plen = strlen(password);
-    if (plen > 64 || cap < 3 + 2 * sizeof spec + 1) return -1;
-    gen_random(spec, 8);
-    spec[8] = 0x60;
-    memcpy(salted, spec, 8);
-    memcpy(salted + 8, password, plen);
-    size_t chunk = 8 + plen, left = (size_t)(16 + (spec[8] & 15)) << ((spec[8] >> 4) + 6);
+    if (plen > S2K_PASSWORD_MAX || cap < sizeof S2K_PREFIX - 1 + 2 * sizeof spec + 1) return -1;
+    gen_random(spec, S2K_SALT_LEN);
+    uint8_t count = spec[S2K_SALT_LEN] = S2K_COUNT;
+    memcpy(salted, spec, S2K_SALT_LEN);
+    memcpy(salted + S2K_SALT_LEN, password, plen);
+    size_t chunk = S2K_SALT_LEN + plen, left = (size_t)(16 + (count & 15)) << ((count >> 4) + S2K_EXPBIAS);
     mbedtls_sha1_context ctx;
     mbedtls_sha1_init(&ctx);
     int rc = mbedtls_sha1_starts(&ctx);
@@ -61,12 +75,12 @@ static int hash_password(const char *password, char *out, size_t cap) {
         rc = mbedtls_sha1_update(&ctx, salted, n);
         left -= n;
     }
-    if (rc == 0) rc = mbedtls_sha1_finish(&ctx, spec + 9);
+    if (rc == 0) rc = mbedtls_sha1_finish(&ctx, spec + S2K_SALT_LEN + 1);
     mbedtls_sha1_free(&ctx);
     crypto_wipe(salted, sizeof salted);
     if (rc != 0) return -1;
-    memcpy(out, "16:", 3);
-    hex_encode(spec, sizeof spec, out + 3);
+    memcpy(out, S2K_PREFIX, sizeof S2K_PREFIX - 1);
+    hex_encode(spec, sizeof spec, out + sizeof S2K_PREFIX - 1);
     return 0;
 }
 
@@ -75,7 +89,7 @@ torproc_t *torproc_start(const char *program, char *err, size_t cap) {
     if (!p) { copy_str(err, "out of memory", cap); return NULL; }
     p->boot = -1;
     // Left by a crashed chat. Its tor has quit by now (it watches chat's process) but the folder is
-// still there.
+    // still there.
     platform_remove_stale_tempdirs("chat-tor", "data/lock");
     if (platform_private_tempdir("chat-tor", p->dir, sizeof p->dir) != 0) {
         copy_str(err, "can't make a private folder for tor", cap);
@@ -102,7 +116,7 @@ torproc_t *torproc_start(const char *program, char *err, size_t cap) {
     }
     snprintf(p->socks, sizeof p->socks, "127.0.0.1:%u", (unsigned)socks_port);
     snprintf(p->control, sizeof p->control, "127.0.0.1:%u", (unsigned)control_port);
-    uint8_t secret[32];
+    uint8_t secret[PASSWORD_SECRET_LEN];
     char hashed[64];
     gen_random(secret, sizeof secret);
     hex_encode(secret, sizeof secret, p->password);
@@ -146,7 +160,7 @@ torproc_t *torproc_start(const char *program, char *err, size_t cap) {
 static void read_log(torproc_t *p) {
     double now = now_seconds();
     if (now < p->next_read) return;
-    p->next_read = now + 1.0;
+    p->next_read = now + LOG_READ_EVERY;
     FILE *f = platform_fopen(p->log, "rb");
     if (!f) return;
     static char buf[LOG_TAIL + 1];
@@ -162,11 +176,12 @@ static void read_log(torproc_t *p) {
     for (char *line = buf; line && *line; ) {
         char *eol = strchr(line, '\n');
         if (eol) *eol = '\0';
-        const char *b = strstr(line, "Bootstrapped ");
-        if (b) p->boot = atoi(b + 13);
-        const char *v = strstr(line, "Tor ");
+        static const char BOOT[] = "Bootstrapped ", TOR[] = "Tor ";
+        const char *b = strstr(line, BOOT);
+        if (b) p->boot = atoi(b + sizeof BOOT - 1);
+        const char *v = strstr(line, TOR);
         if (!p->version[0] && v && strstr(line, "running on")) {
-            size_t vl = strcspn(v + 4, " (") + 4;
+            size_t vl = strcspn(v + sizeof TOR - 1, " (") + sizeof TOR - 1;
             if (vl < sizeof p->version) { memcpy(p->version, v, vl); p->version[vl] = '\0'; }
         }
         if (strstr(line, "[warn]") || strstr(line, "[err]")) {
@@ -205,7 +220,7 @@ void torproc_problem(torproc_t *p, char *out, size_t cap) {
 
 void torproc_stop(torproc_t *p) {
     if (!p) return;
-    platform_proc_stop(p->proc, 3000);
+    platform_proc_stop(p->proc, STOP_WAIT_MS);
     if (p->dir[0]) platform_remove_tree(p->dir);
     crypto_wipe(p->password, sizeof p->password);
     free(p);

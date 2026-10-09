@@ -10,25 +10,26 @@
 #include <time.h>
 
 #include "platform/platform.h"
+#include "common/job.h"
 
-#if defined(__STDC_NO_ATOMICS__)
-typedef volatile int job_state_t;
-#define JOB_ATOMIC 0
-#else
-#include <stdatomic.h>
-typedef _Atomic int job_state_t;
-#define JOB_ATOMIC 1
-#endif
-enum { JOB_RUNNING, JOB_DONE, JOB_ABANDONED };
+_Static_assert(DHT_NODE_ID_LEN == DHT_INFOHASH_LEN, "node ids and infohashes share the distance metric");
+// A compact address: the IP, then the port.
+#define PORT_LEN 2
+// Queries go unanswered after this long, and a lookup with no nodes waits this long for the other
+// family's replies to give it some.
+#define QUERY_TIMEOUT 3.0
+#define STARVED_WAIT 5.0
+#define RESOLVE_BACKOFF_BASE 5.0
+#define RESOLVE_BACKOFF_SHIFT 6
 
 struct dht_boot_job {
     job_state_t state;
-    int want[2];
+    int want[DHT_FAMILIES];
     addr_t out[DHT_BOOT_MAX];
     int n;
 };
 
-static const struct { const char *host; uint16_t port; } BOOTSTRAP[4] = {
+static const struct { const char *host; uint16_t port; } BOOTSTRAP[] = {
     { "router.bittorrent.com", 6881 },
     { "dht.transmissionbt.com", 6881 },
     { "router.utorrent.com", 6881 },
@@ -55,6 +56,8 @@ static void dht_send(dht_state_t *d, const dht_cand_t *c, const uint8_t *buf, si
     else d->send(d->send_ctx, buf, len, &c->addr, NULL, 0);
 }
 
+static int family(addr_t a) { return a.is_v6 ? DHT_V6 : DHT_V4; }
+
 static int known_count(const dht_state_t *d, int fam) {
     int n = 0;
     for (int i = 0; i < DHT_KNOWN_MAX; i++) n += d->known[fam][i].used;
@@ -62,8 +65,8 @@ static int known_count(const dht_state_t *d, int fam) {
 }
 
 // Keeps a node that answered. When the list is full it replaces the one that answered longest ago.
-static void known_add(dht_state_t *d, addr_t a, const uint8_t id[20], double now) {
-    dht_known_t *list = d->known[a.is_v6 ? DHT_V6 : DHT_V4], *slot = NULL;
+static void known_add(dht_state_t *d, addr_t a, const uint8_t id[DHT_NODE_ID_LEN], double now) {
+    dht_known_t *list = d->known[family(a)], *slot = NULL;
     for (int i = 0; i < DHT_KNOWN_MAX && !slot; i++) if (list[i].used && addr_equal(list[i].addr, a)) slot = &list[i];
     for (int i = 0; i < DHT_KNOWN_MAX && !slot; i++) if (!list[i].used) slot = &list[i];
     if (!slot) {
@@ -72,34 +75,34 @@ static void known_add(dht_state_t *d, addr_t a, const uint8_t id[20], double now
     }
     slot->used = 1;
     slot->addr = a;
-    memcpy(slot->node_id, id, 20);
+    memcpy(slot->node_id, id, DHT_NODE_ID_LEN);
     slot->ok_at = now;
 }
 
 static void known_drop(dht_state_t *d, addr_t a) {
-    dht_known_t *list = d->known[a.is_v6 ? DHT_V6 : DHT_V4];
+    dht_known_t *list = d->known[family(a)];
     for (int i = 0; i < DHT_KNOWN_MAX; i++) if (list[i].used && addr_equal(list[i].addr, a)) list[i].used = 0;
 }
 
 // This hour's node id, made the first time the hour's key is looked up.
 static void use_node_id(dht_state_t *d, long long epoch) {
-    for (int i = 0; i < 2; i++)
-        if (d->ids[i].set && d->ids[i].epoch == epoch) { memcpy(d->node_id, d->ids[i].id, 20); return; }
+    for (size_t i = 0; i < COUNT_OF(d->ids); i++)
+        if (d->ids[i].set && d->ids[i].epoch == epoch) { memcpy(d->node_id, d->ids[i].id, DHT_NODE_ID_LEN); return; }
     int slot = !d->ids[0].set ? 0 : !d->ids[1].set ? 1 : d->ids[0].epoch < d->ids[1].epoch ? 0 : 1;
     d->ids[slot].set = 1;
     d->ids[slot].epoch = epoch;
-    gen_random(d->ids[slot].id, 20);
-    memcpy(d->node_id, d->ids[slot].id, 20);
+    gen_random(d->ids[slot].id, DHT_NODE_ID_LEN);
+    memcpy(d->node_id, d->ids[slot].id, DHT_NODE_ID_LEN);
 }
 
 static void resolve_thread(void *arg) {
     dht_boot_job_t *job = arg;
-    int n = 0, per_fam[2] = { 0, 0 };
-    for (int i = 0; i < 4 && n < DHT_BOOT_MAX; i++) {
+    int n = 0, per_fam[DHT_FAMILIES] = { 0, 0 };
+    for (size_t i = 0; i < COUNT_OF(BOOTSTRAP) && n < DHT_BOOT_MAX; i++) {
         addr_t found[ADDR_RESOLVE_MAX];
         int k = addr_resolve_all(BOOTSTRAP[i].host, BOOTSTRAP[i].port, found, ADDR_RESOLVE_MAX);
         for (int j = 0; j < k && n < DHT_BOOT_MAX; j++) {
-            int fam = found[j].is_v6 ? DHT_V6 : DHT_V4;
+            int fam = family(found[j]);
             // Half the slots for each family, so one family's addresses can't fill the whole list.
             if (!job->want[fam] || per_fam[fam] >= DHT_BOOT_MAX / 2) continue;
             int dup = 0;
@@ -108,32 +111,18 @@ static void resolve_thread(void *arg) {
         }
     }
     job->n = n;
-#if JOB_ATOMIC
-    if (atomic_exchange(&job->state, JOB_DONE) == JOB_ABANDONED) free(job);
-#else
-    job->state = JOB_DONE;
-#endif
+    if (job_finish(&job->state)) free(job);
 }
 
 static void drop_job(dht_state_t *d) {
     if (!d->job) return;
-#if JOB_ATOMIC
-    if (atomic_exchange(&d->job->state, JOB_ABANDONED) == JOB_DONE) free(d->job);
-#else
-    if (d->job->state == JOB_DONE) free(d->job);
-    else d->job->state = JOB_ABANDONED;   // abandoned: without atomics, never freed
-#endif
+    if (job_abandon(&d->job->state)) free(d->job);
     d->job = NULL;
 }
 
 // Takes the bootstrap list from a lookup that has finished.
 static void collect_job(dht_state_t *d) {
-    if (!d->job) return;
-#if JOB_ATOMIC
-    if (atomic_load(&d->job->state) != JOB_DONE) return;
-#else
-    if (d->job->state != JOB_DONE) return;
-#endif
+    if (!d->job || !job_done(&d->job->state)) return;
     d->n_boot = d->job->n;
     memcpy(d->boot, d->job->out, sizeof(addr_t) * (size_t)d->n_boot);
     free(d->job);
@@ -185,21 +174,21 @@ static void pick_infohash(dht_state_t *d) {
     use_node_id(d, use);
 }
 
-static void xor_distance(const uint8_t a[20], const uint8_t b[20], uint8_t out[20]) {
-    for (int i = 0; i < 20; i++) out[i] = a[i] ^ b[i];
+static void xor_distance(const uint8_t a[DHT_NODE_ID_LEN], const uint8_t b[DHT_NODE_ID_LEN], uint8_t out[DHT_NODE_ID_LEN]) {
+    for (int i = 0; i < DHT_NODE_ID_LEN; i++) out[i] = a[i] ^ b[i];
 }
 
-static int cand_cmp_dist(const uint8_t infohash[20], const dht_cand_t *x, const dht_cand_t *y) {
+static int cand_cmp_dist(const uint8_t infohash[DHT_INFOHASH_LEN], const dht_cand_t *x, const dht_cand_t *y) {
     if (!x->have_id && !y->have_id) return 0;
     if (!x->have_id) return 1;
     if (!y->have_id) return -1;
-    uint8_t dx[20], dy[20];
+    uint8_t dx[DHT_NODE_ID_LEN], dy[DHT_NODE_ID_LEN];
     xor_distance(x->node_id, infohash, dx);
     xor_distance(y->node_id, infohash, dy);
-    return memcmp(dx, dy, 20);
+    return memcmp(dx, dy, DHT_NODE_ID_LEN);
 }
 
-static int rank_select(dht_lookup_t *lk, const uint8_t infohash[20], int top_n, int *out, int need_token) {
+static int rank_select(dht_lookup_t *lk, const uint8_t infohash[DHT_INFOHASH_LEN], int top_n, int *out, int need_token) {
     int n = 0;
     for (int i = 0; i < lk->n_cands; i++) {
         if (need_token && !lk->cands[i].have_token) continue;
@@ -213,7 +202,7 @@ static int rank_select(dht_lookup_t *lk, const uint8_t infohash[20], int top_n, 
     return n;
 }
 
-static int ranked_top(dht_lookup_t *lk, const uint8_t infohash[20], const int **out) {
+static int ranked_top(dht_lookup_t *lk, const uint8_t infohash[DHT_INFOHASH_LEN], const int **out) {
     if (lk->dirty) {
         lk->n_top = rank_select(lk, infohash, DHT_RANK_TOP, lk->top, 0);
         lk->dirty = 0;
@@ -271,34 +260,34 @@ static size_t append_want(dht_state_t *d, uint8_t *buf, size_t p) {
 
 // Every query sets "ro" (BEP 43). chat is a read only node and doesn't answer queries, so other
 // nodes don't add it to their routing tables or ping it, and don't expect an answer.
-static void send_get_peers(dht_state_t *d, const dht_cand_t *to, const uint8_t tid[2]) {
+static void send_get_peers(dht_state_t *d, const dht_cand_t *to, const uint8_t tid[DHT_TID_LEN]) {
     uint8_t buf[160];
     size_t p = 0;
     p = append_str(buf, p, "d1:ad2:id");
-    p = append_bstr(buf, p, d->node_id, 20);
+    p = append_bstr(buf, p, d->node_id, DHT_NODE_ID_LEN);
     p = append_str(buf, p, "9:info_hash");
-    p = append_bstr(buf, p, d->infohash, 20);
+    p = append_bstr(buf, p, d->infohash, DHT_INFOHASH_LEN);
     p = append_want(d, buf, p);
     p = append_str(buf, p, "e1:q9:get_peers2:roi1e1:t");
-    p = append_bstr(buf, p, tid, 2);
+    p = append_bstr(buf, p, tid, DHT_TID_LEN);
     p = append_str(buf, p, "1:y1:qe");
     dht_send(d, to, buf, p);
 }
 
-static void send_announce(dht_state_t *d, const dht_cand_t *to, const uint8_t tid[2],
+static void send_announce(dht_state_t *d, const dht_cand_t *to, const uint8_t tid[DHT_TID_LEN],
                            const uint8_t *token, size_t token_len) {
     uint8_t buf[256];
     size_t p = 0;
     p = append_str(buf, p, "d1:ad2:id");
-    p = append_bstr(buf, p, d->node_id, 20);
+    p = append_bstr(buf, p, d->node_id, DHT_NODE_ID_LEN);
     p = append_str(buf, p, d->explicit_port ? "12:implied_porti0e9:info_hash" : "12:implied_porti1e9:info_hash");
-    p = append_bstr(buf, p, d->infohash, 20);
+    p = append_bstr(buf, p, d->infohash, DHT_INFOHASH_LEN);
     p = append_str(buf, p, "4:port");
     p = append_int(buf, p, (long)d->my_port);
     p = append_str(buf, p, "5:token");
     p = append_bstr(buf, p, token, token_len);
     p = append_str(buf, p, "1:q13:announce_peer2:roi1e1:t");
-    p = append_bstr(buf, p, tid, 2);
+    p = append_bstr(buf, p, tid, DHT_TID_LEN);
     p = append_str(buf, p, "1:y1:qe");
     dht_send(d, to, buf, p);
 }
@@ -314,13 +303,13 @@ static void start_lookup(dht_state_t *d, dht_lookup_t *lk, int fam, double now) 
         const dht_known_t *k = &d->known[fam][i];
         if (!k->used) continue;
         dht_cand_t *c = find_or_add_cand(lk, k->addr);
-        if (c) { memcpy(c->node_id, k->node_id, 20); c->have_id = 1; }
+        if (c) { memcpy(c->node_id, k->node_id, DHT_NODE_ID_LEN); c->have_id = 1; }
     }
     if (known_count(d, fam) >= DHT_KNOWN_ENOUGH) return;
     if (d->names_remote) {
         // The proxy looks the names up in whatever family it has. IPv6 fills from the replies.
         if (fam == DHT_V4 || !d->want[DHT_V4])
-            for (int i = 0; i < 4; i++) add_named_cand(lk, i);
+            for (int i = 0; i < (int)COUNT_OF(BOOTSTRAP); i++) add_named_cand(lk, i);
         return;
     }
     for (int i = 0; i < d->n_boot; i++)
@@ -332,26 +321,30 @@ static void start_lookup(dht_state_t *d, dht_lookup_t *lk, int fam, double now) 
 // name) nothing at all.
 static int can_start(const dht_state_t *d) {
     if (d->names_remote || d->n_boot > 0) return 1;
-    for (int fam = 0; fam < 2; fam++) if (d->want[fam] && known_count(d, fam) >= DHT_KNOWN_ENOUGH) return 1;
+    for (int fam = 0; fam < DHT_FAMILIES; fam++) if (d->want[fam] && known_count(d, fam) >= DHT_KNOWN_ENOUGH) return 1;
     return 0;
 }
 
 static void maybe_reresolve(dht_state_t *d, double now) {
     if (d->names_remote || d->job || d->n_boot > 0) return;
     if (now < d->next_resolve) return;
-    int shift = d->resolve_tries < 6 ? d->resolve_tries : 6;
-    double delay = 5.0 * (double)(1u << shift);
-    if (delay > DHT_RESOLVE_BACKOFF_MAX) delay = DHT_RESOLVE_BACKOFF_MAX;
+    double delay = backoff(d->resolve_tries, RESOLVE_BACKOFF_BASE, RESOLVE_BACKOFF_SHIFT, DHT_RESOLVE_BACKOFF_MAX);
     d->resolve_tries++;
     d->next_resolve = now + delay;
     dht_start_bootstrap_resolve(d);
+}
+
+static int queried_in(const dht_lookup_t *lk) {
+    int n = 0;
+    for (int i = 0; i < lk->n_cands; i++) if (lk->cands[i].queried) n++;
+    return n;
 }
 
 // Sends the next queries of one lookup. Returns 1 once it has finished (and announced).
 static int lookup_step(dht_state_t *d, dht_lookup_t *lk, double now) {
     for (int i = 0; i < DHT_MAX_INFLIGHT; i++) {
         dht_inflight_t *f = &lk->inflight[i];
-        if (!f->used || now - f->sent_at <= 3.0) continue;
+        if (!f->used || now - f->sent_at <= QUERY_TIMEOUT) continue;
         // No answer, so a previously known node isn't used as a starting point again.
         if (!f->named) known_drop(d, f->addr);
         f->used = 0;
@@ -359,9 +352,8 @@ static int lookup_step(dht_state_t *d, dht_lookup_t *lk, double now) {
 
     const int *top;
     int n_top = ranked_top(lk, d->infohash, &top);
-    int inflight_count = 0, queried_count = 0;
+    int inflight_count = 0, queried_count = queried_in(lk);
     for (int i = 0; i < DHT_MAX_INFLIGHT; i++) if (lk->inflight[i].used) inflight_count++;
-    for (int i = 0; i < lk->n_cands; i++) if (lk->cands[i].queried) queried_count++;
 
     int all_top_queried = 1;
     for (int i = 0; i < n_top; i++) {
@@ -373,7 +365,7 @@ static int lookup_step(dht_state_t *d, dht_lookup_t *lk, double now) {
                 queried_count++;
                 for (int s = 0; s < DHT_MAX_INFLIGHT; s++) {
                     if (!lk->inflight[s].used) {
-                        gen_random(lk->inflight[s].tid, 2);
+                        gen_random(lk->inflight[s].tid, DHT_TID_LEN);
                         lk->inflight[s].addr = c->addr;
                         lk->inflight[s].named = c->named;
                         lk->inflight[s].sent_at = now;
@@ -388,13 +380,13 @@ static int lookup_step(dht_state_t *d, dht_lookup_t *lk, double now) {
     }
 
     // An empty lookup waits a little for the other family's replies to give it nodes.
-    int starved = lk->n_cands == 0 && now - lk->t0 < 5.0;
+    int starved = lk->n_cands == 0 && now - lk->t0 < STARVED_WAIT;
     if ((inflight_count == 0 && all_top_queried && !starved) || now - lk->t0 > DHT_LOOKUP_TIMEOUT) {
         int ann_idx[DHT_ANNOUNCE_TOP];
         int n_ann = rank_select(lk, d->infohash, DHT_ANNOUNCE_TOP, ann_idx, 1);
         for (int i = 0; i < n_ann; i++) {
             dht_cand_t *c = &lk->cands[ann_idx[i]];
-            uint8_t tid[2]; gen_random(tid, 2);
+            uint8_t tid[DHT_TID_LEN]; gen_random(tid, DHT_TID_LEN);
             send_announce(d, c, tid, c->token, c->token_len);
         }
         lk->active = 0;
@@ -410,54 +402,56 @@ int dht_step(dht_state_t *d, double now) {
         maybe_reresolve(d, now);
         if (now >= d->next_lookup && !d->job && can_start(d)) {
             pick_infohash(d);
-            for (int fam = 0; fam < 2; fam++)
+            for (int fam = 0; fam < DHT_FAMILIES; fam++)
                 if (d->want[fam]) start_lookup(d, &d->lk[fam], fam, now);
         }
         return 0;
     }
     int finished = 0;
-    for (int fam = 0; fam < 2; fam++)
+    for (int fam = 0; fam < DHT_FAMILIES; fam++)
         if (d->lk[fam].active) finished |= lookup_step(d, &d->lk[fam], now);
     if (finished && !d->lk[DHT_V4].active && !d->lk[DHT_V6].active) {
         d->next_lookup = d->alt_pending ? now : now + (d->peers_now ? DHT_RELOOKUP_CONNECTED : DHT_RELOOKUP_IDLE);
-        if (!d->told_dht) d->told_dht = 1;
+        d->told_dht = 1;
         return 1;
     }
     return 0;
 }
 
-int dht_queried_count_fam(const dht_state_t *d, int fam) {
-    int n = 0;
-    for (int i = 0; i < d->lk[fam].n_cands; i++) if (d->lk[fam].cands[i].queried) n++;
-    return n;
-}
+int dht_queried_count_fam(const dht_state_t *d, int fam) { return queried_in(&d->lk[fam]); }
 int dht_found_count_fam(const dht_state_t *d, int fam) { return d->lk[fam].found; }
 int dht_queried_count(const dht_state_t *d) { return dht_queried_count_fam(d, DHT_V4) + dht_queried_count_fam(d, DHT_V6); }
 int dht_found_count(const dht_state_t *d) { return d->lk[DHT_V4].found + d->lk[DHT_V6].found; }
+
+// A compact address (BEP 5, BEP 32): the IP, then the port. -1 for port 0.
+static int compact_addr(const uint8_t *e, size_t iplen, addr_t *a) {
+    uint16_t port = load_be16(e + iplen);
+    if (port == 0) return -1;
+    if (iplen == IP6_LEN) {
+        memset(a, 0, sizeof *a);
+        memcpy(a->ip, e, IP6_LEN);
+        a->port = port;
+        a->is_v6 = 1;
+    } else {
+        addr_set_v4(a, e, port);
+    }
+    return 0;
+}
 
 static void add_nodes(dht_state_t *d, const be_value *nodes, int fam) {
     if (!nodes || nodes->type != BE_STR || !d->want[fam]) return;
     dht_lookup_t *lk = &d->lk[fam];
     if (!lk->active) return;
-    size_t iplen = fam == DHT_V6 ? 16 : 4, step = 20 + iplen + 2;
+    size_t iplen = fam == DHT_V6 ? IP6_LEN : IP4_LEN, step = DHT_NODE_ID_LEN + iplen + PORT_LEN;
     for (size_t i = 0; i + step <= nodes->slen; i += step) {
         const uint8_t *e = (const uint8_t *)nodes->s + i;
+        // A v4-mapped address here is an IPv4 node in the wrong list.
+        static const uint8_t v4map[12] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff };
+        if (fam == DHT_V6 && memcmp(e + DHT_NODE_ID_LEN, v4map, sizeof v4map) == 0) continue;
         addr_t a;
-        uint16_t port = (uint16_t)((e[20 + iplen] << 8) | e[21 + iplen]);
-        if (port == 0) continue;
-        if (fam == DHT_V6) {
-            // A v4-mapped address here is an IPv4 node in the wrong list.
-            static const uint8_t v4map[12] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff };
-            if (memcmp(e + 20, v4map, 12) == 0) continue;
-            memset(&a, 0, sizeof a);
-            memcpy(a.ip, e + 20, 16);
-            a.port = port;
-            a.is_v6 = 1;
-        } else {
-            addr_set_v4(&a, e + 20, port);
-        }
+        if (compact_addr(e + DHT_NODE_ID_LEN, iplen, &a) != 0) continue;
         dht_cand_t *nc = find_or_add_cand(lk, a);
-        if (nc && !nc->have_id) { memcpy(nc->node_id, e, 20); nc->have_id = 1; lk->dirty = 1; }
+        if (nc && !nc->have_id) { memcpy(nc->node_id, e, DHT_NODE_ID_LEN); nc->have_id = 1; lk->dirty = 1; }
     }
 }
 
@@ -470,15 +464,15 @@ void dht_on_packet(dht_state_t *d, const uint8_t *data, size_t len, addr_t from,
     const be_value *y = be_dict_get(msg, "y");
     const be_value *t = be_dict_get(msg, "t");
     if (!y || y->type != BE_STR || y->slen != 1 || y->s[0] != 'r') return;
-    if (!t || t->type != BE_STR || t->slen != 2) return;
+    if (!t || t->type != BE_STR || t->slen != DHT_TID_LEN) return;
 
     dht_lookup_t *lk = NULL;
     int slot = -1;
-    for (int fam = 0; fam < 2 && slot < 0; fam++) {
+    for (int fam = 0; fam < DHT_FAMILIES && slot < 0; fam++) {
         dht_lookup_t *l = &d->lk[fam];
         if (!l->active) continue;
         for (int i = 0; i < DHT_MAX_INFLIGHT; i++) {
-            if (l->inflight[i].used && memcmp(l->inflight[i].tid, t->s, 2) == 0 &&
+            if (l->inflight[i].used && memcmp(l->inflight[i].tid, t->s, DHT_TID_LEN) == 0 &&
                 (l->inflight[i].named || addr_equal(l->inflight[i].addr, from))) { slot = i; lk = l; break; }
         }
     }
@@ -492,9 +486,9 @@ void dht_on_packet(dht_state_t *d, const uint8_t *data, size_t len, addr_t from,
     // A server asked by name answers from an address, so that address has already been asked.
     c->queried = 1;
     const be_value *id = be_dict_get(r, "id");
-    if (id && id->type == BE_STR && id->slen == 20) {
+    if (id && id->type == BE_STR && id->slen == DHT_NODE_ID_LEN) {
         if (!c->have_id) {
-            memcpy(c->node_id, id->s, 20);
+            memcpy(c->node_id, id->s, DHT_NODE_ID_LEN);
             c->have_id = 1;
             lk->dirty = 1;
         }
@@ -510,20 +504,9 @@ void dht_on_packet(dht_state_t *d, const uint8_t *data, size_t len, addr_t from,
     if (values && values->type == BE_LIST) {
         for (size_t i = 0; i < values->n; i++) {
             const be_value *v = &values->items[i];
-            if (v->type != BE_STR || (v->slen != 6 && v->slen != 18)) continue;
-            const uint8_t *e = (const uint8_t *)v->s;
-            size_t iplen = v->slen - 2;
+            if (v->type != BE_STR || (v->slen != IP4_LEN + PORT_LEN && v->slen != IP6_LEN + PORT_LEN)) continue;
             addr_t a;
-            uint16_t port = (uint16_t)((e[iplen] << 8) | e[iplen + 1]);
-            if (port == 0) continue;
-            if (iplen == 16) {
-                memset(&a, 0, sizeof a);
-                memcpy(a.ip, e, 16);
-                a.port = port;
-                a.is_v6 = 1;
-            } else {
-                addr_set_v4(&a, e, port);
-            }
+            if (compact_addr((const uint8_t *)v->s, v->slen - PORT_LEN, &a) != 0) continue;
             lk->found++;
             if (on_candidate) on_candidate(ctx, a);
         }

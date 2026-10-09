@@ -3,7 +3,9 @@
 #include "transport/nostr.h"
 #include "common/json.h"
 #include "transport/tls.h"
+#include "transport/socks.h"
 #include "common/util.h"
+#include "common/job.h"
 #include "platform/platform.h"
 #include <ctype.h>
 #include <stdarg.h>
@@ -15,7 +17,6 @@
 #include <secp256k1.h>
 #include <secp256k1_extrakeys.h>
 #include <secp256k1_schnorrsig.h>
-#include <mbedtls/sha1.h>
 
 #define IN_CAP (72 * 1024)
 #define OUT_CAP (64 * 1024)
@@ -23,9 +24,10 @@
 #define EVENT_CAP 16384
 #define SEEN_IDS 512
 // Inside the wrap: sender id, recipient id, datagram length, then the datagram and padding.
-#define WRAP_HDR (ID_LEN * 2 + 2)
+#define WRAP_LEN_AT (ID_LEN * 2)
+#define WRAP_HDR (WRAP_LEN_AT + 2)
 #define DGRAM_MAX (NOSTR_WRAP_PLAIN - WRAP_HDR)
-#define CONTENT_LEN ((NOSTR_WRAP_LEN + 2) / 3 * 4)
+#define CONTENT_LEN BASE64_LEN(NOSTR_WRAP_LEN)
 #define STEP_TIMEOUT 15.0
 #define IDLE_TIMEOUT 100.0
 #define PING_EVERY 30.0
@@ -43,28 +45,65 @@
 #define LEAD 120.0
 #define LEAD_PROXY 240.0
 #define TAIL 120.0
+// What a subscription asks for from before it starts.
+#define REQ_SINCE 120
+// An event's time is moved back by up to this, at random.
+#define CREATED_FUZZ 30
+#define RESOLVE_TIMEOUT 30.0
+// A connection that lasted this long was fine, so the backoff starts again.
+#define CONN_GOOD_AFTER 60.0
+#define BACKOFF_BASE 5.0
+#define BACKOFF_SHIFT 6
+// Refusals without a known reason before a relay is only read from.
+#define ODD_REFUSALS_MAX 3
+
+#define WSS_PREFIX "wss://"
+#define HTTPS_PORT 443
+#define HOST_MAX 100
+#define PATH_MAX_LEN 128
+#define ADDRS_MAX 4
+// A relay has a connection for each ten-minute tag it's asked for: now's, and the next or last one.
+#define CONNS_PER_RELAY 2
+#define TAG_HEX (SHA256_LEN * 2)
+#define SEEN_ID_LEN 8
+#define SUBID_LEN 8
+#define SECP_KEY_LEN 32
+#define SCHNORR_SIG_LEN 64
+
+// Kinds 20000-29999 are ephemeral: relays pass them on and don't keep them.
+#define KIND_EPHEMERAL 20000
+#define KIND_EPHEMERAL_END 30000
+#define KIND_AUTH 22242
+
+// RFC 6455's frames: FIN and the opcode, then MASK and a length that, at 126 or 127, is followed by
+// 2 or 8 bytes of it, then a client's masking key.
+#define WS_FIN 0x80
+#define WS_MASKED 0x80
+#define WS_LEN_MASK 0x7f
+#define WS_OP_MASK 0x0f
+#define WS_LEN16 126
+#define WS_LEN64 127
+#define WS_KEY_LEN 4
+#define WS_HDR_MAX 14
+#define WS_CONTROL_MAX 125
+enum { WS_CONTINUATION = 0, WS_TEXT = 1, WS_BINARY = 2, WS_CLOSE = 8, WS_PING = 9, WS_PONG = 10 };
+// The nonce of the upgrade request, and what the server's accept header is made from.
+#define WS_NONCE_LEN 16
+#define WS_GUID "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+#define HEAD_MAX 8192
 
 enum { R_IDLE, R_RESOLVING, R_CONNECTING, R_SOCKS, R_TLS, R_UPGRADE, R_OPEN };
 // Tor has to build a circuit and reach the relay before the SOCKS reply comes.
 #define SOCKS_TIMEOUT 90.0
-enum { JOB_RUNNING, JOB_DONE, JOB_ABANDONED };
+enum { SOCKS_METHOD, SOCKS_LOGIN, SOCKS_CONNECT };
 
 // A relay's name is looked up on a thread, like the DHT bootstrap servers. The relay may be
 // dropped before it finishes, so whichever side finishes last frees the job.
-#if defined(__STDC_NO_ATOMICS__)
-typedef volatile int job_state_t;
-#define JOB_ATOMIC 0
-#else
-#include <stdatomic.h>
-typedef _Atomic int job_state_t;
-#define JOB_ATOMIC 1
-#endif
-
 typedef struct {
     job_state_t state;
-    char host[100];
+    char host[HOST_MAX];
     uint16_t port;
-    addr_t out[4];
+    addr_t out[ADDRS_MAX];
     int n;
 } resolve_job_t;
 
@@ -75,14 +114,14 @@ typedef struct {
     int used;
     relay_t *relay;
     long long epoch;
-    char tag[65];
+    char tag[TAG_HEX + 1];
     int state;
     resolve_job_t *job;
-    addr_t addrs[4];
+    addr_t addrs[ADDRS_MAX];
     int n_addrs, addr_i;
     sock_t s;
     tls_conn_t *tls;
-    char ws_key[32];
+    char ws_key[BASE64_LEN(WS_NONCE_LEN) + 1];
     uint8_t *in;
     size_t in_len;
     uint8_t *out;
@@ -95,20 +134,20 @@ typedef struct {
     // A new one for each connection. The same id at several relays, or on one relay across
     // connections, would link those connections to one member (and through Tor, the circuits it uses
     // for each relay).
-    char subid[17];
+    char subid[SUBID_LEN * 2 + 1];
     char challenge[160];
     // Through Tor: the SOCKS exchange so far, and this connection's own SOCKS login, so each one gets
     // its own circuit (and exit).
     int via_proxy, socks_stage;
-    char socks_user[17];
+    char socks_user[SOCKS_USER_LEN + 1];
 } conn_t;
 
 struct relay {
     char url[NOSTR_URL_MAX];
-    char host[100];
-    char path[128];
+    char host[HOST_MAX];
+    char path[PATH_MAX_LEN];
     uint16_t port;
-    conn_t conns[2];
+    conn_t conns[CONNS_PER_RELAY];
     double next_try;
     int fails;
     int warned, refusals;
@@ -132,7 +171,7 @@ struct nostr {
     uint8_t tag_key[NOSTR_KEY_LEN];
     uint8_t wrap_key[NOSTR_KEY_LEN];
     uint8_t my_id[ID_LEN];
-    uint8_t seen_ids[SEEN_IDS][8];
+    uint8_t seen_ids[SEEN_IDS][SEEN_ID_LEN];
     int seen_head;
     nostr_deliver_fn deliver;
     nostr_log_fn log;
@@ -149,9 +188,10 @@ static secp256k1_context *g_secp;
 static secp256k1_context *secp(void) {
     if (!g_secp) {
         g_secp = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
-        uint8_t seed[32];
+        uint8_t seed[SECP_KEY_LEN];
         gen_random(seed, sizeof seed);
-        if (g_secp && !secp256k1_context_randomize(g_secp, seed)) { /* still usable, just unblinded */ }
+        // If this fails it's still usable, just unblinded.
+        if (g_secp) (void)secp256k1_context_randomize(g_secp, seed);
         crypto_wipe(seed, sizeof seed);
     }
     return g_secp;
@@ -164,10 +204,10 @@ static void logf_(nostr_t *n, int verbose_only, const char *fmt, ...) {
 }
 
 int nostr_url_ok(const char *url) {
-    if (strncmp(url, "wss://", 6) != 0) return -1;
-    const char *h = url + 6;
+    if (!starts_with(url, WSS_PREFIX)) return -1;
+    const char *h = url + sizeof WSS_PREFIX - 1;
     size_t hl = strcspn(h, ":/");
-    if (hl == 0 || hl >= 100) return -1;
+    if (hl == 0 || hl >= HOST_MAX) return -1;
     for (size_t i = 0; i < hl; i++)
         if (!isalnum((unsigned char)h[i]) && h[i] != '.' && h[i] != '-') return -1;
     const char *p = h + hl;
@@ -176,28 +216,28 @@ int nostr_url_ok(const char *url) {
         long port = 0;
         size_t digits = 0;
         while (*p >= '0' && *p <= '9' && digits < 6) { port = port * 10 + (*p - '0'); p++; digits++; }
-        if (digits == 0 || port <= 0 || port > 65535) return -1;
+        if (digits == 0 || port <= 0 || port > UINT16_MAX) return -1;
     }
     if (*p && *p != '/') return -1;
-    if (strlen(p) >= 128) return -1;
+    if (strlen(p) >= PATH_MAX_LEN) return -1;
     for (; *p; p++) if ((unsigned char)*p <= 0x20 || (unsigned char)*p >= 0x7f) return -1;
     return 0;
 }
 
 static void parse_url(relay_t *r) {
-    const char *h = r->url + 6;
+    const char *h = r->url + sizeof WSS_PREFIX - 1;
     size_t hl = strcspn(h, ":/");
     memcpy(r->host, h, hl);
     r->host[hl] = '\0';
     const char *p = h + hl;
-    r->port = 443;
+    r->port = HTTPS_PORT;
     if (*p == ':') { r->port = (uint16_t)strtol(p + 1, NULL, 10); p += 1 + strspn(p + 1, "0123456789"); }
     copy_str(r->path, *p ? p : "/", sizeof r->path);
 }
 
-static void epoch_tag(const nostr_t *n, long long epoch, char out[65]) {
-    uint8_t e[8], mac[32];
-    for (int i = 0; i < 8; i++) e[i] = (uint8_t)((unsigned long long)epoch >> (56 - 8 * i));
+static void epoch_tag(const nostr_t *n, long long epoch, char out[TAG_HEX + 1]) {
+    uint8_t e[sizeof(uint64_t)], mac[SHA256_LEN];
+    store_be64(e, (uint64_t)epoch);
     hmac_sha256(n->tag_key, sizeof n->tag_key, e, sizeof e, mac);
     hex_encode(mac, sizeof mac, out);
 }
@@ -221,7 +261,7 @@ nostr_t *nostr_new(const uint8_t tag_key[NOSTR_KEY_LEN], const uint8_t wrap_key[
         relay_t *r = &n->relays[n->n_relays++];
         copy_str(r->url, relays[i], sizeof r->url);
         parse_url(r);
-        for (int k = 0; k < 2; k++) { r->conns[k].s = SOCK_INVALID; r->conns[k].relay = r; }
+        for (int k = 0; k < CONNS_PER_RELAY; k++) { r->conns[k].s = SOCK_INVALID; r->conns[k].relay = r; }
         r->plan_epoch = -1;
     }
     return n;
@@ -232,23 +272,14 @@ static void resolve_main(void *arg) {
     addr_t found[ADDR_RESOLVE_MAX];
     int k = addr_resolve_all(job->host, job->port, found, ADDR_RESOLVE_MAX);
     int m = 0;
-    for (int i = 0; i < k && m < 4; i++) job->out[m++] = found[i];
+    for (int i = 0; i < k && m < ADDRS_MAX; i++) job->out[m++] = found[i];
     job->n = m;
-#if JOB_ATOMIC
-    if (atomic_exchange(&job->state, JOB_DONE) == JOB_ABANDONED) free(job);
-#else
-    job->state = JOB_DONE;
-#endif
+    if (job_finish(&job->state)) free(job);
 }
 
 static void drop_job(conn_t *c) {
     if (!c->job) return;
-#if JOB_ATOMIC
-    if (atomic_exchange(&c->job->state, JOB_ABANDONED) == JOB_DONE) free(c->job);
-#else
-    if (c->job->state == JOB_DONE) free(c->job);
-    else c->job->state = JOB_ABANDONED;   // abandoned: without atomics, never freed
-#endif
+    if (job_abandon(&c->job->state)) free(c->job);
     c->job = NULL;
 }
 
@@ -272,10 +303,8 @@ static void conn_fail(nostr_t *n, conn_t *c, double now, const char *why) {
     copy_str(reason, why, sizeof reason);
     close_conn(c);
     // A connection that lasted a minute was fine, so reset the backoff.
-    if (was_open && now - opened_at > 60.0) r->fails = 0;
-    int shift = r->fails < 6 ? r->fails : 6;
-    double delay = 5.0 * (double)(1u << shift);
-    if (delay > BACKOFF_MAX) delay = BACKOFF_MAX;
+    if (was_open && now - opened_at > CONN_GOOD_AFTER) r->fails = 0;
+    double delay = backoff(r->fails, BACKOFF_BASE, BACKOFF_SHIFT, BACKOFF_MAX);
     r->fails++;
     r->next_try = now + delay;
     if (!r->warned) {
@@ -289,7 +318,7 @@ static void conn_fail(nostr_t *n, conn_t *c, double now, const char *why) {
 void nostr_free(nostr_t *n) {
     if (!n) return;
     for (int i = 0; i < n->n_relays; i++)
-        for (int k = 0; k < 2; k++) close_conn(&n->relays[i].conns[k]);
+        for (int k = 0; k < CONNS_PER_RELAY; k++) close_conn(&n->relays[i].conns[k]);
     crypto_unlock(n->wrap_key, sizeof n->wrap_key);
     crypto_wipe(n, sizeof *n);
     free(n);
@@ -304,7 +333,7 @@ void nostr_set_active(nostr_t *n, int on) {
         return;
     }
     for (int i = 0; i < n->n_relays; i++)
-        for (int k = 0; k < 2; k++) close_conn(&n->relays[i].conns[k]);
+        for (int k = 0; k < CONNS_PER_RELAY; k++) close_conn(&n->relays[i].conns[k]);
     logf_(n, 1, "* nostr: off the relays - nothing needs them now");
 }
 
@@ -312,21 +341,21 @@ int nostr_active(const nostr_t *n) { return n->active; }
 
 // Appends one masked client frame to the connection's queue. Returns -1 if it won't fit.
 static int ws_queue(conn_t *c, int op, const void *data, size_t len) {
-    uint8_t hdr[14];
+    uint8_t hdr[WS_HDR_MAX];
     size_t h = 0;
-    hdr[h++] = (uint8_t)(0x80 | op);
-    if (len < 126) hdr[h++] = (uint8_t)(0x80 | len);
-    else if (len < 65536) { hdr[h++] = 0x80 | 126; hdr[h++] = (uint8_t)(len >> 8); hdr[h++] = (uint8_t)len; }
+    hdr[h++] = (uint8_t)(WS_FIN | op);
+    if (len < WS_LEN16) hdr[h++] = (uint8_t)(WS_MASKED | len);
+    else if (len <= UINT16_MAX) { hdr[h++] = WS_MASKED | WS_LEN16; store_be16(hdr + h, (uint16_t)len); h += 2; }
     else return -1;
-    uint8_t mask[4];
-    gen_random(mask, 4);
-    memcpy(hdr + h, mask, 4);
-    h += 4;
+    uint8_t mask[WS_KEY_LEN];
+    gen_random(mask, WS_KEY_LEN);
+    memcpy(hdr + h, mask, WS_KEY_LEN);
+    h += WS_KEY_LEN;
     if (!c->out || c->out_len + h + len > OUT_CAP) return -1;
     memcpy(c->out + c->out_len, hdr, h);
     uint8_t *dst = c->out + c->out_len + h;
     const uint8_t *src = data;
-    for (size_t i = 0; i < len; i++) dst[i] = src[i] ^ mask[i & 3];
+    for (size_t i = 0; i < len; i++) dst[i] = src[i] ^ mask[i % WS_KEY_LEN];
     c->out_len += h + len;
     return 0;
 }
@@ -342,17 +371,14 @@ static int flush(nostr_t *n, conn_t *c, double now) {
     return 0;
 }
 
-static uint32_t rand_below(uint32_t n) {
-    uint32_t r;
-    gen_random((uint8_t *)&r, sizeof r);
-    return r % n;
-}
+// Up to max seconds, at random, to the millisecond.
+static double random_seconds(double max) { return (double)gen_uniform((uint32_t)(max * 1000)) / 1000.0; }
 
 // Builds an event signed with a key made just for it, and returns its JSON length in n->ev, or 0.
 static size_t build_event(nostr_t *n, int kind, const char *tags, const char *content, size_t clen) {
     secp256k1_keypair kp;
-    uint8_t sk[32], pk[32];
-    char pk_hex[65];
+    uint8_t sk[SECP_KEY_LEN], pk[SECP_KEY_LEN];
+    char pk_hex[SECP_KEY_LEN * 2 + 1];
     for (;;) {
         gen_random(sk, sizeof sk);
         if (secp256k1_keypair_create(secp(), &kp, sk)) break;
@@ -361,23 +387,23 @@ static size_t build_event(nostr_t *n, int kind, const char *tags, const char *co
     secp256k1_xonly_pubkey xpk;
     secp256k1_keypair_xonly_pub(secp(), &xpk, NULL, &kp);
     secp256k1_xonly_pubkey_serialize(secp(), pk, &xpk);
-    hex_encode(pk, 32, pk_hex);
+    hex_encode(pk, sizeof pk, pk_hex);
     // Slightly off the real time, so the timestamp doesn't show exactly when it was written.
-    long created = (long)time(NULL) - (long)rand_below(30);
+    long created = (long)time(NULL) - (long)gen_uniform(CREATED_FUZZ);
     size_t p = (size_t)snprintf(n->ser, EVENT_CAP, "[0,\"%s\",%ld,%d,%s,", pk_hex, created, kind, tags);
     if (p >= EVENT_CAP) return 0;
     p = js_put_str(n->ser, p, EVENT_CAP, content, clen);
     if (p + 2 >= EVENT_CAP) return 0;
     n->ser[p++] = ']';
-    uint8_t id[32], aux[32], sig[64];
+    uint8_t id[SHA256_LEN], aux[SECP_KEY_LEN], sig[SCHNORR_SIG_LEN];
     sha256_hash(n->ser, p, id);
     gen_random(aux, sizeof aux);
     int signed_ok = secp256k1_schnorrsig_sign32(secp(), sig, id, &kp, aux);
     crypto_wipe(&kp, sizeof kp);
     if (!signed_ok) return 0;
-    char idhex[65], sighex[129];
-    hex_encode(id, 32, idhex);
-    hex_encode(sig, 64, sighex);
+    char idhex[SHA256_LEN * 2 + 1], sighex[SCHNORR_SIG_LEN * 2 + 1];
+    hex_encode(id, sizeof id, idhex);
+    hex_encode(sig, sizeof sig, sighex);
     size_t e = (size_t)snprintf(n->ev, EVENT_CAP, "{\"id\":\"%s\",\"pubkey\":\"%s\",\"created_at\":%ld,\"kind\":%d,\"tags\":%s,\"content\":",
                                 idhex, pk_hex, created, kind, tags);
     if (e >= EVENT_CAP) return 0;
@@ -390,9 +416,9 @@ static size_t build_event(nostr_t *n, int kind, const char *tags, const char *co
 // Asks for this connection's one tag.
 static void send_req(conn_t *c) {
     char req[200];
-    long since = (long)time(NULL) - 120;
+    long since = (long)time(NULL) - REQ_SINCE;
     int len = snprintf(req, sizeof req, "[\"REQ\",\"%s\",{\"#e\":[\"%s\"],\"since\":%ld}]", c->subid, c->tag, since);
-    if (ws_queue(c, 1, req, (size_t)len) == 0) c->subscribed = 1;
+    if (ws_queue(c, WS_TEXT, req, (size_t)len) == 0) c->subscribed = 1;
 }
 
 // NIP-42: prove to the relay that we hold the key it sees our events signed with.
@@ -405,7 +431,7 @@ static void send_auth(nostr_t *n, conn_t *c) {
     p = js_put_str(tags, p, sizeof tags, c->challenge, strlen(c->challenge));
     if (p + 3 >= sizeof tags) return;
     memcpy(tags + p, "]]", 3);
-    size_t ev = build_event(n, 22242, tags, "", 0);
+    size_t ev = build_event(n, KIND_AUTH, tags, "", 0);
     if (!ev) return;
     char head[] = "[\"AUTH\",";
     size_t total = sizeof head - 1 + ev + 1;
@@ -414,13 +440,13 @@ static void send_auth(nostr_t *n, conn_t *c) {
     memcpy(msg, head, sizeof head - 1);
     memcpy(msg + sizeof head - 1, n->ev, ev);
     msg[total - 1] = ']';
-    ws_queue(c, 1, msg, total);
+    ws_queue(c, WS_TEXT, msg, total);
     free(msg);
 }
 
-static int seen_before(nostr_t *n, const uint8_t id[8]) {
-    for (int i = 0; i < SEEN_IDS; i++) if (memcmp(n->seen_ids[i], id, 8) == 0) return 1;
-    memcpy(n->seen_ids[n->seen_head], id, 8);
+static int seen_before(nostr_t *n, const uint8_t id[SEEN_ID_LEN]) {
+    for (int i = 0; i < SEEN_IDS; i++) if (memcmp(n->seen_ids[i], id, SEEN_ID_LEN) == 0) return 1;
+    memcpy(n->seen_ids[n->seen_head], id, SEEN_ID_LEN);
     n->seen_head = (n->seen_head + 1) % SEEN_IDS;
     return 0;
 }
@@ -428,12 +454,12 @@ static int seen_before(nostr_t *n, const uint8_t id[8]) {
 // Kinds 20000-29999 are ephemeral. A few have a meaning relays may act on. The rest are picked
 // from at random, so the kind says nothing about who sent an event.
 static int kind_reserved(int k) {
-    return k == 22242 || k == 23194 || k == 23195 || k == 24133 || k == 27235 || (k >= 21000 && k < 21100);
+    return k == KIND_AUTH || k == 23194 || k == 23195 || k == 24133 || k == 27235 || (k >= 21000 && k < 21100);
 }
 
 static int random_kind(void) {
     for (;;) {
-        int k = 20000 + (int)rand_below(10000);
+        int k = KIND_EPHEMERAL + (int)gen_uniform(KIND_EPHEMERAL_END - KIND_EPHEMERAL);
         if (!kind_reserved(k)) return k;
     }
 }
@@ -443,7 +469,7 @@ static void on_event(nostr_t *n, conn_t *c, const js_value *ev, double now) {
     const js_value *kind = js_obj_get(ev, "kind");
     const js_value *tags = js_obj_get(ev, "tags");
     if (!content || content->type != JS_STR || content->slen != CONTENT_LEN) return;
-    if (!kind || kind->type != JS_NUM || !kind->is_int || kind->i < 20000 || kind->i > 29999) return;
+    if (!kind || kind->type != JS_NUM || !kind->is_int || kind->i < KIND_EPHEMERAL || kind->i >= KIND_EPHEMERAL_END) return;
     if (!tags || tags->type != JS_ARR) return;
     int ours = 0;
     for (size_t i = 0; i < tags->n && !ours; i++) {
@@ -465,7 +491,7 @@ static void on_event(nostr_t *n, conn_t *c, const js_value *ev, double now) {
     if (nostr_unwrap(n->wrap_key, wrapped, (size_t)wlen, plain) != 0) return;
     static const uint8_t everyone[ID_LEN];
     const uint8_t *from_id = plain, *to_id = plain + ID_LEN;
-    size_t dlen = ((size_t)plain[ID_LEN * 2] << 8) | plain[ID_LEN * 2 + 1];
+    size_t dlen = load_be16(plain + WRAP_LEN_AT);
     // Our own events come back to us too, and other members' go to everyone.
     if (memcmp(from_id, n->my_id, ID_LEN) == 0 || memcmp(from_id, everyone, ID_LEN) == 0) return;
     if (memcmp(to_id, n->my_id, ID_LEN) != 0 && memcmp(to_id, everyone, ID_LEN) != 0) return;
@@ -490,15 +516,14 @@ static void on_message(nostr_t *n, conn_t *c, const char *msg, size_t len, doubl
             clean_text(why ? why : "", clean, sizeof clean - 1);
             // NIP-01 prefixes: back off on rate limits, stop writing on policy. The other relays keep going.
             const char *action = "";
-            if (strncmp(clean, "rate-limited", 12) == 0 || strncmp(clean, "banned", 6) == 0) {
+            if (starts_with(clean, "rate-limited") || starts_with(clean, "banned")) {
                 r->pause = r->pause > 0 ? r->pause * 2 : PAUSE_MIN;
-                if (strncmp(clean, "banned", 6) == 0 && r->pause < PAUSE_MAX / 2) r->pause = PAUSE_MAX / 2;
+                if (starts_with(clean, "banned") && r->pause < PAUSE_MAX / 2) r->pause = PAUSE_MAX / 2;
                 if (r->pause > PAUSE_MAX) r->pause = PAUSE_MAX;
                 if (now + r->pause > r->paused_until) r->paused_until = now + r->pause;
                 action = " - pausing writes there";
-            } else if (strncmp(clean, "blocked", 7) == 0 || strncmp(clean, "restricted", 10) == 0
-                       || strncmp(clean, "pow", 3) == 0 || strncmp(clean, "invalid", 7) == 0
-                       || ++r->odd_refusals >= 3) {
+            } else if (starts_with(clean, "blocked") || starts_with(clean, "restricted") || starts_with(clean, "pow")
+                       || starts_with(clean, "invalid") || ++r->odd_refusals >= ODD_REFUSALS_MAX) {
                 // A policy (web of trust, payment, proof of work) that throwaway keys won't meet.
                 r->read_only = 1;
                 action = " - only reading from it now";
@@ -531,12 +556,12 @@ static void on_message(nostr_t *n, conn_t *c, const char *msg, size_t len, doubl
 
 static void start_upgrade(nostr_t *n, conn_t *c, double now) {
     relay_t *r = c->relay;
-    uint8_t key[16];
+    uint8_t key[WS_NONCE_LEN];
     gen_random(key, sizeof key);
     base64_encode(key, sizeof key, c->ws_key);
     char req[512];
-    char hostport[112];
-    if (r->port == 443) copy_str(hostport, r->host, sizeof hostport);
+    char hostport[HOST_MAX + 12];
+    if (r->port == HTTPS_PORT) copy_str(hostport, r->host, sizeof hostport);
     else snprintf(hostport, sizeof hostport, "%s:%u", r->host, (unsigned)r->port);
     int len = snprintf(req, sizeof req,
                        "GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
@@ -576,16 +601,16 @@ static int check_upgrade(conn_t *c, char *why, size_t cap) {
     for (size_t i = 0; i + 3 < c->in_len; i++)
         if (memcmp(c->in + i, "\r\n\r\n", 4) == 0) { end = c->in + i; break; }
     if (!end) {
-        if (c->in_len > 8192) { copy_str(why, "oversized handshake reply", cap); return -1; }
+        if (c->in_len > HEAD_MAX) { copy_str(why, "oversized handshake reply", cap); return -1; }
         return 0;
     }
     size_t head_len = (size_t)(end - c->in) + 4;
-    char head[8200];
+    char head[HEAD_MAX + 8];
     // One read can return a long head all at once, past the check above.
     if (head_len > sizeof head) { copy_str(why, "oversized handshake reply", cap); return -1; }
     memcpy(head, c->in, head_len - 2);
     head[head_len - 2] = '\0';
-    if (strncmp(head, "HTTP/1.1 101", 12) != 0 && strncmp(head, "HTTP/1.0 101", 12) != 0) {
+    if (!starts_with(head, "HTTP/1.1 101") && !starts_with(head, "HTTP/1.0 101")) {
         char status[48];
         size_t sl = strcspn(head, "\r\n");
         if (sl >= sizeof status) sl = sizeof status - 1;
@@ -599,11 +624,11 @@ static int check_upgrade(conn_t *c, char *why, size_t cap) {
         copy_str(why, "no websocket accept header", cap);
         return -1;
     }
-    char concat[80];
-    snprintf(concat, sizeof concat, "%s258EAFA5-E914-47DA-95CA-C5AB0DC85B11", c->ws_key);
-    uint8_t digest[20];
-    char expect[32];
-    mbedtls_sha1((const unsigned char *)concat, strlen(concat), digest);
+    char concat[sizeof c->ws_key + sizeof WS_GUID];
+    snprintf(concat, sizeof concat, "%s" WS_GUID, c->ws_key);
+    uint8_t digest[SHA1_LEN];
+    char expect[BASE64_LEN(SHA1_LEN) + 1];
+    sha1_hash(concat, strlen(concat), digest);
     base64_encode(digest, sizeof digest, expect);
     if (strcmp(accept, expect) != 0) { copy_str(why, "bad websocket accept header", cap); return -1; }
     memmove(c->in, c->in + head_len, c->in_len - head_len);
@@ -616,42 +641,41 @@ static int read_frames(nostr_t *n, conn_t *c, double now) {
     for (;;) {
         if (c->in_len < 2) return 0;
         uint8_t b0 = c->in[0], b1 = c->in[1];
-        int fin = (b0 & 0x80) != 0, op = b0 & 0x0f, masked = (b1 & 0x80) != 0;
-        uint64_t plen = b1 & 0x7f;
+        int fin = (b0 & WS_FIN) != 0, op = b0 & WS_OP_MASK, masked = (b1 & WS_MASKED) != 0;
+        uint64_t plen = b1 & WS_LEN_MASK;
         size_t h = 2;
-        if (plen == 126) {
+        if (plen == WS_LEN16) {
             if (c->in_len < 4) return 0;
-            plen = ((uint64_t)c->in[2] << 8) | c->in[3];
+            plen = load_be16(c->in + 2);
             h = 4;
-        } else if (plen == 127) {
+        } else if (plen == WS_LEN64) {
             if (c->in_len < 10) return 0;
-            plen = 0;
-            for (int i = 0; i < 8; i++) plen = (plen << 8) | c->in[2 + i];
+            plen = load_be64(c->in + 2);
             h = 10;
         }
         if (plen > MSG_MAX) { conn_fail(n, c, now, "oversized message"); return -1; }
-        uint8_t mask[4] = { 0, 0, 0, 0 };
+        uint8_t mask[WS_KEY_LEN] = { 0 };
         if (masked) {
-            if (c->in_len < h + 4) return 0;
-            memcpy(mask, c->in + h, 4);
-            h += 4;
+            if (c->in_len < h + WS_KEY_LEN) return 0;
+            memcpy(mask, c->in + h, WS_KEY_LEN);
+            h += WS_KEY_LEN;
         }
         if (c->in_len < h + plen) return 0;
         uint8_t *payload = c->in + h;
-        if (masked) for (size_t i = 0; i < plen; i++) payload[i] ^= mask[i & 3];
+        if (masked) for (size_t i = 0; i < plen; i++) payload[i] ^= mask[i % WS_KEY_LEN];
 
-        if (op == 8) { conn_fail(n, c, now, "closed by the relay"); return -1; }
-        if (op == 9) {
-            if (plen <= 125) ws_queue(c, 10, payload, (size_t)plen);
-        } else if (op == 1 || op == 2 || op == 0) {
-            if (op != 0) { c->in_msg = 1; c->msg_op = op; c->msg_len = 0; }
+        if (op == WS_CLOSE) { conn_fail(n, c, now, "closed by the relay"); return -1; }
+        if (op == WS_PING) {
+            if (plen <= WS_CONTROL_MAX) ws_queue(c, WS_PONG, payload, (size_t)plen);
+        } else if (op == WS_TEXT || op == WS_BINARY || op == WS_CONTINUATION) {
+            if (op != WS_CONTINUATION) { c->in_msg = 1; c->msg_op = op; c->msg_len = 0; }
             if (!c->in_msg) { conn_fail(n, c, now, "stray continuation frame"); return -1; }
             if (c->msg_len + plen > MSG_MAX) { conn_fail(n, c, now, "oversized message"); return -1; }
             memcpy(c->msg + c->msg_len, payload, (size_t)plen);
             c->msg_len += (size_t)plen;
             if (fin) {
                 c->in_msg = 0;
-                if (c->msg_op == 1) {
+                if (c->msg_op == WS_TEXT) {
                     n->busy = c;
                     on_message(n, c, (const char *)c->msg, c->msg_len, now);
                     n->busy = NULL;
@@ -693,11 +717,11 @@ static void begin_proxy_connect(nostr_t *n, conn_t *c, double now) {
     if (alloc_buffers(c) != 0) { conn_fail(n, c, now, "out of memory"); return; }
     c->s = net_tcp_connect(pa);
     if (c->s == SOCK_INVALID) { conn_fail(n, c, now, "can't reach Tor's SOCKS port"); return; }
-    uint8_t user[8];
+    uint8_t user[SOCKS_USER_LEN / 2];
     gen_random(user, sizeof user);
     hex_encode(user, sizeof user, c->socks_user);
     c->via_proxy = 1;
-    c->socks_stage = 0;
+    c->socks_stage = SOCKS_METHOD;
     c->in_len = 0;
     c->state = R_CONNECTING;
     c->deadline = now + STEP_TIMEOUT;
@@ -724,33 +748,27 @@ static const char *socks_reply(int rep) {
 static int socks_advance(nostr_t *n, conn_t *c, double now) {
     relay_t *r = c->relay;
     for (;;) {
-        if (c->socks_stage == 0) {
-            if (c->in_len < 2) return 0;
-            if (c->in[0] != 5 || c->in[1] != 2) { conn_fail(n, c, now, "that SOCKS port won't take Tor's login (is it Tor's?)"); return -1; }
-            uint8_t auth[20];
-            auth[0] = 1; auth[1] = 16;
-            memcpy(auth + 2, c->socks_user, 16);
-            auth[18] = 1; auth[19] = 'x';
-            memmove(c->in, c->in + 2, c->in_len - 2); c->in_len -= 2;
+        if (c->socks_stage == SOCKS_METHOD) {
+            if (c->in_len < SOCKS_REPLY_LEN) return 0;
+            if (!socks_hello_ok(c->in)) { conn_fail(n, c, now, "that SOCKS port won't take Tor's login (is it Tor's?)"); return -1; }
+            uint8_t auth[SOCKS_LOGIN_LEN];
+            socks_login(auth, c->socks_user);
+            memmove(c->in, c->in + SOCKS_REPLY_LEN, c->in_len - SOCKS_REPLY_LEN); c->in_len -= SOCKS_REPLY_LEN;
             if (send_all(c->s, auth, sizeof auth) != 0) { conn_fail(n, c, now, "SOCKS write failed"); return -1; }
-            c->socks_stage = 1;
-        } else if (c->socks_stage == 1) {
-            if (c->in_len < 2) return 0;
+            c->socks_stage = SOCKS_LOGIN;
+        } else if (c->socks_stage == SOCKS_LOGIN) {
+            if (c->in_len < SOCKS_REPLY_LEN) return 0;
             if (c->in[1] != 0) { conn_fail(n, c, now, "Tor refused the SOCKS login"); return -1; }
-            memmove(c->in, c->in + 2, c->in_len - 2); c->in_len -= 2;
-            size_t hl = strlen(r->host);
-            uint8_t req[7 + 100];
-            req[0] = 5; req[1] = 1; req[2] = 0; req[3] = 3; req[4] = (uint8_t)hl;
-            memcpy(req + 5, r->host, hl);
-            req[5 + hl] = (uint8_t)(r->port >> 8);
-            req[6 + hl] = (uint8_t)r->port;
-            if (send_all(c->s, req, 7 + hl) != 0) { conn_fail(n, c, now, "SOCKS write failed"); return -1; }
-            c->socks_stage = 2;
+            memmove(c->in, c->in + SOCKS_REPLY_LEN, c->in_len - SOCKS_REPLY_LEN); c->in_len -= SOCKS_REPLY_LEN;
+            uint8_t req[SOCKS_CONNECT_LEN(HOST_MAX)];
+            size_t len = socks_connect(req, r->host, strlen(r->host), r->port);
+            if (send_all(c->s, req, len) != 0) { conn_fail(n, c, now, "SOCKS write failed"); return -1; }
+            c->socks_stage = SOCKS_CONNECT;
             c->deadline = now + SOCKS_TIMEOUT;
         } else {
-            if (c->in_len < 5) return 0;
-            if (c->in[0] != 5 || c->in[1] != 0) { conn_fail(n, c, now, socks_reply(c->in[1])); return -1; }
-            size_t need = c->in[3] == 1 ? 10 : c->in[3] == 4 ? 22 : c->in[3] == 3 ? (size_t)7 + c->in[4] : 0;
+            if (c->in_len < SOCKS_CONNECT_HEAD) return 0;
+            if (c->in[0] != SOCKS_VERSION || c->in[1] != 0) { conn_fail(n, c, now, socks_reply(c->in[1])); return -1; }
+            size_t need = socks_connect_reply_len(c->in);
             if (need == 0) { conn_fail(n, c, now, "bad SOCKS reply"); return -1; }
             if (c->in_len < need) return 0;
             memmove(c->in, c->in + need, c->in_len - need); c->in_len -= need;
@@ -791,7 +809,7 @@ static void conn_open(nostr_t *n, relay_t *r, conn_t *c, long long epoch, double
     c->job = job;
     if (platform_spawn_thread(resolve_main, job) != 0) { free(job); c->job = NULL; conn_fail(n, c, now, "can't look the name up"); return; }
     c->state = R_RESOLVING;
-    c->deadline = now + 30.0;
+    c->deadline = now + RESOLVE_TIMEOUT;
 }
 
 static void conn_step(nostr_t *n, conn_t *c, double now) {
@@ -802,12 +820,7 @@ static void conn_step(nostr_t *n, conn_t *c, double now) {
             if (n->must_proxy && n->proxy[0] && c->s == SOCK_INVALID) begin_proxy_connect(n, c, now);
             return;
         case R_RESOLVING: {
-#if JOB_ATOMIC
-            int done = atomic_load(&c->job->state) == JOB_DONE;
-#else
-            int done = c->job->state == JOB_DONE;
-#endif
-            if (!done) {
+            if (!job_done(&c->job->state)) {
                 if (now > c->deadline) conn_fail(n, c, now, "name lookup timed out");
                 return;
             }
@@ -833,7 +846,8 @@ static void conn_step(nostr_t *n, conn_t *c, double now) {
                 return;
             }
             if (c->via_proxy) {
-                static const uint8_t hello[3] = { 5, 1, 2 };
+                uint8_t hello[SOCKS_HELLO_LEN];
+                socks_hello(hello);
                 if (send_all(c->s, hello, sizeof hello) != 0) { conn_fail(n, c, now, "SOCKS write failed"); return; }
                 c->state = R_SOCKS;
                 c->deadline = now + STEP_TIMEOUT;
@@ -883,7 +897,7 @@ static void conn_step(nostr_t *n, conn_t *c, double now) {
                     c->state = R_OPEN;
                     c->opened_at = now;
                     c->next_ping = now + PING_EVERY;
-                    uint8_t sid[8];
+                    uint8_t sid[SUBID_LEN];
                     gen_random(sid, sizeof sid);
                     hex_encode(sid, sizeof sid, c->subid);
                     if (r->warned) logf_(n, 0, "* nostr: %s is back", r->host);
@@ -898,7 +912,7 @@ static void conn_step(nostr_t *n, conn_t *c, double now) {
                 return;
             }
             if (now - c->last_rx > IDLE_TIMEOUT) { conn_fail(n, c, now, "went quiet"); return; }
-            if (now >= c->next_ping) { c->next_ping = now + PING_EVERY; ws_queue(c, 9, "p", 1); }
+            if (now >= c->next_ping) { c->next_ping = now + PING_EVERY; ws_queue(c, WS_PING, "p", 1); }
             if (!c->subscribed && c->resub_at > 0 && now >= c->resub_at) { c->resub_at = 0; send_req(c); }
             flush(n, c, now);
             return;
@@ -909,8 +923,13 @@ static void conn_step(nostr_t *n, conn_t *c, double now) {
 }
 
 static conn_t *conn_for(relay_t *r, long long epoch) {
-    for (int k = 0; k < 2; k++) if (r->conns[k].used && r->conns[k].epoch == epoch) return &r->conns[k];
+    for (int k = 0; k < CONNS_PER_RELAY; k++) if (r->conns[k].used && r->conns[k].epoch == epoch) return &r->conns[k];
     return NULL;
+}
+
+static int relay_open(const relay_t *r) {
+    for (int k = 0; k < CONNS_PER_RELAY; k++) if (r->conns[k].used && r->conns[k].state == R_OPEN) return 1;
+    return 0;
 }
 
 // Which connections a relay should have now: the one for these ten minutes, the next one from a
@@ -921,11 +940,11 @@ static void relay_plan(nostr_t *n, relay_t *r, double now) {
     if (r->plan_epoch != e) {
         double lead = n->must_proxy ? LEAD_PROXY : LEAD;
         double start = (double)(e * NOSTR_EPOCH), next = (double)((e + 1) * NOSTR_EPOCH);
-        r->open_next_at = next - lead / 2 - (double)rand_below((uint32_t)(lead / 2 * 1000)) / 1000.0;
-        r->close_last_at = start + TAIL / 2 + (double)rand_below((uint32_t)(TAIL / 2 * 1000)) / 1000.0;
+        r->open_next_at = next - lead / 2 - random_seconds(lead / 2);
+        r->close_last_at = start + TAIL / 2 + random_seconds(TAIL / 2);
         r->plan_epoch = e;
     }
-    for (int k = 0; k < 2; k++) {
+    for (int k = 0; k < CONNS_PER_RELAY; k++) {
         conn_t *c = &r->conns[k];
         if (!c->used) continue;
         int keep = c->epoch == e || (c->epoch == e + 1) || (c->epoch == e - 1 && wall < r->close_last_at);
@@ -954,14 +973,14 @@ void nostr_step(nostr_t *n, double now) {
     for (int i = 0; i < n->n_relays; i++) {
         relay_t *r = &n->relays[i];
         relay_plan(n, r, now);
-        for (int k = 0; k < 2; k++) if (r->conns[k].used) conn_step(n, &r->conns[k], now);
+        for (int k = 0; k < CONNS_PER_RELAY; k++) if (r->conns[k].used) conn_step(n, &r->conns[k], now);
     }
 }
 
 int nostr_sockets(const nostr_t *n, sock_t *out, int max) {
     int k = 0;
     for (int i = 0; i < n->n_relays; i++)
-        for (int j = 0; j < 2 && k < max; j++) {
+        for (int j = 0; j < CONNS_PER_RELAY && k < max; j++) {
             const conn_t *c = &n->relays[i].conns[j];
             if (c->used && c->s != SOCK_INVALID && c->state >= R_SOCKS) out[k++] = c->s;
         }
@@ -995,8 +1014,7 @@ int nostr_send(nostr_t *n, addr_t to, const uint8_t *data, size_t len, double no
     uint8_t plain[NOSTR_WRAP_PLAIN], wrapped[NOSTR_WRAP_LEN];
     memcpy(plain, n->my_id, ID_LEN);
     memcpy(plain + ID_LEN, to.ip, ID_LEN);
-    plain[ID_LEN * 2] = (uint8_t)(len >> 8);
-    plain[ID_LEN * 2 + 1] = (uint8_t)len;
+    store_be16(plain + WRAP_LEN_AT, (uint16_t)len);
     memcpy(plain + WRAP_HDR, data, len);
     gen_random(plain + WRAP_HDR + len, NOSTR_WRAP_PLAIN - WRAP_HDR - len);
     nostr_wrap(n->wrap_key, plain, wrapped);
@@ -1007,7 +1025,7 @@ int nostr_send(nostr_t *n, addr_t to, const uint8_t *data, size_t len, double no
     size_t clen = base64_encode(wrapped, sizeof wrapped, content);
     int kind = random_kind(), sent = 0;
     // One event per tag. Every relay with a connection for the same ten minutes gets the same event.
-    char built_tag[65] = "";
+    char built_tag[TAG_HEX + 1] = "";
     size_t total = 0;
     static const char head[] = "[\"EVENT\",";
     for (int i = 0; i < n->n_relays; i++) {
@@ -1029,7 +1047,7 @@ int nostr_send(nostr_t *n, addr_t to, const uint8_t *data, size_t len, double no
             n->ser[total - 1] = ']';
             copy_str(built_tag, c->tag, sizeof built_tag);
         }
-        if (ws_queue(c, 1, n->ser, total) != 0) continue;
+        if (ws_queue(c, WS_TEXT, n->ser, total) != 0) continue;
         r->tokens -= 1.0;
         sent++;
         if (c != n->busy) flush(n, c, now);
@@ -1043,7 +1061,7 @@ void nostr_set_proxy(nostr_t *n, const char *socks) {
     // Everything that went through the old tor is gone, so start again through the new one.
     for (int i = 0; i < n->n_relays; i++) {
         relay_t *r = &n->relays[i];
-        for (int k = 0; k < 2; k++) close_conn(&r->conns[k]);
+        for (int k = 0; k < CONNS_PER_RELAY; k++) close_conn(&r->conns[k]);
         r->next_try = 0;
         r->fails = 0;
     }
@@ -1059,10 +1077,7 @@ void nostr_retry_now(nostr_t *n) {
 
 int nostr_relays_up(const nostr_t *n) {
     int k = 0;
-    for (int i = 0; i < n->n_relays; i++) {
-        const relay_t *r = &n->relays[i];
-        k += (r->conns[0].used && r->conns[0].state == R_OPEN) || (r->conns[1].used && r->conns[1].state == R_OPEN);
-    }
+    for (int i = 0; i < n->n_relays; i++) k += relay_open(&n->relays[i]);
     return k;
 }
 
@@ -1077,8 +1092,7 @@ void nostr_status(const nostr_t *n, char *out, size_t cap) {
     size_t p = (size_t)snprintf(out, cap, "%d/%d relays up", nostr_relays_up(n), n->n_relays);
     for (int i = 0; i < n->n_relays && p < cap; i++) {
         const relay_t *r = &n->relays[i];
-        int open = (r->conns[0].used && r->conns[0].state == R_OPEN) || (r->conns[1].used && r->conns[1].state == R_OPEN);
-        int trying = r->conns[0].used || r->conns[1].used;
+        int open = relay_open(r), trying = r->conns[0].used || r->conns[1].used;
         const char *st = !open ? (trying ? "connecting" : "waiting")
                        : r->read_only ? "read-only" : now < r->paused_until ? "paused" : "up";
         p += (size_t)snprintf(out + p, cap - p, "%s%s %s", i ? ", " : " (", r->host, st);

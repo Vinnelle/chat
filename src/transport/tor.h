@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "platform/net.h"
+#include "crypto/crypto.h"
 
 // Datagrams over Tor, for sessions that must not show anyone their IP address. Needs a running
 // tor (the system service, or Tor Browser) with its control port on.
@@ -23,13 +24,14 @@
 #define TOR_ROOM_SLOTS 6
 #define TOR_ADDR_LEN 56
 #define TOR_HOST_MAX 64
+#define TOR_PASSWORD_MAX 128
 
 typedef struct tor tor_t;
 
 typedef struct {
     char socks[TOR_HOST_MAX];     // host:port of Tor's SOCKS port
     char control[TOR_HOST_MAX];   // host:port of Tor's control port
-    char password[128];           // for HashedControlPassword; empty uses cookie or no auth
+    char password[TOR_PASSWORD_MAX];   // for HashedControlPassword; empty uses cookie or no auth
 } tor_opts_t;
 
 typedef void (*tor_deliver_fn)(void *ctx, const uint8_t *data, size_t len, addr_t from, double now);
@@ -37,8 +39,8 @@ typedef void (*tor_log_fn)(void *ctx, int verbose_only, const char *msg);
 
 extern const tor_opts_t TOR_DEFAULTS;
 
-tor_t *tor_new(const tor_opts_t *o, const uint8_t room_keys[TOR_ROOM_SLOTS][64],
-               const uint8_t room_pubs[TOR_ROOM_SLOTS][32], tor_deliver_fn deliver, tor_log_fn log, void *ctx);
+tor_t *tor_new(const tor_opts_t *o, const uint8_t room_keys[TOR_ROOM_SLOTS][TOR_KEY_LEN],
+               const uint8_t room_pubs[TOR_ROOM_SLOTS][TOR_PUB_LEN], tor_deliver_fn deliver, tor_log_fn log, void *ctx);
 void tor_free(tor_t *t);
 
 // Points a session at another tor, and the password its control port takes: the one chat
@@ -75,7 +77,7 @@ const char *tor_my_onion(const tor_t *t);
 void tor_status(const tor_t *t, char *out, size_t cap);
 
 // Onion service v3 address of an ed25519 public key, and a check that s is one.
-void onion_address(const uint8_t pub[32], char out[TOR_ADDR_LEN + 1]);
+void onion_address(const uint8_t pub[TOR_PUB_LEN], char out[TOR_ADDR_LEN + 1]);
 int onion_valid(const char *s);
 
 #endif
