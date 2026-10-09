@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- The full-screen UI marks a name in the chat with a symbol in a column of its own, where it added
+  words that could push everyone's messages halfway across the chat: `◆` you, `✓` code compared, `?`
+  code not compared, `✗` codes differ. The name column is as wide as the longest nick in view, up to
+  a quarter of the chat (a third before), and a longer name, like a relayed one, goes on its own row
+  above its message. Lines from a history kept by an older version show the symbols too.
+- The sidebar spells out the symbols that apply to each peer on rows under it: its verify state,
+  `h keeps history` and `! modified client`. When the sidebar is too short for that, they go next to
+  the nick as before.
+- Messages from a peer whose verify code you compared say `(code compared)` after its name, in
+  `--simple` and notifications too. Only `(code not compared)` and `(codes differ)` were shown before.
+
 ## 0.5.0-beta.4
 
 ### Security
