@@ -318,10 +318,12 @@ static int peer_trusted(const chat_t *c, const peer_t *p) {
     return p->code_ok != CODE_DIFFERENT && (!c->verify_required || p->code_ok == CODE_SAME);
 }
 
-// What's added to p's name on a line from it, when its code matters.
+// What's added to p's name on a line from it: whether its code was compared, or that it wasn't when
+// that holds messages back. The full-screen UI shows it as a symbol (tui.c's MARKS).
 static const char *code_mark(const chat_t *c, const peer_t *p) {
     if (p->code_ok == CODE_DIFFERENT) return " (codes differ)";
-    return c->verify_required && p->code_ok != CODE_SAME ? " (code not compared)" : "";
+    if (p->code_ok == CODE_SAME) return " (code compared)";
+    return c->verify_required ? " (code not compared)" : "";
 }
 
 static void pending_clear(pending_msg_t *pm) { crypto_wipe(pm, sizeof *pm); }

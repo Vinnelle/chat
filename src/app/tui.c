@@ -1009,17 +1009,70 @@ static int split_chat_line(const tui_line_t *l, char *name, size_t cap, const ch
     return 1;
 }
 
-// A name as the chat shows it: the nick in its colour, and what the UI adds to it (" (you)", or a
-// "#id" to tell lookalikes apart) faint. No nick can contain '(' or '#', so those are always the UI's.
-static void draw_name(pen_t *p, const char *name, const uint8_t *rgb) {
-    size_t nick = strcspn(name, "#(");
-    while (nick > 0 && name[nick - 1] == ' ') nick--;
-    char buf[NAME_BUF];
-    copy_slice(buf, sizeof buf, name, nick);
+// What a peer is marked with: a symbol after its name in the chat, spelled out under it in the
+// sidebar, in words that fit the narrowest sidebar. The engine ends a chat line's name with one in
+// brackets ("ida (code compared)"), which the chat shows as the symbol.
+enum { MK_YOU, MK_DIFFERS, MK_KEY_CHANGED, MK_INVALID, MK_TO_COMPARE, MK_COMPARED, MK_VERIFIED, MK_UNVERIFIED,
+       MK_HISTORY, MK_MODIFIED };
+static const struct { const char *glyph, *word, *chat; style_t st; } MARKS[] = {
+    [MK_YOU]         = { G_DIAMOND, "you",             "(you)",               S_FAINT },
+    [MK_DIFFERS]     = { G_CROSS,   "codes differ",    "(codes differ)",      S_RED_BOLD },
+    [MK_KEY_CHANGED] = { G_CROSS,   "key changed",     NULL,                  S_RED_BOLD },
+    [MK_INVALID]     = { G_CROSS,   "bad signature",   NULL,                  S_RED_BOLD },
+    [MK_TO_COMPARE]  = { "?",       "compare code",    "(code not compared)", S_YELLOW_BOLD },
+    [MK_COMPARED]    = { G_CHECK,   "code compared",   "(code compared)",     S_GREEN },
+    [MK_VERIFIED]    = { G_CHECK,   "verified",        NULL,                  S_GREEN },
+    [MK_UNVERIFIED]  = { "?",       "unverified",      NULL,                  S_FAINT },
+    [MK_HISTORY]     = { "h",       "keeps history",   NULL,                  S_YELLOW_BOLD },
+    [MK_MODIFIED]    = { "!",       "modified client", NULL,                  S_RED_BOLD },
+};
+
+// A mark's symbol after a name, in the column the chat keeps for them.
+#define MARK_COLS 2
+
+static void draw_mark(pen_t *p, int mark) {
+    if (mark < 0) return;
+    ptext(p, S_PLAIN, " ");
+    ptext(p, MARKS[mark].st, MARKS[mark].glyph);
+}
+
+// A chat line's name as it's drawn: the nick, what's added to tell it apart (a "#id", who relayed
+// it), and the mark that ended it, or -1. No nick can contain '(' or '#', so those are always the UI's.
+typedef struct {
+    char nick[NAME_BUF], extra[NAME_BUF];
+    int mark;
+} chat_name_t;
+
+static int split_name(const char *name, chat_name_t *n) {
+    size_t cut = strlen(name), rest = cut;
+    n->mark = -1;
+    const char *open = strrchr(name, '(');
+    for (int i = 0; open && i < (int)COUNT_OF(MARKS); i++) {
+        if (!MARKS[i].chat || strncmp(open, MARKS[i].chat, strlen(MARKS[i].chat)) != 0) continue;
+        n->mark = i;
+        cut = (size_t)(open - name);
+        rest = cut + strlen(MARKS[i].chat);
+        break;
+    }
+    while (cut > 0 && name[cut - 1] == ' ') cut--;
+    // A relayed line's mark is inside its "(via ...)", whose ')' stays.
+    char bare[NAME_BUF];
+    copy_slice(bare, sizeof bare, name, cut);
+    size_t bl = strlen(bare);
+    copy_str(bare + bl, name + rest, sizeof bare - bl);
+    size_t nick = strcspn(bare, "#(");
+    while (nick > 0 && bare[nick - 1] == ' ') nick--;
+    copy_slice(n->nick, sizeof n->nick, bare, nick);
+    copy_str(n->extra, bare + nick, sizeof n->extra);
+    return utf8_str_cols(n->nick) + utf8_str_cols(n->extra);
+}
+
+// The nick in its colour, and what's added to it faint.
+static void draw_name(pen_t *p, const chat_name_t *n, const uint8_t *rgb) {
     if (rgb) sty_rgb(p->w, rgb, 1, 0);
     else sty(p->w, S_BOLD);
-    p->used += wapp_trunc(p->w, buf, p->room - p->used);
-    ptext(p, S_FAINT, name + nick);
+    p->used += wapp_trunc(p->w, n->nick, p->room - p->used);
+    ptext(p, S_FAINT, n->extra);
 }
 
 #define SB_AT(sb, k) (&(sb)->lines[((sb)->head - 1 - (k) + TUI_SCROLLBACK * 2) % TUI_SCROLLBACK])
@@ -1159,19 +1212,22 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
     int fresh = !console && v && v->new_lines > 0 && v->new_lines < sb->count ? v->new_lines : 0;
     const char *self = !console && v ? v->self : NULL;
     int time_w = W >= TIME_MIN_W ? TIME_COLS : 0;
-    // The name column: as wide as the widest name in view, up to a third of the pane. A name wider
-    // than that goes on its own row, so it doesn't take up space in the column.
-    int nw = 0;
+    // The name column: as wide as the widest name in view, up to a quarter of the pane, then a column
+    // for the marks if a name in view has one. A name wider than that goes on its own row, so it
+    // doesn't take up space in the column.
+    int nw = 0, mw = 0;
     if (!console) {
         for (int k = skip; k < sb->count && k < skip + nrows; k++) {
             char name[NAME_BUF];
             const char *body;
+            chat_name_t cn;
             if (!split_chat_line(SB_AT(sb, k), name, sizeof name, &body)) continue;
-            int c = utf8_str_cols(name);
-            if (c > nw && c <= W / 3) nw = c;
+            int c = split_name(name, &cn);
+            if (c > nw && c <= W / 4) nw = c;
+            if (cn.mark >= 0) mw = MARK_COLS;
         }
     }
-    int aligned = W - time_w - nw - 2 >= 16;
+    int aligned = W - time_w - nw - mw - 2 >= 16;
     int bottom = first + nrows - 1;
     for (int k = skip; k < sb->count && bottom >= first; k++) {
         const tui_line_t *l = SB_AT(sb, k);
@@ -1179,14 +1235,16 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
         const char *body = l->text;
         int chat = split_chat_line(l, name, sizeof name, &body);
         if (!chat && body[0] == '*' && body[1] == ' ') body += 2;
-        int name_c = chat ? utf8_str_cols(name) : 0;
+        chat_name_t cn = { .mark = -1 };
+        int name_c = chat ? split_name(name, &cn) : 0;
 
-        // A name wider than the column ("bob (code not compared)" in a narrow pane) goes on its own row
-        // above the text, so the text still lines up. Cutting it off could lose what the chat adds to it.
+        // A name wider than the column ("carol#1a2b3c4d (via bob)", or a long nick in a narrow pane)
+        // goes on its own row above the text, so the text still lines up. Cutting it off could lose
+        // what the chat adds to it.
         int stacked = chat && aligned && name_c > nw;
         int first_pre, rest_pre;
-        if (chat && aligned) first_pre = rest_pre = time_w + nw + 2;
-        else if (chat) { first_pre = time_w + name_c + 1; rest_pre = time_w; }
+        if (chat && aligned) first_pre = rest_pre = time_w + nw + mw + 2;
+        else if (chat) { first_pre = time_w + name_c + (cn.mark >= 0 ? MARK_COLS : 0) + 1; rest_pre = time_w; }
         else first_pre = rest_pre = time_w;
         if (first_pre > W - 1) first_pre = W - 1 > 0 ? W - 1 : 0;
         if (rest_pre > W - 1) rest_pre = W - 1 > 0 ? W - 1 : 0;
@@ -1230,7 +1288,8 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
             grid_open(g, hrow, &gp);
             if (time_w) ptext(&gp.p, l->mention ? S_YELLOW_BOLD : S_FAINT, l->hhmm);
             pspace(&gp.p, time_w);
-            draw_name(&gp.p, name, l->has_color ? l->rgb : NULL);
+            draw_name(&gp.p, &cn, l->has_color ? l->rgb : NULL);
+            draw_mark(&gp.p, cn.mark);
             grid_close(g, hrow, &gp);
         }
 
@@ -1262,7 +1321,8 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
                 pspace(p, time_w);
                 if (chat && !grouped) {
                     if (aligned) pspace(p, time_w + nw - name_c);
-                    draw_name(p, name, l->has_color ? l->rgb : NULL);
+                    draw_name(p, &cn, l->has_color ? l->rgb : NULL);
+                    draw_mark(p, cn.mark);
                 }
                 pspace(p, first_pre);
             } else {
@@ -1460,7 +1520,7 @@ static void draw_main(wbuf_t *w, rect_t m, int boxed, int sidebar_shown, const t
 
 // ---- the sidebar: sessions, the peers in the selected one, and how it reaches them ----
 
-enum { L_BLANK, L_HEAD_SESSIONS, L_NO_SESSIONS, L_SESSION, L_HEAD_PEERS, L_PEER, L_HEAD_NET, L_NET };
+enum { L_BLANK, L_HEAD_SESSIONS, L_NO_SESSIONS, L_SESSION, L_HEAD_PEERS, L_PEER, L_PEER_MARKS, L_HEAD_NET, L_NET };
 
 static void heading(pen_t *p, const char *title, int count) {
     ptext(p, S_FAINT, title);
@@ -1501,43 +1561,98 @@ static void session_line(pen_t *p, const tui_session_row_t *s, int sel) {
     ptext(p, S_FAINT, count);
 }
 
-// A history kept, a modified client and the verify state in words while they fit next to the nick,
-// then the first, the second and the third as symbols in turn. The nick is cut to make room for them,
-// never the other way.
-static void peer_line(pen_t *p, const tui_peer_row_t *pr) {
-    const char *word, *glyph;
-    style_t st;
-    // Most urgent first: codes that differ, a key that isn't the one verified for the nick, a bad
-    // signature, a code still to compare.
-    if (pr->you) { word = glyph = "you"; st = S_FAINT; }
-    else if (pr->code == TUI_CODE_DIFFERS) { word = G_CROSS " codes differ"; glyph = G_CROSS; st = S_RED_BOLD; }
-    else if (pr->code == TUI_CODE_KEY_CHANGED) { word = G_CROSS " key changed"; glyph = G_CROSS; st = S_RED_BOLD; }
-    else if (pr->verify == TUI_VERIFY_BAD) { word = G_CROSS " invalid"; glyph = G_CROSS; st = S_RED_BOLD; }
-    else if (pr->code == TUI_CODE_TO_COMPARE) { word = "? compare code"; glyph = "?"; st = S_YELLOW_BOLD; }
-    else if (pr->code == TUI_CODE_COMPARED) { word = G_CHECK " compared"; glyph = G_CHECK; st = S_GREEN; }
-    else if (pr->verify == TUI_VERIFY_OK) { word = G_CHECK " verified"; glyph = G_CHECK; st = S_GREEN; }
-    else { word = "unverified"; glyph = "?"; st = S_FAINT; }
-    const char *mod_word = pr->modified ? "modified " : "", *mod_glyph = pr->modified ? "! " : "";
-    const char *hist_word = pr->history ? "history " : "", *hist_glyph = pr->history ? "h " : "";
+// What applies to a peer: who it is or its verify state, most urgent first (codes that differ, a
+// key that isn't the one verified for the nick, a bad signature, a code still to compare), then a
+// history kept and a modified client.
+#define PEER_MARKS_MAX 3
+
+static int peer_marks(const tui_peer_row_t *pr, int mk[PEER_MARKS_MAX]) {
+    int n = 0;
+    if (pr->you) mk[n++] = MK_YOU;
+    else if (pr->code == TUI_CODE_DIFFERS) mk[n++] = MK_DIFFERS;
+    else if (pr->code == TUI_CODE_KEY_CHANGED) mk[n++] = MK_KEY_CHANGED;
+    else if (pr->verify == TUI_VERIFY_BAD) mk[n++] = MK_INVALID;
+    else if (pr->code == TUI_CODE_TO_COMPARE) mk[n++] = MK_TO_COMPARE;
+    else if (pr->code == TUI_CODE_COMPARED) mk[n++] = MK_COMPARED;
+    else if (pr->verify == TUI_VERIFY_OK) mk[n++] = MK_VERIFIED;
+    else mk[n++] = MK_UNVERIFIED;
+    if (pr->history) mk[n++] = MK_HISTORY;
+    if (pr->modified) mk[n++] = MK_MODIFIED;
+    return n;
+}
+
+static int mark_cols(int m, int word) {
+    return utf8_str_cols(MARKS[m].glyph) + (word ? 1 + utf8_str_cols(MARKS[m].word) : 0);
+}
+
+static void mark_item(pen_t *p, int m, int word) {
+    ptext(p, MARKS[m].st, MARKS[m].glyph);
+    if (!word) return;
+    ptext(p, MARKS[m].st, " ");
+    ptext(p, MARKS[m].st, MARKS[m].word);
+}
+
+// The rows under a peer that spell out its marks, room columns wide, as the first mark on each.
+// Marks share a row while they fit.
+static int mark_rows(const int *mk, int n, int room, int first[PEER_MARKS_MAX + 1]) {
+    int rows = 0, used = 0;
+    for (int i = 0; i < n; i++) {
+        int c = mark_cols(mk[i], 1);
+        if (rows > 0 && used + 2 + c <= room) { used += 2 + c; continue; }
+        first[rows++] = i;
+        used = c;
+    }
+    first[rows] = n;
+    return rows;
+}
+
+// The marks are indented under the nick, past the dot before it.
+#define MARK_INDENT 2
+
+static int peer_mark_rows(const tui_peer_row_t *pr, int room) {
+    int mk[PEER_MARKS_MAX], first[PEER_MARKS_MAX + 1];
+    int n = peer_marks(pr, mk);
+    return mark_rows(mk, n, room - MARK_INDENT, first);
+}
+
+static void peer_marks_line(pen_t *p, const tui_peer_row_t *pr, int row) {
+    int mk[PEER_MARKS_MAX], first[PEER_MARKS_MAX + 1];
+    int n = peer_marks(pr, mk);
+    if (row >= mark_rows(mk, n, p->room - MARK_INDENT, first)) return;
+    pspace(p, MARK_INDENT);
+    for (int i = first[row]; i < first[row + 1]; i++) {
+        if (i > first[row]) pspace(p, p->used + 2);
+        mark_item(p, mk[i], 1);
+    }
+}
+
+// A peer's nick, and unless its marks are spelled out under it, the marks after it: in words while
+// they fit, then as symbols, the verify state last. The nick is cut to make room for them, never the
+// other way.
+static void peer_line(pen_t *p, const tui_peer_row_t *pr, int spelled) {
+    int mk[PEER_MARKS_MAX], word[PEER_MARKS_MAX];
+    int n = spelled ? 0 : peer_marks(pr, mk);
     int tag_w = utf8_str_cols(pr->tag);
     int nick_w = utf8_str_cols(pr->nick);
     int room = p->room - 2 - tag_w - 1, want = nick_w < 6 ? nick_w : 6;
-    const char *h = hist_word, *m = mod_word, *v = word;
-#define RIGHT_COLS (utf8_str_cols(h) + utf8_str_cols(m) + utf8_str_cols(v))
-    if (room - RIGHT_COLS < want) h = hist_glyph;
-    if (room - RIGHT_COLS < want) m = mod_glyph;
-    if (room - RIGHT_COLS < want) v = glyph;
-    int right = RIGHT_COLS;
-#undef RIGHT_COLS
+    int right = n > 0 ? n - 1 : 0;
+    for (int i = 0; i < n; i++) { word[i] = 1; right += mark_cols(mk[i], 1); }
+    // From the second mark round to the first, so the verify state keeps its word longest.
+    for (int i = 1; i <= n && room - right < want; i++) {
+        int k = i % n;
+        right -= mark_cols(mk[k], 1) - mark_cols(mk[k], 0);
+        word[k] = 0;
+    }
     sty_rgb(p->w, pr->color, 0, 0);
     p->used += wapp_trunc(p->w, G_DOT " ", p->room - p->used);
     int nick_room = p->room - p->used - tag_w - right - 1;
     prgb(p, pr->color, pr->you, pr->nick, nick_room < 1 ? 1 : nick_room);
     ptext(p, S_FAINT, pr->tag);
     pspace(p, p->room - right);
-    ptext(p, S_YELLOW_BOLD, h);
-    ptext(p, S_RED_BOLD, m);
-    ptext(p, st, v);
+    for (int i = 1; i <= n; i++) {
+        if (i > 1) ptext(p, S_PLAIN, " ");
+        mark_item(p, mk[i % n], word[i % n]);
+    }
 }
 
 static void draw_sidebar(wbuf_t *w, rect_t r, const tui_session_row_t *sessions, int n_sessions, int selected,
@@ -1551,13 +1666,23 @@ static void draw_sidebar(wbuf_t *w, rect_t r, const tui_session_row_t *sessions,
     static int kind[MAX_ROWS], arg[MAX_ROWS];
     int n = 0;
 #define ADD(k, a) do { if (n < h) { kind[n] = (k); arg[n] = (a); n++; } } while (0)
+    // Each peer's marks are spelled out on rows under it while every peer's fit above the network
+    // section: the sessions and a blank row and heading before the peers, a blank row and heading
+    // before the network.
+    int room = r.w - 4, under = 0;
+    for (int i = 0; i < n_peers; i++) under += peer_mark_rows(&peers[i], room);
+    int spelled = 1 + (n_sessions > 0 ? n_sessions : 1) + 2 + n_peers + under + (n_net > 0 ? 2 + n_net : 0) <= h;
     ADD(L_HEAD_SESSIONS, 0);
     if (n_sessions == 0) ADD(L_NO_SESSIONS, 0);
     for (int i = 0; i < n_sessions; i++) ADD(L_SESSION, i);
     if (n_peers > 0) {
         ADD(L_BLANK, 0);
         ADD(L_HEAD_PEERS, 0);
-        for (int i = 0; i < n_peers; i++) ADD(L_PEER, i);
+        for (int i = 0; i < n_peers; i++) {
+            ADD(L_PEER, i);
+            int rows = spelled ? peer_mark_rows(&peers[i], room) : 0;
+            for (int j = 0; j < rows; j++) ADD(L_PEER_MARKS, i * PEER_MARKS_MAX + j);
+        }
     }
     if (n_net > 0) {
         // At the bottom when there's room, otherwise straight after the rest.
@@ -1584,7 +1709,8 @@ static void draw_sidebar(wbuf_t *w, rect_t r, const tui_session_row_t *sessions,
             case L_NO_SESSIONS:   ptext(&p, S_FAINT, "none yet" DOT_SEP "ctrl+n"); break;
             case L_SESSION:       session_line(&p, &sessions[a], sel); break;
             case L_HEAD_PEERS:   heading(&p, "PEERS", n_peers); break;
-            case L_PEER:          peer_line(&p, &peers[a]); break;
+            case L_PEER:          peer_line(&p, &peers[a], spelled); break;
+            case L_PEER_MARKS:    peer_marks_line(&p, &peers[a / PEER_MARKS_MAX], a % PEER_MARKS_MAX); break;
             case L_HEAD_NET:      heading(&p, "NETWORK", -1); break;
             case L_NET:
                 ptext(&p, S_FAINT, net[a].label);

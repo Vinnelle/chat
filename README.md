@@ -37,9 +37,10 @@ ends if nobody is in the middle. Mark it with `:verify NICK ok`, or `:verify NIC
 didn't match, and then that peer gets nothing. By default, what you send goes to everyone
 else whether you've compared or not. **Compare verify codes** on the settings page
 (`:set verify required`, `--verify-required`) holds it back instead: nothing you send goes to
-a peer until you've marked it `ok`. Until then, their messages show `(code not compared)`, the
-sidebar says `compare code`, and the input box tells you your messages aren't going to them
-(`:verify NICK` shows the code).
+a peer until you've marked it `ok`. Until then, their messages show `(code not compared)` (a
+yellow `?` after their name in the full screen UI), the sidebar says `compare code`, and the
+input box tells you your messages aren't going to them (`:verify NICK` shows the code). Once
+compared, their messages show `(code compared)` (a green `✓`).
 
 **Verified keys.** If the peer signs with an identity (below), `:verify NICK ok` also keeps
 its signing key, with its nick, as verified. When a peer signs a handshake with a verified key,
@@ -105,7 +106,7 @@ check the list against the release key built into chat and look for the hash in 
 downloaded and nobody else is asked, so the check doesn't tell anyone you met that peer. A peer
 whose hash isn't in its release's list, or with no signed list (a build from source, for
 example), is marked **modified**. You get a warning after it joins, the sidebar shows
-`modified` next to its name, and `:peers` says `modified client`. One that passes shows as
+`! modified client` under its name, and `:peers` says `modified client`. One that passes shows as
 `says official`, because that's only its word.
 
 > This is not perfect as a client can be modified to send the correct SHA and will be marked as unmodified. I am working on a better solution for this
@@ -873,6 +874,11 @@ In a terminal, `chat` opens a full screen UI. The sidebar on the left lists your
 that session reaches them: route, port or tor, relays, port mapping, DHT and traffic. The rest
 of the screen is the selected session's chat, with its console above it, and you type in the
 box at the bottom.
+
+In the chat, a symbol after a name stands for what chat adds to it: `◆` you, `✓` code
+compared, `?` code not compared, `✗` codes differ. Under each peer, the sidebar spells out the
+symbols that apply to them, with `h` for a peer keeping a history and `!` for a modified
+client. When the sidebar is too short for that, the symbols go next to each name instead.
 
 > NOTE: This TUI was heavily assisted by UI, as I have mentioned across most my projects, I hate, and suck at, UI / Front-End development. If any front-end devs would like to improve the functionality, performance, and/or aesthetic of this, be my guest!
 

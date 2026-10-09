@@ -190,8 +190,9 @@ static secp256k1_context *secp(void) {
         g_secp = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
         uint8_t seed[SECP_KEY_LEN];
         gen_random(seed, sizeof seed);
-        // If this fails it's still usable, just unblinded.
-        if (g_secp) (void)secp256k1_context_randomize(g_secp, seed);
+        if (g_secp && !secp256k1_context_randomize(g_secp, seed)) {
+            // Still usable, just unblinded. A (void) cast doesn't quiet GCC's warn_unused_result.
+        }
         crypto_wipe(seed, sizeof seed);
     }
     return g_secp;
