@@ -15,6 +15,11 @@
   behind keep the old room and everything said in it, and aren't told where you went. With
   `--simple`, `:move yes` and `:move no` answer. Versions before this one can't move, so a move
   leaves them behind.
+- A panic key. `Ctrl+\` clears the screen and quits at once, from anywhere in chat: every session
+  says bye, nothing is saved, memory is wiped and chat's own tor stops. `:set panicwipe on` makes it
+  delete the open save as well, and `:set panichistory on` writes the history kept first.
+  `:set panickey` chooses another key, or none. In `--simple`, the terminal's `Ctrl+\` panics. It
+  used to end chat there, and in the full screen UI, with no bye and nothing cleaned up.
 
 ## 0.5.0
 

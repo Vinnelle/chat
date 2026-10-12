@@ -453,8 +453,10 @@ int term_raw_enable(void) {
     raw.c_lflag &= ~(tcflag_t)(ECHO | ICANON);
     raw.c_iflag &= ~(tcflag_t)(IXON | ICRNL);
     // Ctrl+C comes in as a key, so chat can ask before quitting. As a signal it would also reach the
-    // programs chat runs in its process group, and stop an update's curl even if you stay.
+    // programs chat runs in its process group, and stop an update's curl even if you stay. The same
+    // for Ctrl+\ (SIGQUIT), so it's a key the panic setting can choose or leave alone.
     raw.c_cc[VINTR] = _POSIX_VDISABLE;
+    raw.c_cc[VQUIT] = _POSIX_VDISABLE;
     raw.c_cc[VMIN] = 0;
     raw.c_cc[VTIME] = 0;
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) != 0) return -1;

@@ -88,6 +88,18 @@ const setting_def_t SETTINGS[] = {
       "a copy made before, a backup or the disk itself can still hold the real save, sealed under its own "
       "passphrase. Enter sets or removes it. Only while a save is open, and it needs the save's own factors to "
       "hand." },
+    { SET_PANIC_KEY, NULL, NULL, "panickey", "Panic key", K_CHOICE, "off|ctrl+\\|ctrl+q|ctrl+x|f12",
+      "A key that, from anywhere in chat, clears the screen and quits at once, without asking: every session says "
+      "bye, memory is wiped and chat's own tor stops. Nothing is saved but what the rows below keep. Anyone at the "
+      "keyboard can press it. Ctrl+\\ is awkward on some keyboards, so there are others. In --simple, the "
+      "terminal's Ctrl+\\ panics unless this is off." },
+    { SET_PANIC_WIPE, NULL, NULL, "panicwipe", "Panic deletes the save", K_TOGGLE, "on|off",
+      "on: the panic key also deletes the open save, as :uninstall does but without asking: its settings, signing "
+      "key, verified keys and history. Deleting isn't erasing: the disk and its backups can keep traces of the "
+      "files." },
+    { SET_PANIC_HISTORY, NULL, NULL, "panichistory", "Panic writes history", K_TOGGLE, "on|off",
+      "on: the panic key writes the history kept for each session before it quits. off: it isn't written, so "
+      "each history loses up to its last 30 seconds." },
     { SET_VERIFY, "Chat", NULL, "verify", "Compare verify codes", K_CHOICE, "required|optional",
       "Anyone with a session's id and password could sit between two members and read what they say. When a peer "
       "joins, chat shows a code to compare with them over another channel. It only matches on both ends if "
@@ -222,6 +234,9 @@ int setting_options(setting_id_t id, const char *const **names, int *n) {
             for (int i = 0; i < 4; i++) if (DESTROY_VALS[i] == g_app.destroy_limit) return i;
             return 0;
         }
+        case SET_PANIC_KEY:  *names = PANIC_KEY_NAMES; *n = N_PANIC_KEYS; return g_app.panic_key;
+        case SET_PANIC_WIPE: return g_app.panic_wipe != 0;
+        case SET_PANIC_HISTORY: return g_app.panic_history != 0;
         case SET_TOR_LAUNCH: *names = TOR_LAUNCH_NAMES; *n = 3; return g_app.tor_launch;
         case SET_NOTIFY:     *names = NOTIFY_NAMES; *n = 3; return (int)g_app.notify_mode;
         case SET_PREVIEW:    *names = PREVIEW_NAMES; *n = 3; return (int)g_app.notify_preview;
@@ -591,6 +606,12 @@ void setting_choose(setting_id_t id, int i) {
         case SET_AUTHENTICATOR: factor_choose(INSTALL_FACTOR_CODE, i); return;
         case SET_DESTROY: destroy_choose(DESTROY_VALS[i]); return;
         case SET_HISTORY: history_choose(i); return;
+        case SET_PANIC_KEY: g_app.panic_key = i; break;
+        case SET_PANIC_WIPE:
+            g_app.panic_wipe = i;
+            if (i) { note("Panic deletes the save: on - the panic key deletes the open save too, without asking"); return; }
+            break;
+        case SET_PANIC_HISTORY: g_app.panic_history = i; break;
         default: return;
     }
     char v[32]; setting_value(id, v, sizeof v);

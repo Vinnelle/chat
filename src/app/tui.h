@@ -120,6 +120,11 @@ typedef enum {
     TUI_KEY_FILES,
     TUI_KEY_CTRL_C,
     TUI_KEY_ESCAPE,
+    // The keys the panic setting chooses from.
+    TUI_KEY_CTRL_Q,
+    TUI_KEY_CTRL_X,
+    TUI_KEY_CTRL_BACKSLASH,
+    TUI_KEY_F12,
     // Not keys: the terminal's reply to a background colour query (r, g, b in ch[0..2]), and its
     // report that it switched between a light and a dark theme.
     TUI_KEY_BG_REPORT,

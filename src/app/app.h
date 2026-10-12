@@ -191,6 +191,9 @@ typedef struct {
     int betas;
     int history;    // keep each session's history, sealed in the save open
     int autosave;   // what's changed is saved as it changes, while installed
+    // The key that panics, by its place in PANIC_KEY_NAMES (0: no key). A panic deletes the open save
+    // with panic_wipe, and writes the histories kept with panic_history.
+    int panic_key, panic_wipe, panic_history;
     // Locked to this device: the open save, or with none open, the new one :install is making for it
     // (install_for). device_want is what the DEVICE LOCK box asks to change it to, and device_back
     // where it goes back to.
@@ -332,6 +335,7 @@ typedef enum {
     SET_NOSTR, SET_RELAYS,
     SET_NICK, SET_COLOUR, SET_SIGN, SET_AGE_RECIPIENT, SET_PGP_PUBKEY, SET_AUTOSAVE, SET_DEVICE_LOCK,
     SET_SECURITY_KEY, SET_AUTHENTICATOR, SET_DESTROY, SET_SHADOW,
+    SET_PANIC_KEY, SET_PANIC_WIPE, SET_PANIC_HISTORY,
     SET_VERIFY, SET_FILE_LIMIT, SET_FAST_FILES, SET_NOTIFY, SET_PREVIEW, SET_HISTORY, SET_NET, SET_PORT, SET_BETAS,
     N_SETTING_IDS
 } setting_id_t;
@@ -408,6 +412,13 @@ void osc52_copy(const char *text);
 void copy_session_id(session_slot_t *s);
 const char *route_label(void);
 void reapply_options(void);
+// Why the main loop is ending at once, with no frame after: the panic key, or SIGQUIT.
+typedef enum { PANIC_NONE, PANIC_KEY } panic_t;
+extern panic_t g_panic;
+void panic(panic_t why);
+#define N_PANIC_KEYS 5
+extern const char *const PANIC_KEY_NAMES[N_PANIC_KEYS];
+int panic_key_is(const tui_key_t *key);
 
 // history.c
 int history_possible(void);

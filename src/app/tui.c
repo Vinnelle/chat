@@ -147,6 +147,7 @@ size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out) {
                 }
             }
             if (len >= 5 && buf[2] == '1' && buf[3] == '1' && buf[4] == '~') { out->type = TUI_KEY_HELP; return 5; }
+            if (len >= 5 && buf[2] == '2' && buf[3] == '4' && buf[4] == '~') { out->type = TUI_KEY_F12; return 5; }
             // Parameter and intermediate bytes run up to a final byte from '@' to '~'.
             size_t k = 2;
             while (k < len && buf[k] >= ' ' && buf[k] <= '?') k++;
@@ -189,6 +190,9 @@ size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out) {
         case CTRL_KEY('S'):           out->type = TUI_KEY_SETTINGS; return 1;
         case CTRL_KEY('F'):           out->type = TUI_KEY_FILES; return 1;
         case CTRL_KEY('C'):           out->type = TUI_KEY_CTRL_C; return 1;
+        case CTRL_KEY('Q'):           out->type = TUI_KEY_CTRL_Q; return 1;
+        case CTRL_KEY('X'):           out->type = TUI_KEY_CTRL_X; return 1;
+        case CTRL_KEY('\\'):          out->type = TUI_KEY_CTRL_BACKSLASH; return 1;
         default:
             if (b0 < ' ') { out->type = TUI_KEY_UNKNOWN; return 1; }
     }

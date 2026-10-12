@@ -72,10 +72,10 @@ session id and password, whether they were invited or the password leaked.
 - **"Modified client" is a hint, not a check.** A client says which build it runs, and chat checks
   that against the signed list of release binaries. A modified client can still send a release
   binary's hash.
-- **Deleting isn't erasing.** `:uninstall`, self-destruct and a decoy taking a save's place delete
-  files. A journal, a copy-on-write snapshot, an SSD's spare blocks or a backup can still hold
-  them. Only a save locked to a Windows computer's TPM is gone once deleted, since its TPM key goes
-  with it.
+- **Deleting isn't erasing.** `:uninstall`, self-destruct, the panic key with `:set panicwipe on`
+  and a decoy taking a save's place delete files. A journal, a copy-on-write snapshot, an SSD's
+  spare blocks or a backup can still hold them. Only a save locked to a Windows computer's TPM is
+  gone once deleted, since its TPM key goes with it.
 - **The self-destruct count isn't sealed.** chat has to read the count before any passphrase
   opens anything. Anyone who can read the folder sees the limit, and anyone who can copy or change
   the folder can put the count back. It stops someone guessing at the keyboard, not someone with a

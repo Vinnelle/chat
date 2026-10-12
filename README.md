@@ -69,6 +69,15 @@ behind keep the old room and everything said in it. Nothing tells them where you
 everyone leave together. A peer that only reaches the room through someone else is left behind
 too. With `--simple`, `:move` says who would come, and `:move yes` or `:move no` answers.
 
+**Panic key.** `Ctrl+\` clears the screen, the terminal's own as well, and quits at once, from
+anywhere in chat, without asking. Every session says bye, memory is wiped and chat's own tor stops.
+Nothing is saved: not settings, and not the last 30 seconds of a history unless
+`:set panichistory on`. `:set panicwipe on` makes it delete the open save too, as `:uninstall`
+would. Anyone at the keyboard can press it, so with that on, anyone can delete the save.
+`:set panickey` picks another key (`Ctrl+\` is awkward on some keyboards), or none. In `--simple`,
+the terminal's `Ctrl+\` panics, unless the panic key is off. Its lines are in the terminal's
+scrollback, so that's cleared too.
+
 **Identity signing** is optional, and lets peers check who they're talking to. Pick it under
 **Signing identity** on the settings page (or `:set sign`), or with `--identity`:
 
@@ -690,7 +699,7 @@ history is sealed with the save's other files, in a `history-...` file named fro
 and password, so the name doesn't say which session it is. Joining the same session again (the same
 id and password) shows what was kept, above the new messages, under the day each came on. Up to 256
 KB of each session's are kept, the oldest going first, written every 30 seconds and when the
-session closes.
+session closes. The panic key skips that last write, unless `:set panichistory on`.
 
 Everyone in the session is told while you keep it: they see `[keeps history]` when you join, and a
 warning in the chat, and the sidebar and `:peers` say so. Turning it on or off tells them straight
@@ -925,6 +934,7 @@ saved your settings, it starts on your sessions, and `Ctrl+S` opens the page.
 | `Ctrl+S` | settings |
 | `F1` | list all commands and keybinds (`?` in NORMAL, and `:help`, too) |
 | `Ctrl+C` | quit, after a `y`/`n` box saying what's open and what isn't saved (every session leaves cleanly first) |
+| `Ctrl+\` | panic: clear the screen and quit at once, without asking (see [Panic key](#security)) |
 
 The bottom row is the same on every screen: a chip for where you are (`INSERT`, `NORMAL`,
 `COMMAND`, `SETTINGS`, ...), whether you're signing, your nick, the reply to what you just did
@@ -1007,6 +1017,9 @@ after a name. Under each row's help, the page shows the `:set` command that does
 | `authenticator` | `on` (the save asks for an authenticator app's code too), `off` |
 | `destroy` | `off`, `3`, `5`, `10` (the save is deleted after that many wrong passphrases in a row) |
 | `shadow` | `on` (asks for a second passphrase, which opens a decoy in the save's place), `off` |
+| `panickey` | `ctrl+\`, `ctrl+q`, `ctrl+x`, `f12` (the key that panics), `off` |
+| `panicwipe` | `on` (the panic key deletes the open save too), `off` |
+| `panichistory` | `on` (the panic key writes the history kept first), `off` |
 | `verify` | `required` (nothing goes to a peer until you've compared its code), `optional` |
 | `filelimit` | the biggest file fetched without `anyway`: `8M`, `500K`, `1G` |
 | `fastfiles` | `on` (what you send goes in quick bursts; through the relays, as fast as they allow), `off` (chat's regular slots) |

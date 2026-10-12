@@ -4,12 +4,16 @@
 
 // ---- the help page: every key, then every command ----
 
+// The key the panic setting chooses, as help_rows last named it.
+static char g_panic_keys[16];
+
 static const struct { const char *section, *keys, *what; } HELP_KEYS[] = {
     { "Sessions",    "ctrl+n",          "start a new session" },
     { NULL,          "ctrl+j",          "join a session by its id and password" },
     { NULL,          "tab  shift+tab",  "next / previous session" },
     { NULL,          "ctrl+s",          "settings" },
     { NULL,          "ctrl+c",          "quit, after asking - every session leaves cleanly first" },
+    { NULL,          g_panic_keys,      "panic: clear the screen and quit at once (:set panickey)" },
     { "Screen",      "ctrl+b",          "show or hide the sidebar" },
     { NULL,          "ctrl+o",          "show or hide the console" },
     { NULL,          "ctrl+t",          "show or hide the chat" },
@@ -449,6 +453,7 @@ cmd_result_t app_hide(void *ctx, const char *arg) {
 static int help_rows(tui_row_t *rows, const command_t **cmds) {
     static char labels[MAX_HELP_COMMANDS][CMD_WORD_MAX + 24];
     int n = 0, k = 0;
+    copy_str(g_panic_keys, PANIC_KEY_NAMES[g_app.panic_key], sizeof g_panic_keys);
     for (int i = 0; i < N_HELP_KEYS; i++) {
         rows[n] = (tui_row_t){ HELP_KEYS[i].section, HELP_KEYS[i].keys, HELP_KEYS[i].what, TUI_V_TEXT, NULL, NULL, 0, 0 };
         cmds[n++] = NULL;
@@ -1032,6 +1037,7 @@ void handle_key(const tui_key_t *key) {
     // A message is the result of the previous key, so this key resets the bar.
     if (g_app.message[0]) { g_app.message[0] = '\0'; g_app.dirty = 1; }
 
+    if (panic_key_is(key)) { panic(PANIC_KEY); return; }
     if (key->type == TUI_KEY_CTRL_C) { g_app.asking_quit = 1; g_app.dirty = 1; return; }
     if (g_app.asking_quit) { quit_key(key); return; }
 

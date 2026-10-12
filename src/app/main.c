@@ -34,6 +34,8 @@ static const char *USAGE =
     "  Ctrl+F     files offered here and yours: show, save or stop them (f in NORMAL, :files)\n"
     "  F1         list all commands and keybinds (also ? in NORMAL, and :help)\n"
     "  Ctrl+C     quit chat, after asking (every open session leaves cleanly first)\n"
+    "  Ctrl+\\     panic: clear the screen and quit at once, without asking. :set panickey\n"
+    "             chooses another key, or none\n"
     "\n"
     "Each session has two parts: the conversation, and a console above it for everything\n"
     "else, such as people joining and leaving, network lookups and command output. A session\n"
@@ -95,6 +97,7 @@ static const char *USAGE =
     "it opens (a check chat makes: the code's secret is kept in the save). One, the other or both.\n"
     ":set destroy N deletes a save after N wrong passphrases in a row, and :set shadow on adds a\n"
     "second passphrase that opens a decoy in its place and deletes the real save's files.\n"
+    ":set panicwipe on makes the panic key delete the open save too.\n"
     "\n"
     "  --save      open the save with this name, without the list\n"
     "              (default is the one in ~/.config/chat itself). If there's no save\n"
@@ -206,8 +209,15 @@ volatile sig_atomic_t g_interrupted = 0;
 
 static volatile sig_atomic_t g_ctrl_c = 0;
 
+// SIGQUIT panics: in --simple the terminal sends it for Ctrl+\, and the full-screen UI only gets it
+// from a kill -QUIT. With the panic key off, it quits like SIGTERM.
+static volatile sig_atomic_t g_sigquit = 0;
+
 static void on_quit_signal(int sig) {
     if (sig == SIGINT) g_ctrl_c = 1;
+#ifdef SIGQUIT
+    else if (sig == SIGQUIT) g_sigquit = 1;
+#endif
     else g_interrupted = 1;
 #ifdef _WIN32
     // The Windows C runtime puts the default back before calling a handler.
@@ -232,6 +242,7 @@ static void catch_quit_signals(void) {
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGHUP, &sa, NULL);
+    sigaction(SIGQUIT, &sa, NULL);
 #endif
 }
 
@@ -589,6 +600,46 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
 // Leaving it undoes that.
 #define SCREEN_ENTER "\x1b[22;0t\x1b]0;chat\x07\x1b[?1049h\x1b[2J\x1b[H"
 #define SCREEN_LEAVE "\x1b[?7h\x1b[0 q\x1b[?25h\x1b[?1049l\x1b[23;0t"
+#define CLEAR_SCREEN "\x1b[2J\x1b[H"
+#define CLEAR_SCROLLBACK "\x1b[3J"
+
+const char *const PANIC_KEY_NAMES[N_PANIC_KEYS] = { "off", "ctrl+\\", "ctrl+q", "ctrl+x", "f12" };
+
+static const tui_keytype_t PANIC_KEYS[N_PANIC_KEYS] = {
+    TUI_KEY_NONE, TUI_KEY_CTRL_BACKSLASH, TUI_KEY_CTRL_Q, TUI_KEY_CTRL_X, TUI_KEY_F12
+};
+
+int panic_key_is(const tui_key_t *key) { return g_app.panic_key > 0 && key->type == PANIC_KEYS[g_app.panic_key]; }
+
+panic_t g_panic;
+
+// The screen goes first, before anything that can take time: cleared before it's left, so nothing of
+// it lingers, then the one it goes back to cleared too. --simple's lines are in the terminal's
+// scrollback, so that goes as well. The main loop ends without drawing another frame, and the rest is
+// in its ending: no question, and nothing saved but what panic_history keeps.
+void panic(panic_t why) {
+    if (g_panic) return;
+    g_panic = why;
+    g_interrupted = 1;
+    if (g_plain) {
+        static const char clear[] = CLEAR_SCREEN CLEAR_SCROLLBACK;
+        if (term_stdout_is_tty() && term_ansi_ok()) platform_write_stdout(clear, sizeof clear - 1);
+        return;
+    }
+    static const char out[] = CLEAR_SCREEN TUI_THEME_UNWATCH SCREEN_LEAVE CLEAR_SCREEN;
+    platform_write_stdout(out, sizeof out - 1);
+    term_raw_disable();
+}
+
+// The open save goes first with panic_wipe. The histories kept are dropped unwritten, unless
+// panic_history keeps them.
+static void panic_saves(void) {
+    int wipe = g_app.panic_wipe && g_app.installed && !g_app.locked;
+    if (wipe && install_remove(install_current()) == 0) g_app.installed = 0;
+    int keep = g_app.panic_history && !wipe;
+    for (int i = 0; i < MAX_SESSIONS; i++)
+        if (g_app.used[i] && !keep) history_stop(&g_app.sessions[i], 0);
+}
 
 static int run_tui(const char *explicit_session, char *explicit_password, uint16_t explicit_port,
                     const char peer_args[][PEER_ARG_LEN], int n_peer_args) {
@@ -661,13 +712,18 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
         platform_wait(socks, n, ready, &stdin_ready, WAIT_MS);
 
         if (g_ctrl_c) { g_ctrl_c = 0; g_app.asking_quit = 1; g_app.dirty = 1; }
+        if (g_sigquit) {
+            g_sigquit = 0;
+            if (g_app.panic_key) panic(PANIC_KEY);
+            else g_interrupted = 1;
+        }
 
-        if (stdin_ready) {
+        if (stdin_ready && !g_panic) {
             uint8_t buf[512];
             long got = term_read_raw(buf, sizeof buf);
             if (got > 0) {
                 size_t off = 0;
-                while ((size_t)got > off) {
+                while ((size_t)got > off && !g_panic) {
                     tui_key_t key;
                     size_t used = tui_decode_key(buf + off, (size_t)got - off, &key);
                     if (used == 0) break;
@@ -678,6 +734,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
                 g_interrupted = 1;
             }
         }
+        if (g_panic) break;
         double now = now_seconds();
         for (int i = 0; i < n; i++)
             if (ready[i]) chat_on_socket_readable(&owner[i]->engine, socks[i], now);
@@ -708,6 +765,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
         else if (g_app.input_dirty) { render_bar(); g_app.input_dirty = 0; }
     }
 
+    if (g_panic) panic_saves();
     for (int i = 0; i < MAX_SESSIONS; i++) if (g_app.used[i]) close_session(&g_app.sessions[i]);
     // After the sessions, so their onion services are removed with their control connections first.
     tor_link_stop();
@@ -721,9 +779,11 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
     tui_scrollback_clear(&g_app.log);
 
     // Back to the main screen with the cursor visible, its default shape and autowrap on, however
-    // the last frame left them.
-    fputs(TUI_THEME_UNWATCH SCREEN_LEAVE, stdout);
-    term_raw_disable();
+    // the last frame left them. A panic has done that already.
+    if (!g_panic) {
+        fputs(TUI_THEME_UNWATCH SCREEN_LEAVE, stdout);
+        term_raw_disable();
+    }
     fflush(stdout);
     net_shutdown();
     platform_notify_shutdown();
@@ -939,6 +999,11 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
             ctrl_c_at = now;
             push_log("* Ctrl+C again within %d seconds leaves the session and quits (so does :quit)", CTRL_C_AGAIN);
         }
+        if (g_sigquit) {
+            g_sigquit = 0;
+            if (g_app.panic_key) panic(PANIC_KEY);
+            break;
+        }
         for (int i = 0; i < ns; i++) if (ready[i]) chat_on_socket_readable(i < nc ? c : left, socks[i], now);
         char line[MAX_TEXT + 1];
         int rc = stdin_reader_poll(reader, line, sizeof line);
@@ -962,6 +1027,7 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
             if (chat_move_finished(left, now_seconds())) { chat_shutdown(left); left = NULL; }
         }
     }
+    if (g_panic) panic_saves();
     if (left) chat_shutdown(left);
     chat_shutdown(c);
     g_plain_engine = NULL;
@@ -1109,6 +1175,7 @@ int main(int argc, char **argv) {
     g_app.notify_mode = NOTIFY_MENTIONS;
     g_app.verify_optional = 1;
     g_app.show_sidebar = g_app.show_console = g_app.show_chat = 1;
+    g_app.panic_key = 1;
     note_setting_defaults();
     trust_on_change(save_verified);
     int exit_code = read_options(g_argc, g_argv, &g_opts);
