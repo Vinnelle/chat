@@ -465,6 +465,7 @@ typedef struct {
     char text[MSG_LINE_LEN];
     int tries;
     double next_retry;
+    unsigned own;   // the number of our message it carries (chat_t's own_seq), or 0
 } pending_msg_t;
 
 // file: the number of the file a line offers (an image can be shown under it), else 0.
@@ -476,6 +477,14 @@ typedef void (*chat_print_fn)(void *ui, const char *hhmm, const char *text, cons
 // A warning the user must see, such as a verified peer's key changing: shown in the chat as well
 // as the console.
 #define LINE_WARN 4u
+// A message of ours, numbered chat_t's own_seq as it's printed, for chat_delivery_fn.
+#define LINE_OWN 8u
+
+// What became of a message of ours: a peer it went to never acked it (name says who), or there's
+// nothing left to hear about it. Settled with nobody missed, every peer it went to has it. Copies
+// passed on by others aren't acked back, so that's the peers we're connected to.
+typedef enum { CHAT_MISSED, CHAT_SETTLED } chat_delivery_t;
+typedef void (*chat_delivery_fn)(void *ui, unsigned own, chat_delivery_t what, const char *name);
 
 // A file fetched to be shown has arrived, complete and matching the offer. Its bytes are only
 // valid during the call.
@@ -649,6 +658,8 @@ typedef struct chat_s {
     int fast_files;         // our slots speed up while a transfer runs
     int picture_noise;      // a JPEG offered gets noise nobody can see (common/clean.h)
     chat_file_fn file_view;
+    unsigned own_seq;
+    chat_delivery_fn delivery;
 
     // Moving out (:move): the session we moved to, which is given the keys that come after, and since
     // when this one has only stayed for them. move_ask: the request that's shown.

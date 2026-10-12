@@ -51,6 +51,7 @@ static void ui_print_colored(chat_t *c, const uint8_t rgb[3], const char *fmt, .
 static void ui_chat(chat_t *c, const uint8_t rgb[3], int mention, const char *name, const char *text);
 static void ui_chat_file(chat_t *c, const uint8_t rgb[3], int mention, const char *name, const char *text, int file);
 static void ui_direct(chat_t *c, const uint8_t rgb[3], int to_me, const char *name, const char *text);
+static void ui_own(chat_t *c, const char *name, const char *text);
 
 // Who a direct message is between, in brackets after the sender's name, since no nick can hold '('.
 #define DM_ARROW "\xe2\x86\x92"
@@ -333,10 +334,29 @@ static const char *code_mark(const chat_t *c, const peer_t *p) {
 
 static void pending_clear(pending_msg_t *pm) { crypto_wipe(pm, sizeof *pm); }
 
+// Once nothing waits for an ack of our message own, the UI hears it's settled.
+static void own_settled(chat_t *c, unsigned own) {
+    if (!own || !c->delivery) return;
+    for (int i = 0; i < MAX_PENDING_MSGS; i++) if (c->pending[i].used && c->pending[i].own == own) return;
+    c->delivery(c->ui, own, CHAT_SETTLED, NULL);
+}
+
+// p never acked pm: given up on after its last try, or gone.
+static void own_missed(chat_t *c, peer_t *p, pending_msg_t *pm) {
+    unsigned own = pm->own;
+    if (own && c->delivery) {
+        char name[CHAT_NAME_LEN];
+        chat_peer_name(c, p, name);
+        c->delivery(c->ui, own, CHAT_MISSED, name);
+    }
+    pending_clear(pm);
+    own_settled(c, own);
+}
+
 static void forget_peer(chat_t *c, peer_t *p) {
     int slot = peer_slot(c, p);
     for (int i = 0; i < MAX_PENDING_MSGS; i++)
-        if (c->pending[i].used && c->pending[i].peer_slot == slot) pending_clear(&c->pending[i]);
+        if (c->pending[i].used && c->pending[i].peer_slot == slot) own_missed(c, p, &c->pending[i]);
     for (int i = 0; i < SENDQ_MAX; i++)
         if (c->sendq[i].used && c->sendq[i].peer_slot == slot) crypto_wipe(&c->sendq[i], sizeof c->sendq[i]);
     for (int i = 0; i < ROOMQ_MAX; i++)
@@ -1101,11 +1121,12 @@ static size_t part_len(const char *text, size_t len, size_t max) {
 }
 
 // With every retry slot taken a message still goes out once, just without retries.
-static void track_message(chat_t *c, peer_t *p, const char *mid, const char *record, double now) {
+static void track_message(chat_t *c, peer_t *p, const char *mid, const char *record, unsigned own, double now) {
     for (int s = 0; s < MAX_PENDING_MSGS; s++) {
         pending_msg_t *pm = &c->pending[s];
         if (pm->used) continue;
         pm->used = 1;
+        pm->own = own;
         copy_str(pm->mid, mid, sizeof pm->mid);
         pm->peer_slot = peer_slot(c, p);
         copy_str(pm->text, record, sizeof pm->text);
@@ -1116,9 +1137,10 @@ static void track_message(chat_t *c, peer_t *p, const char *mid, const char *rec
 }
 
 // An "m" to q: the text whole, or for a peer that reads no more than OLD_MAX_TEXT, in parts, each a
-// message with an id of its own. track: each is kept for retries until q acks it. 1 if any went.
+// message with an id of its own. own: our message's number, and each part is kept for retries until q
+// acks it (0: passed on, not kept). 1 if any went.
 static int send_message(chat_t *c, peer_t *q, const char *mid, const char *idhex, const char *nick, const char *text,
-                        int track, double now) {
+                        unsigned own, double now) {
     char record[MSG_LINE_LEN];
     size_t len = strlen(text), pos = 0;
     int sent = 0;
@@ -1130,7 +1152,7 @@ static int send_message(chat_t *c, peer_t *q, const char *mid, const char *idhex
         snprintf(record, sizeof record, "m\t%s\t%s\t%s\t%.*s", pmid, idhex, nick, (int)n, text + pos);
         if (send_peer(c, q, record) == 0) {
             sent = 1;
-            if (track) track_message(c, q, pmid, record, now);
+            if (own) track_message(c, q, pmid, record, own, now);
         }
         pos += n;
         while (pos < len && text[pos] == ' ') pos++;
@@ -1213,7 +1235,7 @@ static void send_move_key(chat_t *c, peer_t *q, double now) {
     char keyhex[ID_SIGN_PUB_LEN * 2 + 1]; hex_encode(own_move_key(c)->pub, ID_SIGN_PUB_LEN, keyhex);
     char rec[8 + MID_HEX + ID_SIGN_PUB_LEN * 2];
     snprintf(rec, sizeof rec, "mk\t%s\t%s", mid, keyhex);
-    if (send_peer(c, q, rec) == 0) track_message(c, q, mid, rec, now);
+    if (send_peer(c, q, rec) == 0) track_message(c, q, mid, rec, 0, now);
 }
 
 // The peers a request asks along, by our names for them, leaving out us and its sender.
@@ -1516,9 +1538,13 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
             c->notify(c->ui, c->notify_preview >= PREVIEW_NICK ? shown : NULL,
                       c->notify_preview == PREVIEW_MESSAGE ? text : NULL, 1);
     } else if (n == 2 && strcmp(f[0], "a") == 0) {
-        for (int i = 0; i < MAX_PENDING_MSGS; i++)
-            if (c->pending[i].used && c->pending[i].peer_slot == peer_slot(c, p) && strcmp(c->pending[i].mid, f[1]) == 0)
-                pending_clear(&c->pending[i]);
+        for (int i = 0; i < MAX_PENDING_MSGS; i++) {
+            pending_msg_t *pm = &c->pending[i];
+            if (!pm->used || pm->peer_slot != peer_slot(c, p) || strcmp(pm->mid, f[1]) != 0) continue;
+            unsigned own = pm->own;
+            pending_clear(pm);
+            own_settled(c, own);
+        }
     } else if (n == 6 && strcmp(f[0], "mv") == 0) {
         on_move(c, p, f, now);
     } else if (n == 3 && strcmp(f[0], "mk") == 0) {
@@ -2133,7 +2159,7 @@ void chat_tick(chat_t *c, double now) {
         if (!pm->used) continue;
         if (now >= pm->next_retry) {
             peer_t *p = &c->peers[pm->peer_slot];
-            if (!p->used || !p->ok || pm->tries >= MSG_TRIES) pending_clear(pm);
+            if (!p->used || !p->ok || pm->tries >= MSG_TRIES) own_missed(c, p, pm);
             else { send_peer(c, p, pm->text); pm->tries++; pm->next_retry = now + resend_delay(c, p); }
         }
     }
@@ -2752,7 +2778,7 @@ void chat_move_go(chat_t *c, const chat_move_to_t *to, chat_t *moved_to, double 
             char mid[MID_HEX + 1]; gen_mid(mid);
             char rec[RECORD_MAX + 1];
             snprintf(rec, sizeof rec, "mv\t%s\t%s\t%s\t%s\t%s", mid, to->session_name, to->password, keyhex, coming);
-            if (send_peer(c, p, rec) == 0) track_message(c, p, mid, rec, now);
+            if (send_peer(c, p, rec) == 0) track_message(c, p, mid, rec, 0, now);
             crypto_wipe(rec, sizeof rec);
             p->move_with = p->key_sent = 1;
         }
@@ -2842,7 +2868,8 @@ static cmd_result_t cmd_msg(void *ctx, const char *arg) {
     seen_add(c, mid);
     snprintf(record, sizeof record, "pm\t%s\t%s", mid, line);
     if (send_peer(c, p, record) != 0) { ui_print(c, "* couldn't send that to %s", name); return CMD_OK; }
-    track_message(c, p, mid, record, now_seconds());
+    unsigned own = ++c->own_seq;
+    track_message(c, p, mid, record, own, now_seconds());
     snprintf(shown, sizeof shown, "%s (" DM_ARROW " %s) (you)", c->nick, name);
     ui_direct(c, c->my_color, 0, shown, line);
     return CMD_OK;
@@ -3038,7 +3065,7 @@ static void file_send_offer(chat_t *c, peer_t *p, const file_entry_t *e, double 
     snprintf(rec, sizeof rec, "fo\t%s\t%s\t%llu\t%s\t%s\t%s", mid, fidhex, (unsigned long long)e->size, shahex,
              e->image ? "image" : "file", e->name);
     // Retried until acked, like a message.
-    if (send_peer(c, p, rec) == 0) track_message(c, p, mid, rec, now);
+    if (send_peer(c, p, rec) == 0) track_message(c, p, mid, rec, 0, now);
 }
 
 // Our offers, to a peer that has just joined or whose code was just compared.
@@ -3965,7 +3992,8 @@ void chat_send_text(chat_t *c, const char *text_in, double now) {
     char mid[MID_HEX + 1]; gen_mid(mid);
     seen_add(c, mid);
     char who[MAX_NICK + 8]; snprintf(who, sizeof who, "%s (you)", c->nick);
-    ui_chat(c, c->my_color, 0, who, line);
+    unsigned own = ++c->own_seq;
+    ui_own(c, who, line);
     int sent = 0, held = 0;
     char held_names[HELD_NAMES * CHAT_NAME_LEN] = "";
     for (int i = 0; i < c->peer_hi; i++) {
@@ -3979,8 +4007,9 @@ void chat_send_text(chat_t *c, const char *text_in, double now) {
             held++;
             continue;
         }
-        sent += send_message(c, p, mid, c->my_idhex, c->nick, line, 1, now);
+        sent += send_message(c, p, mid, c->my_idhex, c->nick, line, own, now);
     }
+    if (sent) own_settled(c, own);
     if (held)
         ui_print(c, "* not sent to %s%s: compare verify codes first (:peers lists them, :verify NICK ok once they match)",
                  held_names, held > HELD_NAMES ? " and others" : "");
@@ -4265,10 +4294,18 @@ static void ui_chat(chat_t *c, const uint8_t rgb[3], int mention, const char *na
     ui_chat_file(c, rgb, mention, name, text, 0);
 }
 
+// Ours, numbered own_seq.
+static void ui_own(chat_t *c, const char *name, const char *text) {
+    char msg[UI_LINE_MAX];
+    int head = snprintf(msg, sizeof msg, "%s:", name);
+    snprintf(msg + head, sizeof msg - (size_t)head, " %s", text);
+    emit(c, msg, c->my_color, LINE_CHAT | LINE_OWN, head, 0);
+}
+
 // A direct message: its name says who it's between, so it has no "@ " in front even when it's to us.
 static void ui_direct(chat_t *c, const uint8_t rgb[3], int to_me, const char *name, const char *text) {
     char msg[UI_LINE_MAX];
     int head = snprintf(msg, sizeof msg, "%s:", name);
     snprintf(msg + head, sizeof msg - (size_t)head, " %s", text);
-    emit(c, msg, rgb, LINE_CHAT | (to_me ? LINE_MENTION : 0u), head, 0);
+    emit(c, msg, rgb, LINE_CHAT | (to_me ? LINE_MENTION : LINE_OWN), head, 0);
 }

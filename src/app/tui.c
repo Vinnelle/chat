@@ -58,6 +58,9 @@ void tui_scrollback_push(tui_scrollback_t *sb, const char *hhmm, const char *tex
     l->mention = mention;
     l->color_len = color_len;
     l->file = 0;
+    l->own = 0;
+    l->delivery = TUI_SENDING;
+    l->mark[0] = '\0';
     sb->head = (sb->head + 1) % TUI_SCROLLBACK;
     if (sb->count < TUI_SCROLLBACK) sb->count++;
     sb->total++;
@@ -69,6 +72,28 @@ void tui_scrollback_clear(tui_scrollback_t *sb) {
 
 void tui_scrollback_mark_file(tui_scrollback_t *sb, int file) {
     if (sb->count > 0) sb->lines[(sb->head - 1 + TUI_SCROLLBACK) % TUI_SCROLLBACK].file = file;
+}
+
+void tui_scrollback_mark_own(tui_scrollback_t *sb, unsigned own) {
+    if (sb->count > 0) sb->lines[(sb->head - 1 + TUI_SCROLLBACK) % TUI_SCROLLBACK].own = own;
+}
+
+int tui_scrollback_delivery(tui_scrollback_t *sb, unsigned own, const char *missed) {
+    for (int k = 0; k < sb->count; k++) {
+        tui_line_t *l = &sb->lines[(sb->head - 1 - k + TUI_SCROLLBACK * 2) % TUI_SCROLLBACK];
+        if (!own || l->own != own) continue;
+        if (!missed) {
+            if (l->delivery == TUI_SENDING) l->delivery = TUI_REACHED;
+            return 1;
+        }
+        size_t n = strlen(l->mark);
+        if (l->delivery == TUI_MISSED && strstr(l->mark, missed)) return 1;
+        if (l->delivery != TUI_MISSED) snprintf(l->mark, sizeof l->mark, "not reached: %s", missed);
+        else if (n + 2 + strlen(missed) < sizeof l->mark) snprintf(l->mark + n, sizeof l->mark - n, ", %s", missed);
+        l->delivery = TUI_MISSED;
+        return 1;
+    }
+    return 0;
 }
 
 #define ESC 0x1b
@@ -1257,8 +1282,16 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
         if (first_pre > W - 1) first_pre = W - 1 > 0 ? W - 1 : 0;
         if (rest_pre > W - 1) rest_pre = W - 1 > 0 ? W - 1 : 0;
 
+        // Your message's mark goes after its text, faint, or yellow for who it didn't reach.
+        char text[TUI_LINE_MAX + TUI_MARK_MAX + 8];
+        size_t body_len = strlen(body);
+        style_t mark_style = l->delivery == TUI_MISSED ? S_YELLOW : S_FAINT;
+        if (chat && l->own && l->delivery != TUI_SENDING)
+            snprintf(text, sizeof text, "%s %s", body, l->delivery == TUI_MISSED ? l->mark : G_BULLET);
+        else
+            copy_str(text, body, sizeof text);
         size_t off[WRAP_ROWS_MAX], len[WRAP_ROWS_MAX];
-        int nch = wrap_rows(body, W - first_pre, W - rest_pre, off, len, WRAP_ROWS_MAX);
+        int nch = wrap_rows(text, W - first_pre, W - rest_pre, off, len, WRAP_ROWS_MAX);
         // A picture shown under the line that offers it, lined up with the text.
         const tui_image_t *im = chat && l->file && v && v->image ? v->image(v->image_ctx, l->file) : NULL;
         int img_cols = W - rest_pre - 1 < TUI_IMAGE_MAX_W ? W - rest_pre - 1 : TUI_IMAGE_MAX_W;
@@ -1336,8 +1369,9 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
             } else {
                 pspace(p, rest_pre);
             }
-            char piece[TUI_LINE_MAX + 1];
-            copy_slice(piece, sizeof piece, body + off[c], len[c]);
+            size_t from = off[c], to = off[c] + len[c], cut = to < body_len ? to : from > body_len ? from : body_len;
+            char piece[sizeof text];
+            copy_slice(piece, sizeof piece, text + from, cut - from);
             if (body_rgb) {
                 sty_rgb(p->w, l->rgb, 0, 0);
                 p->used += wapp_trunc(p->w, piece, p->room - p->used);
@@ -1345,6 +1379,10 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
                 draw_body(p, body_style, piece, self);
             } else {
                 ptext(p, body_style, piece);
+            }
+            if (to > cut) {
+                copy_slice(piece, sizeof piece, text + cut, to - cut);
+                ptext(p, mark_style, piece);
             }
             grid_close(g, row, &gp);
         }

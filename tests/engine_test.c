@@ -380,6 +380,54 @@ static void test_lost_message(double *t) {
     CHECK(pending_msgs(&A) == 0, "alice still waits on %d acks", pending_msgs(&A));
 }
 
+// What became of the message alice is watching.
+static struct { unsigned own; int settled, missed; char who[CHAT_NAME_LEN]; } g_delivered;
+
+static void on_delivery(void *ui, unsigned own, chat_delivery_t what, const char *name) {
+    (void)ui;
+    if (own != g_delivered.own) return;
+    if (what == CHAT_SETTLED) g_delivered.settled++;
+    else { g_delivered.missed++; copy_str(g_delivered.who, name, sizeof g_delivered.who); }
+}
+
+// Drops every session frame from one port to another.
+typedef struct { uint16_t from, to; } cut_t;
+
+static int drop_all(void *ctx, addr_t from, addr_t to, const void *data, size_t len) {
+    const cut_t *c = ctx;
+    return from.port == c->from && to.port == c->to && is_session_frame(data, len);
+}
+
+// Alice's message settles once bob acks it, and when every frame to bob is lost, it settles naming
+// him once the last try is given up on.
+static void test_delivered(double *t) {
+    peer_t *p = peer_named(&A, "bob");
+    RUN_UNTIL(t, 30, p && queues_empty(&A, p) && pending_msgs(&A) == 0);
+    A.delivery = on_delivery;
+    memset(&g_delivered, 0, sizeof g_delivered);
+    chat_send_text(&A, "did this arrive", *t);
+    g_delivered.own = A.own_seq;
+    RUN_UNTIL(t, 15, g_delivered.settled);
+    CHECK(g_delivered.own && g_delivered.settled == 1 && g_delivered.missed == 0,
+          "a message bob acked didn't settle as reached (settled %d, missed %d)", g_delivered.settled,
+          g_delivered.missed);
+
+    memset(&g_delivered, 0, sizeof g_delivered);
+    cut_t cut = { A.port, B.port };
+    fake_net_filter = drop_all;
+    fake_net_filter_ctx = &cut;
+    chat_send_text(&A, "this won't", *t);
+    g_delivered.own = A.own_seq;
+    RUN_UNTIL(t, 35, g_delivered.settled);
+    fake_net_filter = NULL;
+    fake_net_filter_ctx = NULL;
+    CHECK(g_delivered.settled == 1 && g_delivered.missed >= 1 && strstr(g_delivered.who, "bob"),
+          "a message bob never got didn't settle as missing him (settled %d, missed %d, %s)", g_delivered.settled,
+          g_delivered.missed, g_delivered.who);
+    A.delivery = NULL;
+    RUN_UNTIL(t, 60, chat_online_count(&A) == 1 && chat_online_count(&B) == 1 && pending_msgs(&A) == 0);
+}
+
 static int rekeyed(chat_t *x, const char *y_nick) {
     peer_t *p = peer_named(x, y_nick);
     return p && p->keygen == x->keygen && p->chain_confirmed;
@@ -2836,7 +2884,7 @@ int main(int argc, char **argv) {
         { "constant rate", test_constant_rate }, { "lost message", test_lost_message },
         { "rekey", test_rekey }, { "rekey mid-message", test_message_across_rekey }, { "cookie rate", test_cookie_rate },
         { "udp masked", test_udp_masked },
-        { "junk", test_junk }, { "lookalike nick", test_lookalike_nick },
+        { "junk", test_junk }, { "lookalike nick", test_lookalike_nick }, { "delivered", test_delivered },
         { "third peer", test_third_peer }, { "direct message", test_direct_message },
         { "candidates settle", test_candidates_settle }, { "builds", test_builds },
         { "parsers", test_parsers }, { "toml", test_toml }, { "dht keys", test_dht_keys }, { "dht", test_dht }, { "read file", test_read_file },

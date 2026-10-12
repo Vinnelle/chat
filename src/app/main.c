@@ -285,6 +285,7 @@ void session_print(void *ui, const char *hhmm, const char *text, const uint8_t *
     if (flags & LINE_CHAT) {
         tui_scrollback_push(&s->sb, hhmm, text, rgb, (flags & LINE_MENTION) != 0, color_len);
         if (file) tui_scrollback_mark_file(&s->sb, file);
+        if (flags & LINE_OWN) tui_scrollback_mark_own(&s->sb, s->engine.own_seq);
         if (s != g_app.selected) {
             s->unread++;
             if (flags & LINE_MENTION) s->mentioned = 1;
@@ -295,6 +296,11 @@ void session_print(void *ui, const char *hhmm, const char *text, const uint8_t *
         tui_scrollback_push(&s->console, hhmm, text, rgb, 0, 0);
     }
     g_app.dirty = 1;
+}
+
+void session_delivery(void *ui, unsigned own, chat_delivery_t what, const char *name) {
+    session_slot_t *s = ui;
+    if (tui_scrollback_delivery(&s->sb, own, what == CHAT_MISSED ? name : NULL) && s == g_app.selected) g_app.dirty = 1;
 }
 
 int session_ready(const session_slot_t *s) { return !s->initialising && chat_ready(&s->engine); }
@@ -892,6 +898,11 @@ static void plain_notify(void *ui, const char *nick, const char *text, int menti
     send_notification(nick, text, mentioned);
 }
 
+static void plain_delivery(void *ui, unsigned own, chat_delivery_t what, const char *name) {
+    (void)ui; (void)own;
+    if (what == CHAT_MISSED) { printf("* not reached: %s\n", name); fflush(stdout); }
+}
+
 // A room :move left prints nothing while it closes.
 static void plain_quiet(void *ui, const char *hhmm, const char *text, const uint8_t *rgb, unsigned flags, int color_len,
                         int file) {
@@ -928,6 +939,7 @@ static chat_t *plain_move(chat_t *c, chat_t **left, chat_t engines[2], const cha
     if (n->route.mode == ROUTE_TOR && g_tor.state == TL_READY && g_tor.proc)
         chat_tor_set_ports(n, g_tor.socks, g_tor.control, torproc_password(g_tor.proc));
     n->file_view = plain_file_view;
+    n->delivery = plain_delivery;
     n->net_verbose = c->net_verbose;
     chat_move_go(c, to, n, now_seconds());
     c->print = plain_quiet;
@@ -1009,6 +1021,7 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
     chat_t *c = &engines[0], *left = NULL;
     chat_init(c, &o, plain_print, plain_notify, NULL);
     c->file_view = plain_file_view;
+    c->delivery = plain_delivery;
     g_plain_engine = c;
     crypto_wipe(&o, sizeof o);
     if (!chat_started(c)) {

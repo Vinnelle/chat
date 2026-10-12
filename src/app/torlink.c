@@ -550,6 +550,7 @@ static session_slot_t *open_session(const char *session_name, const char *passwo
 
     chat_init(&s->engine, &o, session_print, session_notify, s);
     s->engine.file_view = session_file_view;
+    s->engine.delivery = session_delivery;
     crypto_wipe(&o, sizeof o);
     if (!chat_started(&s->engine)) {
         const char *why = chat_start_error(&s->engine);

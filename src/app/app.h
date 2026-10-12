@@ -428,6 +428,7 @@ extern volatile sig_atomic_t g_interrupted;
 extern int g_plain;
 extern int g_echo;
 void push_log(const char *fmt, ...);
+void session_delivery(void *ui, unsigned own, chat_delivery_t what, const char *name);
 void session_print(void *ui, const char *hhmm, const char *text, const uint8_t *rgb, unsigned flags, int color_len,
                    int file);
 int session_ready(const session_slot_t *s);

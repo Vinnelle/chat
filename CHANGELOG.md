@@ -72,6 +72,10 @@
   same one with `:call`, with nothing to swap. Nobody compares codes there, nothing goes to anyone but
   the verified key, and a call nobody else is in moves to the next day's room at midnight. It shows
   as `@NICK`. Both need a signing identity, AGE or PGP.
+- A faint `•` after a message of yours once every peer it went to has acked it, and `not reached:
+  bob` in yellow for a peer that still hadn't after the last try, or left first. The acks were
+  always sent, so nothing new goes on the network, and there are no read receipts. Direct messages
+  get it too. `--simple` prints `* not reached: bob`.
 
 ### Fixed
 - The help for **Start chat's own tor** said its tor takes a cookie login. It never has: its

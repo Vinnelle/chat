@@ -9,6 +9,11 @@
 
 #define TUI_SCROLLBACK 400
 #define TUI_LINE_MAX 1024
+#define TUI_MARK_MAX 48
+
+// Your own message, once there's nothing more to hear about it: every peer it went to has it, drawn
+// as a faint dot after it, or some didn't get it, named after it.
+enum { TUI_SENDING, TUI_REACHED, TUI_MISSED };
 
 typedef struct {
     char hhmm[HHMM_LEN];
@@ -18,6 +23,9 @@ typedef struct {
     int color_len;
     int mention;
     int file;          // the file this line offers (a picture can be drawn under it), or 0
+    unsigned own;      // the engine's number for your message on this line, or 0
+    int delivery;      // TUI_SENDING, TUI_REACHED or TUI_MISSED, for own
+    char mark[TUI_MARK_MAX];   // with TUI_MISSED: "not reached: bob, carol"
 } tui_line_t;
 
 typedef struct {
@@ -33,6 +41,10 @@ void tui_scrollback_push(tui_scrollback_t *sb, const char *hhmm, const char *tex
 void tui_scrollback_clear(tui_scrollback_t *sb);
 // Marks the newest line as the one offering file.
 void tui_scrollback_mark_file(tui_scrollback_t *sb, int file);
+// Marks the newest line as your message own, then what became of it: missed by the peer named, or
+// with NULL, settled. 1 if its line is still there.
+void tui_scrollback_mark_own(tui_scrollback_t *sb, unsigned own);
+int tui_scrollback_delivery(tui_scrollback_t *sb, unsigned own, const char *missed);
 
 // A picture shown under the line that offers it: w by h pixels, rgb, drawn two pixels per row.
 #define TUI_IMAGE_MAX_W 64

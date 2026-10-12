@@ -1026,6 +1026,12 @@ compared, `?` code not compared, `✗` codes differ. Under each peer, the sideba
 symbols that apply to them, with `h` for a peer keeping a history and `!` for a modified
 client. When the sidebar is too short for that, the symbols go next to each name instead.
 
+A faint `•` after a message of yours means every peer it went to has it: each acked it. Acks
+were always sent, so nothing new goes on the network. If a peer still hasn't after the last try,
+or left first, it says `not reached: bob` in yellow instead. Copies others pass on to peers
+you're not connected to aren't acked back to you, so it's about the peers you're connected to.
+There are no read receipts: they'd tell people when you look.
+
 > NOTE: This TUI was heavily assisted by UI, as I have mentioned across most my projects, I hate, and suck at, UI / Front-End development. If any front-end devs would like to improve the functionality, performance, and/or aesthetic of this, be my guest!
 
 A session with unread messages shows how many next to its name, in yellow with an `@` if one
