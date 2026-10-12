@@ -188,6 +188,7 @@ typedef struct {
     char tor_path[TOR_PATH_MAX];
     uint64_t file_cap;   // 0: the default
     int fast_files;
+    int picture_noise;   // a JPEG sent gets noise nobody can see (common/clean.h)
     int betas;
     int history;    // keep each session's history, sealed in the save open
     int autosave;   // what's changed is saved as it changes, while installed
@@ -285,6 +286,7 @@ typedef struct {
     tui_input_t saved_input;
     browser_t browser;
     char send_dir[APP_PATH_MAX];   // the folder :send's browser last offered a file from
+    int send_asis;                 // and it sends a picture as it is (:send asis), not cleaned
     char save_dir[APP_PATH_MAX];   // the folder :saveto's browser last saved a file in
     int save_num, save_anyway;   // what :saveto's browser saves
     app_mode_t browse_back;      // where :send's and :saveto's browsers go back to
@@ -352,7 +354,7 @@ typedef enum {
     SET_NICK, SET_COLOUR, SET_SIGN, SET_AGE_RECIPIENT, SET_PGP_PUBKEY, SET_AUTOSAVE, SET_DEVICE_LOCK,
     SET_SECURITY_KEY, SET_AUTHENTICATOR, SET_DESTROY, SET_SHADOW,
     SET_LOCK, SET_LOCK_KEY, SET_PANIC_KEY, SET_PANIC_WIPE, SET_PANIC_HISTORY, SET_SANDBOX,
-    SET_VERIFY, SET_FILE_LIMIT, SET_FAST_FILES, SET_NOTIFY, SET_PREVIEW, SET_HISTORY, SET_NET, SET_PORT, SET_BETAS,
+    SET_VERIFY, SET_FILE_LIMIT, SET_FAST_FILES, SET_NOISE, SET_NOTIFY, SET_PREVIEW, SET_HISTORY, SET_NET, SET_PORT, SET_BETAS,
     N_SETTING_IDS
 } setting_id_t;
 
@@ -582,7 +584,7 @@ void list_move(list_key_t k, int *sel, int n);
 void settings_key(const tui_key_t *key);
 void sign_picker_key(const tui_key_t *key);
 void browser_key(const tui_key_t *key);
-void begin_send_browse(void);
+void begin_send_browse(int asis);
 void send_browser_key(const tui_key_t *key);
 void begin_save_browse(int num, int anyway);
 void save_browser_key(const tui_key_t *key);

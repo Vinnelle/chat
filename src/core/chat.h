@@ -399,6 +399,7 @@ typedef struct {
     char name[FILE_NAME_MAX + 1];
     int image;                   // offered as a PNG, JPEG or GIF (only decoding it says it is one)
     FILE *fp;                    // ours: open for its chunks, so the file offered is the one sent
+    uint8_t *clean;              // ours, cleaned (common/clean.h): the bytes offered, from memory in fp's place
 
     dl_state_t dl;
     int view;                    // fetched to show (into mem), not to save (to out)
@@ -646,6 +647,7 @@ typedef struct chat_s {
     int file_seq;
     uint64_t file_cap;      // offers bigger than this need "anyway" to fetch
     int fast_files;         // our slots speed up while a transfer runs
+    int picture_noise;      // a JPEG offered gets noise nobody can see (common/clean.h)
     chat_file_fn file_view;
 
     // Moving out (:move): the session we moved to, which is given the keys that come after, and since
@@ -685,7 +687,7 @@ typedef struct {
     uint8_t color[3];
 
     uint64_t file_cap;      // 0: FILE_CAP_DEFAULT
-    int fast_files;
+    int fast_files, picture_noise;
 
     // What peers are told about this build, and the release key (minisign, base64) used to check
     // their builds' lists. "" leaves them unchecked.
@@ -710,7 +712,8 @@ int chat_submit_line(chat_t *c, const char *line, double now);
 cmd_result_t chat_run_command(chat_t *c, const char *line);
 void chat_send_text(chat_t *c, const char *text, double now);
 // Offers the file at path (used as is: ~ and quotes aren't expanded) to everyone here, like :send.
-void chat_send_file(chat_t *c, const char *path);
+// A picture offered is cleaned first (common/clean.h), unless asis.
+void chat_send_file(chat_t *c, const char *path, int asis);
 
 extern const command_t CHAT_COMMANDS[];
 

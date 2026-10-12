@@ -194,6 +194,7 @@ add_executable(chat
     src/common/bencode.c
     src/common/json.c
     src/common/image.c
+    src/common/clean.c
     src/common/qr.c
     src/common/bytewords.c
     src/platform/${CHAT_POSIX_OS}/net.c

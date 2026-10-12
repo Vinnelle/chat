@@ -1218,6 +1218,7 @@ int main(int argc, char **argv) {
     g_app.show_sidebar = g_app.show_console = g_app.show_chat = 1;
     g_app.lock_key = g_app.panic_key = 1;
     g_app.sandbox = 1;
+    g_app.picture_noise = 1;
     note_setting_defaults();
     trust_on_change(save_verified);
     int exit_code = read_options(g_argc, g_argv, &g_opts);

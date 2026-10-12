@@ -189,6 +189,7 @@ void app_session_opts(chat_opts_t *o) {
     o->verify_optional = g_app.verify_optional;
     o->file_cap = g_app.file_cap;
     o->fast_files = g_app.fast_files;
+    o->picture_noise = g_app.picture_noise;
     o->has_color = 1;
     memcpy(o->color, g_app.color, 3);
     o->identity_source = g_app.identity_source;

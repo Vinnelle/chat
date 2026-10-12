@@ -842,7 +842,7 @@ static tui_bar_t current_bar(void) {
             b.hint = "enter open" DOT_SEP "h up" DOT_SEP "/ type a path" DOT_SEP "~ home" DOT_SEP "esc back" DOT_SEP "q close";
             break;
         case MODE_SEND_BROWSE:
-            b.chip = "SEND";
+            b.chip = g_app.send_asis ? "SEND AS IS" : "SEND";
             b.hint = "enter send" DOT_SEP "h up" DOT_SEP "~ home" DOT_SEP "j/k move" DOT_SEP "esc close";
             break;
         case MODE_SAVE_BROWSE:

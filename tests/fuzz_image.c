@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
 // Images as a peer could send them: whatever the bytes, a thumbnail of the size asked for, or a
-// refusal with a reason. Built with FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION, which lets damaged
+// refusal with a reason. And the cleaner, which either refuses or gives back a picture of the same
+// kind that it can clean again. Built with FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION, which lets damaged
 // checksums through so mutations reach the inflater and the decoders behind them.
 #include "common/image.h"
+#include "common/clean.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -25,5 +27,17 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     } else {
         check(why[0] != '\0');
     }
+    uint8_t seed[CLEAN_SEED_LEN] = { 0 }, *out = NULL, *again = NULL;
+    size_t out_len = 0, again_len = 0;
+    if (size > 2) memcpy(seed, data + 2, size - 2 < sizeof seed ? size - 2 : sizeof seed);
+    if (image_clean(data, size, 1, seed, &out, &out_len) >= 0) {
+        check(out != NULL && image_kind(out, out_len) != NULL);
+        check(strcmp(image_kind(out, out_len), image_kind(data, size)) == 0);
+        check(image_clean(out, out_len, 0, seed, &again, &again_len) >= 0);
+        free(again);
+    } else {
+        check(out == NULL);
+    }
+    free(out);
     return 0;
 }

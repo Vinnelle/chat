@@ -344,6 +344,27 @@ away. `:download N` saves a file in `~/Downloads`, and for a picture (PNG, JPEG 
 draws it in the chat under the line that offered it. Pictures from others stay hidden until you ask, and
 `:hide N` hides one again. `:cancel N` stops a fetch, or stops offering one of your files.
 
+**What a picture says about you.** A phone's photo carries where it was taken, to a few metres, the
+time to the second, the camera's make and model and often its serial number, and sometimes a second
+picture or a whole video after the image. Screenshots and edited pictures carry text, editing
+history and times. So a PNG, JPEG or GIF you send goes without any of that: chat keeps only what
+drawing it needs (the image data, its colour profile, and the Orientation alone, so a portrait photo
+still shows upright), and offers that copy, from memory, in place of the file. A name a camera or
+a screenshot tool gave it (`IMG_20261012_143022.jpg`, `Screenshot 2026-10-12 at 14.30.22.png`,
+`DSC_0412.JPG`) gives away the time too, so the picture goes as `photo.jpg` or `image.png` instead.
+The reply says what was taken out and whether it was renamed. `:send asis PATH` (or `:send asis` for
+the file browser) sends a file exactly as it is.
+
+With **Noise in pictures** on (the default), a baseline JPEG, which most photos are, also gets noise
+nobody can see: some of its coefficients move one step. No two copies you send are the same bytes or
+pixels, so the same photo sent twice, or to two rooms, doesn't match itself. Progressive JPEGs, PNGs
+and GIFs are cleaned without it. What it can't do: it doesn't hide which camera took a photo from
+someone who studies its sensor's noise, a JPEG's quantisation tables still hint at the camera or app
+that wrote it, and a picture can still be recognised by what's in it. A picture over 64 MB can't be
+cleaned, so it's only sent with `asis`. Other files keep whatever they hold: HEIC and AVIF photos,
+WebP, TIFF and raw files, videos, PDFs and office documents usually say where, when and with what
+they were made, and chat says so when you send one. Convert a photo to JPEG first if that matters.
+
 A row under the line that offered a file says what's happening to it: how far a fetch has got and
 roughly how long is left, where it was saved, or why it failed. Under one of yours, it says who's
 fetching it and who it has gone to in full. The reply to `:download`, `:show`, `:cancel` and
@@ -1027,7 +1048,7 @@ puts it on the command line.
 | `:uninstall [NAME]` | delete what `:install` saved (the save in use, or the one called NAME) |
 | `:history [forget [all]]` | whether this session's history is kept; `forget` deletes it, `forget all` every session's (see [History](#history)) |
 | `:changelog` | show changelog (`:news`); built in, so it works offline |
-| `:send [PATH]` | offer a file, or pick one in a file browser without PATH (see [Files and pictures](#files-and-pictures)) |
+| `:send [asis] [PATH]` | offer a file, or pick one in a file browser without PATH; a picture goes without what could tell where, when or with what it was made, unless `asis` (see [Files and pictures](#files-and-pictures)) |
 | `:files` | the files page (`Ctrl+F`): the files offered here and yours, to show, save or stop; with `--simple`, a list |
 | `:download [N] [anyway] [FOLDER]` | save file N in `~/Downloads` or FOLDER (`:dl`); the newest file without N; `anyway` if it's over your size limit |
 | `:saveto N [anyway]` | pick a folder in a file browser and save file N there |
@@ -1067,6 +1088,7 @@ after a name. Under each row's help, the page shows the `:set` command that does
 | `verify` | `required` (nothing goes to a peer until you've compared its code), `optional` |
 | `filelimit` | the biggest file fetched without `anyway`: `8M`, `500K`, `1G` |
 | `fastfiles` | `on` (what you send goes in quick bursts; through the relays, as fast as they allow), `off` (chat's regular slots) |
+| `noise` | `on` (a JPEG you send gets noise nobody can see, so no two copies match), `off` |
 | `notify` | `all`, `mentions`, `none` |
 | `preview` | what a notification shows: `off` (only that a message came), `nick` (who from), `message` (who, and what); never the session |
 | `history` | `on` (each session's messages are kept, sealed in the save that's open, and everyone in it is told), `off` |

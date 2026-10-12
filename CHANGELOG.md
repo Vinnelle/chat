@@ -39,6 +39,14 @@
   passed on. It only goes to a peer you're connected to directly whose build reads it (the `p`
   letter), and an older build is refused rather than sent it. Both sides show who it's between,
   and it counts as a mention.
+- Pictures go without what could tell where, when or with what they were made. A PNG, JPEG or GIF
+  you send keeps only what drawing it needs: no Exif (location, camera, serial numbers, times), XMP,
+  IPTC, comments, PNG text or times, thumbnails, MPF pictures or the video a motion photo hides
+  after its end. An Orientation other than 1 is kept, alone. A camera's or screenshot's name, which
+  gives away the time, becomes `photo.jpg` or `image.png`. The cleaned copy is offered from memory,
+  and the reply says what went. With **Noise in pictures** on, a baseline JPEG also gets noise
+  nobody can see, so no two copies are the same bytes. `:send asis` sends a file as it is, and a
+  HEIC, raw, video, PDF or office file says it can't be cleaned.
 
 ## 0.5.0
 

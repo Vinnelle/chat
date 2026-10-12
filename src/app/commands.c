@@ -598,7 +598,7 @@ static const struct { const char *cmd; int args[4]; } COMMAND_ARGS[] = {
     { "verify",    { A_NICK, A_WORD | A_TYPED } },
     { "msg",       { A_NICK, A_WORD | A_TYPED } },
     { "verified",  { A_WORD | A_TYPED, A_TRUSTED | A_PICK } },
-    { "send",      { A_PATH | A_PICK } },
+    { "send",      { A_WORD | A_SKIP, A_PATH | A_PICK } },
     { "download",  { A_FILE | A_SKIP, A_WORD | A_SKIP, A_FOLDER | A_PICK } },
     { "cancel",    { A_FILE | A_TYPED } },
     { "show",      { A_FILE, A_WORD | A_TYPED } },
@@ -612,6 +612,7 @@ static const struct { const char *cmd, *word, *help; } ARG_WORDS[] = {
     { "verify",   "ok",     "their code is the same - what you send reaches them" },
     { "verify",   "no",     "their code differs - nothing you send reaches them" },
     { "verified", "forget", "remove a verified key" },
+    { "send",     "asis",   "as it is: a picture keeps what it holds about where, when and with what it was made" },
     { "show",     "anyway", "even if it's over your file size limit" },
     { "saveto",   "anyway", "even if it's over your file size limit" },
     { "download", "anyway", "even if it's over your file size limit" },
@@ -912,7 +913,12 @@ static void run_command(const char *line) {
         note(":%s needs a session - Ctrl+N (or :new) creates one, Ctrl+J (or :join) joins one", word);
         return;
     }
-    if (strcmp(word, "send") == 0 && !arg[strspn(arg, " ")]) { begin_send_browse(); return; }
+    // Without a path, a browser to pick the file in.
+    if (strcmp(word, "send") == 0) {
+        const char *rest = arg + strspn(arg, " ");
+        int asis = strncmp(rest, "asis", 4) == 0 && !rest[4 + strspn(rest + 4, " ")];
+        if (!rest[0] || asis) { begin_send_browse(asis); return; }
+    }
     g_echo = strcmp(word, "download") == 0 || strcmp(word, "dl") == 0 || strcmp(word, "cancel") == 0 || strcmp(word, "send") == 0;
     cmd_result_t r = chat_run_command(&g_app.selected->engine, line);
     g_echo = 0;

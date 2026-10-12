@@ -139,6 +139,11 @@ const setting_def_t SETTINGS[] = {
       "file, your slots to that peer come every few milliseconds. It takes seconds instead of minutes, but anyone "
       "watching the network sees a burst about the size of the file. Through the relays it goes as often as they "
       "allow, about twice the normal rate, and the relays can see that. Only the sender's setting matters." },
+    { SET_NOISE, NULL, NULL, "noise", "Noise in pictures", K_TOGGLE, "on|off",
+      "on: a JPEG you send also gets noise nobody can see, on top of what's always taken out (where, when and "
+      "with what it was made): some coefficients move a step, so no two copies are the same bytes or pixels, even "
+      "of one photo sent twice. It doesn't hide which camera took it from someone who studies its sensor's noise, "
+      "or stop it being recognised. Baseline JPEGs only (most photos). :send asis sends a file as it is." },
     { SET_BETAS, NULL, "Updates", "betas", "Beta releases", K_TOGGLE, "on|off",
       "on: :update installs betas too, the test builds of the next release. They're signed and checked like a "
       "release, but have had less testing. off: only releases, so a beta you're on stays until its release is "
@@ -241,6 +246,7 @@ int setting_options(setting_id_t id, const char *const **names, int *n) {
         case SET_NOSTR:      *names = NOSTR_NAMES; *n = 3; return r->nostr;
         case SET_VERIFY:     *names = VERIFY_NAMES; return g_app.verify_optional != 0;
         case SET_FAST_FILES: return g_app.fast_files != 0;
+        case SET_NOISE:      return g_app.picture_noise != 0;
         case SET_HISTORY:    return g_app.history != 0;
         case SET_BETAS:      return g_app.betas != 0;
         case SET_AUTOSAVE:   return g_app.autosave != 0;
@@ -508,6 +514,7 @@ void settings_to_sessions(void) {
         chat_t *e = &g_app.sessions[i].engine;
         chat_apply_routing(e, &g_app.route);
         chat_set_file_options(e, g_app.file_cap, g_app.fast_files);
+        e->picture_noise = g_app.picture_noise;
         e->verify_required = !g_app.verify_optional;
         e->notify_mode = g_app.notify_mode;
         e->notify_preview = g_app.notify_preview;
@@ -618,6 +625,11 @@ void setting_choose(setting_id_t id, int i) {
             g_app.fast_files = i;
             for (int s = 0; s < MAX_SESSIONS; s++)
                 if (takes_settings(s)) chat_set_file_options(&g_app.sessions[s].engine, g_app.file_cap, i);
+            break;
+        case SET_NOISE:
+            g_app.picture_noise = i;
+            for (int s = 0; s < MAX_SESSIONS; s++)
+                if (takes_settings(s)) g_app.sessions[s].engine.picture_noise = i;
             break;
         case SET_BETAS:
             g_app.betas = i;

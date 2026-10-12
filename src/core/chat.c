@@ -6,6 +6,7 @@
 #include "common/bytewords.h"
 #include "platform/platform.h"
 #include "common/image.h"
+#include "common/clean.h"
 #include <ctype.h>
 #include <stddef.h>
 #include <string.h>
@@ -2976,6 +2977,7 @@ static void file_free(file_entry_t *e) {
     file_stop_download(e, DL_NONE);
     file_cache_drop(e);
     if (e->fp) { fclose(e->fp); e->fp = NULL; }
+    file_mem_free(&e->clean, e->size);
     crypto_wipe(e, sizeof *e);
 }
 
@@ -3050,19 +3052,48 @@ static void typed_path(const char *in, char *path, size_t cap) {
     }
 }
 
+// "asis" first, since a path can hold spaces.
 static cmd_result_t cmd_send(void *ctx, const char *arg) {
     chat_t *c = ctx;
     char path[TYPED_PATH_MAX];
-    typed_path(arg, path, sizeof path);
-    if (!path[0]) { ui_print(c, "* usage: :send PATH - offers a file to everyone here; nobody gets it unless they fetch it"); return CMD_OK; }
-    chat_send_file(c, path);
+    while (*arg == ' ') arg++;
+    int asis = strncmp(arg, "asis", 4) == 0 && (arg[4] == ' ' || arg[4] == '\0');
+    typed_path(asis ? arg + 4 : arg, path, sizeof path);
+    if (!path[0]) {
+        ui_print(c, "* usage: :send [asis] PATH - offers a file to everyone here; nobody gets it unless they fetch it. A "
+                    "picture goes without what could tell where, when or with what it was made, unless asis");
+        return CMD_OK;
+    }
+    chat_send_file(c, path, asis);
     return CMD_OK;
 }
 
-// As much of the start of a file as image_kind needs.
-#define KIND_HEAD 8
+// What went from a picture offered, and what was done to it.
+static void say_cleaned(chat_t *c, int num, unsigned took, const char *old_name) {
+    static const struct { unsigned flag; const char *what; } WENT[] = {
+        { CLEAN_LOCATION, "where it was taken" }, { CLEAN_CAMERA, "camera details and when" },
+        { CLEAN_XMP, "editing details" }, { CLEAN_IPTC, "captions and names" }, { CLEAN_COMMENT, "comments" },
+        { CLEAN_EXTRA, "a picture or video tucked in with it" }, { CLEAN_TIME, "when it was saved" },
+        { CLEAN_OTHER, "other hidden data" },
+    };
+    char what[512] = "";
+    size_t p = 0;
+    int n = 0;
+    for (size_t i = 0; i < COUNT_OF(WENT); i++) {
+        if (!(took & WENT[i].flag) || p >= sizeof what) continue;
+        int w = snprintf(what + p, sizeof what - p, "%s%s", n++ ? ", " : "", WENT[i].what);
+        if (w > 0) p += (size_t)w;
+    }
+    if (old_name && p < sizeof what) {
+        int w = snprintf(what + p, sizeof what - p, "%sits name (%s)", n++ ? ", " : "", old_name);
+        if (w > 0) p += (size_t)w;
+    }
+    const char *noise = took & CLEAN_NOISE ? "; added noise nobody can see, so it matches no other copy" : "";
+    if (n) ui_print(c, "* file %d: took out %s%s - :send asis offers a picture as it is", num, what, noise);
+    else ui_print(c, "* file %d: nothing in it to take out%s", num, noise);
+}
 
-void chat_send_file(chat_t *c, const char *path) {
+void chat_send_file(chat_t *c, const char *path, int asis) {
     uint64_t size = 0;
     FILE *f = platform_open_regular(path, &size);
     if (!f) { ui_print(c, "* can't send %s: not a file chat can read", path); return; }
@@ -3076,7 +3107,7 @@ void chat_send_file(chat_t *c, const char *path) {
     // since then gives a hash that doesn't match, and nothing else is ever sent in its place.
     sha256_ctx_t h;
     sha256_init(&h);
-    uint8_t buf[65536], head[KIND_HEAD] = { 0 };
+    uint8_t buf[65536], head[CLEAN_HEAD] = { 0 };
     uint64_t total = 0;
     size_t n;
     uint8_t *mem = NULL;
@@ -3090,20 +3121,72 @@ void chat_send_file(chat_t *c, const char *path) {
         if (total > size) break;
     }
     crypto_wipe(buf, sizeof buf);
-    int image = image_kind(head, total < sizeof head ? (size_t)total : sizeof head) != NULL;
-    file_entry_t *e = NULL;
-    if (ferror(f) || total != size) ui_print(c, "* can't send %s: it changed while it was read", path);
-    else if (!(e = file_new(c, NULL))) ui_print(c, "* can't offer more files at once - :cancel one you offered first");
-    if (!e || !image) {
+    size_t got_head = total < sizeof head ? (size_t)total : sizeof head;
+    const char *kind = image_kind(head, got_head);
+    int image = kind != NULL;
+    if (ferror(f) || total != size) {
         file_mem_free(&mem, size);
-        if (!e) { fclose(f); return; }
+        fclose(f);
+        ui_print(c, "* can't send %s: it changed while it was read", path);
+        return;
+    }
+    // A picture goes without what could tell where, when or with what it was made, unless it's asked
+    // for as it is.
+    uint8_t *clean = NULL;
+    size_t clean_len = 0;
+    int took = -1;
+    if (image && !asis) {
+        if (!mem) {
+            fclose(f);
+            ui_print(c, "* not sent: %s is a picture too big to clean of where and when it was taken (over 64 MB) - "
+                        ":send asis %s sends it as it is", path, path);
+            return;
+        }
+        uint8_t seed[CLEAN_SEED_LEN];
+        gen_random(seed, sizeof seed);
+        took = image_clean(mem, (size_t)size, c->picture_noise, seed, &clean, &clean_len);
+        crypto_wipe(seed, sizeof seed);
+        if (took < 0) {
+            file_mem_free(&mem, size);
+            fclose(f);
+            ui_print(c, "* not sent: %s doesn't read as a whole picture, so what it holds can't be taken out - :send "
+                        "asis %s sends it as it is", path, path);
+            return;
+        }
+    }
+    file_entry_t *e = file_new(c, NULL);
+    if (!e) {
+        file_mem_free(&mem, size);
+        file_mem_free(&clean, clean_len);
+        fclose(f);
+        ui_print(c, "* can't offer more files at once - :cancel one you offered first");
+        return;
     }
     e->mine = 1;
     memcpy(e->owner, c->my_id, ID_LEN);
     gen_random(e->fid, FILE_ID_LEN);
+    char old_name[FILE_NAME_MAX + 1];
+    file_clean_name(file_basename(path), old_name);
+    copy_str(e->name, old_name, sizeof e->name);
+    int renamed = 0;
+    if (clean) {
+        // Offered from memory from now on, and shown here as the peers get it.
+        file_mem_free(&mem, size);
+        e->clean = clean;
+        size = clean_len;
+        sha256_init(&h);
+        sha256_update(&h, clean, clean_len);
+        if (clean_name_tells(old_name)) {
+            copy_str(e->name, strcmp(kind, "jpeg") == 0 ? "photo.jpg" : strcmp(kind, "png") == 0 ? "image.png" : "image.gif",
+                     sizeof e->name);
+            renamed = 1;
+        }
+        if ((mem = file_mem_alloc(size)) != NULL) memcpy(mem, clean, clean_len);
+    } else if (!image) {
+        file_mem_free(&mem, size);
+    }
     e->size = size;
     sha256_final(&h, e->sha);
-    file_clean_name(file_basename(path), e->name);
     e->image = image;
     e->fp = f;
     current_hhmm(e->at);
@@ -3113,6 +3196,11 @@ void chat_send_file(chat_t *c, const char *path) {
     char text[FILE_NAME_MAX + 96];
     snprintf(text, sizeof text, "offered %s as file %d", desc, e->num);
     ui_chat_file(c, c->my_color, 0, who, text, e->num);
+    if (clean) say_cleaned(c, e->num, (unsigned)took, renamed ? old_name : NULL);
+    const char *cannot = image ? NULL : clean_cannot(head, got_head, old_name);
+    if (cannot)
+        ui_print(c, "* file %d is a %s, which chat can't clean: it may say where, when and with what it was made", e->num,
+                 cannot);
     int sent = 0, held = 0;
     for (int i = 0; i < c->peer_hi; i++) {
         peer_t *p = &c->peers[i];
@@ -3244,6 +3332,11 @@ static int file_check_saved(const file_entry_t *e, uint8_t **mem) {
 // One of ours as it is now, if it's still what was offered.
 static int file_read_own(const file_entry_t *e, uint8_t **mem) {
     *mem = NULL;
+    if (e->clean) {
+        if (!(*mem = file_mem_alloc(e->size))) return -1;
+        memcpy(*mem, e->clean, (size_t)e->size);
+        return 0;
+    }
     if (!e->fp || e->size > FILE_VIEW_MAX || fseek(e->fp, 0, SEEK_SET) != 0) return -1;
     uint8_t *m = file_mem_alloc(e->size);
     if (!m) return -1;
@@ -3547,6 +3640,7 @@ static cmd_result_t cmd_cancel(void *ctx, const char *arg) {
     if (!e) { ui_print(c, "* usage: :cancel N - stops fetching file N, or stops offering one of yours"); return CMD_OK; }
     if (e->mine) {
         if (e->fp) { fclose(e->fp); e->fp = NULL; }
+        file_mem_free(&e->clean, e->size);
         for (int i = 0; i < c->peer_hi; i++)
             if (c->peers[i].used && c->peers[i].serving && memcmp(c->peers[i].serve_fid, e->fid, FILE_ID_LEN) == 0) c->peers[i].serving = 0;
         ui_print(c, "* file %d is no longer offered", e->num);
@@ -3624,7 +3718,8 @@ static int file_next_chunk(chat_t *c, peer_t *p, char *text, size_t *pos, size_t
     int hl = snprintf(head, sizeof head, "%sfd\t%s\t%llu\t", *pos ? "\n" : "", fidhex, (unsigned long long)p->serve_next);
     if (hl < 0 || *pos + (size_t)hl + BASE64_LEN(want) > cap) return 0;
     uint8_t buf[FILE_CHUNK];
-    if (fseek(e->fp, (long)p->serve_next, SEEK_SET) != 0 || fread(buf, 1, want, e->fp) != want) { p->serving = 0; return 0; }
+    if (e->clean) memcpy(buf, e->clean + p->serve_next, want);
+    else if (fseek(e->fp, (long)p->serve_next, SEEK_SET) != 0 || fread(buf, 1, want, e->fp) != want) { p->serving = 0; return 0; }
     memcpy(text + *pos, head, (size_t)hl);
     *pos += (size_t)hl;
     *pos += base64_encode(buf, want, text + *pos);
@@ -3823,7 +3918,7 @@ const command_t CHAT_COMMANDS[] = {
     { "net",        NULL,     NULL,              "network report and diagnosis",                    cmd_net },
     { "port",       NULL,     "[N]",             "show or change this session's udp port",          cmd_port },
     { "set",        NULL,     "[NAME [VALUE]]",  "show or change nick, colour, notify, preview, net", cmd_set },
-    { "send",       NULL,     "[PATH]",          "offer a file; nobody gets it unless they fetch it", cmd_send },
+    { "send",       NULL,     "[asis] [PATH]",   "offer a file; nobody gets it unless they fetch it, and a picture goes cleaned unless asis", cmd_send },
     { "files",      NULL,     NULL,              "the files offered here, and how they're coming",   cmd_files },
     { "download",   "dl",     "[N] [anyway] [FOLDER]", "save file N (the newest if left out) in Downloads or FOLDER", cmd_download },
     { "cancel",     NULL,     "N",               "stop fetching or queueing file N, or stop offering yours", cmd_cancel },
@@ -4024,6 +4119,7 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
     c->notify_preview = o->notify_preview;
     c->verify_required = !o->verify_optional;
     chat_set_file_options(c, o->file_cap, o->fast_files);
+    c->picture_noise = o->picture_noise;
 
     if (o->has_color) memcpy(c->my_color, o->color, 3);
     else chat_random_colour(c->my_color);

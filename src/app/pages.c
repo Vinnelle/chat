@@ -160,8 +160,9 @@ void browser_key(const tui_key_t *key) {
 }
 
 // :send without a path: the file is picked here, starting where the last one came from.
-void begin_send_browse(void) {
+void begin_send_browse(int asis) {
     if (g_app.mode != MODE_CHAT && g_app.mode != MODE_FILES) return;
+    g_app.send_asis = asis;
     const char *home = platform_home_dir();
     if ((!g_app.send_dir[0] || browser_load(&g_app.browser, g_app.send_dir) != 0)
         && (!home || browser_load(&g_app.browser, home) != 0))
@@ -194,7 +195,7 @@ void send_browser_key(const tui_key_t *key) {
                 chat_t *e = &g_app.selected->engine;
                 int was = e->file_seq;
                 g_echo = 1;
-                chat_send_file(e, full);
+                chat_send_file(e, full, g_app.send_asis);
                 g_echo = 0;
                 if (e->file_seq != was) g_app.file_num = e->file_seq;
             }
@@ -1245,7 +1246,7 @@ void files_key(const tui_key_t *key) {
     const file_entry_t *f = n ? l[sel] : NULL;
     g_app.dirty = 1;
     if (key->type == TUI_KEY_CHAR && key->ch_len == 1) {
-        if (key->ch[0] == 'n') { begin_send_browse(); return; }
+        if (key->ch[0] == 'n') { begin_send_browse(0); return; }
         if (f && file_action(key->ch[0], s, f)) return;
     }
     list_key_t k = list_key(key);

@@ -26,6 +26,7 @@ set(CHAT_CORE_SOURCES
     ${PROJECT_SOURCE_DIR}/src/common/json.c
     ${PROJECT_SOURCE_DIR}/src/common/toml.c
     ${PROJECT_SOURCE_DIR}/src/common/image.c
+    ${PROJECT_SOURCE_DIR}/src/common/clean.c
     ${PROJECT_SOURCE_DIR}/src/common/qr.c
     ${PROJECT_SOURCE_DIR}/src/common/bytewords.c
     ${PROJECT_SOURCE_DIR}/src/platform/${CHAT_POSIX_OS}/platform.c

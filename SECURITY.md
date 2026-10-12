@@ -74,6 +74,11 @@ session id and password, whether they were invited or the password leaked.
 - **"Modified client" is a hint, not a check.** A client says which build it runs, and chat checks
   that against the signed list of release binaries. A modified client can still send a release
   binary's hash.
+- **Only pictures are cleaned.** A PNG, JPEG or GIF goes without its location, camera details,
+  times, text and anything tucked in with it, and a JPEG gets noise so no two copies match. Every
+  other file goes as it is: HEIC, raw photos, videos, PDFs and office documents usually say where,
+  when and with what they were made. The noise doesn't stop someone recognising a picture by what's
+  in it, or linking photos to one camera by its sensor's noise.
 - **Deleting isn't erasing.** `:uninstall`, self-destruct, the panic key with `:set panicwipe on`
   and a decoy taking a save's place delete files. A journal, a copy-on-write snapshot, an SSD's
   spare blocks or a backup can still hold them. Only a save locked to a Windows computer's TPM is
