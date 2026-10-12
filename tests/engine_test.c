@@ -287,14 +287,15 @@ static void test_verify_gate(double *t) {
     CHECK(pa && pa->code_ok == 1 && chat_code_state(&A, pa) == 2, "alice's ok didn't stick");
 
     chat_send_text(&A, "after comparing", *t);
-    RUN_UNTIL(t, 10, log_count(&log_b, "alice: after comparing") == 1);
-    CHECK(log_count(&log_b, "alice: after comparing") == 1, "bob didn't get the message once the codes were compared");
+    RUN_UNTIL(t, 10, log_count(&log_b, "alice (code compared): after comparing") == 1);
+    CHECK(log_count(&log_b, "alice (code compared): after comparing") == 1,
+          "bob didn't get the message once the codes were compared");
 }
 
 static void test_message(double *t) {
     chat_send_text(&A, "hello there", *t);
-    RUN_UNTIL(t, 10, log_count(&log_b, "alice: hello there") == 1 && pending_msgs(&A) == 0);
-    CHECK(log_count(&log_b, "alice: hello there") == 1, "bob didn't get alice's message once");
+    RUN_UNTIL(t, 10, log_count(&log_b, "alice (code compared): hello there") == 1 && pending_msgs(&A) == 0);
+    CHECK(log_count(&log_b, "alice (code compared): hello there") == 1, "bob didn't get alice's message once");
     CHECK(pending_msgs(&A) == 0, "alice still waits on %d acks", pending_msgs(&A));
 }
 
@@ -448,8 +449,9 @@ static void test_rekey(double *t) {
     peer_t *pa = peer_named(&A, "bob");
     CHECK(pa && pa->code_ok == 1, "the rekey forgot that alice compared bob's code");
     chat_send_text(&B, "after the rekey", *t);
-    RUN_UNTIL(t, 10, log_count(&log_a, "bob: after the rekey") == 1);
-    CHECK(log_count(&log_a, "bob: after the rekey") == 1, "alice didn't get bob's message after the rekey");
+    RUN_UNTIL(t, 10, log_count(&log_a, "bob (code compared): after the rekey") == 1);
+    CHECK(log_count(&log_a, "bob (code compared): after the rekey") == 1,
+          "alice didn't get bob's message after the rekey");
 }
 
 // A message lost just before the peer rekeys: its retry has to outlive the re-handshake, which
@@ -766,9 +768,10 @@ static void test_third_peer(double *t) {
     confirm(&A, "carol", &C, "alice");
     confirm(&B, "carol", &C, "bob");
     chat_send_text(&C, "hi all", *t);
-    RUN_UNTIL(t, 10, log_count(&log_a, "carol: hi all") == 1 && log_count(&log_b, "carol: hi all") == 1);
-    CHECK(log_count(&log_a, "carol: hi all") == 1, "alice didn't get carol's message once");
-    CHECK(log_count(&log_b, "carol: hi all") == 1, "bob didn't get carol's message once");
+    RUN_UNTIL(t, 10, log_count(&log_a, "carol (code compared): hi all") == 1
+                     && log_count(&log_b, "carol (code compared): hi all") == 1);
+    CHECK(log_count(&log_a, "carol (code compared): hi all") == 1, "alice didn't get carol's message once");
+    CHECK(log_count(&log_b, "carol (code compared): hi all") == 1, "bob didn't get carol's message once");
 }
 
 // A direct message: only the peer named gets it, both sides show who it's between, it's acked, and a
@@ -2901,8 +2904,9 @@ static void test_move(double *t) {
           "the new room asked to compare codes (%d, %d) or didn't say they came along (%d, %d)", log_a2.compare_prompts,
           log_b2.compare_prompts, log_a2.came_along, log_b2.came_along);
     chat_send_text(&A2, "in the new room", *t);
-    RUN_UNTIL(t, 10, log_count(&log_b2, "alice: in the new room") == 1);
-    CHECK(log_count(&log_b2, "alice: in the new room") == 1, "bob didn't get alice's message in the new room");
+    RUN_UNTIL(t, 10, log_count(&log_b2, "alice (code compared): in the new room") == 1);
+    CHECK(log_count(&log_b2, "alice (code compared): in the new room") == 1,
+          "bob didn't get alice's message in the new room");
 
     RUN_UNTIL(t, MOVE_LINGER + 5, chat_move_finished(&A, *t) && chat_move_finished(&B, *t));
     CHECK(chat_move_finished(&A, *t) && chat_move_finished(&B, *t) && *t - went < MOVE_LINGER,
