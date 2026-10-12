@@ -27,6 +27,13 @@
   history kept first. `:set lockkey` and `:set panickey` choose other keys, or none. In `--simple`,
   the terminal's `Ctrl+\` panics. It used to end chat there, and in the full screen UI, with no
   bye and nothing cleaned up.
+- A sandbox, on Linux. Once chat starts reaching the network, Landlock lets it, and tor, write only
+  under the folders in your home that aren't hidden or on PATH, its own folder and the temporary
+  folders, and run only tor, and seccomp refuses the calls chat never makes (ptrace, mount, bpf,
+  io_uring...). A bug in how chat reads what peers, DHT nodes or relays send can then plant nothing
+  that runs later. Landlock needs Linux 5.13 or later, and without it chat carries on with seccomp
+  alone. While it's up, `:update` can't replace chat (`chat --update` can). `:set sandbox off` or
+  `--nosandbox` leave it down.
 
 ## 0.5.0
 

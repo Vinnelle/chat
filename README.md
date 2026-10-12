@@ -177,6 +177,20 @@ can keep them out:
   started a process with their text on its command line, which every user can read.
 - Reading a save doesn't change its access time (Linux).
 
+**Sandbox (Linux).** chat reads a lot of untrusted input with its own code: pictures from peers, the
+DHT's bencode from anyone on the internet, the relays' JSON. In case a bug there gets past the
+fuzzers, chat puts up a sandbox as it starts reaching the network (at **Start chatting**, or as
+`--simple` starts). From then on chat, and tor, can only write under the folders in your home that
+aren't hidden or on `PATH`, chat's own folder and the temporary folders, can only run tor, and are
+refused the system calls chat never makes (`ptrace`, `mount`, `bpf`, `io_uring` and the like). A bug
+can't plant anything that runs later: not in `.bashrc`, `~/.config/autostart`, `~/.ssh` or
+`~/.local/bin`. It still runs as you, though, so it can read what you can and send it out. It's
+Landlock (Linux 5.13 or later) and seccomp, with no root needed, and without Landlock chat carries on
+with seccomp alone. While it's up, saving a file anywhere else fails, and so does `:update`
+(`chat --update` from the shell works). Until `:install` has made chat's own folder, the folder it
+goes in (`~/.config`) stays writable. `:set sandbox off` (from the next start) or `--nosandbox` (for
+one run) leave it down.
+
 What chat can't hide: root and administrators can read any program's memory. Anyone on the
 computer can see that chat is running, how much CPU time and memory it uses, and its network
 connections (in Tor mode, those only reach Tor relays, never a peer). Your terminal holds what's
@@ -906,7 +920,7 @@ chat [--nick NAME] [--colour NAME|#HEX] [--identity age|pgp[:KEYFILE]] [--simple
      [--noportmap] [--nonostr] [--nostr-always] [--relay wss://HOST ...]
      [--tor-launch auto|always|never] [--tor-path PATH] [--tor-socks HOST:PORT]
      [--tor-control HOST:PORT] [--verify-required] [--file-limit SIZE]
-     [--fast-files] [--betas]
+     [--fast-files] [--betas] [--nosandbox]
      [--session ID --port UDP_PORT --peer HOST:PORT ...]
 chat --update [--betas] | --version
 ```
@@ -1041,6 +1055,7 @@ after a name. Under each row's help, the page shows the `:set` command that does
 | `panickey` | `ctrl+\`, `ctrl+q`, `ctrl+x`, `f12` (the key that panics), `off` |
 | `panicwipe` | `on` (the panic key deletes the open save too), `off` |
 | `panichistory` | `on` (the panic key writes the history kept first), `off` |
+| `sandbox` | `on` (Linux: once chat reaches the network, it can only write to the folders in your home that aren't hidden or on `PATH`, its own and the temporary folders, and only run tor), `off`; from the next start |
 | `verify` | `required` (nothing goes to a peer until you've compared its code), `optional` |
 | `filelimit` | the biggest file fetched without `anyway`: `8M`, `500K`, `1G` |
 | `fastfiles` | `on` (what you send goes in quick bursts; through the relays, as fast as they allow), `off` (chat's regular slots) |
@@ -1107,6 +1122,7 @@ Options given here override what `:install` saved, for that run.
 | `--identity ...` | `age` or `pgp` for a key made from a password (asked for, or `CHAT_SIGN_PASSWORD`), or `age:KEYFILE` or `pgp:KEYFILE` for your own (see [Security](#security)); for that run, instead of a key `:install` saved |
 | `--save NAME` | Open the save called NAME, without the list of saves (`default` is the one in `~/.config/chat` itself); if there isn't one, start from the defaults and let `:install` make it (see [Installing](#installing)) |
 | `--simple` | Plain `[HH:MM] ...` lines, one session, stdin, `:name` runs a command. Used automatically when stdout isn't a tty |
+| `--nosandbox` | Don't put the sandbox up for that run (Linux; `:set sandbox off` keeps it down) |
 | `--session ID` | Join a session at startup (with `--port`, `--peer`) |
 | `--update` | Install the latest release and exit, without opening chat (see [Updating](#updating)) |
 | `--betas` | Let `:update` and `--update` install betas too, for that run (`:set betas on` keeps it) |

@@ -70,7 +70,8 @@ static void tor_link_start_own(double now) {
     }
     g_tor.proc = torproc_start(program, err, sizeof err);
     if (!g_tor.proc) {
-        push_log("* tor: couldn't start %s: %s", program, err);
+        push_log("* tor: couldn't start %s: %s%s", program, err, g_app.sandboxed & PLATFORM_SANDBOX_FILES
+                 ? " - the sandbox only lets chat run the tor it found when it started" : "");
         tor_link_fail(now, TOR_RETRY);
         return;
     }
@@ -466,6 +467,11 @@ cmd_result_t app_copyid(void *ctx, const char *arg) {
 
 cmd_result_t app_update(void *ctx, const char *arg) {
     (void)ctx; (void)arg;
+    if (g_app.sandboxed & PLATFORM_SANDBOX_FILES) {
+        note("the sandbox keeps chat from replacing itself - quit and run chat --update, or :set sandbox off for the "
+             "next start");
+        return CMD_OK;
+    }
     if (g_app.route.mode == ROUTE_TOR && g_tor.state != TL_READY) {
         push_log(UPDATE_PREFIX "Tor mode downloads through Tor, and there's no tor yet - try again once it's connected");
         return CMD_OK;

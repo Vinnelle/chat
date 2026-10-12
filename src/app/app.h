@@ -195,6 +195,10 @@ typedef struct {
     // panic, by their place in LOCK_KEY_NAMES and PANIC_KEY_NAMES (0: no key). A panic deletes the
     // open save with panic_wipe, and writes the histories kept with panic_history.
     int lock_after, lock_key, panic_key, panic_wipe, panic_history;
+    // Put the sandbox up once chat starts reaching the network (Linux), and what of it is up
+    // (PLATFORM_SANDBOX_).
+    int sandbox;
+    unsigned sandboxed;
     // Locked to this device: the open save, or with none open, the new one :install is making for it
     // (install_for). device_want is what the DEVICE LOCK box asks to change it to, and device_back
     // where it goes back to.
@@ -309,7 +313,7 @@ typedef struct {
     uint16_t port;
     char peers[MAX_PEER_ARGS][PEER_ARG_LEN];
     int n_peers;
-    int simple, update, has_color;
+    int simple, update, has_color, nosandbox;
     uint8_t color[3];
 } options_t;
 
@@ -347,7 +351,7 @@ typedef enum {
     SET_NOSTR, SET_RELAYS,
     SET_NICK, SET_COLOUR, SET_SIGN, SET_AGE_RECIPIENT, SET_PGP_PUBKEY, SET_AUTOSAVE, SET_DEVICE_LOCK,
     SET_SECURITY_KEY, SET_AUTHENTICATOR, SET_DESTROY, SET_SHADOW,
-    SET_LOCK, SET_LOCK_KEY, SET_PANIC_KEY, SET_PANIC_WIPE, SET_PANIC_HISTORY,
+    SET_LOCK, SET_LOCK_KEY, SET_PANIC_KEY, SET_PANIC_WIPE, SET_PANIC_HISTORY, SET_SANDBOX,
     SET_VERIFY, SET_FILE_LIMIT, SET_FAST_FILES, SET_NOTIFY, SET_PREVIEW, SET_HISTORY, SET_NET, SET_PORT, SET_BETAS,
     N_SETTING_IDS
 } setting_id_t;
@@ -429,6 +433,7 @@ void reapply_options(void);
 typedef enum { PANIC_NONE, PANIC_KEY, PANIC_DECOY, PANIC_DESTROYED } panic_t;
 extern panic_t g_panic;
 void panic(panic_t why);
+void sandbox_up(void);
 #define N_PANIC_KEYS 5
 extern const char *const PANIC_KEY_NAMES[N_PANIC_KEYS];
 int panic_key_is(const tui_key_t *key);

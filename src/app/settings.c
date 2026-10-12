@@ -108,6 +108,12 @@ const setting_def_t SETTINGS[] = {
     { SET_PANIC_HISTORY, NULL, NULL, "panichistory", "Panic writes history", K_TOGGLE, "on|off",
       "on: the panic key writes the history kept for each session before it quits. off: it isn't written, so "
       "each history loses up to its last 30 seconds." },
+    { SET_SANDBOX, NULL, "Sandbox", "sandbox", "Sandbox", K_TOGGLE, "on|off",
+      "on: once chat reaches the network, it can only write to your home's folders that aren't hidden or on PATH, "
+      "its own and the temporary ones, and only run tor. Calls it never makes (ptrace, "
+      "mount, bpf...) are refused, for tor too. A bug can't plant anything that runs later (.bashrc, ~/.local/bin), "
+      "and saving elsewhere fails. Linux 5.13 or later. :update can't replace chat while it's up (chat --update "
+      "can). From the next start." },
     { SET_VERIFY, "Chat", NULL, "verify", "Compare verify codes", K_CHOICE, "required|optional",
       "Anyone with a session's id and password could sit between two members and read what they say. When a peer "
       "joins, chat shows a code to compare with them over another channel. It only matches on both ends if "
@@ -204,6 +210,9 @@ int setting_shown(setting_id_t id) {
     if (id == SET_RELAYS && !g_app.route.nostr) return 0;
     if (id == SET_AGE_RECIPIENT && g_app.identity_source != IDENT_AGE) return 0;
     if (id == SET_PGP_PUBKEY && !pgp_key_made_here()) return 0;
+#ifndef __linux__
+    if (id == SET_SANDBOX) return 0;
+#endif
     return 1;
 }
 
@@ -213,6 +222,7 @@ static const char *setting_hidden_why(setting_id_t id) {
     if (tor_only_setting(id)) return "it only applies with tor routing";
     if (id == SET_RELAYS) return "it only applies with the Nostr relays on";
     if (id == SET_PGP_PUBKEY) return "it needs a PGP signing key made here";
+    if (id == SET_SANDBOX) return "the sandbox is only on Linux";
     return "it needs an AGE signing identity";
 }
 
@@ -251,6 +261,7 @@ int setting_options(setting_id_t id, const char *const **names, int *n) {
         case SET_PANIC_KEY:  *names = PANIC_KEY_NAMES; *n = N_PANIC_KEYS; return g_app.panic_key;
         case SET_PANIC_WIPE: return g_app.panic_wipe != 0;
         case SET_PANIC_HISTORY: return g_app.panic_history != 0;
+        case SET_SANDBOX:    return g_app.sandbox != 0;
         case SET_TOR_LAUNCH: *names = TOR_LAUNCH_NAMES; *n = 3; return g_app.tor_launch;
         case SET_NOTIFY:     *names = NOTIFY_NAMES; *n = 3; return (int)g_app.notify_mode;
         case SET_PREVIEW:    *names = PREVIEW_NAMES; *n = 3; return (int)g_app.notify_preview;
@@ -628,6 +639,11 @@ void setting_choose(setting_id_t id, int i) {
             if (i) { note("Panic deletes the save: on - the panic key deletes the open save too, without asking"); return; }
             break;
         case SET_PANIC_HISTORY: g_app.panic_history = i; break;
+        case SET_SANDBOX:
+            g_app.sandbox = i;
+            // It goes up at Start chatting, and can't come down once it's up.
+            if (!g_app.onboarding) { note("Sandbox: %s - from the next start", i ? "on" : "off"); return; }
+            break;
         default: return;
     }
     char v[32]; setting_value(id, v, sizeof v);
@@ -877,6 +893,7 @@ void settings_done(void) {
     if (g_app.onboarding) {
         g_app.onboarding = 0;
         push_log("* routing: %s", route_label());
+        sandbox_up();
         sync_update_proxy();
         tor_link_ensure(now_seconds());
         finish_onboarding();

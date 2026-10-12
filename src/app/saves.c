@@ -553,6 +553,8 @@ static void finish_install(const char *passphrase) {
         // A new save has no key in it yet.
         g_app.saved_key_known = 0;
         g_app.saved_key_path[0] = '\0';
+        // chat's folder is there now, if it wasn't.
+        platform_sandbox_narrow();
     }
     // Everything in use, including the options.
     note_settings_seen();

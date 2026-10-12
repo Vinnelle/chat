@@ -139,6 +139,14 @@ void platform_harden_process(const char *const secret_env[]) {
     }
 }
 
+unsigned platform_sandbox(const char *const run[], int n_run, char *why, size_t cap) {
+    (void)run; (void)n_run;
+    copy_str(why, "it's only on Linux", cap);
+    return 0;
+}
+
+void platform_sandbox_narrow(void) {}
+
 int platform_env_take(const char *name, char *out, size_t outlen) {
     for (int i = 0; i < SECRET_ENV_MAX && g_secret_env[i].name; i++) {
         if (strcmp(g_secret_env[i].name, name) != 0) continue;

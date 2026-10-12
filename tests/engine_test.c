@@ -23,6 +23,15 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
+#ifdef __linux__
+#include <errno.h>
+#include <fcntl.h>
+#include <spawn.h>
+#include <unistd.h>
+#include <sys/prctl.h>
+#include <sys/ptrace.h>
+#include <sys/wait.h>
+#endif
 
 #define LOG_LINES 512
 
@@ -1359,6 +1368,68 @@ static void test_lock_screen(double *t) {
     crypto_wipe(&tried, sizeof tried);
 }
 
+// The sandbox, in a child with a home folder of its own: a dotfile, a dot-folder and a folder on
+// PATH stay out of reach, a home folder and chat's own folder don't, nothing runs, and ptrace is
+// refused. Skipped on a kernel without Landlock.
+static void test_sandbox(double *t) {
+    (void)t;
+#ifdef __linux__
+    static char home[256];
+    CHECK(test_temp_dir("sandbox", home, sizeof home) == 0, "no temporary folder");
+    char path[700];
+    static const char *const DIRS[] = { "Documents", ".config", ".config/chat", "bin" };
+    for (size_t i = 0; i < COUNT_OF(DIRS); i++) {
+        snprintf(path, sizeof path, "%s/%s", home, DIRS[i]);
+        mkdir(path, 0700);
+    }
+    snprintf(path, sizeof path, "%s/.bashrc", home);
+    FILE *f = fopen(path, "w");
+    if (f) fclose(f);
+    enum { SKIP = 77, DOTFILE = 1, DOTDIR = 2, ON_PATH = 4, HOME_DIR = 8, OWN_DIR = 16, RAN = 32, TRACED = 64 };
+    pid_t pid = fork();
+    if (pid == 0) {
+        setenv("HOME", home, 1);
+        unsetenv("XDG_CONFIG_HOME");
+        snprintf(path, sizeof path, "%s/bin:/usr/bin:/bin", home);
+        setenv("PATH", path, 1);
+        prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+        char why[160];
+        unsigned up = (unsigned)platform_sandbox(NULL, 0, why, sizeof why);
+        if (!(up & PLATFORM_SANDBOX_FILES)) _exit(SKIP);
+        int bad = 0, fd;
+        snprintf(path, sizeof path, "%s/.bashrc", home);
+        if ((fd = open(path, O_WRONLY | O_APPEND | O_CLOEXEC)) >= 0 || errno != EACCES) bad |= DOTFILE;
+        snprintf(path, sizeof path, "%s/.config/autostart", home);
+        if (mkdir(path, 0700) == 0 || errno != EACCES) bad |= DOTDIR;
+        snprintf(path, sizeof path, "%s/bin/ls", home);
+        if ((fd = open(path, O_WRONLY | O_CREAT | O_CLOEXEC, 0700)) >= 0 || errno != EACCES) bad |= ON_PATH;
+        snprintf(path, sizeof path, "%s/Documents/note", home);
+        if ((fd = open(path, O_WRONLY | O_CREAT | O_CLOEXEC, 0600)) < 0) bad |= HOME_DIR;
+        snprintf(path, sizeof path, "%s/.config/chat/settings", home);
+        if ((fd = open(path, O_WRONLY | O_CREAT | O_CLOEXEC, 0600)) < 0) bad |= OWN_DIR;
+        pid_t child;
+        char *const argv[] = { (char *)"true", NULL }, *const envp[] = { NULL };
+        if (posix_spawn(&child, "/bin/true", NULL, NULL, argv, envp) == 0) { waitpid(child, NULL, 0); bad |= RAN; }
+        if ((up & PLATFORM_SANDBOX_CALLS) && (ptrace(PTRACE_TRACEME, 0, NULL, NULL) == 0 || errno != EPERM)) bad |= TRACED;
+        _exit(bad);
+    }
+    int status = 0;
+    CHECK(pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status), "the sandboxed child didn't finish");
+    int code = WIFEXITED(status) ? WEXITSTATUS(status) : 0;
+    if (code == SKIP) {
+        if (verbose) printf("  skip  this kernel has no Landlock\n");
+        return;
+    }
+    CHECK(!(code & DOTFILE), "a dotfile in the home folder could still be written");
+    CHECK(!(code & DOTDIR), "a folder could still be made in a dot-folder (~/.config/autostart)");
+    CHECK(!(code & ON_PATH), "a folder on PATH could still be written");
+    CHECK(!(code & HOME_DIR), "a folder in the home folder couldn't be written");
+    CHECK(!(code & OWN_DIR), "chat's own folder couldn't be written");
+    CHECK(!(code & RAN), "a program it wasn't given still ran");
+    CHECK(!(code & TRACED), "ptrace wasn't refused");
+#endif
+}
+
 // A session's history: named the same by every member, sealed in the open save, read back as
 // written, sealed again when the save's factors change, deleted by forget, by a decoy taking over
 // and with the save. A peer is told when someone starts keeping one, and when they stop.
@@ -2299,7 +2370,7 @@ int main(int argc, char **argv) {
         { "third peer", test_third_peer }, { "candidates settle", test_candidates_settle }, { "builds", test_builds },
         { "parsers", test_parsers }, { "toml", test_toml }, { "dht keys", test_dht_keys }, { "dht", test_dht }, { "read file", test_read_file },
         { "identity keys", test_identity_keys }, { "passphrase seal", test_passphrase_seal }, { "device lock", test_device_lock },
-        { "factor locks", test_factor_locks }, { "totp", test_totp }, { "bytewords", test_bytewords }, { "qr", test_qr }, { "save factors", test_save_factors }, { "duress", test_duress }, { "lock screen", test_lock_screen }, { "history", test_history }, { "images", test_images }, { "file names", test_file_names }, { "files", test_files },
+        { "factor locks", test_factor_locks }, { "totp", test_totp }, { "bytewords", test_bytewords }, { "qr", test_qr }, { "save factors", test_save_factors }, { "duress", test_duress }, { "lock screen", test_lock_screen }, { "sandbox", test_sandbox }, { "history", test_history }, { "images", test_images }, { "file names", test_file_names }, { "files", test_files },
         { "verified keys", test_trust }, { "move", test_move },
     };
     size_t n_tests = sizeof tests / sizeof tests[0];

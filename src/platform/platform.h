@@ -14,6 +14,18 @@
 // hands each one out once.
 void platform_harden_process(const char *const secret_env[]);
 
+// Once chat starts reaching the network, on Linux. From then on chat, and tor and anything else it
+// starts, can only write under the folders in the home folder that aren't hidden or on PATH,
+// Downloads, chat's own folder and the temporary folders' base, and can only run the programs in
+// run (the interpreters they need too): Landlock. Calls chat never makes are refused: seccomp.
+// Returns which of the two are up (PLATFORM_SANDBOX_), with why the rest isn't.
+#define PLATFORM_SANDBOX_FILES 1u
+#define PLATFORM_SANDBOX_CALLS 2u
+unsigned platform_sandbox(const char *const run[], int n_run, char *why, size_t cap);
+// Until chat's own folder exists, its parent folder is writable in its place. Once the first
+// :install has made it, this narrows that down to the folder itself.
+void platform_sandbox_narrow(void);
+
 int platform_env_take(const char *name, char *out, size_t outlen);
 
 // Blanks the arguments where other programs read a process's command line (ps, /proc, Task

@@ -10,7 +10,7 @@ static const char *USAGE =
     "            [--noportmap] [--nonostr] [--nostr-always] [--relay wss://HOST ...]\n"
     "            [--tor-launch auto|always|never] [--tor-path PATH] [--tor-socks HOST:PORT]\n"
     "            [--tor-control HOST:PORT] [--verify-required] [--file-limit SIZE]\n"
-    "            [--fast-files] [--betas]\n"
+    "            [--fast-files] [--betas] [--nosandbox]\n"
     "            [--session ID --port UDP_PORT --peer HOST:PORT ...]\n"
     "       chat --update [--betas] | --version\n"
     "\n"
@@ -164,6 +164,8 @@ static const char *USAGE =
     "              typed, and a key can be pasted in. For a key file :install saves its\n"
     "              path, not the key. Any other key is only written to disk by :install,\n"
     "              sealed.\n"
+    "  --nosandbox don't put the sandbox up for this run (Linux; :set sandbox off keeps it\n"
+    "              down)\n"
     "  --simple    don't use the full-screen UI, even in a terminal. Prints plain\n"
     "              \"[HH:MM] ...\" lines for one session and reads lines from stdin. A line\n"
     "              starting with : is a command (:help lists them). For scripts and basic\n"
@@ -636,6 +638,34 @@ void panic(panic_t why) {
     term_raw_disable();
 }
 
+// Before chat first reaches the network, so whatever it reads from there (DHT packets, relay
+// messages, pictures) is read inside it.
+void sandbox_up(void) {
+    static int done;
+    if (done) return;
+    done = 1;
+#ifdef __linux__
+    if (!g_app.sandbox || g_opts.nosandbox) {
+        push_log("* sandbox: off %s", g_opts.nosandbox ? "for this run (--nosandbox)" : "- :set sandbox on puts it up from the next start");
+        return;
+    }
+    char tor[1024], why[160];
+    const char *run[] = { tor };
+    int n = platform_find_program("tor", g_app.tor_path, tor, sizeof tor) == 0;
+    unsigned up = g_app.sandboxed = platform_sandbox(run, n, why, sizeof why);
+    if (up & PLATFORM_SANDBOX_FILES)
+        push_log("* sandbox: on - from now on chat%s can only write to the folders in your home that aren't hidden or on "
+                 "PATH, its own folder and the temporary folders, and only run %s%s", n ? " and tor" : "",
+                 n ? "tor" : "nothing else", up & PLATFORM_SANDBOX_CALLS ? "; calls chat never makes (ptrace, mount, bpf...) "
+                 "are refused" : "");
+    else if (up & PLATFORM_SANDBOX_CALLS)
+        push_log("* sandbox: partly up - calls chat never makes are refused, but %s, so it can still write anywhere you can",
+                 why);
+    else
+        push_log("* sandbox: not up - %s", why);
+#endif
+}
+
 // The open save goes first with panic_wipe, unless the shadow passphrase has put the decoy in its place.
 // The histories kept are dropped unwritten, unless panic_history keeps them.
 static void panic_saves(void) {
@@ -942,6 +972,7 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
         }
         apply_route_choice(choice);
     }
+    sandbox_up();
     // --peer names are only looked up once the routing is decided, and never for Tor, where the lookup
     // would bypass it.
     if (n_peer_args > 0 && g_app.route.mode == ROUTE_TOR) {
@@ -1137,6 +1168,8 @@ static int read_options(int argc, char **argv, options_t *o) {
             copy_str(strcmp(key, "tor-socks") == 0 ? g_app.route.tor.socks : g_app.route.tor.control, v, TOR_HOST_MAX);
         } else if (strcmp(key, "simple") == 0) {
             o->simple = 1;
+        } else if (strcmp(key, "nosandbox") == 0) {
+            o->nosandbox = 1;
         } else if ((strcmp(key, "colour") == 0 || strcmp(key, "color") == 0) && i + 1 < argc) {
             if (parse_color(argv[++i], o->color) != 0) { fprintf(stderr, "chat: unknown colour %s\n", argv[i]); return 1; }
             o->has_color = 1;
@@ -1184,6 +1217,7 @@ int main(int argc, char **argv) {
     g_app.verify_optional = 1;
     g_app.show_sidebar = g_app.show_console = g_app.show_chat = 1;
     g_app.lock_key = g_app.panic_key = 1;
+    g_app.sandbox = 1;
     note_setting_defaults();
     trust_on_change(save_verified);
     int exit_code = read_options(g_argc, g_argv, &g_opts);
