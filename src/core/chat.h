@@ -341,8 +341,8 @@ typedef struct {
     int batches;
     // Its k says it reads a message up to MAX_TEXT long ("l"), not just OLD_MAX_TEXT.
     int long_text;
-    // Its k says it can move to a new room with us ("m").
-    int can_move;
+    // Its k says it can move to a new room with us ("m"), and reads direct messages ("p").
+    int can_move, can_pm;
     // :move, in the room being left. move_pub: the key it showed us for the move ("mv" or "mk"), and
     // whether the room we moved to has it (move_passed). move_with: it moves with us, so this room
     // waits for its key before closing. key_sent: it has ours.

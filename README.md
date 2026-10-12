@@ -69,6 +69,13 @@ behind keep the old room and everything said in it. Nothing tells them where you
 everyone leave together. A peer that only reaches the room through someone else is left behind
 too. With `--simple`, `:move` says who would come, and `:move yes` or `:move no` answers.
 
+**Direct messages.** `:msg NICK TEXT` (or `:dm`) sends a message to one peer alone, over your
+session with them and in the same slots as everything else, so the network sees nothing new. It's
+never passed on, so it only goes to a peer you're connected to directly, and only to one whose chat
+reads direct messages: an older one is refused rather than sent it. With **Compare verify codes**
+required, it waits until you've compared codes, like any message. Both sides show who it's between
+(`bob (→ you)`, `alice (→ bob)`), it counts as a mention, and a history keeps it like any message.
+
 **Lock screen.** Walk away from chat and anyone can read the screen, scroll back or type as you.
 `Ctrl+L` (or `:lock`) locks chat's screen at once, and `:set lock 5m` locks it after five minutes
 without a key (or `1m`, `15m`, `30m`). Locked, chat draws nothing but a box for the open save's
@@ -1008,6 +1015,7 @@ puts it on the command line.
 | `:set [NAME [VALUE]]` | change a setting (see below); on its own, opens the settings page (`Ctrl+S`) |
 | `:verify NICK [ok\|no]` | show a peer's verify code and identity fingerprint; `ok` once the code matches theirs, `no` if it doesn't |
 | `:verified [forget NICK\|all]` | list the signing keys you verified, with nicks and fingerprints, or remove them |
+| `:msg NICK TEXT` (`:dm`) | a direct message to one peer you're connected to: nobody else gets it, and it's never passed on (see [Direct messages](#security)) |
 | `:move` | move to a new room with the peers whose verify codes you compared, leaving the rest behind; each is asked first (see [Moving a room](#security)). With a request to move waiting, shows it again |
 | `:peers` | who's online, with verify codes and builds |
 | `:net` | network report and diagnosis |

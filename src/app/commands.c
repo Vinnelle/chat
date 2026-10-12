@@ -596,6 +596,7 @@ enum { A_NICK = 1, A_WORD, A_FILE, A_PATH, A_FOLDER, A_SAVE, A_TRUSTED, A_KIND =
 
 static const struct { const char *cmd; int args[4]; } COMMAND_ARGS[] = {
     { "verify",    { A_NICK, A_WORD | A_TYPED } },
+    { "msg",       { A_NICK, A_WORD | A_TYPED } },
     { "verified",  { A_WORD | A_TYPED, A_TRUSTED | A_PICK } },
     { "send",      { A_PATH | A_PICK } },
     { "download",  { A_FILE | A_SKIP, A_WORD | A_SKIP, A_FOLDER | A_PICK } },

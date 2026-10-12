@@ -34,6 +34,11 @@
   that runs later. Landlock needs Linux 5.13 or later, and without it chat carries on with seccomp
   alone. While it's up, `:update` can't replace chat (`chat --update` can). `:set sandbox off` or
   `--nosandbox` leave it down.
+- Direct messages. `:msg NICK TEXT` (or `:dm`) sends a message to one peer alone: a `pm` record
+  over your session with them, acked and retried like a message, in the same slots, and never
+  passed on. It only goes to a peer you're connected to directly whose build reads it (the `p`
+  letter), and an older build is refused rather than sent it. Both sides show who it's between,
+  and it counts as a mention.
 
 ## 0.5.0
 

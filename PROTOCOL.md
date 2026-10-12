@@ -306,7 +306,7 @@ Records go in session frames. A `k` and a `v` come first after each handshake.
 | `k` | NICK COLOUR FLAGS IDTYPE IDPUB SIG | Who the sender is (see below). |
 | `v` | VERSION PROOF LIST LISTSIG | Which build the sender runs (see below). |
 | `m` | MID ORIGIN NICK TEXT | A message (see below). |
-| `a` | MID | Acknowledges an `m`, `fo`, `mv` or `mk`. |
+| `a` | MID | Acknowledges an `m`, `pm`, `fo`, `mv` or `mk`. |
 | `n` | NICK | A new nick. |
 | `c` | COLOUR | A new colour. |
 | `rk` | PUB | The sender's next X25519 key (§6). |
@@ -319,6 +319,7 @@ Records go in session frames. A `k` and a `v` come first after each handshake.
 | `mv` | MID ID PASSWORD KEY COMING | Moves the room, and asks the receiver along (see below). It's acked and retried like `m`. |
 | `mk` | MID KEY | The sender's key for a move (see below). It's acked and retried like `m`. |
 | `mp` | SIG | In the room a move went to: the sender's session keys, signed with its key for the move (see below). |
+| `pm` | MID TEXT | A direct message, for the receiver alone (see below). It's acked and retried like `m`. |
 | `nop` | | Cover: sent when a slot has nothing else to carry. |
 | `bye` | | The sender is leaving. Sent straight away, outside the slots. |
 
@@ -331,7 +332,8 @@ Records go in session frames. A `k` and a `v` come first after each handshake.
   - `r`: announces rekeys with `rk`;
   - `b`: reads several records in one frame;
   - `l`: reads messages longer than 250 bytes;
-  - `m`: can move to a new room (`mv`, `mk` and `mp`).
+  - `m`: can move to a new room (`mv`, `mk` and `mp`);
+  - `p`: reads direct messages (`pm`).
 - IDTYPE is the signing identity: `0` none, `1` native, `2` AGE, `3` PGP. With `0`, IDPUB and
   SIG are empty.
 - IDPUB is an Ed25519 public key (64 hex digits).
@@ -373,6 +375,12 @@ message that was passed on are whatever the peer that passed it on says.
 A peer without `l` gets text longer than 250 bytes as up to eight parts. Each part is an `m` of
 its own, with the MID `hex(SHA-256(MID ‖ "/" ‖ i)[:4])`, where *i* is the part's number in
 decimal.
+
+**`pm`** is a direct message (`:msg NICK TEXT`): MID and TEXT as in `m`, with no ORIGIN or NICK,
+since it only ever comes from the peer it's from. It goes only to a connected peer whose `k` has `p`
+(and with comparing required, only once its code is compared), and it's never passed on, so a
+member who isn't connected to the receiver directly can't send one. It goes in the same slots as
+everything else.
 
 **Files** go in the slots that would otherwise carry a `nop`. The receiver asks for a window of
 chunks at a time with `fg`, and asks again for any run of chunks that's missing. It keeps the file
@@ -442,5 +450,7 @@ These are sent outside the slots:
 - Builds without `l` cut longer messages off at 250 bytes. That's why messages to them go in parts.
 - Builds without `m` (0.5.0 and older) can't move to a new room. A move leaves them behind: they're
   never sent `mv`, and would ignore it.
+- Builds without `p` would drop a `pm` without a word, so they're never sent one: chat says the
+  peer's build is too old instead.
 - Builds before 0.5.0 called the first character of FLAGS the logging flag, and show it as
   `[logging chat locally]`.

@@ -49,6 +49,10 @@ const char *routing_mode_name(route_mode_t m) { return m == ROUTE_TOR ? "tor" : 
 static void ui_print_colored(chat_t *c, const uint8_t rgb[3], const char *fmt, ...);
 static void ui_chat(chat_t *c, const uint8_t rgb[3], int mention, const char *name, const char *text);
 static void ui_chat_file(chat_t *c, const uint8_t rgb[3], int mention, const char *name, const char *text, int file);
+static void ui_direct(chat_t *c, const uint8_t rgb[3], int to_me, const char *name, const char *text);
+
+// Who a direct message is between, in brackets after the sender's name, since no nick can hold '('.
+#define DM_ARROW "\xe2\x86\x92"
 static int file_next_chunk(chat_t *c, peer_t *p, char *text, size_t *pos, size_t cap);
 static void file_on_record(chat_t *c, peer_t *p, char **f, int n, double now);
 static void files_tick(chat_t *c, double now);
@@ -683,7 +687,7 @@ static void build_k_message(chat_t *c, peer_t *p, char *out, size_t out_cap) {
     }
     // After the logging flag, features this build has that older ones don't: "r" announces rekeys,
     // "b" reads several records per frame, "l" reads messages up to MAX_TEXT, "m" moves rooms.
-    snprintf(out, out_cap, "k\t%s\t%s\t%drblm\t%d\t%s\t%s", c->nick, colorhex, c->persist, idtype, idpubhex, sighex);
+    snprintf(out, out_cap, "k\t%s\t%s\t%drblmp\t%d\t%s\t%s", c->nick, colorhex, c->persist, idtype, idpubhex, sighex);
 }
 
 // "v": our version, our executable's hash, and our release's signed list of binaries (empty
@@ -820,6 +824,7 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
         slot->trust = carry.trust;
         slot->next_rehello = carry.next_rehello;
         slot->can_move = carry.can_move;
+        slot->can_pm = carry.can_pm;
         memcpy(slot->move_pub, carry.move_pub, ID_SIGN_PUB_LEN);
         slot->move_pub_set = carry.move_pub_set;
         slot->move_passed = carry.move_passed;
@@ -1364,7 +1369,8 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         uint8_t rgb[3];
         if (parse_color(f[2], rgb) == 0) memcpy(p->color, rgb, 3);
         // f[3] is the history flag, then capability letters older builds ignore: "r" = sends rk,
-        // "b" = reads records joined by newlines, "l" = reads messages up to MAX_TEXT, "m" = moves rooms.
+        // "b" = reads records joined by newlines, "l" = reads messages up to MAX_TEXT, "m" = moves rooms,
+        // "p" = reads direct messages.
         int had_history = p->persists;
         p->persists = (f[3][0] == '1');
         if (p->announced && had_history != p->persists) {
@@ -1376,6 +1382,7 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         p->batches = strchr(f[3], 'b') != NULL;
         p->long_text = strchr(f[3], 'l') != NULL;
         p->can_move = strchr(f[3], 'm') != NULL;
+        p->can_pm = strchr(f[3], 'p') != NULL;
         int idtype = atoi(f[4]);
         size_t idpub_len = strlen(f[5]), sig_len = strlen(f[6]);
         if (idtype > IDENT_NONE && idtype <= IDENT_PGP && idpub_len == ID_SIGN_PUB_LEN * 2 && sig_len == ID_SIGN_LEN * 2) {
@@ -1494,6 +1501,19 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
             if (!peer_trusted(c, q)) continue;
             send_message(c, q, f[1], f[2], nick, text, 0, now);
         }
+    } else if (n == 3 && strcmp(f[0], "pm") == 0) {
+        // Meant for us alone, so never passed on. Only p itself sends one.
+        if (!ack_record(c, p, f[1]) || seen_has(c, f[1])) return;
+        seen_add(c, f[1]);
+        char text[MAX_TEXT + 1], via[CHAT_NAME_LEN], shown[CHAT_NAME_LEN + 48];
+        clean_text(f[2], text, MAX_TEXT);
+        chat_peer_name(c, p, via);
+        snprintf(shown, sizeof shown, "%s (" DM_ARROW " you)%s", via, code_mark(c, p));
+        ui_direct(c, p->color, 1, shown, text);
+        // It's for us, so it counts as a mention.
+        if (c->notify && c->notify_mode != NOTIFY_NONE)
+            c->notify(c->ui, c->notify_preview >= PREVIEW_NICK ? shown : NULL,
+                      c->notify_preview == PREVIEW_MESSAGE ? text : NULL, 1);
     } else if (n == 2 && strcmp(f[0], "a") == 0) {
         for (int i = 0; i < MAX_PENDING_MSGS; i++)
             if (c->pending[i].used && c->pending[i].peer_slot == peer_slot(c, p) && strcmp(c->pending[i].mid, f[1]) == 0)
@@ -2758,6 +2778,63 @@ int chat_move_finished(const chat_t *c, double now) {
     return 1;
 }
 
+// The peer ":msg NICK TEXT" is for: the longest start of arg, up to a space, that names an online
+// peer, since a nick can hold spaces. *text is what follows it.
+static peer_t *peer_at_start(chat_t *c, const char *arg, const char **text, int *ambiguous) {
+    char name[CHAT_NAME_LEN];
+    peer_t *found = NULL;
+    *ambiguous = 0;
+    for (const char *sp = strchr(arg, ' '); sp; sp = strchr(sp + 1, ' ')) {
+        size_t n = (size_t)(sp - arg);
+        if (n == 0 || n >= sizeof name) continue;
+        memcpy(name, arg, n);
+        name[n] = '\0';
+        int amb;
+        peer_t *p = peer_by_name(c, name, &amb);
+        if (p || amb) { found = p; *ambiguous = amb; *text = sp + 1; }
+    }
+    return found;
+}
+
+// A direct message goes only to the peer named, never through anyone else, and only to one whose
+// build reads it: an older one would drop it without a word.
+static cmd_result_t cmd_msg(void *ctx, const char *arg) {
+    chat_t *c = ctx;
+    const char *rest = "";
+    int ambiguous;
+    peer_t *p = peer_at_start(c, arg, &rest, &ambiguous);
+    char line[MAX_TEXT + 1], name[CHAT_NAME_LEN];
+    clean_text(rest, line, MAX_TEXT);
+    if (!p && ambiguous) {
+        ui_print(c, "* more than one peer has that nick - add the #id :peers shows (:msg NICK#1a2b... TEXT)");
+        return CMD_OK;
+    }
+    if (!p) {
+        size_t w = strcspn(arg, " ");
+        if (!arg[0] || !arg[w]) ui_print(c, "* usage: :msg NICK TEXT sends TEXT to that peer alone");
+        else ui_print(c, "* nobody called %.*s is connected to you - a direct message only goes straight to them, "
+                         "never through someone else", (int)w, arg);
+        return CMD_OK;
+    }
+    chat_peer_name(c, p, name);
+    if (!line[0]) { ui_print(c, "* usage: :msg %s TEXT sends TEXT to them alone", name); return CMD_OK; }
+    if (!p->can_pm) { ui_print(c, "* %s's chat is too old for direct messages", name); return CMD_OK; }
+    if (!peer_trusted(c, p)) {
+        if (p->code_ok == CODE_DIFFERENT) ui_print(c, "* your verify codes with %s differ - nothing you send reaches them", name);
+        else ui_print(c, "* compare verify codes with %s first - :verify %s shows the code", name, name);
+        return CMD_OK;
+    }
+    char mid[MID_HEX + 1], record[MSG_LINE_LEN], shown[CHAT_NAME_LEN + MAX_NICK + 48];
+    gen_mid(mid);
+    seen_add(c, mid);
+    snprintf(record, sizeof record, "pm\t%s\t%s", mid, line);
+    if (send_peer(c, p, record) != 0) { ui_print(c, "* couldn't send that to %s", name); return CMD_OK; }
+    track_message(c, p, mid, record, now_seconds());
+    snprintf(shown, sizeof shown, "%s (" DM_ARROW " %s) (you)", c->nick, name);
+    ui_direct(c, c->my_color, 0, shown, line);
+    return CMD_OK;
+}
+
 // --simple's :move: who would come, or the request waiting. "yes" goes, "no" stays. The full-screen
 // UI asks in a box instead.
 static cmd_result_t cmd_move(void *ctx, const char *arg) {
@@ -3741,6 +3818,7 @@ const command_t CHAT_COMMANDS[] = {
     { "peers",      NULL,     NULL,              "who is online, with verify codes and builds",     cmd_peers },
     { "verify",     NULL,     "NICK [ok|no]",    "compare a peer's verify code; ok once it matches", cmd_verify },
     { "verified",   NULL,     "[forget NICK]",   "list the signing keys you verified, or remove one", cmd_verified },
+    { "msg",        "dm",     "NICK TEXT",       "a direct message to one peer you're connected to; nobody else gets it", cmd_msg },
     { "move",       NULL,     "[yes|no]",        "move to a new room with the peers whose codes you compared; yes goes, no stays", cmd_move },
     { "net",        NULL,     NULL,              "network report and diagnosis",                    cmd_net },
     { "port",       NULL,     "[N]",             "show or change this session's udp port",          cmd_port },
@@ -4077,4 +4155,12 @@ static void ui_chat_file(chat_t *c, const uint8_t rgb[3], int mention, const cha
 
 static void ui_chat(chat_t *c, const uint8_t rgb[3], int mention, const char *name, const char *text) {
     ui_chat_file(c, rgb, mention, name, text, 0);
+}
+
+// A direct message: its name says who it's between, so it has no "@ " in front even when it's to us.
+static void ui_direct(chat_t *c, const uint8_t rgb[3], int to_me, const char *name, const char *text) {
+    char msg[UI_LINE_MAX];
+    int head = snprintf(msg, sizeof msg, "%s:", name);
+    snprintf(msg + head, sizeof msg - (size_t)head, " %s", text);
+    emit(c, msg, rgb, LINE_CHAT | (to_me ? LINE_MENTION : 0u), head, 0);
 }

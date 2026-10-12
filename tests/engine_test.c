@@ -51,6 +51,7 @@ typedef struct {
     int histories;         // "* NICK keeps a history of this chat"
     int move_asks;         // "* NICK wants to move this room ..."
     int came_along;        // "* NICK came along from the room you moved from ..."
+    int dm_old;            // "* NICK's chat is too old for direct messages"
 } log_t;
 
 // A2 and B2: alice and bob in the room :move takes them to.
@@ -85,6 +86,7 @@ static void on_print(void *ui, const char *hhmm, const char *text, const uint8_t
         if ((flags & LINE_WARN) && strstr(text, " keeps a history of this chat")) l->histories++;
         if (strstr(text, " wants to move this room")) l->move_asks++;
         if (strstr(text, " came along from the room you moved from")) l->came_along++;
+        if (strstr(text, "'s chat is too old for direct messages")) l->dm_old++;
         if (strncmp(text, "* joining: peer ", 16) == 0) l->joining++;
         else if (strstr(text, " joined (")) { if (l->joining > 0) l->joining--; else l->unheralded_joins++; }
         return;
@@ -714,6 +716,30 @@ static void test_third_peer(double *t) {
     RUN_UNTIL(t, 10, log_count(&log_a, "carol: hi all") == 1 && log_count(&log_b, "carol: hi all") == 1);
     CHECK(log_count(&log_a, "carol: hi all") == 1, "alice didn't get carol's message once");
     CHECK(log_count(&log_b, "carol: hi all") == 1, "bob didn't get carol's message once");
+}
+
+// A direct message: only the peer named gets it, both sides show who it's between, it's acked, and a
+// peer whose build can't read one is refused rather than sent it.
+static void test_direct_message(double *t) {
+    chat_run_command(&A, "msg bob just between us");
+    RUN_UNTIL(t, 10, log_count(&log_b, "just between us") == 1);
+    RUN_FOR(t, 4);
+    CHECK(log_count(&log_b, "alice (\xe2\x86\x92 you)") == 1, "bob didn't get alice's direct message once, marked as to him");
+    CHECK(log_count(&log_a, "(\xe2\x86\x92 bob) (you): just between us") == 1, "alice doesn't show her direct message to bob");
+    CHECK(log_count(&log_c, "just between us") == 0, "carol got a direct message meant for bob");
+    int waiting = 0;
+    for (int i = 0; i < MAX_PENDING_MSGS; i++) waiting += A.pending[i].used && starts_with(A.pending[i].text, "pm\t");
+    CHECK(waiting == 0, "bob never acked alice's direct message");
+
+    peer_t *carol = peer_named(&A, "carol");
+    CHECK(carol != NULL, "alice doesn't know carol");
+    if (!carol) return;
+    carol->can_pm = 0;
+    chat_run_command(&A, "msg carol for an old build");
+    RUN_FOR(t, 4);
+    carol->can_pm = 1;
+    CHECK(log_a.dm_old == 1 && log_count(&log_c, "for an old build") == 0,
+          "a direct message to a build that can't read one wasn't refused");
 }
 
 // A peer already connected is no candidate: the keepalive's static peers stop being tried.
@@ -2367,7 +2393,8 @@ int main(int argc, char **argv) {
         { "rekey", test_rekey }, { "rekey mid-message", test_message_across_rekey }, { "cookie rate", test_cookie_rate },
         { "udp masked", test_udp_masked },
         { "junk", test_junk }, { "lookalike nick", test_lookalike_nick },
-        { "third peer", test_third_peer }, { "candidates settle", test_candidates_settle }, { "builds", test_builds },
+        { "third peer", test_third_peer }, { "direct message", test_direct_message },
+        { "candidates settle", test_candidates_settle }, { "builds", test_builds },
         { "parsers", test_parsers }, { "toml", test_toml }, { "dht keys", test_dht_keys }, { "dht", test_dht }, { "read file", test_read_file },
         { "identity keys", test_identity_keys }, { "passphrase seal", test_passphrase_seal }, { "device lock", test_device_lock },
         { "factor locks", test_factor_locks }, { "totp", test_totp }, { "bytewords", test_bytewords }, { "qr", test_qr }, { "save factors", test_save_factors }, { "duress", test_duress }, { "lock screen", test_lock_screen }, { "sandbox", test_sandbox }, { "history", test_history }, { "images", test_images }, { "file names", test_file_names }, { "files", test_files },
