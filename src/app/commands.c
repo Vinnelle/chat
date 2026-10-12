@@ -1244,8 +1244,13 @@ tui_view_t current_view(char *sub, size_t cap) {
         v.progress = progress_for;
     }
     if (s->has_new) v.new_lines = (int)(s->sb.total - s->new_at);
+    unsigned timer = s->initialising ? 0 : chat_timer(&s->engine, NULL, 0);
+    char after[16];
+    chat_format_timer(timer, after, sizeof after);
     if (s->initialising) snprintf(sub, cap, "starting");
-    else snprintf(sub, cap, "%d online" DOT_SEP "%s", chat_online_count(&s->engine) + 1, routing_mode_name(s->engine.route.mode));
+    else snprintf(sub, cap, "%d online" DOT_SEP "%s%s%s", chat_online_count(&s->engine) + 1,
+                  routing_mode_name(s->engine.route.mode), timer ? DOT_SEP "messages go after " : "",
+                  timer ? after : "");
     v.subtitle = sub;
     return v;
 }

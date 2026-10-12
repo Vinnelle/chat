@@ -752,12 +752,14 @@ void current_hhmm(char out[HHMM_LEN]) {
     snprintf(out, HHMM_LEN, "%02d:%02d", tmv.tm_hour, tmv.tm_min);
 }
 
-void current_stamp(char out[STAMP_LEN]) {
-    time_t t = time(NULL);
+void stamp_at(long long at, char out[STAMP_LEN]) {
+    time_t t = (time_t)at;
     struct tm tmv;
     localtime_s(&tmv, &t);
     if (strftime(out, STAMP_LEN, "%Y-%m-%d %H:%M", &tmv) != STAMP_LEN - 1) out[0] = '\0';
 }
+
+void current_stamp(char out[STAMP_LEN]) { stamp_at((long long)time(NULL), out); }
 
 typedef struct { void (*fn)(void *); void *arg; } thread_boot_t;
 

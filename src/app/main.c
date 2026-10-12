@@ -320,6 +320,29 @@ static void pics_free(session_slot_t *s) {
     for (int i = 0; i < MAX_PICS; i++) if (s->pics[i].used) pic_free(&s->pics[i]);
 }
 
+// Each session's message timer: what came before it goes from the chat, the pictures shown with it
+// go too, and so does that much of its history.
+void timers_tick(double now) {
+    static double next;
+    if (now < next) return;
+    next = now + 1.0;
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        session_slot_t *s = &g_app.sessions[i];
+        if (!g_app.used[i] || s->initialising) continue;
+        unsigned timer = chat_timer(&s->engine, NULL, 0);
+        if (!timer) continue;
+        int files[TUI_SCROLLBACK], n_files = 0;
+        int gone = tui_scrollback_expire(&s->sb, now - timer, files, &n_files, TUI_SCROLLBACK);
+        for (int k = 0; k < n_files; k++) {
+            pic_t *pic = pic_find(s, files[k]);
+            if (pic) pic_free(pic);
+        }
+        if (s->scroll > s->sb.count - 1) s->scroll = s->sb.count > 0 ? s->sb.count - 1 : 0;
+        history_expire(s, timer);
+        if (gone) g_app.dirty = 1;
+    }
+}
+
 const tui_image_t *pic_for(const void *ctx, int file) {
     const session_slot_t *s = ctx;
     for (int i = 0; i < MAX_PICS; i++)
@@ -791,6 +814,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
             if (g_app.used[i]) chat_tick(&g_app.sessions[i].engine, now_seconds());
         move_tick(now_seconds());
         contacts_tick();
+        timers_tick(now_seconds());
         lock_tick();
         history_sync(now);
 

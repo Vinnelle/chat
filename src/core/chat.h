@@ -303,6 +303,9 @@ typedef struct {
     uint8_t vfy[VERIFY_LEN];
     uint8_t color[3];
     int persists;
+    // Its "k" has "t": it keeps to message timers, and asks for timer seconds (0: none).
+    int can_timer;
+    unsigned timer;
     identity_source_t identity_source;
     verify_state_t identity_state;
     uint8_t identity_pub[ID_SIGN_PUB_LEN];
@@ -594,6 +597,8 @@ typedef struct chat_s {
 
     // We keep a history of this session, which our "k" tells peers.
     int persist;
+    // Our message timer (chat_set_timer), which our "k" tells peers too.
+    unsigned timer;
 
     notify_mode_t notify_mode;
     notify_preview_t notify_preview;
@@ -793,6 +798,19 @@ void chat_set_identity(chat_t *c, identity_source_t source, const identity_keypa
 
 // Whether we keep a history of the session: peers' "k" is sent again so they're told straight away.
 void chat_set_history(chat_t *c, int on);
+
+// The message timer (:timer): messages older than this go from the screen and from memory, and a
+// history keeps no longer. Ours goes to peers in "k", like history, and every chat that keeps to
+// timers ("t") keeps to the shortest anyone in the session asks for. It's a request: a modified chat,
+// or a screenshot, can keep anything. In seconds, 0 for none.
+#define TIMER_MIN 60u
+#define TIMER_MAX (7u * 24 * 3600)
+void chat_set_timer(chat_t *c, unsigned seconds);
+// The one kept to, and who asked for it ("you", or a peer's name) in who if it's given.
+unsigned chat_timer(const chat_t *c, char *who, size_t cap);
+// "10m", "2h", "1d" or "90s" for seconds, and back (0, or -1 for something else).
+void chat_format_timer(unsigned seconds, char *out, size_t cap);
+int chat_parse_timer(const char *s, unsigned *seconds);
 // What names the session's history: from its key, the same each time it's joined with the same id
 // and password, and nothing anyone else can work out.
 #define CHAT_HISTORY_ID_LEN 16

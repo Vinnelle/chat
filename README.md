@@ -817,6 +817,17 @@ all` deletes every session's in the save. Turning history off keeps what was kep
 it. Only the full-screen UI keeps history, not `--simple`. A room `:move` goes to has a new id and
 password, so it gets a history of its own, and the old room's stays as it was.
 
+#### Message timer
+
+`:timer 10m` (or `2h`, `1d`: from a minute to a week) asks for messages in this session to go after
+that long. Once they're older, chat takes them off the screen and wipes them from memory, pictures
+shown with them too, and a history keeps no more than that. It's announced to everyone in the
+session the way history is, and every chat that keeps to timers takes the shortest one anyone whose
+code you compared asks for: the chat's title says `messages go after 10m`, and the console says who
+asked. `:timer` alone says which one is kept to, and `:timer off` stops asking. It's a request: a
+modified chat, or a screenshot, can keep anything, and chat says when someone's chat is too old to
+keep to it. `--simple` can't take back what it's printed to the terminal.
+
 #### Kept rooms
 
 `:keep` keeps the room on screen in the open save: its id and password, under a label you give it
@@ -1106,6 +1117,7 @@ puts it on the command line.
 | `:set [NAME [VALUE]]` | change a setting (see below); on its own, opens the settings page (`Ctrl+S`) |
 | `:verify NICK [ok\|no]` | show a peer's verify code and identity fingerprint; `ok` once the code matches theirs, `no` if it doesn't |
 | `:verified [forget NICK\|all]` | list the signing keys you verified, with nicks and fingerprints, or remove them |
+| `:timer [off\|10m\|2h\|1d]` | messages in this session go off every screen that keeps to it after that long; alone, says which timer is kept to (see [Message timer](#message-timer)) |
 | `:reply NICK TEXT` (`:re`) | answer NICK's last message in the room, quoting the start of it (faint, after `↪`) |
 | `:msg NICK TEXT` (`:dm`) | a direct message to one peer you're connected to: nobody else gets it, and it's never passed on (see [Direct messages](#security)) |
 | `:move` | move to a new room with the peers whose verify codes you compared, leaving the rest behind; each is asked first (see [Moving a room](#security)). With a request to move waiting, shows it again |

@@ -488,6 +488,8 @@ void histories_write(void);
 void history_start(session_slot_t *s, int show);
 void history_stop(session_slot_t *s, int write);
 void history_sync(double now);
+void history_expire(session_slot_t *s, unsigned seconds);
+void timers_tick(double now);
 
 // torlink.c
 extern const char *const TOR_LAUNCH_NAMES[];

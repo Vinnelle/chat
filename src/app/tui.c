@@ -62,6 +62,7 @@ void tui_scrollback_push(tui_scrollback_t *sb, const char *hhmm, const char *tex
     l->delivery = TUI_SENDING;
     l->mark[0] = '\0';
     l->quote = 0;
+    l->at = now_seconds();
     sb->head = (sb->head + 1) % TUI_SCROLLBACK;
     if (sb->count < TUI_SCROLLBACK) sb->count++;
     sb->total++;
@@ -81,6 +82,19 @@ void tui_scrollback_mark_own(tui_scrollback_t *sb, unsigned own) {
 
 void tui_scrollback_mark_quote(tui_scrollback_t *sb, int quote) {
     if (sb->count > 0) sb->lines[(sb->head - 1 + TUI_SCROLLBACK) % TUI_SCROLLBACK].quote = quote;
+}
+
+int tui_scrollback_expire(tui_scrollback_t *sb, double before, int *files, int *n_files, int max) {
+    int gone = 0;
+    while (sb->count > 0) {
+        tui_line_t *l = &sb->lines[(sb->head - sb->count + TUI_SCROLLBACK) % TUI_SCROLLBACK];
+        if (l->at >= before) break;
+        if (l->file && *n_files < max) files[(*n_files)++] = l->file;
+        crypto_wipe(l, sizeof *l);
+        sb->count--;
+        gone++;
+    }
+    return gone;
 }
 
 int tui_scrollback_delivery(tui_scrollback_t *sb, unsigned own, const char *missed) {

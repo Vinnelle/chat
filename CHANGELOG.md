@@ -80,6 +80,12 @@
   it after a `↪`, faint, and a reply to you counts as a mention. It's an `mr` record with the id of
   the message it answers, passed on like any message, and a peer whose build doesn't read it (the
   `q` letter) gets the quote in the text instead. Direct messages are never quoted.
+- A message timer for each session. `:timer 10m` (or `2h`, `1d`) asks for messages there to go after
+  that long: chat takes them off the screen and wipes them from memory, pictures shown with them too,
+  and a history keeps no longer. It's announced in `k` the way history is (the `t` letter with the
+  seconds), every chat that keeps to timers takes the shortest one asked for by someone whose code it
+  compared, and the chat's title says so. It's a request: a modified chat, or a screenshot, can keep
+  anything.
 
 ### Fixed
 - The help for **Start chat's own tor** said its tor takes a cookie login. It never has: its

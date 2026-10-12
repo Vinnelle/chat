@@ -54,6 +54,7 @@ typedef struct {
     int move_asks;         // "* NICK wants to move this room ..."
     int came_along;        // "* NICK came along from the room you moved from ..."
     int dm_old;            // "* NICK's chat is too old for direct messages"
+    int timer_asks, timer_stops;   // "* NICK asks for messages here to go after ...", "... stopped asking ..."
 } log_t;
 
 // A2 and B2: alice and bob in the room :move takes them to.
@@ -89,6 +90,8 @@ static void on_print(void *ui, const char *hhmm, const char *text, const uint8_t
         if (strstr(text, " wants to move this room")) l->move_asks++;
         if (strstr(text, " came along from the room you moved from")) l->came_along++;
         if (strstr(text, "'s chat is too old for direct messages")) l->dm_old++;
+        if (strstr(text, " asks for messages here to go after ")) l->timer_asks++;
+        if (strstr(text, " stopped asking for messages here to go")) l->timer_stops++;
         if (strncmp(text, "* joining: peer ", 16) == 0) l->joining++;
         else if (strstr(text, " joined (")) { if (l->joining > 0) l->joining--; else l->unheralded_joins++; }
         return;
@@ -812,6 +815,34 @@ static void test_reply(double *t) {
     CHECK(log_count(&log_b, QUOTED_BOB "for an old build") == 1,
           "a build without replies didn't get the quote as text");
     RUN_FOR(t, 4);
+}
+
+// Alice asks for a message timer: bob is told, keeps to it, and his recent messages from before it go.
+// Then she stops asking. And what :timer takes.
+static void test_timer(double *t) {
+    unsigned s = 0;
+    char d[16], who[CHAT_NAME_LEN] = "";
+    CHECK(chat_parse_timer("10m", &s) == 0 && s == 600 && chat_parse_timer("2h", &s) == 0 && s == 7200
+          && chat_parse_timer("off", &s) == 0 && s == 0, "a timer wasn't read");
+    CHECK(chat_parse_timer("30s", &s) != 0 && chat_parse_timer("8d", &s) != 0 && chat_parse_timer("10", &s) != 0
+          && chat_parse_timer("m", &s) != 0 && chat_parse_timer("-5m", &s) != 0, "a timer that isn't one was taken");
+    chat_format_timer(5400, d, sizeof d);
+    CHECK(strcmp(d, "90m") == 0, "90 minutes reads %s", d);
+
+    int asks = log_b.timer_asks, stops = log_b.timer_stops;
+    chat_run_command(&A, "timer 10m");
+    RUN_UNTIL(t, 10, chat_timer(&B, who, sizeof who) == 600);
+    CHECK(chat_timer(&B, who, sizeof who) == 600 && strstr(who, "alice") && log_b.timer_asks == asks + 1,
+          "bob doesn't keep to alice's timer, or wasn't told once (%d)", log_b.timer_asks - asks);
+    int i = (B.recent_next + RECENT_MAX - 1) % RECENT_MAX;
+    CHECK(B.recent[i].used, "bob keeps no recent messages");
+    B.recent[i].at = *t - 601;
+    chat_tick(&B, *t);
+    CHECK(!B.recent[i].used, "a message from before the timer wasn't wiped");
+    chat_run_command(&A, "timer off");
+    RUN_UNTIL(t, 10, chat_timer(&B, NULL, 0) == 0);
+    CHECK(chat_timer(&B, NULL, 0) == 0 && log_b.timer_stops == stops + 1,
+          "bob still keeps to a timer alice stopped asking for, or wasn't told once");
 }
 
 // A peer already connected is no candidate: the keepalive's static peers stop being tried.
@@ -2908,6 +2939,7 @@ int main(int argc, char **argv) {
         { "udp masked", test_udp_masked },
         { "junk", test_junk }, { "lookalike nick", test_lookalike_nick }, { "delivered", test_delivered },
         { "third peer", test_third_peer }, { "direct message", test_direct_message }, { "reply", test_reply },
+        { "timer", test_timer },
         { "candidates settle", test_candidates_settle }, { "builds", test_builds },
         { "parsers", test_parsers }, { "toml", test_toml }, { "dht keys", test_dht_keys }, { "dht", test_dht }, { "read file", test_read_file },
         { "identity keys", test_identity_keys }, { "call room", test_contact_room },

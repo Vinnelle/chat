@@ -354,7 +354,10 @@ Records go in session frames. A `k` and a `v` come first after each handshake.
   - `l`: reads messages longer than 250 bytes;
   - `m`: can move to a new room (`mv`, `mk` and `mp`);
   - `p`: reads direct messages (`pm`);
-  - `q`: reads replies (`mr`).
+  - `q`: reads replies (`mr`);
+  - `t` and a number after it: keeps to message timers, and asks for messages to go after that
+    many seconds (`0`: none; otherwise 60 to 604800). Each chat keeps to the shortest timer that
+    it or any peer whose code it compared asks for. A new `k` goes out when it changes.
 - IDTYPE is the signing identity: `0` none, `1` native, `2` AGE, `3` PGP. With `0`, IDPUB and
   SIG are empty.
 - IDPUB is an Ed25519 public key (64 hex digits).

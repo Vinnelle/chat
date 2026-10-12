@@ -776,8 +776,9 @@ static void build_k_message(chat_t *c, peer_t *p, char *out, size_t out_cap) {
     }
     // After the logging flag, features this build has that older ones don't: "r" announces rekeys,
     // "b" reads several records per frame, "l" reads messages up to MAX_TEXT, "m" moves rooms, "p"
-    // reads direct messages, "q" reads replies.
-    snprintf(out, out_cap, "k\t%s\t%s\t%drblmpq\t%d\t%s\t%s", c->nick, colorhex, c->persist, idtype, idpubhex, sighex);
+    // reads direct messages, "q" reads replies, "t" keeps to message timers, then our timer.
+    snprintf(out, out_cap, "k\t%s\t%s\t%drblmpqt%u\t%d\t%s\t%s", c->nick, colorhex, c->persist, c->timer, idtype,
+             idpubhex, sighex);
 }
 
 // "v": our version, our executable's hash, and our release's signed list of binaries (empty
@@ -882,6 +883,8 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
         memcpy(slot->nick_skel, carry.nick_skel, sizeof slot->nick_skel);
         memcpy(slot->color, carry.color, 3);
         slot->persists = carry.persists;
+        slot->can_timer = carry.can_timer;
+        slot->timer = carry.timer;
         slot->ok_since = carry.ok_since;
         slot->k_seen = carry.k_seen;
         slot->announced = carry.announced;
@@ -1479,7 +1482,8 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         if (parse_color(f[2], rgb) == 0) memcpy(p->color, rgb, 3);
         // f[3] is the history flag, then capability letters older builds ignore: "r" = sends rk,
         // "b" = reads records joined by newlines, "l" = reads messages up to MAX_TEXT, "m" = moves rooms,
-        // "p" = reads direct messages, "q" = reads replies ("mr").
+        // "p" = reads direct messages, "q" = reads replies ("mr"), "t" = keeps to message timers, then the
+        // seconds of the one it asks for.
         int had_history = p->persists;
         p->persists = (f[3][0] == '1');
         if (p->announced && had_history != p->persists) {
@@ -1493,6 +1497,22 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         p->can_move = strchr(f[3], 'm') != NULL;
         p->can_pm = strchr(f[3], 'p') != NULL;
         p->can_reply = strchr(f[3], 'q') != NULL;
+        const char *tp = strchr(f[3], 't');
+        unsigned long asked = tp ? strtoul(tp + 1, NULL, 10) : 0;
+        unsigned had_timer = p->timer;
+        p->can_timer = tp != NULL;
+        p->timer = asked >= TIMER_MIN && asked <= TIMER_MAX ? (unsigned)asked : 0;
+        if (had_timer != p->timer) {
+            char name[CHAT_NAME_LEN], d[16];
+            chat_peer_name(c, p, name);
+            chat_format_timer(p->timer, d, sizeof d);
+            if (p->timer && !peer_trusted(c, p))
+                ui_print(c, "* %s asks for messages here to go after %s - kept to once you've compared codes", name, d);
+            else if (p->timer)
+                ui_print(c, "* %s asks for messages here to go after %s: chat takes them off the screen and out of "
+                            "memory then (a modified chat, or a screenshot, can keep anything)", name, d);
+            else ui_print(c, "* %s stopped asking for messages here to go", name);
+        }
         int idtype = atoi(f[4]);
         size_t idpub_len = strlen(f[5]), sig_len = strlen(f[6]);
         if (idtype > IDENT_NONE && idtype <= IDENT_PGP && idpub_len == ID_SIGN_PUB_LEN * 2 && sig_len == ID_SIGN_LEN * 2) {
@@ -2202,6 +2222,9 @@ static int relays_needed(chat_t *c, double now) {
 #define FAST_BURST_MAX 64
 
 void chat_tick(chat_t *c, double now) {
+    unsigned timer = chat_timer(c, NULL, 0);
+    for (int i = 0; timer && i < RECENT_MAX; i++)
+        if (c->recent[i].used && now - c->recent[i].at > timer) crypto_wipe(&c->recent[i], sizeof c->recent[i]);
     if (c->nostr) {
         if (relays_needed(c, now)) c->relays_until = now + RELAY_LINGER;
         nostr_set_active(c->nostr, now < c->relays_until);
@@ -2486,6 +2509,60 @@ void chat_set_history(chat_t *c, int on) {
     for (int i = 0; i < c->peer_hi; i++)
         if (c->peers[i].used && c->peers[i].ok) send_k_now(c, &c->peers[i]);
     if (live_count(c) > 0) ui_print(c, "* everyone here is told you %s", on ? "keep a history of this chat now" : "stopped keeping a history of it");
+}
+
+void chat_format_timer(unsigned seconds, char *out, size_t cap) {
+    if (!seconds) snprintf(out, cap, "off");
+    else if (seconds % 86400 == 0) snprintf(out, cap, "%ud", seconds / 86400);
+    else if (seconds % 3600 == 0) snprintf(out, cap, "%uh", seconds / 3600);
+    else if (seconds % 60 == 0) snprintf(out, cap, "%um", seconds / 60);
+    else snprintf(out, cap, "%us", seconds);
+}
+
+int chat_parse_timer(const char *s, unsigned *seconds) {
+    if (strcmp(s, "off") == 0 || strcmp(s, "0") == 0) { *seconds = 0; return 0; }
+    char *end;
+    unsigned long n = strtoul(s, &end, 10);
+    unsigned long unit = *end == 's' ? 1 : *end == 'm' ? 60 : *end == 'h' ? 3600 : *end == 'd' ? 86400 : 0;
+    if (end == s || !isdigit((unsigned char)s[0]) || !unit || end[1] || n > TIMER_MAX / unit || n * unit < TIMER_MIN)
+        return -1;
+    *seconds = (unsigned)(n * unit);
+    return 0;
+}
+
+// Only a peer whose code was compared is listened to, so nobody else can wipe the chat from under you.
+unsigned chat_timer(const chat_t *c, char *who, size_t cap) {
+    unsigned best = c->timer;
+    if (who && best) copy_str(who, "you", cap);
+    for (int i = 0; i < c->peer_hi; i++) {
+        const peer_t *p = &c->peers[i];
+        if (!p->used || !p->ok || !p->timer || (best && p->timer >= best) || !peer_trusted(c, p)) continue;
+        best = p->timer;
+        if (who && cap >= CHAT_NAME_LEN) chat_peer_name(c, p, who);
+    }
+    return best;
+}
+
+void chat_set_timer(chat_t *c, unsigned seconds) {
+    if ((seconds && (seconds < TIMER_MIN || seconds > TIMER_MAX)) || c->timer == seconds) return;
+    c->timer = seconds;
+    int deaf = 0;
+    for (int i = 0; i < c->peer_hi; i++) {
+        peer_t *p = &c->peers[i];
+        if (!p->used || !p->ok) continue;
+        send_k_now(c, p);
+        deaf += !p->can_timer;
+    }
+    char d[16], who[CHAT_NAME_LEN];
+    chat_format_timer(seconds, d, sizeof d);
+    if (seconds)
+        ui_print(c, "* messages here go after %s from now: off the screen and out of memory, here and on every "
+                    "chat here that keeps to it (a modified chat, or a screenshot, can keep anything)%s", d,
+                 deaf ? ". Some here run a chat too old to keep to it" : "");
+    else if (chat_timer(c, who, sizeof who))
+        ui_print(c, "* you stopped asking for messages here to go - %s still asks", who);
+    else
+        ui_print(c, "* you stopped asking for messages here to go");
 }
 
 // From the session's key, so only its members can tell which history is this session's.
@@ -2973,6 +3050,32 @@ static cmd_result_t cmd_msg(void *ctx, const char *arg) {
     track_message(c, p, mid, record, own, now_seconds());
     snprintf(shown, sizeof shown, "%s (" DM_ARROW " %s) (you)", c->nick, name);
     ui_direct(c, c->my_color, 0, shown, line);
+    return CMD_OK;
+}
+
+// ":timer" says which message timer is kept to here, ":timer 10m" asks for one, ":timer off" stops.
+static cmd_result_t cmd_timer(void *ctx, const char *arg) {
+    chat_t *c = ctx;
+    char d[16], who[CHAT_NAME_LEN];
+    unsigned seconds;
+    if (!arg[0]) {
+        unsigned t = chat_timer(c, who, sizeof who);
+        chat_format_timer(t, d, sizeof d);
+        if (t) ui_print(c, "* messages here go after %s, as %s asked", d, who);
+        else ui_print(c, "* no message timer here - :timer 10m (or 2h, 1d) asks for one");
+        return CMD_OK;
+    }
+    if (chat_parse_timer(arg, &seconds) != 0) {
+        ui_print(c, "* usage: :timer 10m (or 2h, 1d: from a minute to a week), or :timer off");
+        return CMD_OK;
+    }
+    if (seconds == c->timer) {
+        chat_format_timer(seconds, d, sizeof d);
+        if (seconds) ui_print(c, "* you ask for messages here to go after %s already", d);
+        else ui_print(c, "* you don't ask for a timer here");
+        return CMD_OK;
+    }
+    chat_set_timer(c, seconds);
     return CMD_OK;
 }
 
@@ -4083,6 +4186,7 @@ const command_t CHAT_COMMANDS[] = {
     { "verified",   NULL,     "[forget NICK]",   "list the signing keys you verified, or remove one", cmd_verified },
     { "msg",        "dm",     "NICK TEXT",       "a direct message to one peer you're connected to; nobody else gets it", cmd_msg },
     { "reply",      "re",     "NICK TEXT",       "answer NICK's last message, quoting the start of it", cmd_reply },
+    { "timer",      NULL,     "[off|10m|2h|1d]", "messages here go from every screen that keeps to it after this long; alone, says which", cmd_timer },
     { "move",       NULL,     "[yes|no]",        "move to a new room with the peers whose codes you compared; yes goes, no stays", cmd_move },
     { "net",        NULL,     NULL,              "network report and diagnosis",                    cmd_net },
     { "port",       NULL,     "[N]",             "show or change this session's udp port",          cmd_port },

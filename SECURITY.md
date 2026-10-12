@@ -80,6 +80,9 @@ session id and password, whether they were invited or the password leaked.
 - **A bridge sees you.** Whoever runs a bridge sees your IP address and that you use Tor, as an
   entry guard does, and a bridge that's handed out widely gets found and blocked. With **Keep tor's
   guards** on, the save holds which guards or bridges you use, for anyone who can open it.
+- **A message timer is a request.** `:timer` wipes messages from your chat, and asks everyone else's
+  to do the same, but a modified chat, a screenshot or a camera can keep anything, and `--simple`
+  can't take back what it printed.
 - **"Modified client" is a hint, not a check.** A client says which build it runs, and chat checks
   that against the signed list of release binaries. A modified client can still send a release
   binary's hash.

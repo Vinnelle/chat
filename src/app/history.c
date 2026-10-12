@@ -39,6 +39,25 @@ void history_add(session_slot_t *s, const char *text, const uint8_t *rgb, int me
     crypto_wipe(line, sizeof line);
 }
 
+// Lines from before the message timer go from the history too.
+void history_expire(session_slot_t *s, unsigned seconds) {
+    if (!s->hist || !s->hist_len) return;
+    char cutoff[STAMP_LEN];
+    stamp_at((long long)time(NULL) - seconds, cutoff);
+    if (!cutoff[0]) return;
+    size_t drop = 0;
+    while (drop < s->hist_len && s->hist_len - drop >= STAMP_LEN - 1
+           && memcmp(s->hist + drop, cutoff, STAMP_LEN - 1) < 0) {
+        const char *nl = memchr(s->hist + drop, '\n', s->hist_len - drop);
+        drop = nl ? (size_t)(nl - s->hist) + 1 : s->hist_len;
+    }
+    if (!drop) return;
+    memmove(s->hist, s->hist + drop, s->hist_len - drop);
+    crypto_wipe(s->hist + s->hist_len - drop, drop);
+    s->hist_len -= drop;
+    s->hist_dirty = 1;
+}
+
 static void history_write(session_slot_t *s) {
     if (!s->hist || !s->hist_dirty || !history_possible() || strcmp(s->hist_save, install_current()) != 0) return;
     uint8_t id[CHAT_HISTORY_ID_LEN];

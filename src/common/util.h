@@ -90,6 +90,8 @@ double backoff(int tries, double base, int max_shift, double cap);
 #define DATE_LEN 10
 void current_hhmm(char out[HHMM_LEN]);
 void current_stamp(char out[STAMP_LEN]);
+// The stamp for a time (seconds since 1970).
+void stamp_at(long long t, char out[STAMP_LEN]);
 
 static inline uint16_t load_be16(const uint8_t *p) { return (uint16_t)(p[0] << 8 | p[1]); }
 static inline uint32_t load_be32(const uint8_t *p) {
