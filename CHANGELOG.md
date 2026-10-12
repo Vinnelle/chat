@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.1-beta.1
 
 ### Added
 - `:move` moves the room. With no server, nobody can be put out of a room and a leaked password
