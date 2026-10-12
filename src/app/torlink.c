@@ -521,6 +521,7 @@ static session_slot_t *open_session(const char *session_name, const char *passwo
 
     char pw[MAX_PASSWORD + 1];
     copy_str(pw, password, sizeof pw);
+    copy_str(s->password, password, sizeof s->password);
 
     s->initialising = 1;
     g_app.used[idx] = 1;
@@ -653,6 +654,7 @@ void finish_onboarding(void) {
         crypto_wipe(g_app.pending_auto_password, sizeof g_app.pending_auto_password);
         g_app.pending_auto_session[0] = '\0';
     }
+    rooms_join_at_start();
     g_app.dirty = 1;
 }
 
@@ -753,8 +755,139 @@ cmd_result_t app_new(void *ctx, const char *arg) {
 
 cmd_result_t app_join(void *ctx, const char *arg) {
     (void)ctx; (void)arg;
-    begin_prompt(MODE_JOIN_ID);
+    begin_rooms();
     return CMD_OK;
+}
+
+// ---- kept rooms ----
+
+static session_slot_t *open_room(const char *id) {
+    for (int i = 0; i < MAX_SESSIONS; i++)
+        if (g_app.used[i] && !g_app.sessions[i].leaving && strcmp(g_app.sessions[i].name, id) == 0)
+            return &g_app.sessions[i];
+    return NULL;
+}
+
+// The kept rooms written to the open save, then done said.
+static void rooms_saved(const char *done) {
+    char where[APP_PATH_MAX] = "";
+    install_where(install_current(), where, sizeof where);
+    if (settings_write() != 0) note("couldn't write that to %s/settings - it lasts until chat exits", where);
+    else note("%s", done);
+}
+
+// The room on screen, kept in the open save under a label (its id unless one's given, or the one it
+// has), for Ctrl+J to join it again. "forget" lets it go.
+cmd_result_t app_keep(void *ctx, const char *arg) {
+    (void)ctx;
+    session_slot_t *s = g_app.selected;
+    if (!s || s->initialising) { note("no room on screen to keep"); return CMD_OK; }
+    int at = rooms_find(s->name);
+    char label[ROOM_LABEL_MAX + 1], done[160];
+    const char *shown = install_shown_name(install_current());
+    if (strcmp(arg, "forget") == 0) {
+        if (at < 0) { note("this room isn't kept"); return CMD_OK; }
+        snprintf(done, sizeof done, "%s: no longer kept in the save %s", room_at(at)->label, shown);
+        rooms_forget(at);
+        rooms_saved(done);
+        return CMD_OK;
+    }
+    if (!g_app.installed || g_app.locked) { note("a room is kept in a save - :install makes one"); return CMD_OK; }
+    if (at < 0 && rooms_count() >= ROOMS_MAX) {
+        note("%d rooms are kept already - :keep forget one", ROOMS_MAX);
+        return CMD_OK;
+    }
+    copy_str(label, arg[0] ? arg : at >= 0 ? room_at(at)->label : s->name, sizeof label);
+    int i = rooms_keep(label, s->name, s->password);
+    if (i < 0) { note("this room can't be kept"); return CMD_OK; }
+    snprintf(done, sizeof done, "%s: %s in the save %s" DOT_SEP "Ctrl+J joins it", room_at(i)->label,
+             at < 0 ? "kept" : "kept, with that label,", shown);
+    rooms_saved(done);
+    return CMD_OK;
+}
+
+// With rooms kept, Ctrl+J lists them, and "another room" under them asks for an id as before.
+void begin_rooms(void) {
+    if (!rooms_count()) { begin_prompt(MODE_JOIN_ID); return; }
+    if (g_app.rooms_sel > rooms_count()) g_app.rooms_sel = 0;
+    g_app.rooms_forgetting = 0;
+    begin_prompt(MODE_ROOMS);
+}
+
+static void join_room(int i) {
+    const room_t *r = room_at(i);
+    if (!r) return;
+    session_slot_t *s = open_room(r->id);
+    end_prompt();
+    if (s) { select_session(s); note("%s is open already", r->label); return; }
+    char id[MAX_SESSION_NAME + 1], pw[MAX_PASSWORD + 1];
+    copy_str(id, r->id, sizeof id);
+    copy_str(pw, r->password, sizeof pw);
+    start_session(id, pw, 0, 0, NULL, 0);
+    crypto_wipe(pw, sizeof pw);
+}
+
+void rooms_key(const tui_key_t *key) {
+    int n = rooms_count(), i = g_app.rooms_sel;
+    if (g_app.rooms_forgetting) {
+        int yes = key->type == TUI_KEY_CHAR && key->ch_len == 1 && (key->ch[0] == 'y' || key->ch[0] == 'Y');
+        int no = key->type == TUI_KEY_ESCAPE
+              || (key->type == TUI_KEY_CHAR && key->ch_len == 1 && strchr("nNq", key->ch[0]));
+        if (!yes && !no) return;
+        g_app.rooms_forgetting = 0;
+        g_app.dirty = 1;
+        if (no) return;
+        char done[160];
+        snprintf(done, sizeof done, "%s: no longer kept in the save %s", room_at(i)->label,
+                 install_shown_name(install_current()));
+        rooms_forget(i);
+        if (g_app.rooms_sel > 0 && g_app.rooms_sel >= rooms_count()) g_app.rooms_sel--;
+        if (!rooms_count()) end_prompt();
+        rooms_saved(done);
+        return;
+    }
+    if (key->type == TUI_KEY_CHAR && key->ch_len == 1 && i < n && (key->ch[0] == 'd' || key->ch[0] == 's')) {
+        if (key->ch[0] == 'd') { g_app.rooms_forgetting = 1; g_app.dirty = 1; return; }
+        char done[160];
+        rooms_set_start(i, !room_at(i)->at_start);
+        snprintf(done, sizeof done, "%s: %s", room_at(i)->label,
+                 room_at(i)->at_start ? "joined as chat starts" : "not joined as chat starts");
+        rooms_saved(done);
+        g_app.dirty = 1;
+        return;
+    }
+    list_key_t k = list_key(key);
+    switch (k) {
+        case LIST_CHOOSE:
+        case LIST_RIGHT:
+            if (i < n) { join_room(i); return; }
+            end_prompt();
+            begin_prompt(MODE_JOIN_ID);
+            return;
+        case LIST_LEFT:
+        case LIST_BACK:
+        case LIST_CLOSE:
+            end_prompt();
+            return;
+        default:
+            list_move(k, &g_app.rooms_sel, n + 1);
+            g_app.dirty = 1;
+            return;
+    }
+}
+
+// The rooms marked to, once chat starts reaching the network.
+void rooms_join_at_start(void) {
+    if (!g_app.installed || g_app.locked) return;
+    for (int i = 0; i < rooms_count(); i++) {
+        const room_t *r = room_at(i);
+        if (!r || !r->at_start || open_room(r->id)) continue;
+        char id[MAX_SESSION_NAME + 1], pw[MAX_PASSWORD + 1];
+        copy_str(id, r->id, sizeof id);
+        copy_str(pw, r->password, sizeof pw);
+        start_session(id, pw, 0, 0, NULL, 0);
+        crypto_wipe(pw, sizeof pw);
+    }
 }
 
 cmd_result_t app_quit(void *ctx, const char *arg) {

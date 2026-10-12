@@ -492,7 +492,16 @@ int settings_text(char *out, size_t cap) {
         p = put_row_value(i, g_saved_rows[i], out, p, cap);
         p = put_text(out, p, cap, "\n");
     }
+    p = rooms_text(out, p, cap);
     return p < cap ? 0 : -1;
+}
+
+// The rows saved so far and the kept rooms, written to the open save. 0 or -1.
+int settings_write(void) {
+    static char text[INSTALL_SETTINGS_MAX];
+    int rc = settings_text(text, sizeof text) == 0 && install_write_settings(text) == 0 ? 0 : -1;
+    crypto_wipe(text, sizeof text);
+    return rc;
 }
 
 // Checked before every frame, so any change to a row (from the page or :set) is picked up. The
@@ -517,8 +526,7 @@ void keep_settings_saved(void) {
     size_t n = strlen(g_app.message);
     if (held && n > 0) snprintf(g_app.message + n, sizeof g_app.message - n, DOT_SEP "not saved (autosave is off)");
     if (!changed) return;
-    static char text[INSTALL_SETTINGS_MAX];
-    if (settings_text(text, sizeof text) != 0 || install_write_settings(text) != 0) {
+    if (settings_write() != 0) {
         char where[APP_PATH_MAX] = "";
         install_where(install_current(), where, sizeof where);
         note("couldn't save that in %s/settings - it lasts until chat exits", where);

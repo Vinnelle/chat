@@ -25,7 +25,7 @@ static const char *USAGE =
     "settings, chat starts on your sessions instead.\n"
     "\n"
     "  Ctrl+N     create a new session (asks for a password; blank still encrypts)\n"
-    "  Ctrl+J     join an existing session (asks for its id, then its password)\n"
+    "  Ctrl+J     join an existing session (asks for its id, then its password), or a kept one\n"
     "  Tab        next session       Shift+Tab   previous session (j/k in NORMAL too)\n"
     "  PgUp/PgDn  scroll the chat back and forward (Ctrl+U/Ctrl+D in NORMAL, G the newest)\n"
     "  Ctrl+B     hide/show the sidebar   Ctrl+O   hide/show the console\n"
@@ -63,7 +63,7 @@ static const char *USAGE =
     "you type is sent:\n"
     "  :new :join :quit (:q) :quitall (:qa) :copyid :update :peers :verify NICK [ok|no] :net\n"
     "  :verified [forget NICK] :port [N] :set [NAME [VALUE]] :install :uninstall :help\n"
-    "  :send [PATH] :files :download [N] :show N :hide N :cancel N\n"
+    "  :send [PATH] :files :download [N] :show N :hide N :cancel N :keep [LABEL|forget]\n"
     "  (:help opens a page of keys and commands)\n"
     "\n"
     "Anyone with a session's id and password can sit between two other members. When a peer\n"
@@ -471,12 +471,14 @@ session_slot_t *find_free_slot(void) {
 void lock_scrollbacks(session_slot_t *s) {
     crypto_lock(&s->sb, sizeof s->sb);
     crypto_lock(&s->console, sizeof s->console);
+    crypto_lock(s->password, sizeof s->password);
 }
 
-// Zeroes them as it unlocks them.
+// Zeroes them as it unlocks them, and the room's password.
 void release_scrollbacks(session_slot_t *s) {
     crypto_unlock(&s->sb, sizeof s->sb);
     crypto_unlock(&s->console, sizeof s->console);
+    crypto_wipe(s->password, sizeof s->password);
 }
 
 // Puts s on screen (or none). The session being left loses its new messages line, and s gets one
@@ -816,6 +818,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
     crypto_wipe(g_app.pending_auto_password, sizeof g_app.pending_auto_password);
     crypto_wipe(g_app.install_pass, sizeof g_app.install_pass);
     lock_forget();
+    rooms_clear();
     install_forget();
     tui_scrollback_clear(&g_app.log);
 

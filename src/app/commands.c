@@ -9,7 +9,7 @@ static char g_lock_keys[16], g_panic_keys[16];
 
 static const struct { const char *section, *keys, *what; } HELP_KEYS[] = {
     { "Sessions",    "ctrl+n",          "start a new session" },
-    { NULL,          "ctrl+j",          "join a session by its id and password" },
+    { NULL,          "ctrl+j",          "join a session by its id and password, or one you kept (:keep)" },
     { NULL,          "tab  shift+tab",  "next / previous session" },
     { NULL,          "ctrl+s",          "settings" },
     { NULL,          "ctrl+c",          "quit, after asking - every session leaves cleanly first" },
@@ -366,7 +366,8 @@ void move_tick(double now) {
 static const command_t APP_COMMANDS[] = {
     { "help",    NULL,                  NULL,     "list all commands and keybinds (F1)",          app_help },
     { "new",     NULL,                  NULL,     "create a session (Ctrl+N)",                       app_new },
-    { "join",    NULL,                  NULL,     "join a session by id (Ctrl+J)",                   app_join },
+    { "join",    NULL,                  NULL,     "join a session by id, or one you kept (Ctrl+J)",  app_join },
+    { "keep",    NULL,      "[LABEL | forget]", "keep this room in the open save, to join it again from Ctrl+J; forget lets it go", app_keep },
     { "quit",    "q exit close bd bw",  NULL,     "leave this session; quits if none are open",       app_quit },
     { "quitall", "qa qall",             NULL,     "leave every session and quit (Ctrl+C)",           app_quitall },
     { "lock",    NULL,                  NULL,     "lock the screen until the save's passphrase, or a PIN, unlocks it", app_lock },
@@ -606,6 +607,7 @@ static const struct { const char *cmd; int args[4]; } COMMAND_ARGS[] = {
     { "saveto",    { A_FILE, A_WORD | A_TYPED } },
     { "install",   { A_SAVE | A_TYPED } },
     { "uninstall", { A_SAVE | A_TYPED } },
+    { "keep",      { A_WORD | A_TYPED } },
 };
 
 static const struct { const char *cmd, *word, *help; } ARG_WORDS[] = {
@@ -616,6 +618,7 @@ static const struct { const char *cmd, *word, *help; } ARG_WORDS[] = {
     { "show",     "anyway", "even if it's over your file size limit" },
     { "saveto",   "anyway", "even if it's over your file size limit" },
     { "download", "anyway", "even if it's over your file size limit" },
+    { "keep",     "forget", "stop keeping this room in the save" },
 };
 
 // Bumped when the menu is listed from the start, so the folders and saves it reads are read again.
@@ -1098,6 +1101,7 @@ void handle_key(const tui_key_t *key) {
         case MODE_UPDATE:         update_key(key); return;
         case MODE_MOVE:           confirm_key(key, move_yes, move_no); return;
         case MODE_TOR_STATE:      confirm_key(key, tor_state_yes, tor_state_no); return;
+        case MODE_ROOMS:          rooms_key(key); return;
         case MODE_MOVE_ASK:       move_ask_key(key); return;
         default:
             break;
@@ -1133,7 +1137,7 @@ void handle_key(const tui_key_t *key) {
         case TUI_KEY_TAB:            select_step(1); break;
         case TUI_KEY_BACKTAB:        select_step(-1); break;
         case TUI_KEY_NEW_SESSION:    begin_prompt(MODE_NEW_PASSWORD); break;
-        case TUI_KEY_JOIN_SESSION:   begin_prompt(MODE_JOIN_ID); break;
+        case TUI_KEY_JOIN_SESSION:   begin_rooms(); break;
         case TUI_KEY_TOGGLE_SIDEBAR: g_app.show_sidebar = !g_app.show_sidebar; g_app.dirty = 1; break;
         case TUI_KEY_TOGGLE_CONSOLE: g_app.show_console = !g_app.show_console; g_app.dirty = 1; break;
         case TUI_KEY_TOGGLE_CHAT:    g_app.show_chat = !g_app.show_chat; g_app.dirty = 1; break;
@@ -1168,7 +1172,7 @@ int on_chat_screen(void) {
     switch (g_app.mode) {
         case MODE_CHAT: case MODE_NEW_PASSWORD: case MODE_JOIN_ID: case MODE_JOIN_PASSWORD:
         case MODE_UNINSTALL: case MODE_SAVES: case MODE_UNLOCK: case MODE_UPDATE: case MODE_UNLOCK_CODE:
-        case MODE_MOVE: case MODE_MOVE_ASK:
+        case MODE_MOVE: case MODE_MOVE_ASK: case MODE_ROOMS:
             return 1;
         case MODE_DEVICE_LOCK:
             return g_app.device_back == MODE_CHAT;

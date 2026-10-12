@@ -537,17 +537,24 @@ not the key's public half, so neither file can be linked to the fingerprint peer
   [chat]
   filelimit = "64M"
   notify = "all"
+
+  [rooms]
+  1 = ["book club", "K7M2Q9XRT4", "correct horse battery staple", "start"]
   ```
 
   The keys are the names `:set` takes: the routing, Tor and relay ones in `[network]`, `nick`,
   `colour` and `autosave` in `[profile]`, and the rest in `[chat]`. A
-  switch is `true` or `false`, `port` is a number, `relays` is a list, and the rest are strings,
-  written the way `:set` takes them. A key chat can't use is skipped, and the console says so.
+  switch is `true` or `false`, `port` is a number, `relays` and `bridges` are lists, and the rest
+  are strings, written the way `:set` takes them. A key chat can't use is skipped, and the console
+  says so. `[rooms]` holds the rooms you `:keep`: each one's label, id and password, and `"start"`
+  for one joined as chat starts. The file is padded with zeros to a multiple of 4 KB, so its size
+  says little about how many rooms it keeps.
 - `~/.config/chat/saves/NAME/key`: your signing key, what kind it is and where it came from.
 
 Only you can open the folder and the files (`0700`, `0600`). Each file is written in full and
-then renamed into place, so a crash can't leave half a file. Sessions, their ids and passwords,
-peers and files are never saved, and messages only with history on (see [History](#history)).
+then renamed into place, so a crash can't leave half a file. A session's id and password are only
+saved for a room you `:keep` (see [Kept rooms](#kept-rooms)). Peers and files are never saved, and
+messages only with history on (see [History](#history)).
 
 `settings` and `key` are the only files chat writes there (and the same two in `~/.config/chat`
 itself for the save called `default`, see [More than one save](#more-than-one-save)), and both are always sealed, as is
@@ -798,6 +805,20 @@ all` deletes every session's in the save. Turning history off keeps what was kep
 it. Only the full-screen UI keeps history, not `--simple`. A room `:move` goes to has a new id and
 password, so it gets a history of its own, and the old room's stays as it was.
 
+#### Kept rooms
+
+`:keep` keeps the room on screen in the open save: its id and password, under a label you give it
+(`:keep book club`) or its id. `:keep LABEL` again changes the label, and `:keep forget` lets it go.
+With rooms kept, `Ctrl+J` (or `:join`) lists them by label, without their ids or passwords, and
+`Enter` joins one. `s` marks one to be joined as chat starts, `d` forgets one after asking, and
+**another room...** at the bottom asks for an id as before. Up to 16 are kept.
+
+They're kept in the sealed `settings` file, as its `[rooms]` table, so no file of their own says the
+save keeps any, and the file is padded to a multiple of 4 KB. Anyone who can open the save can join
+the rooms it keeps. Since nobody has to remember a kept room's password, a long random one costs
+nothing. The decoy keeps none, and `:uninstall` deletes them with the rest. Only the full-screen UI
+keeps rooms, not `--simple`.
+
 #### A shadow passphrase, and self-destruct
 
 `:set shadow on` (the **Shadow password** row on the settings page) gives the open save a second
@@ -1014,7 +1035,7 @@ saved your settings, it starts on your sessions, and `Ctrl+S` opens the page.
 | Key | Action |
 | --- | --- |
 | `Ctrl+N` | create a new session (asks for a password) |
-| `Ctrl+J` | join an existing session (id, then password) |
+| `Ctrl+J` | join an existing session (id, then password), or with rooms kept, pick one of them |
 | `Tab` / `Shift+Tab` | next / previous session (`j` / `k` in NORMAL too) |
 | `PgUp` / `PgDn` | scroll the chat back / forward (`Ctrl+U` / `Ctrl+D` in NORMAL, `G` the newest) |
 | `Ctrl+B` / `Ctrl+O` / `Ctrl+T` | toggle sidebar / console / chat pane (`s` / `c` / `C` in NORMAL) |
@@ -1059,6 +1080,7 @@ puts it on the command line.
 | Command | Action |
 | --- | --- |
 | `:new`, `:join` | create / join a session (same as `Ctrl+N` / `Ctrl+J`) |
+| `:keep [LABEL\|forget]` | keep this room in the open save, under LABEL (or its id), to join it again from `Ctrl+J`; `forget` lets it go (see [Kept rooms](#kept-rooms)) |
 | `:quit` (`:q`) | leave this session; quits when none is open |
 | `:quitall` (`:qa`) | leave every session and quit |
 | `:lock` | lock the screen until the save's passphrase, or a PIN, unlocks it (the lock key, `Ctrl+L`, does the same) |

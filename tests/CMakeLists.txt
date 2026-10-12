@@ -59,7 +59,8 @@ function(chat_test_executable name)
 endfunction()
 
 # The saves' code, with a device and a security key of the test's own in engine_test.c.
-chat_test_executable(engine_test engine_test.c ${PROJECT_SOURCE_DIR}/src/app/install.c)
+chat_test_executable(engine_test engine_test.c ${PROJECT_SOURCE_DIR}/src/app/install.c
+                     ${PROJECT_SOURCE_DIR}/src/app/rooms.c)
 add_test(NAME engine COMMAND engine_test)
 
 if(CHAT_FUZZ)

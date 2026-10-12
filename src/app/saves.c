@@ -69,6 +69,10 @@ int g_loading_settings;
 
 static void load_setting(void *ctx, const char *table, const char *key, const toml_value *tv) {
     loading_t *l = ctx;
+    if (strcmp(table, "rooms") == 0) {
+        if (rooms_load(tv) != 0) saved_note("* %s: kept room %.10s can't be read - left out", l->where, key);
+        return;
+    }
     const setting_def_t *d = setting_by_key(key);
     char value[ROW_TEXT_MAX], before[ROW_TEXT_MAX], now[ROW_TEXT_MAX];
     if (!d || strcmp(setting_table(d->id), table) != 0 || !setting_text(d->id, before, sizeof before)) {
@@ -98,6 +102,7 @@ static void load_saved_settings(void) {
     char where[APP_PATH_MAX] = "";
     install_where(install_current(), where, sizeof where);
     snprintf(l.where, sizeof l.where, "%s/settings", where);
+    rooms_clear();
     long n = install_read_settings(text, sizeof text);
     if (n == INSTALL_NO_FILE) return;
     if (n < 0) { saved_note("* %s is damaged, or isn't sealed with this passphrase - left out", l.where); return; }
@@ -566,8 +571,7 @@ static void finish_install(const char *passphrase) {
     // Everything in use, including the options.
     note_settings_seen();
     memcpy(g_saved_rows, g_seen_rows, sizeof g_saved_rows);
-    static char text[INSTALL_SETTINGS_MAX];
-    if (settings_text(text, sizeof text) != 0 || install_write_settings(text) != 0) {
+    if (settings_write() != 0) {
         if (passphrase) {
             // A new save leaves nothing behind, not even its device or security key files.
             if (install_open_factors()) install_remove(g_app.save_target);
@@ -870,11 +874,8 @@ static void use_save_now(void) {
     const char *shown = install_shown_name(install_current());
     char where[APP_PATH_MAX] = "";
     install_where(install_current(), where, sizeof where);
-    if (keep) {
-        static char text[INSTALL_SETTINGS_MAX];
-        if (settings_text(text, sizeof text) != 0 || install_write_settings(text) != 0)
-            push_log("* couldn't save the settings changed this run in %s/settings - they last until chat exits", where);
-    }
+    if (keep && settings_write() != 0)
+        push_log("* couldn't save the settings changed this run in %s/settings - they last until chat exits", where);
     if (verified_here > 0) save_verified();
     settings_to_sessions();
     // As at the end of the startup settings page: :update's proxy, and a tor for Tor mode.
@@ -962,6 +963,7 @@ void uninstall_confirmed(void) {
     g_app.installed = g_app.locked = 0;
     factors_in_use();
     verified_saving(0);
+    rooms_clear();
     g_n_uninstalled_keys = 0;
     for (int i = 0; i < trust_count(); i++)
         memcpy(g_uninstalled_keys[g_n_uninstalled_keys++], trust_at(i)->pub, ID_SIGN_PUB_LEN);

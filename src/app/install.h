@@ -19,7 +19,7 @@
 // nothing. The code can't: the secret an app makes its codes from has to be kept with the save,
 // sealed in its authenticator file, so it's a check chat makes before the save is used.
 
-#define INSTALL_SETTINGS_MAX 8192
+#define INSTALL_SETTINGS_MAX 20480
 #define INSTALL_KEY_MAX 1280
 #define INSTALL_VERIFIED_MAX 24576
 #define INSTALL_NO_FILE -4

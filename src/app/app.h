@@ -15,6 +15,7 @@
 #include "common/util.h"
 #include "app/update.h"
 #include "app/install.h"
+#include "app/rooms.h"
 #include "transport/torproc.h"
 #include "common/image.h"
 #include "common/qr.h"
@@ -82,6 +83,8 @@ typedef struct {
     int leaving;
     // The request to move (its seq) put away with Esc, which doesn't come up again until :move.
     unsigned move_later;
+    // The room's password, for :keep. Locked memory, wiped when it closes.
+    char password[MAX_PASSWORD + 1];
 } session_slot_t;
 
 typedef enum {
@@ -126,7 +129,8 @@ typedef enum {
     MODE_UPDATE,
     MODE_MOVE,
     MODE_MOVE_ASK,
-    MODE_TOR_STATE
+    MODE_TOR_STATE,
+    MODE_ROOMS
 } app_mode_t;
 
 // What a security key is being touched for: to register it for the open save or the new one
@@ -194,6 +198,8 @@ typedef struct {
     char pt_dir[TOR_PATH_MAX];
     int tor_state;
     app_mode_t tor_state_back;
+    // The kept rooms' list (Ctrl+J): the row selected, and whether it asks to forget that one.
+    int rooms_sel, rooms_forgetting;
     uint64_t file_cap;   // 0: the default
     int fast_files;
     int picture_noise;   // a JPEG sent gets noise nobody can see (common/clean.h)
@@ -517,6 +523,10 @@ void begin_prompt(app_mode_t mode);
 void end_prompt(void);
 cmd_result_t app_new(void *ctx, const char *arg);
 cmd_result_t app_join(void *ctx, const char *arg);
+cmd_result_t app_keep(void *ctx, const char *arg);
+void begin_rooms(void);
+void rooms_key(const tui_key_t *key);
+void rooms_join_at_start(void);
 cmd_result_t app_quit(void *ctx, const char *arg);
 cmd_result_t app_quitall(void *ctx, const char *arg);
 cmd_result_t app_copyid(void *ctx, const char *arg);
@@ -557,6 +567,7 @@ void note_settings_seen(void);
 const char *setting_table(setting_id_t id);
 size_t put_text(char *out, size_t p, size_t cap, const char *s);
 int settings_text(char *out, size_t cap);
+int settings_write(void);
 void keep_settings_saved(void);
 void settings_to_sessions(void);
 void device_check(void);

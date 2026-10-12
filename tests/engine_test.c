@@ -17,6 +17,7 @@
 #include "common/qr.h"
 #include "common/bytewords.h"
 #include "app/install.h"
+#include "app/rooms.h"
 #include "test_os.h"
 #include <sodium.h>
 #include <stdio.h>
@@ -1498,6 +1499,68 @@ static void test_history(double *t) {
     CHECK(pa && !pa->persists, "bob wasn't told alice stopped keeping one");
 }
 
+static void room_back(void *ctx, const char *table, const char *key, const toml_value *v) {
+    (void)key;
+    int *bad = ctx;
+    if (strcmp(table, "rooms") == 0 && rooms_load(v) != 0) (*bad)++;
+}
+
+// Kept rooms through the settings file's [rooms] table and back, with odd labels and passwords, and
+// the settings file padded so its size says little about how many there are.
+static void test_rooms(double *t) {
+    (void)t;
+    static char text[INSTALL_SETTINGS_MAX], buf[INSTALL_SETTINGS_MAX], config[256];
+    static const char pw[] = "a \"quoted\"\\ pass\tword", nick[] = "[profile]\nnick = \"a\"\n";
+    rooms_clear();
+    CHECK(rooms_keep("home", "ABC234", pw) == 0 && rooms_keep("\x1b[2Jwork", "XYZ789", "") == 1
+          && rooms_keep(" ", "QQQ222", "x") == 2 && rooms_keep("home again", "ABC234", pw) == 0 && rooms_count() == 3,
+          "the rooms weren't kept, or one was kept twice");
+    rooms_set_start(1, 1);
+    CHECK(strcmp(room_at(0)->label, "home again") == 0 && strcmp(room_at(1)->label, "[2Jwork") == 0
+          && strcmp(room_at(2)->label, "QQQ222") == 0, "a label wasn't cleaned, or a blank one isn't the id");
+    size_t n = rooms_text(text, 0, sizeof text);
+    CHECK(n > 0 && n < sizeof text, "the rooms didn't fit");
+    rooms_clear();
+    int bad = 0, bad_line = 0;
+    CHECK(toml_parse(text, room_back, &bad, &bad_line) == 0 && bad == 0 && rooms_count() == 3
+          && strcmp(room_at(0)->password, pw) == 0 && strcmp(room_at(1)->id, "XYZ789") == 0
+          && room_at(1)->at_start && !room_at(0)->at_start && !room_at(1)->password[0],
+          "the rooms didn't come back as they were kept:\n%s", text);
+    rooms_forget(0);
+    CHECK(rooms_count() == 2 && rooms_find("ABC234") < 0 && rooms_find("QQQ222") == 1, "forgetting a room didn't");
+
+    // As many as can be kept, each as long as it can be with a password that's all quotes, leave room
+    // for the settings beside them.
+    rooms_clear();
+    char id[MAX_SESSION_NAME + 1], label[ROOM_LABEL_MAX + 1], quotes[MAX_PASSWORD + 1];
+    memset(quotes, '"', MAX_PASSWORD);
+    quotes[MAX_PASSWORD] = '\0';
+    memset(label, 'l', ROOM_LABEL_MAX);
+    label[ROOM_LABEL_MAX] = '\0';
+    for (int i = 0; i < ROOMS_MAX; i++) {
+        snprintf(id, sizeof id, "%0*d", MAX_SESSION_NAME, i);
+        CHECK(rooms_keep(label, id, quotes) == i, "room %d wasn't kept", i);
+    }
+    CHECK(rooms_keep("one more", "MORE22", "p") < 0, "more than %d rooms were kept", ROOMS_MAX);
+    n = rooms_text(text, 0, sizeof text);
+    CHECK(n + 6000 < INSTALL_SETTINGS_MAX, "the most rooms there can be take %zu bytes of the settings", n);
+    rooms_clear();
+
+    CHECK(test_temp_dir("rooms", config, sizeof config) == 0, "no temporary folder");
+    test_set_env(TEST_CONFIG_VAR, config);
+    install_use("p");
+    CHECK(install_lock_new("p", "pw", 0) == 0 && install_write_settings(nick) == 0
+          && save_size(config, "p", "settings") == (long)(4096 + PASS_SEAL_OVERHEAD)
+          && install_read_settings(buf, sizeof buf) == (long)strlen(nick) && strcmp(buf, nick) == 0,
+          "the settings weren't padded to 4 KB, or didn't read back as they were");
+    memset(text, 'x', 5000);
+    text[5000] = '\0';
+    CHECK(install_write_settings(text) == 0
+          && save_size(config, "p", "settings") == (long)(8192 + PASS_SEAL_OVERHEAD)
+          && install_read_settings(buf, sizeof buf) == 5000, "settings over 4 KB weren't padded to 8 KB");
+    CHECK(install_remove("p") == 0, "it wasn't uninstalled");
+}
+
 // What chat's own tor keeps in the save: read back as it was written, sealed again when the save's
 // lock changes, and gone when it's forgotten, with the decoy and with the save.
 static void test_tor_state(double *t) {
@@ -2747,7 +2810,7 @@ int main(int argc, char **argv) {
         { "candidates settle", test_candidates_settle }, { "builds", test_builds },
         { "parsers", test_parsers }, { "toml", test_toml }, { "dht keys", test_dht_keys }, { "dht", test_dht }, { "read file", test_read_file },
         { "identity keys", test_identity_keys }, { "passphrase seal", test_passphrase_seal }, { "device lock", test_device_lock },
-        { "factor locks", test_factor_locks }, { "totp", test_totp }, { "bytewords", test_bytewords }, { "qr", test_qr }, { "save factors", test_save_factors }, { "duress", test_duress }, { "lock screen", test_lock_screen }, { "sandbox", test_sandbox }, { "history", test_history }, { "tor state", test_tor_state }, { "images", test_images }, { "file names", test_file_names }, { "clean", test_clean }, { "files", test_files }, { "clean offer", test_clean_offer },
+        { "factor locks", test_factor_locks }, { "totp", test_totp }, { "bytewords", test_bytewords }, { "qr", test_qr }, { "save factors", test_save_factors }, { "duress", test_duress }, { "lock screen", test_lock_screen }, { "sandbox", test_sandbox }, { "history", test_history }, { "tor state", test_tor_state }, { "rooms", test_rooms }, { "images", test_images }, { "file names", test_file_names }, { "clean", test_clean }, { "files", test_files }, { "clean offer", test_clean_offer },
         { "verified keys", test_trust }, { "move", test_move },
     };
     size_t n_tests = sizeof tests / sizeof tests[0];

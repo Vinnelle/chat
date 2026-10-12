@@ -697,6 +697,34 @@ static const tui_dialog_t *current_dialog(void) {
             d.n_text = file_ask_paras(paras, &d.title, &d.keys);
             d.input = NULL;
             break;
+        case MODE_ROOMS: {
+            static const char *names[ROOMS_MAX + 1], *details[ROOMS_MAX + 1];
+            static char text[160];
+            int n = rooms_count();
+            for (int i = 0; i < n; i++) {
+                names[i] = room_at(i)->label;
+                details[i] = room_at(i)->at_start ? "joined at start" : "";
+            }
+            names[n] = "another room...";
+            details[n] = "type its id";
+            d.title = "JOIN SESSION";
+            d.input = NULL;
+            if (g_app.rooms_forgetting && g_app.rooms_sel < n) {
+                snprintf(text, sizeof text, "Forget `%s`? Its id and password go from the save.",
+                         room_at(g_app.rooms_sel)->label);
+                d.keys = "y forget" DOT_SEP "n keep";
+            } else {
+                copy_str(text, "The rooms kept in the save, by label. Enter joins one.", sizeof text);
+                d.items = names;
+                d.details = details;
+                d.n_items = n + 1;
+                d.sel = g_app.rooms_sel;
+                d.keys = g_app.rooms_sel < n ? "enter join" DOT_SEP "s at start" DOT_SEP "d forget" DOT_SEP "esc close"
+                                             : "enter type an id" DOT_SEP "esc close";
+            }
+            d.n_text = add_para(paras, 0, TUI_P_TEXT, text);
+            break;
+        }
         case MODE_TOR_STATE:
             d.title = "TOR GUARDS";
             d.n_text = tor_state_paras(paras);
@@ -917,6 +945,11 @@ static tui_bar_t current_bar(void) {
         case MODE_MOVE_ASK:
             chat_input(&b, &g_app.input);
             b.chip = "MOVE";
+            b.tone = TUI_TONE_PROMPT;
+            break;
+        case MODE_ROOMS:
+            chat_input(&b, &g_app.saved_input);
+            b.chip = "JOIN";
             b.tone = TUI_TONE_PROMPT;
             break;
         case MODE_SAVES:

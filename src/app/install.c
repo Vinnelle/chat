@@ -47,6 +47,9 @@
 #define HISTORY_FILE_MAX (INSTALL_HISTORY_MAX + PASS_SEAL_OVERHEAD)
 #define HISTORIES_MAX 1024
 #define SETTINGS_FILE_MAX (INSTALL_SETTINGS_MAX + PASS_SEAL_OVERHEAD)
+// The settings are padded with NULs to a multiple of this, so the file's size says little about
+// what's in them: how many rooms they keep, say.
+#define SETTINGS_PAD 4096
 #define KEY_FILE_MAX (INSTALL_KEY_MAX + PASS_SEAL_OVERHEAD)
 #define VERIFIED_FILE_MAX (INSTALL_VERIFIED_MAX + PASS_SEAL_OVERHEAD)
 #define CODE_PLAIN_LEN (1 + TOTP_SECRET_LEN)
@@ -70,6 +73,8 @@ _Static_assert(DEVICE_SECRET_LEN == PASS_DEVICE_SECRET_LEN, "the device's secret
 _Static_assert(F_DEVICE == PASS_NEEDS_DEVICE && F_KEY == PASS_NEEDS_KEY && F_CODE == PASS_NEEDS_CODE,
                "a save's factors are its lock's");
 _Static_assert(SECKEY_SECRET_LEN == 32 && PASS_KEY_SECRET_LEN == 32, "a security key's secret wraps the lock's");
+_Static_assert(INSTALL_SETTINGS_MAX % SETTINGS_PAD == 0 && INSTALL_SETTINGS_MAX <= INSTALL_VERIFIED_MAX,
+               "padded settings fit, and read_text's buffer holds them");
 
 // Also removes any .new files left by a crash while writing.
 static const char *const FILES[] = { SETTINGS_NAME, KEY_NAME, VERIFIED_NAME, CODE_NAME, SECKEY_NAME,
@@ -543,6 +548,17 @@ static int write_sealed_with(const pass_lock_t *lk, const char *file, const void
     return g_open ? write_sealed_to(g_name, lk, file, plain, len) : -1;
 }
 
+static int write_settings_to(const char *name, const pass_lock_t *lk, const char *text) {
+    static char padded[INSTALL_SETTINGS_MAX];
+    size_t len = strlen(text), n = len / SETTINGS_PAD * SETTINGS_PAD + SETTINGS_PAD;
+    if (n > sizeof padded) return -1;
+    memset(padded, 0, n);
+    memcpy(padded, text, len);
+    int rc = write_sealed_to(name, lk, SETTINGS_NAME, padded, n);
+    crypto_wipe(padded, n);
+    return rc;
+}
+
 static int write_code_to(const char *name, const pass_lock_t *lk, const uint8_t secret[TOTP_SECRET_LEN]) {
     uint8_t plain[CODE_PLAIN_LEN];
     plain[0] = 1;
@@ -720,7 +736,7 @@ static void promote(const char *name, const pass_lock_t *sl, const uint8_t *spar
                 remove_file(name, to[i]);
         }
     } else {
-        write_sealed_to(name, sl, SETTINGS_NAME, "", 0);
+        write_settings_to(name, sl, "");
         remove_file(name, KEY_NAME);
         write_sealed_to(name, sl, VERIFIED_NAME, "", 0);
         if (spare_plain[1]) write_code_to(name, sl, spare_plain + SPARE_HEAD);
@@ -990,14 +1006,17 @@ static long read_text(const char *file, size_t max, char *buf, size_t cap) {
     return (long)len;
 }
 
-long install_read_settings(char *buf, size_t cap) { return read_text(SETTINGS_NAME, SETTINGS_FILE_MAX, buf, cap); }
+long install_read_settings(char *buf, size_t cap) {
+    long n = read_text(SETTINGS_NAME, SETTINGS_FILE_MAX, buf, cap);
+    return n < 0 ? n : (long)strlen(buf);
+}
 long install_read_verified(char *buf, size_t cap) { return read_text(VERIFIED_NAME, VERIFIED_FILE_MAX, buf, cap); }
 
 static int write_sealed(const char *file, const void *plain, size_t len) {
     return write_sealed_with(&g_held.lock, file, plain, len);
 }
 
-int install_write_settings(const char *text) { return write_sealed(SETTINGS_NAME, text, strlen(text)); }
+int install_write_settings(const char *text) { return g_open ? write_settings_to(g_name, &g_held.lock, text) : -1; }
 
 int install_write_verified(const char *text) {
     size_t len = strlen(text);

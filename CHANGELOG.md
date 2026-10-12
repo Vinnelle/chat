@@ -61,6 +61,12 @@
   back before the next one starts. It keeps the same guards from run to run, as Tor's design
   expects, and connects in seconds. A box first says what it adds to the save: which guards you
   use, in tens of MB, mostly the directory. The decoy never gets them, and turning it off deletes them.
+- Kept rooms. `:keep [LABEL]` keeps the room on screen in the open save, with its id and password,
+  so nobody has to remember a short password to come back. With rooms kept, `Ctrl+J` lists them by
+  label: `Enter` joins one, `s` marks it to be joined as chat starts, `d` forgets it, and **another
+  room...** asks for an id as before. `:keep forget` lets one go. They're kept in the sealed settings
+  file, which is now padded to a multiple of 4 KB, so neither a file of their own nor its size says
+  how many there are. The decoy keeps none.
 
 ### Fixed
 - The help for **Start chat's own tor** said its tor takes a cookie login. It never has: its
