@@ -553,7 +553,7 @@ void settings_to_sessions(void) {
         chat_apply_routing(e, &g_app.route);
         chat_set_file_options(e, g_app.file_cap, g_app.fast_files);
         e->picture_noise = g_app.picture_noise;
-        e->verify_required = !g_app.verify_optional;
+        e->verify_required = !g_app.verify_optional || g_app.sessions[i].contact;
         e->notify_mode = g_app.notify_mode;
         e->notify_preview = g_app.notify_preview;
         e->net_verbose = g_app.net_verbose;

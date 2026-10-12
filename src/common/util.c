@@ -274,6 +274,15 @@ void random_session_id(char *out, size_t len) {
     out[len] = '\0';
 }
 
+void session_id_from(uint64_t n, char *out, size_t len) {
+    if (len > SESSION_ID_MAX) len = SESSION_ID_MAX;
+    for (size_t i = 0; i < len; i++) {
+        out[i] = SID_ALPHABET[n % (sizeof SID_ALPHABET - 1)];
+        n /= sizeof SID_ALPHABET - 1;
+    }
+    out[len] = '\0';
+}
+
 static const char *NICK_ADJ[] = {
     "swift", "quiet", "brave", "lucky", "quick", "calm", "bright", "bold",
     "gentle", "sharp", "steady", "sunny", "clever", "mellow", "sly", "eager",

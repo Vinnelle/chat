@@ -27,6 +27,8 @@ size_t clean_text(const char *in, char *out, size_t max_len);
 int has_control_chars(const char *in);
 
 void random_session_id(char *out, size_t len);
+// A session id in the same letters from n, for one worked out rather than made up.
+void session_id_from(uint64_t n, char *out, size_t len);
 
 #define BASE64_CHARS "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 // The characters base64_encode writes for n bytes, without its NUL.

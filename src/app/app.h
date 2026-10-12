@@ -85,6 +85,11 @@ typedef struct {
     unsigned move_later;
     // The room's password, for :keep. Locked memory, wiped when it closes.
     char password[MAX_PASSWORD + 1];
+    // A call (:call): the verified key it's with, and the day its room is for. While nobody's there,
+    // it follows the day.
+    int contact;
+    uint8_t contact_pub[ID_SIGN_PUB_LEN];
+    uint64_t contact_day;
 } session_slot_t;
 
 typedef enum {
@@ -524,6 +529,8 @@ void end_prompt(void);
 cmd_result_t app_new(void *ctx, const char *arg);
 cmd_result_t app_join(void *ctx, const char *arg);
 cmd_result_t app_keep(void *ctx, const char *arg);
+cmd_result_t app_call(void *ctx, const char *arg);
+void contacts_tick(void);
 void begin_rooms(void);
 void rooms_key(const tui_key_t *key);
 void rooms_join_at_start(void);

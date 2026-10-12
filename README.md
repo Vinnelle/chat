@@ -76,6 +76,18 @@ reads direct messages: an older one is refused rather than sent it. With **Compa
 required, it waits until you've compared codes, like any message. Both sides show who it's between
 (`bob (→ you)`, `alice (→ bob)`), it counts as a mention, and a history keeps it like any message.
 
+**Calls.** Once you and a peer have verified each other's signing keys, you don't need to swap an
+id and password again: `:call NICK` (a nick `:verified` lists) opens a room only your two keys can
+work out, and they `:call` you to open the same one. It shows as `@NICK` in the session list. Its
+id and password come from X25519 between the two signing keys (taken the way age takes ssh-ed25519
+keys), both keys and the day (UTC), so it's a new room each day. One nobody else is in moves to the
+new day's room at midnight, so calls made either side of it, or with clocks a little apart, still
+meet. Nobody compares codes there, since the verified key signs the handshake, and nothing goes to
+anyone else who turns up, whatever **Compare verify codes** says. Both of you need a signing
+identity. Anyone who gets one of the two signing keys later can work out these rooms, past and
+future, and see when you meet in them, but can't read what was said: the sessions' keys are
+ephemeral. Only the full-screen UI calls, not `--simple`.
+
 **Lock screen.** Walk away from chat and anyone can read the screen, scroll back or type as you.
 `Ctrl+L` (or `:lock`) locks chat's screen at once, and `:set lock 5m` locks it after five minutes
 without a key (or `1m`, `15m`, `30m`). Locked, chat draws nothing but a box for the open save's
@@ -1080,6 +1092,7 @@ puts it on the command line.
 | Command | Action |
 | --- | --- |
 | `:new`, `:join` | create / join a session (same as `Ctrl+N` / `Ctrl+J`) |
+| `:call NICK` | open the room only you and a verified key can work out, which they open with `:call` too (see [Calls](#security)) |
 | `:keep [LABEL\|forget]` | keep this room in the open save, under LABEL (or its id), to join it again from `Ctrl+J`; `forget` lets it go (see [Kept rooms](#kept-rooms)) |
 | `:quit` (`:q`) | leave this session; quits when none is open |
 | `:quitall` (`:qa`) | leave every session and quit |

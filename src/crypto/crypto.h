@@ -309,4 +309,13 @@ int move_verify(const uint8_t pub[ID_SIGN_PUB_LEN], const uint8_t sig[ID_SIGN_LE
                 const uint8_t their_eph_pub[PUB_LEN], const uint8_t their_id[ID_LEN],
                 const uint8_t my_eph_pub[PUB_LEN], const uint8_t my_id[ID_LEN]);
 
+// A secret only the holders of these two signing keys can work out, for a room of their own (:call):
+// X25519 between them, the Ed25519 keys taken as points the way age takes ssh-ed25519 ones, hashed
+// with a label, both keys (the lower first) and the day. -1 for a key that isn't a usable point, or
+// your own.
+#define CONTACT_SECRET_LEN 64
+#define CONTACT_LABEL "chat-contact-v1"
+int contact_secret(const identity_keypair_t *mine, const uint8_t their_pub[ID_SIGN_PUB_LEN], uint64_t day,
+                   uint8_t out[CONTACT_SECRET_LEN]);
+
 #endif

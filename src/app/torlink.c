@@ -782,6 +782,7 @@ cmd_result_t app_keep(void *ctx, const char *arg) {
     (void)ctx;
     session_slot_t *s = g_app.selected;
     if (!s || s->initialising) { note("no room on screen to keep"); return CMD_OK; }
+    if (s->contact) { note("a call's room changes every day - :call finds it again"); return CMD_OK; }
     int at = rooms_find(s->name);
     char label[ROOM_LABEL_MAX + 1], done[160];
     const char *shown = install_shown_name(install_current());
@@ -887,6 +888,80 @@ void rooms_join_at_start(void) {
         copy_str(pw, r->password, sizeof pw);
         start_session(id, pw, 0, 0, NULL, 0);
         crypto_wipe(pw, sizeof pw);
+    }
+}
+
+// ---- calls ----
+
+static session_slot_t *open_call(const uint8_t pub[ID_SIGN_PUB_LEN]) {
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        session_slot_t *s = &g_app.sessions[i];
+        if (g_app.used[i] && !s->leaving && s->contact && memcmp(s->contact_pub, pub, ID_SIGN_PUB_LEN) == 0) return s;
+    }
+    return NULL;
+}
+
+// Only the verified key gets anything there, whatever :set verify says.
+static session_slot_t *call_open(const trust_entry_t *t, uint64_t day) {
+    char id[SESSION_ID_LEN + 1], pw[CONTACT_PASSWORD_LEN + 1], nick[MAX_NICK + 1];
+    uint8_t pub[ID_SIGN_PUB_LEN];
+    memcpy(pub, t->pub, sizeof pub);
+    copy_str(nick, t->nick, sizeof nick);
+    if (chat_contact_room(&g_app.identity, pub, day, id, pw) != 0) {
+        note("no room can be worked out with %s's key", nick);
+        return NULL;
+    }
+    session_slot_t *s = start_session(id, pw, 0, 0, NULL, 0);
+    crypto_wipe(pw, sizeof pw);
+    if (!s) return NULL;
+    s->contact = 1;
+    memcpy(s->contact_pub, pub, sizeof s->contact_pub);
+    s->contact_day = day;
+    snprintf(s->name, sizeof s->name, "@%s", nick);
+    s->engine.verify_required = 1;
+    console_note(s, "* calling %s: a room only your signing key and theirs can work out, for today (UTC). They "
+                    "have to :call you too, and nothing goes to anyone there but the key you verified", nick);
+    return s;
+}
+
+// :call NICK: the room of a verified key's, which they open with :call too.
+cmd_result_t app_call(void *ctx, const char *arg) {
+    (void)ctx;
+    if (!arg[0]) { note("call whom? :call NICK, for a key :verified lists"); return CMD_OK; }
+    if (g_app.identity_source == IDENT_NONE) {
+        note("a call needs a signing identity of yours, which they've verified - :set sign");
+        return CMD_OK;
+    }
+    char skel[NICK_SKEL_LEN];
+    chat_nick_skeleton(arg, skel, sizeof skel);
+    int at = trust_find_nick(skel, 0);
+    if (at < 0) { note("no verified key goes by %.40s - :verified lists them", arg); return CMD_OK; }
+    if (trust_find_nick(skel, at + 1) >= 0) {
+        note("more than one verified key goes by %.40s - :verified forget the one that's gone", arg);
+        return CMD_OK;
+    }
+    const trust_entry_t *t = trust_at(at);
+    session_slot_t *s = open_call(t->pub);
+    if (s) { select_session(s); note("the call with %s is open already", t->nick); return CMD_OK; }
+    call_open(t, chat_contact_day());
+    return CMD_OK;
+}
+
+// A call nobody's in moves to the new day's room as the day changes, so two who :call either side of
+// midnight (UTC), or with clocks a little apart, still meet.
+void contacts_tick(void) {
+    uint64_t day = chat_contact_day();
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        session_slot_t *s = &g_app.sessions[i], *sel = g_app.selected;
+        if (!g_app.used[i] || s->leaving || !s->contact || s->initialising || s->contact_day == day
+            || chat_online_count(&s->engine) > 0)
+            continue;
+        const trust_entry_t *t = trust_by_key(s->contact_pub);
+        char name[sizeof s->name];
+        copy_str(name, s->name, sizeof name);
+        close_session(s);
+        if (!t) { push_log("* the call %s ended: their key isn't verified any more", name); continue; }
+        if (call_open(t, day) && sel != s && sel && g_app.used[slot_index(sel)]) select_session(sel);
     }
 }
 

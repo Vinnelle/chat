@@ -1600,6 +1600,37 @@ static void test_tor_state(double *t) {
     free(state);
 }
 
+// A call's room: both ends work out the same id and password, whichever form their keys take, and
+// another key, another day or your own key doesn't.
+static void test_contact_room(double *t) {
+    (void)t;
+    identity_keypair_t alice, bob, carol;
+    uint8_t x[PRIV_LEN];
+    char id[SESSION_ID_LEN + 1], pw[CONTACT_PASSWORD_LEN + 1], id2[SESSION_ID_LEN + 1], pw2[CONTACT_PASSWORD_LEN + 1];
+    static const uint8_t small_order[ID_SIGN_PUB_LEN] = { 0 };
+    const uint64_t day = 20373;
+    gen_identity_keypair(&alice);
+    gen_identity_keypair(&carol);
+    randombytes_buf(x, sizeof x);
+    CHECK(identity_from_x25519(x, &bob) == 0, "an AGE key didn't make an identity");
+    CHECK(chat_contact_room(&alice, bob.pub, day, id, pw) == 0 && chat_contact_room(&bob, alice.pub, day, id2, pw2) == 0
+          && strcmp(id, id2) == 0 && strcmp(pw, pw2) == 0, "alice and bob didn't work out the same room");
+    CHECK(strlen(id) == SESSION_ID_LEN && strspn(id, "23456789ABCDEFGHJKMNPQRSTVWXYZ") == SESSION_ID_LEN
+          && strlen(pw) == CONTACT_PASSWORD_LEN, "the room's id or password doesn't look like one: %s", id);
+    CHECK(chat_contact_room(&carol, bob.pub, day, id2, pw2) == 0 && strcmp(id2, id) != 0 && strcmp(pw2, pw) != 0,
+          "carol worked out alice and bob's room");
+    CHECK(chat_contact_room(&alice, bob.pub, day + 1, id2, pw2) == 0 && strcmp(id2, id) != 0 && strcmp(pw2, pw) != 0,
+          "the next day's room is the same");
+    CHECK(chat_contact_room(&carol, alice.pub, day, id2, pw2) == 0
+          && chat_contact_room(&alice, carol.pub, day, id, pw) == 0 && strcmp(id, id2) == 0 && strcmp(pw, pw2) == 0, "two keys from seeds didn't work out the same room");
+    CHECK(chat_contact_room(&alice, alice.pub, day, id2, pw2) != 0, "a room with your own key was worked out");
+    CHECK(chat_contact_room(&alice, small_order, day, id2, pw2) != 0, "a room with a small-order point was worked out");
+    sodium_memzero(&alice, sizeof alice);
+    sodium_memzero(&bob, sizeof bob);
+    sodium_memzero(&carol, sizeof carol);
+    sodium_memzero(x, sizeof x);
+}
+
 static void test_identity_keys(double *t) {
     (void)t;
     // An identity file age-keygen wrote, and the recipient it gave for it.
@@ -2809,7 +2840,8 @@ int main(int argc, char **argv) {
         { "third peer", test_third_peer }, { "direct message", test_direct_message },
         { "candidates settle", test_candidates_settle }, { "builds", test_builds },
         { "parsers", test_parsers }, { "toml", test_toml }, { "dht keys", test_dht_keys }, { "dht", test_dht }, { "read file", test_read_file },
-        { "identity keys", test_identity_keys }, { "passphrase seal", test_passphrase_seal }, { "device lock", test_device_lock },
+        { "identity keys", test_identity_keys }, { "call room", test_contact_room },
+        { "passphrase seal", test_passphrase_seal }, { "device lock", test_device_lock },
         { "factor locks", test_factor_locks }, { "totp", test_totp }, { "bytewords", test_bytewords }, { "qr", test_qr }, { "save factors", test_save_factors }, { "duress", test_duress }, { "lock screen", test_lock_screen }, { "sandbox", test_sandbox }, { "history", test_history }, { "tor state", test_tor_state }, { "rooms", test_rooms }, { "images", test_images }, { "file names", test_file_names }, { "clean", test_clean }, { "files", test_files }, { "clean offer", test_clean_offer },
         { "verified keys", test_trust }, { "move", test_move },
     };

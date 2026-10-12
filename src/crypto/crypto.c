@@ -755,3 +755,33 @@ int move_verify(const uint8_t pub[ID_SIGN_PUB_LEN], const uint8_t sig[ID_SIGN_LE
     move_message(buf, their_eph_pub, their_id, my_eph_pub, my_id);
     return crypto_sign_verify_detached(sig, buf, sizeof buf, pub) == 0 ? 0 : -1;
 }
+
+// The scalar times their point on the Edwards curve, then as X25519's u: for a key from a seed that's
+// X25519 with crypto_sign_ed25519_sk_to_curve25519's secret, and an AGE key's reduced scalar, which
+// X25519 would clamp again, gives the same point.
+int contact_secret(const identity_keypair_t *mine, const uint8_t their_pub[ID_SIGN_PUB_LEN], uint64_t day,
+                   uint8_t out[CONTACT_SECRET_LEN]) {
+    uint8_t s[SCALAR_LEN], q[ID_SIGN_PUB_LEN], shared[PUB_LEN], d[8];
+    int rc = -1;
+    if (sodium_memcmp(mine->pub, their_pub, ID_SIGN_PUB_LEN) == 0) return -1;
+    if (mine->scalar) memcpy(s, mine->priv, SCALAR_LEN);
+    else if (crypto_sign_ed25519_sk_to_curve25519(s, mine->priv) != 0) return -1;
+    if (crypto_scalarmult_ed25519_noclamp(q, s, their_pub) == 0
+        && crypto_sign_ed25519_pk_to_curve25519(shared, q) == 0) {
+        int mine_first = memcmp(mine->pub, their_pub, ID_SIGN_PUB_LEN) < 0;
+        crypto_generichash_state st;
+        store_be64(d, day);
+        crypto_generichash_init(&st, shared, sizeof shared, CONTACT_SECRET_LEN);
+        crypto_generichash_update(&st, (const uint8_t *)CONTACT_LABEL, sizeof CONTACT_LABEL - 1);
+        crypto_generichash_update(&st, mine_first ? mine->pub : their_pub, ID_SIGN_PUB_LEN);
+        crypto_generichash_update(&st, mine_first ? their_pub : mine->pub, ID_SIGN_PUB_LEN);
+        crypto_generichash_update(&st, d, sizeof d);
+        crypto_generichash_final(&st, out, CONTACT_SECRET_LEN);
+        sodium_memzero(&st, sizeof st);
+        rc = 0;
+    }
+    sodium_memzero(s, sizeof s);
+    sodium_memzero(q, sizeof q);
+    sodium_memzero(shared, sizeof shared);
+    return rc;
+}

@@ -67,6 +67,11 @@
   room...** asks for an id as before. `:keep forget` lets one go. They're kept in the sealed settings
   file, which is now padded to a multiple of 4 KB, so neither a file of their own nor its size says
   how many there are. The decoy keeps none.
+- Calls. Once two people have verified each other's signing keys, `:call NICK` opens a room only
+  their two keys can work out, from X25519 between them and the day (UTC), and the other opens the
+  same one with `:call`, with nothing to swap. Nobody compares codes there, nothing goes to anyone but
+  the verified key, and a call nobody else is in moves to the next day's room at midnight. It shows
+  as `@NICK`. Both need a signing identity, AGE or PGP.
 
 ### Fixed
 - The help for **Start chat's own tor** said its tor takes a cookie login. It never has: its

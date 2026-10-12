@@ -2678,6 +2678,18 @@ static void say_nobody_moves(chat_t *c, const chat_move_plan_t *plan) {
 
 _Static_assert(BYTEWORDS_LEN(MOVE_PASSWORD_BYTES) <= MAX_PASSWORD + 1, "a new room's password fits");
 
+int chat_contact_room(const identity_keypair_t *mine, const uint8_t their_pub[ID_SIGN_PUB_LEN], uint64_t day,
+                      char id[SESSION_ID_LEN + 1], char password[CONTACT_PASSWORD_LEN + 1]) {
+    uint8_t k[CONTACT_SECRET_LEN];
+    if (contact_secret(mine, their_pub, day, k) != 0) return -1;
+    session_id_from(load_be64(k), id, SESSION_ID_LEN);
+    hex_encode(k + CONTACT_SECRET_LEN - CONTACT_PASSWORD_LEN / 2, CONTACT_PASSWORD_LEN / 2, password);
+    crypto_wipe(k, sizeof k);
+    return 0;
+}
+
+uint64_t chat_contact_day(void) { return (uint64_t)time(NULL) / DAY_SECONDS; }
+
 int chat_move_begin(chat_t *c, chat_move_to_t *to) {
     chat_move_plan_t plan;
     chat_move_plan(c, &plan);

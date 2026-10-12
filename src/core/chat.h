@@ -770,6 +770,14 @@ void chat_set_history(chat_t *c, int on);
 #define CHAT_HISTORY_ID_LEN 16
 void chat_history_id(const chat_t *c, uint8_t out[CHAT_HISTORY_ID_LEN]);
 
+// A call (:call): the room only this identity and a verified key can work out, for a day (UTC days
+// since 1970, chat_contact_day), as its id and password. 0, or -1 if that key can't make one.
+#define CONTACT_PASSWORD_LEN 64
+#define DAY_SECONDS 86400
+int chat_contact_room(const identity_keypair_t *mine, const uint8_t their_pub[ID_SIGN_PUB_LEN], uint64_t day,
+                      char id[SESSION_ID_LEN + 1], char password[CONTACT_PASSWORD_LEN + 1]);
+uint64_t chat_contact_day(void);
+
 // :move. Who it would take along: peers whose code was compared, whose builds can move.
 void chat_move_plan(chat_t *c, chat_move_plan_t *plan);
 // The one moving the room: a new id and password into to. 0, or -1 after saying why (nobody can come).

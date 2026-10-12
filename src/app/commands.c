@@ -368,6 +368,7 @@ static const command_t APP_COMMANDS[] = {
     { "new",     NULL,                  NULL,     "create a session (Ctrl+N)",                       app_new },
     { "join",    NULL,                  NULL,     "join a session by id, or one you kept (Ctrl+J)",  app_join },
     { "keep",    NULL,      "[LABEL | forget]", "keep this room in the open save, to join it again from Ctrl+J; forget lets it go", app_keep },
+    { "call",    NULL,                  "NICK",   "open the room only you and a verified key can work out; they :call you too", app_call },
     { "quit",    "q exit close bd bw",  NULL,     "leave this session; quits if none are open",       app_quit },
     { "quitall", "qa qall",             NULL,     "leave every session and quit (Ctrl+C)",           app_quitall },
     { "lock",    NULL,                  NULL,     "lock the screen until the save's passphrase, or a PIN, unlocks it", app_lock },
@@ -587,7 +588,7 @@ static const command_t *find_command(const char *word) {
 }
 
 // What commands' arguments can be, in order, for the menu over the COMMAND line.
-enum { A_NICK = 1, A_WORD, A_FILE, A_PATH, A_FOLDER, A_SAVE, A_TRUSTED, A_KIND = 0xf };
+enum { A_NICK = 1, A_WORD, A_FILE, A_PATH, A_FOLDER, A_SAVE, A_TRUSTED, A_CONTACT, A_KIND = 0xf };
 
 #define A_TYPED 0x10  // Enter fills it in only once some of it is typed
 
@@ -608,6 +609,7 @@ static const struct { const char *cmd; int args[4]; } COMMAND_ARGS[] = {
     { "install",   { A_SAVE | A_TYPED } },
     { "uninstall", { A_SAVE | A_TYPED } },
     { "keep",      { A_WORD | A_TYPED } },
+    { "call",      { A_CONTACT } },
 };
 
 static const struct { const char *cmd, *word, *help; } ARG_WORDS[] = {
@@ -766,7 +768,8 @@ static int arg_saves(arg_menu_t *m, const char *rest) {
 }
 
 // The nicks of the verified keys, each once, then "all".
-static int arg_trusted(arg_menu_t *m, const char *rest) {
+// all: "all" is listed after them, for :verified forget.
+static int arg_trusted(arg_menu_t *m, const char *rest, int all) {
     int n = trust_count();
     for (int i = 0; i < n; i++) {
         const char *nick = trust_at(i)->nick;
@@ -781,7 +784,8 @@ static int arg_trusted(arg_menu_t *m, const char *rest) {
         snprintf(m->out->help, sizeof m->out->help, "%d verified key%s", keys, keys == 1 ? "" : "s");
         return 1;
     }
-    if (n == 0 || strncmp("all", rest, strlen(rest)) != 0 || !arg_item(m, rest, "all", "all", "verified")) return 0;
+    if (!all || n == 0 || strncmp("all", rest, strlen(rest)) != 0 || !arg_item(m, rest, "all", "all", "verified"))
+        return 0;
     copy_str(m->out->help, "every verified key", sizeof m->out->help);
     return 1;
 }
@@ -820,7 +824,8 @@ static int arg_suggest(arg_menu_t *m, const int *args, const char *rest) {
         case A_FILE: found = arg_files(m, rest); break;
         case A_PATH: case A_FOLDER: found = arg_paths(m, rest, k == A_FOLDER); break;
         case A_SAVE: found = arg_saves(m, rest); break;
-        case A_TRUSTED: found = arg_trusted(m, rest); break;
+        case A_TRUSTED: found = arg_trusted(m, rest, 1); break;
+        case A_CONTACT: found = arg_trusted(m, rest, 0); break;
     }
     if (found) {
         m->out->no_default = (a & A_PICK) || ((a & (A_TYPED | A_SKIP)) && !*rest);

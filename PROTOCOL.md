@@ -47,6 +47,25 @@ Everything else the room shares comes from the master key:
 Every member has all of these keys. They keep outsiders out, but they can't authenticate one
 member to another.
 
+### 1.1 A call's room
+
+`:call` opens a room whose id and password only the holders of two signing keys (Ed25519: an AGE
+or a PGP identity) can work out. `s` is your signing scalar: for a key from a seed, the first half
+of SHA-512 of the seed, clamped (`crypto_sign_ed25519_sk_to_curve25519`); for an AGE key, its
+X25519 secret, clamped and reduced mod L. `P` is the other key as an Edwards point, and `lo` and
+`hi` are the two public keys, lower first.
+
+```
+shared   = the Montgomery u of [s]P                                  32 bytes: X25519 between the keys
+k        = BLAKE2b keyed with shared, 64-byte output, over "chat-contact-v1" ‖ lo ‖ hi ‖ BE64(day)
+id       = 10 of "23456789ABCDEFGHJKMNPQRSTVWXYZ": with n = BE64(k[0:8]), each is n mod 30, then n = n / 30
+password = hex(k[32:64])
+```
+
+`day` is the number of whole days since 1970-01-01 00:00 UTC. From there it's an ordinary room
+(§1), and nothing on the wire says it's a call. A call nobody else is in moves to the new day's
+room as the day changes.
+
 ## 2. A member's own keys
 
 Each time chat joins a session, it makes these:

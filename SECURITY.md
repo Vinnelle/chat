@@ -71,6 +71,10 @@ session id and password, whether they were invited or the password leaked.
   who wrote it, and chat shows it that way.
 - **History is the other side's choice.** A peer that says it keeps a history is shown as keeping
   one, but chat can't check what anyone's copy of chat does, or whether they take screenshots.
+- **A stolen signing key finds your calls.** Someone who gets your signing key, or a contact's, can
+  work out the room of every call between the two of you (`:call`), past and future, and wait there
+  posing as the key's owner. They can't read what was said before: the sessions' keys are
+  ephemeral.
 - **A kept room is as safe as the save.** Anyone who can open the save can join the rooms it keeps
   (`:keep`), with their ids and passwords. The save's passphrase then guards every one of them.
 - **A bridge sees you.** Whoever runs a bridge sees your IP address and that you use Tor, as an

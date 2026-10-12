@@ -64,6 +64,7 @@ static const char *USAGE =
     "  :new :join :quit (:q) :quitall (:qa) :copyid :update :peers :verify NICK [ok|no] :net\n"
     "  :verified [forget NICK] :port [N] :set [NAME [VALUE]] :install :uninstall :help\n"
     "  :send [PATH] :files :download [N] :show N :hide N :cancel N :keep [LABEL|forget]\n"
+    "  :call NICK (a room only you and a verified key can work out)\n"
     "  (:help opens a page of keys and commands)\n"
     "\n"
     "Anyone with a session's id and password can sit between two other members. When a peer\n"
@@ -782,6 +783,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
         for (int i = 0; i < MAX_SESSIONS; i++)
             if (g_app.used[i]) chat_tick(&g_app.sessions[i].engine, now_seconds());
         move_tick(now_seconds());
+        contacts_tick();
         lock_tick();
         history_sync(now);
 
