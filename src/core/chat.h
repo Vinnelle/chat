@@ -342,7 +342,7 @@ typedef struct {
     // Its k says it reads a message up to MAX_TEXT long ("l"), not just OLD_MAX_TEXT.
     int long_text;
     // Its k says it can move to a new room with us ("m"), and reads direct messages ("p").
-    int can_move, can_pm;
+    int can_move, can_pm, can_reply;
     // :move, in the room being left. move_pub: the key it showed us for the move ("mv" or "mk"), and
     // whether the room we moved to has it (move_passed). move_with: it moves with us, so this room
     // waits for its key before closing. key_sent: it has ours.
@@ -467,6 +467,19 @@ typedef struct {
     double next_retry;
     unsigned own;   // the number of our message it carries (chat_t's own_seq), or 0
 } pending_msg_t;
+
+// The room's recent messages, ours too, for :reply to pick one and a reply to quote: its id, who
+// sent it, and the start of it. Direct messages aren't kept, so a reply in the room can't quote one.
+#define RECENT_MAX 64
+#define QUOTE_MAX 80
+typedef struct {
+    int used;
+    char mid[MID_HEX + 1];
+    uint8_t origin[ID_LEN];
+    char nick[MAX_NICK + 1];
+    char quote[QUOTE_MAX + 4];
+    double at;
+} recent_msg_t;
 
 // file: the number of the file a line offers (an image can be shown under it), else 0.
 typedef void (*chat_print_fn)(void *ui, const char *hhmm, const char *text, const uint8_t *rgb,
@@ -617,6 +630,10 @@ typedef struct chat_s {
     addr_t static_peers[MAX_STATIC_PEERS];
     int n_static;
     pending_msg_t pending[MAX_PENDING_MSGS];
+    recent_msg_t recent[RECENT_MAX];
+    int recent_next;
+    // While a reply's line is printed: how much of its text, from the start, is the quote.
+    int line_quote;
     sendq_t sendq[SENDQ_MAX];
     roomq_t roomq[ROOMQ_MAX];
     uint32_t queue_seq;

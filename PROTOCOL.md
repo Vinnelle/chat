@@ -325,7 +325,8 @@ Records go in session frames. A `k` and a `v` come first after each handshake.
 | `k` | NICK COLOUR FLAGS IDTYPE IDPUB SIG | Who the sender is (see below). |
 | `v` | VERSION PROOF LIST LISTSIG | Which build the sender runs (see below). |
 | `m` | MID ORIGIN NICK TEXT | A message (see below). |
-| `a` | MID | Acknowledges an `m`, `pm`, `fo`, `mv` or `mk`. |
+| `mr` | MID REPLYTO ORIGIN NICK TEXT | A reply to the message REPLYTO (see below). It's acked, retried and passed on like `m`. |
+| `a` | MID | Acknowledges an `m`, `mr`, `pm`, `fo`, `mv` or `mk`. |
 | `n` | NICK | A new nick. |
 | `c` | COLOUR | A new colour. |
 | `rk` | PUB | The sender's next X25519 key (§6). |
@@ -352,7 +353,8 @@ Records go in session frames. A `k` and a `v` come first after each handshake.
   - `b`: reads several records in one frame;
   - `l`: reads messages longer than 250 bytes;
   - `m`: can move to a new room (`mv`, `mk` and `mp`);
-  - `p`: reads direct messages (`pm`).
+  - `p`: reads direct messages (`pm`);
+  - `q`: reads replies (`mr`).
 - IDTYPE is the signing identity: `0` none, `1` native, `2` AGE, `3` PGP. With `0`, IDPUB and
   SIG are empty.
 - IDPUB is an Ed25519 public key (64 hex digits).
@@ -394,6 +396,13 @@ message that was passed on are whatever the peer that passed it on says.
 A peer without `l` gets text longer than 250 bytes as up to eight parts. Each part is an `m` of
 its own, with the MID `hex(SHA-256(MID ‖ "/" ‖ i)[:4])`, where *i* is the part's number in
 decimal.
+
+**`mr`** is a reply (`:reply NICK TEXT`, to NICK's last message): an `m` with REPLYTO, the MID of
+the message it answers, after its own. TEXT is at most 870 bytes, so the record fits a frame like an
+`m` at its longest. The receiver shows the start of the message REPLYTO names, if it has it, in front
+of TEXT. A peer whose `k` has no `q` gets an `m` with the same MID instead, its TEXT starting with
+`↪ NICK: ` and the start of the message answered, then ` · `, so it reads the same. That's also how
+an `mr` is passed on to a peer without `q`.
 
 **`pm`** is a direct message (`:msg NICK TEXT`): MID and TEXT as in `m`, with no ORIGIN or NICK,
 since it only ever comes from the peer it's from. It goes only to a connected peer whose `k` has `p`
@@ -471,5 +480,6 @@ These are sent outside the slots:
   never sent `mv`, and would ignore it.
 - Builds without `p` would drop a `pm` without a word, so they're never sent one: chat says the
   peer's build is too old instead.
+- Builds without `q` would drop an `mr`, so they get an `m` with the quote in its text instead.
 - Builds before 0.5.0 called the first character of FLAGS the logging flag, and show it as
   `[logging chat locally]`.

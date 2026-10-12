@@ -61,6 +61,7 @@ void tui_scrollback_push(tui_scrollback_t *sb, const char *hhmm, const char *tex
     l->own = 0;
     l->delivery = TUI_SENDING;
     l->mark[0] = '\0';
+    l->quote = 0;
     sb->head = (sb->head + 1) % TUI_SCROLLBACK;
     if (sb->count < TUI_SCROLLBACK) sb->count++;
     sb->total++;
@@ -76,6 +77,10 @@ void tui_scrollback_mark_file(tui_scrollback_t *sb, int file) {
 
 void tui_scrollback_mark_own(tui_scrollback_t *sb, unsigned own) {
     if (sb->count > 0) sb->lines[(sb->head - 1 + TUI_SCROLLBACK) % TUI_SCROLLBACK].own = own;
+}
+
+void tui_scrollback_mark_quote(tui_scrollback_t *sb, int quote) {
+    if (sb->count > 0) sb->lines[(sb->head - 1 + TUI_SCROLLBACK) % TUI_SCROLLBACK].quote = quote;
 }
 
 int tui_scrollback_delivery(tui_scrollback_t *sb, unsigned own, const char *missed) {
@@ -1369,9 +1374,17 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
             } else {
                 pspace(p, rest_pre);
             }
-            size_t from = off[c], to = off[c] + len[c], cut = to < body_len ? to : from > body_len ? from : body_len;
+            // A reply's quote is faint, then the text, then your message's mark.
+            size_t from = off[c], to = off[c] + len[c];
+            size_t qend = chat && l->quote > 0 && (size_t)l->quote <= body_len ? (size_t)l->quote : 0;
+            size_t q = qend < from ? from : qend > to ? to : qend;
+            size_t cut = body_len < q ? q : body_len > to ? to : body_len;
             char piece[sizeof text];
-            copy_slice(piece, sizeof piece, text + from, cut - from);
+            if (q > from) {
+                copy_slice(piece, sizeof piece, text + from, q - from);
+                ptext(p, S_FAINT, piece);
+            }
+            copy_slice(piece, sizeof piece, text + q, cut - q);
             if (body_rgb) {
                 sty_rgb(p->w, l->rgb, 0, 0);
                 p->used += wapp_trunc(p->w, piece, p->room - p->used);

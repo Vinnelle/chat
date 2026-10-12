@@ -286,6 +286,7 @@ void session_print(void *ui, const char *hhmm, const char *text, const uint8_t *
         tui_scrollback_push(&s->sb, hhmm, text, rgb, (flags & LINE_MENTION) != 0, color_len);
         if (file) tui_scrollback_mark_file(&s->sb, file);
         if (flags & LINE_OWN) tui_scrollback_mark_own(&s->sb, s->engine.own_seq);
+        if (s->engine.line_quote) tui_scrollback_mark_quote(&s->sb, s->engine.line_quote);
         if (s != g_app.selected) {
             s->unread++;
             if (flags & LINE_MENTION) s->mentioned = 1;

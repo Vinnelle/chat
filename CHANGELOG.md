@@ -76,6 +76,10 @@
   bob` in yellow for a peer that still hadn't after the last try, or left first. The acks were
   always sent, so nothing new goes on the network, and there are no read receipts. Direct messages
   get it too. `--simple` prints `* not reached: bob`.
+- Replies. `:reply NICK TEXT` (or `:re`) answers NICK's last message in the room, quoting the start of
+  it after a `↪`, faint, and a reply to you counts as a mention. It's an `mr` record with the id of
+  the message it answers, passed on like any message, and a peer whose build doesn't read it (the
+  `q` letter) gets the quote in the text instead. Direct messages are never quoted.
 
 ### Fixed
 - The help for **Start chat's own tor** said its tor takes a cookie login. It never has: its

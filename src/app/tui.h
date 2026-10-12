@@ -26,6 +26,7 @@ typedef struct {
     unsigned own;      // the engine's number for your message on this line, or 0
     int delivery;      // TUI_SENDING, TUI_REACHED or TUI_MISSED, for own
     char mark[TUI_MARK_MAX];   // with TUI_MISSED: "not reached: bob, carol"
+    int quote;         // a reply: how much of its text, from the start, quotes what it answers
 } tui_line_t;
 
 typedef struct {
@@ -44,6 +45,7 @@ void tui_scrollback_mark_file(tui_scrollback_t *sb, int file);
 // Marks the newest line as your message own, then what became of it: missed by the peer named, or
 // with NULL, settled. 1 if its line is still there.
 void tui_scrollback_mark_own(tui_scrollback_t *sb, unsigned own);
+void tui_scrollback_mark_quote(tui_scrollback_t *sb, int quote);
 int tui_scrollback_delivery(tui_scrollback_t *sb, unsigned own, const char *missed);
 
 // A picture shown under the line that offers it: w by h pixels, rgb, drawn two pixels per row.

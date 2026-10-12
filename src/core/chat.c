@@ -52,6 +52,7 @@ static void ui_chat(chat_t *c, const uint8_t rgb[3], int mention, const char *na
 static void ui_chat_file(chat_t *c, const uint8_t rgb[3], int mention, const char *name, const char *text, int file);
 static void ui_direct(chat_t *c, const uint8_t rgb[3], int to_me, const char *name, const char *text);
 static void ui_own(chat_t *c, const char *name, const char *text);
+static void send_text(chat_t *c, const char *text_in, const recent_msg_t *reply, double now);
 
 // Who a direct message is between, in brackets after the sender's name, since no nick can hold '('.
 #define DM_ARROW "\xe2\x86\x92"
@@ -270,6 +271,73 @@ static void seen_add(chat_t *c, const char *mid) {
     c->seen_mids[c->seen_head] = mid_key(mid);
     c->seen_head = (c->seen_head + 1) % SEEN_MIDS;
     if (c->seen_count < SEEN_MIDS) c->seen_count++;
+}
+
+// ---- recent messages, for replies ----
+
+#define REPLY_ARROW "\xe2\x86\xaa"
+#define REPLY_DOT "\xc2\xb7"
+// What a reply shows in front of its text: "↪ NICK: QUOTE · ".
+#define REPLY_PREFIX_MAX (MAX_NICK + QUOTE_MAX + 32)
+// "mr" has its reply's id on top of what "m" has, and has to fit a frame all the same.
+#define MAX_REPLY_TEXT (MAX_TEXT - MID_HEX - 2)
+
+static void recent_add(chat_t *c, const char *mid, const uint8_t origin[ID_LEN], const char *nick, const char *text,
+                       double now) {
+    recent_msg_t *r = &c->recent[c->recent_next];
+    c->recent_next = (c->recent_next + 1) % RECENT_MAX;
+    crypto_wipe(r, sizeof *r);
+    r->used = 1;
+    copy_str(r->mid, mid, sizeof r->mid);
+    memcpy(r->origin, origin, ID_LEN);
+    copy_str(r->nick, nick, sizeof r->nick);
+    size_t n = strlen(text);
+    int cut = n > QUOTE_MAX;
+    if (cut) {
+        n = QUOTE_MAX;
+        while (n > 0 && utf8_is_cont((unsigned char)text[n])) n--;
+    }
+    memcpy(r->quote, text, n);
+    if (cut) { memcpy(r->quote + n, "\xe2\x80\xa6", 3); n += 3; }
+    r->quote[n] = '\0';
+    r->at = now;
+}
+
+static const recent_msg_t *recent_find(const chat_t *c, const char *mid) {
+    for (int i = 0; i < RECENT_MAX; i++)
+        if (c->recent[i].used && strcmp(c->recent[i].mid, mid) == 0) return &c->recent[i];
+    return NULL;
+}
+
+// The newest message from origin, or with origin NULL, from whoever's nick starts arg: the longest
+// such nick, up to a space or the end, since nicks can hold spaces. *rest is what follows it.
+static const recent_msg_t *recent_from(const chat_t *c, const uint8_t *origin, const char *arg, const char **rest) {
+    const recent_msg_t *best = NULL;
+    size_t best_len = 0;
+    for (int k = 1; k <= RECENT_MAX; k++) {
+        const recent_msg_t *r = &c->recent[(c->recent_next - k + RECENT_MAX) % RECENT_MAX];
+        if (!r->used || memcmp(r->origin, c->my_id, ID_LEN) == 0) continue;
+        if (origin) {
+            if (memcmp(r->origin, origin, ID_LEN) == 0) return r;
+            continue;
+        }
+        size_t n = strlen(r->nick);
+        if (n <= best_len || strncasecmp(arg, r->nick, n) != 0 || (arg[n] && arg[n] != ' ')) continue;
+        best = r;
+        best_len = n;
+    }
+    if (best) {
+        *rest = arg + best_len;
+        while (**rest == ' ') (*rest)++;
+    }
+    return best;
+}
+
+// Who said what a reply answers, and the start of it.
+static void reply_prefix(const chat_t *c, const char *reply_mid, char *out, size_t cap) {
+    const recent_msg_t *r = recent_find(c, reply_mid);
+    if (r) snprintf(out, cap, REPLY_ARROW " %s: %s " REPLY_DOT " ", r->nick, r->quote);
+    else snprintf(out, cap, REPLY_ARROW " a message you don't have " REPLY_DOT " ");
 }
 
 static double jitter(double spread) {
@@ -707,8 +775,9 @@ static void build_k_message(chat_t *c, peer_t *p, char *out, size_t out_cap) {
         hex_encode(sig, ID_SIGN_LEN, sighex);
     }
     // After the logging flag, features this build has that older ones don't: "r" announces rekeys,
-    // "b" reads several records per frame, "l" reads messages up to MAX_TEXT, "m" moves rooms.
-    snprintf(out, out_cap, "k\t%s\t%s\t%drblmp\t%d\t%s\t%s", c->nick, colorhex, c->persist, idtype, idpubhex, sighex);
+    // "b" reads several records per frame, "l" reads messages up to MAX_TEXT, "m" moves rooms, "p"
+    // reads direct messages, "q" reads replies.
+    snprintf(out, out_cap, "k\t%s\t%s\t%drblmpq\t%d\t%s\t%s", c->nick, colorhex, c->persist, idtype, idpubhex, sighex);
 }
 
 // "v": our version, our executable's hash, and our release's signed list of binaries (empty
@@ -846,6 +915,7 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
         slot->next_rehello = carry.next_rehello;
         slot->can_move = carry.can_move;
         slot->can_pm = carry.can_pm;
+        slot->can_reply = carry.can_reply;
         memcpy(slot->move_pub, carry.move_pub, ID_SIGN_PUB_LEN);
         slot->move_pub_set = carry.move_pub_set;
         slot->move_passed = carry.move_passed;
@@ -1160,6 +1230,22 @@ static int send_message(chat_t *c, peer_t *q, const char *mid, const char *idhex
     return sent;
 }
 
+// A reply to q: "mr" to a peer that reads it, otherwise an "m" with the quote in front.
+static int send_reply(chat_t *c, peer_t *q, const char *mid, const char *reply_mid, const char *idhex,
+                      const char *nick, const char *text, const char *prefix, unsigned own, double now) {
+    if (!q->can_reply) {
+        char joined[REPLY_PREFIX_MAX + MAX_TEXT + 1], line[MAX_TEXT + 1];
+        snprintf(joined, sizeof joined, "%s%s", prefix, text);
+        clean_text(joined, line, MAX_TEXT);
+        return send_message(c, q, mid, idhex, nick, line, own, now);
+    }
+    char record[MSG_LINE_LEN];
+    snprintf(record, sizeof record, "mr\t%s\t%s\t%s\t%s\t%s", mid, reply_mid, idhex, nick, text);
+    if (send_peer(c, q, record) != 0) return 0;
+    if (own) track_message(c, q, mid, record, own, now);
+    return 1;
+}
+
 // Checks p against the verified keys again, and offers it our files if that makes its code compared.
 static int recheck_trust(chat_t *c, peer_t *p) {
     int was_ok = p->code_ok, warned = check_trust(c, p);
@@ -1393,7 +1479,7 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         if (parse_color(f[2], rgb) == 0) memcpy(p->color, rgb, 3);
         // f[3] is the history flag, then capability letters older builds ignore: "r" = sends rk,
         // "b" = reads records joined by newlines, "l" = reads messages up to MAX_TEXT, "m" = moves rooms,
-        // "p" = reads direct messages.
+        // "p" = reads direct messages, "q" = reads replies ("mr").
         int had_history = p->persists;
         p->persists = (f[3][0] == '1');
         if (p->announced && had_history != p->persists) {
@@ -1406,6 +1492,7 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         p->long_text = strchr(f[3], 'l') != NULL;
         p->can_move = strchr(f[3], 'm') != NULL;
         p->can_pm = strchr(f[3], 'p') != NULL;
+        p->can_reply = strchr(f[3], 'q') != NULL;
         int idtype = atoi(f[4]);
         size_t idpub_len = strlen(f[5]), sig_len = strlen(f[6]);
         if (idtype > IDENT_NONE && idtype <= IDENT_PGP && idpub_len == ID_SIGN_PUB_LEN * 2 && sig_len == ID_SIGN_LEN * 2) {
@@ -1478,10 +1565,15 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         if (!version_ok(f[1]) || strlen(f[2]) != BUILD_HASH_LEN * 2
             || hex_decode(f[2], BUILD_HASH_LEN * 2, proof) != 0) return;
         check_build(c, p, f[1], proof, n == 5 ? f[3] : NULL, n == 5 ? f[4] : NULL);
-    } else if (n == 5 && strcmp(f[0], "m") == 0) {
-        // Only p itself is authenticated here. f[2] and f[3] (origin id, nick) are whatever p says.
-        uint8_t mid_raw[MID_LEN], origin[ID_LEN];
-        if (hex_decode(f[1], MID_HEX, mid_raw) != 0 || hex_decode(f[2], ID_LEN * 2, origin) != 0) return;
+    } else if ((n == 5 && strcmp(f[0], "m") == 0) || (n == 6 && strcmp(f[0], "mr") == 0)) {
+        // "mr" is a reply: the id of the message it answers comes after its own. Only p itself is
+        // authenticated here. The origin id and nick are whatever p says.
+        uint8_t mid_raw[MID_LEN], origin[ID_LEN], reply_raw[MID_LEN];
+        const char *reply = n == 6 ? f[2] : NULL;
+        if (reply) { f[2] = f[3]; f[3] = f[4]; f[4] = f[5]; }
+        if (hex_decode(f[1], MID_HEX, mid_raw) != 0 || hex_decode(f[2], ID_LEN * 2, origin) != 0
+            || (reply && (strlen(reply) != MID_HEX || hex_decode(reply, MID_HEX, reply_raw) != 0)))
+            return;
         char ack[16]; snprintf(ack, sizeof ack, "a\t%s", f[1]);
         send_peer(c, p, ack);
         int direct = memcmp(origin, p->id, ID_LEN) == 0;
@@ -1500,11 +1592,15 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
                 part_mid(f[1], i, pmid);
                 seen_add(c, pmid);
             }
-        char nick[MAX_NICK + 1], text[MAX_TEXT + 1], via[CHAT_NAME_LEN];
+        char nick[MAX_NICK + 1], text[MAX_TEXT + 1], via[CHAT_NAME_LEN], prefix[REPLY_PREFIX_MAX] = "";
+        char line[REPLY_PREFIX_MAX + MAX_TEXT + 1];
         if (direct) copy_str(nick, p->nick, sizeof nick);
         else chat_clean_nick(f[3], nick);
         clean_text(f[4], text, MAX_TEXT);
-        int mentioned = has_mention(text, c->nick);
+        if (reply) reply_prefix(c, reply, prefix, sizeof prefix);
+        // A reply to us counts as a mention.
+        const recent_msg_t *answered = reply ? recent_find(c, reply) : NULL;
+        int mentioned = has_mention(text, c->nick) || (answered && memcmp(answered->origin, c->my_id, ID_LEN) == 0);
         char shown[MAX_NICK + CHAT_NAME_LEN + 48];
         chat_peer_name(c, p, via);
         // A relayed nick is only the relayer's claim, so it always includes the origin's id. Nicks can't
@@ -1512,7 +1608,11 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         const char *mark = code_mark(c, p);
         if (direct) snprintf(shown, sizeof shown, "%s%s", via, mark);
         else snprintf(shown, sizeof shown, "%s#%.*s (via %s%s)", nick, SHORT_ID_HEX, f[2], via, mark);
-        ui_chat(c, direct ? p->color : NULL, mentioned, shown, text);
+        snprintf(line, sizeof line, "%s%s", prefix, text);
+        c->line_quote = (int)strlen(prefix);
+        ui_chat(c, direct ? p->color : NULL, mentioned, shown, line);
+        c->line_quote = 0;
+        recent_add(c, f[1], origin, nick, text, now);
         // Only as much as the preview setting allows, since desktops keep what a notification shows.
         if (c->notify && (c->notify_mode == NOTIFY_ALL || (c->notify_mode == NOTIFY_MENTIONS && mentioned)))
             c->notify(c->ui, c->notify_preview >= PREVIEW_NICK ? shown : NULL,
@@ -1522,7 +1622,8 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
             if (!q->used || !q->ok || q == p || memcmp(q->id, origin, ID_LEN) == 0) continue;
             // Only passed on to peers our own messages would go to.
             if (!peer_trusted(c, q)) continue;
-            send_message(c, q, f[1], f[2], nick, text, 0, now);
+            if (reply) send_reply(c, q, f[1], reply, f[2], nick, text, prefix, 0, now);
+            else send_message(c, q, f[1], f[2], nick, text, 0, now);
         }
     } else if (n == 3 && strcmp(f[0], "pm") == 0) {
         // Meant for us alone, so never passed on. Only p itself sends one.
@@ -2875,6 +2976,34 @@ static cmd_result_t cmd_msg(void *ctx, const char *arg) {
     return CMD_OK;
 }
 
+// ":reply NICK TEXT" answers NICK's last message in the room, quoting the start of it.
+static cmd_result_t cmd_reply(void *ctx, const char *arg) {
+    chat_t *c = ctx;
+    const char *rest = "";
+    int ambiguous;
+    peer_t *p = peer_at_start(c, arg, &rest, &ambiguous);
+    const recent_msg_t *r = p ? recent_from(c, p->id, NULL, &rest) : NULL;
+    if (!p && ambiguous) {
+        ui_print(c, "* more than one peer has that nick - add the #id :peers shows (:reply NICK#1a2b... TEXT)");
+        return CMD_OK;
+    }
+    if (!p) r = recent_from(c, NULL, arg, &rest);
+    if (!r) {
+        size_t w = strcspn(arg, " ");
+        if (!arg[0]) ui_print(c, "* usage: :reply NICK TEXT answers NICK's last message, quoting it");
+        else ui_print(c, "* nothing from %.*s to reply to yet", (int)w, arg);
+        return CMD_OK;
+    }
+    if (!rest[0]) {
+        ui_print(c, "* usage: :reply %s TEXT answers their last message, quoting it", r->nick);
+        return CMD_OK;
+    }
+    recent_msg_t answered = *r;
+    send_text(c, rest, &answered, now_seconds());
+    crypto_wipe(&answered, sizeof answered);
+    return CMD_OK;
+}
+
 // --simple's :move: who would come, or the request waiting. "yes" goes, "no" stays. The full-screen
 // UI asks in a box instead.
 static cmd_result_t cmd_move(void *ctx, const char *arg) {
@@ -3953,6 +4082,7 @@ const command_t CHAT_COMMANDS[] = {
     { "verify",     NULL,     "NICK [ok|no]",    "compare a peer's verify code; ok once it matches", cmd_verify },
     { "verified",   NULL,     "[forget NICK]",   "list the signing keys you verified, or remove one", cmd_verified },
     { "msg",        "dm",     "NICK TEXT",       "a direct message to one peer you're connected to; nobody else gets it", cmd_msg },
+    { "reply",      "re",     "NICK TEXT",       "answer NICK's last message, quoting the start of it", cmd_reply },
     { "move",       NULL,     "[yes|no]",        "move to a new room with the peers whose codes you compared; yes goes, no stays", cmd_move },
     { "net",        NULL,     NULL,              "network report and diagnosis",                    cmd_net },
     { "port",       NULL,     "[N]",             "show or change this session's udp port",          cmd_port },
@@ -3981,19 +4111,29 @@ cmd_result_t chat_run_command(chat_t *c, const char *line_in) {
 // The peers a message is held back from that are named.
 #define HELD_NAMES 3
 
-void chat_send_text(chat_t *c, const char *text_in, double now) {
-    char line[MAX_TEXT + 1];
-    clean_text(text_in, line, MAX_TEXT);
+// A message from us, or with reply, an answer to that one.
+static void send_text(chat_t *c, const char *text_in, const recent_msg_t *reply, double now) {
+    char line[MAX_TEXT + 1], prefix[REPLY_PREFIX_MAX] = "", shown_text[REPLY_PREFIX_MAX + MAX_TEXT + 1];
+    clean_text(text_in, line, reply ? MAX_REPLY_TEXT : MAX_TEXT);
     if (!line[0]) return;
     if (!chat_ready(c)) {
         ui_print(c, "* not connected yet - message not sent, chat opens once someone answers");
         return;
     }
-    char mid[MID_HEX + 1]; gen_mid(mid);
+    char mid[MID_HEX + 1], reply_mid[MID_HEX + 1] = "";
+    gen_mid(mid);
     seen_add(c, mid);
+    if (reply) {
+        copy_str(reply_mid, reply->mid, sizeof reply_mid);
+        reply_prefix(c, reply_mid, prefix, sizeof prefix);
+    }
     char who[MAX_NICK + 8]; snprintf(who, sizeof who, "%s (you)", c->nick);
     unsigned own = ++c->own_seq;
-    ui_own(c, who, line);
+    snprintf(shown_text, sizeof shown_text, "%s%s", prefix, line);
+    c->line_quote = (int)strlen(prefix);
+    ui_own(c, who, shown_text);
+    c->line_quote = 0;
+    recent_add(c, mid, c->my_id, c->nick, line, now);
     int sent = 0, held = 0;
     char held_names[HELD_NAMES * CHAT_NAME_LEN] = "";
     for (int i = 0; i < c->peer_hi; i++) {
@@ -4007,7 +4147,8 @@ void chat_send_text(chat_t *c, const char *text_in, double now) {
             held++;
             continue;
         }
-        sent += send_message(c, p, mid, c->my_idhex, c->nick, line, own, now);
+        if (reply_mid[0]) sent += send_reply(c, p, mid, reply_mid, c->my_idhex, c->nick, line, prefix, own, now);
+        else sent += send_message(c, p, mid, c->my_idhex, c->nick, line, own, now);
     }
     if (sent) own_settled(c, own);
     if (held)
@@ -4015,6 +4156,8 @@ void chat_send_text(chat_t *c, const char *text_in, double now) {
                  held_names, held > HELD_NAMES ? " and others" : "");
     else if (!sent) ui_print(c, "* nobody else is here yet, message not delivered");
 }
+
+void chat_send_text(chat_t *c, const char *text_in, double now) { send_text(c, text_in, NULL, now); }
 
 int chat_submit_line(chat_t *c, const char *line_in, double now) {
     char line[MAX_TEXT + 1];
@@ -4146,8 +4289,9 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
     // swapped. The peers hold their chain keys.
     crypto_lock((uint8_t *)c + SECRETS_OFFSET, SECRETS_LEN);
     crypto_lock(c->peers, sizeof c->peers);
-    // What's queued to send holds messages as typed.
+    // What's queued to send holds messages as typed, and the recent ones what was said.
     crypto_lock(c->sendq, sizeof c->sendq);
+    crypto_lock(c->recent, sizeof c->recent);
     c->print = print;
     c->notify = notify;
     c->ui = ui;
@@ -4245,6 +4389,7 @@ void chat_shutdown(chat_t *c) {
     crypto_unlock((uint8_t *)c + SECRETS_OFFSET, SECRETS_LEN);
     crypto_unlock(c->peers, sizeof c->peers);
     crypto_unlock(c->sendq, sizeof c->sendq);
+    crypto_unlock(c->recent, sizeof c->recent);
 
     crypto_wipe(c, sizeof *c);
 }

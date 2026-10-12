@@ -1106,6 +1106,7 @@ puts it on the command line.
 | `:set [NAME [VALUE]]` | change a setting (see below); on its own, opens the settings page (`Ctrl+S`) |
 | `:verify NICK [ok\|no]` | show a peer's verify code and identity fingerprint; `ok` once the code matches theirs, `no` if it doesn't |
 | `:verified [forget NICK\|all]` | list the signing keys you verified, with nicks and fingerprints, or remove them |
+| `:reply NICK TEXT` (`:re`) | answer NICK's last message in the room, quoting the start of it (faint, after `↪`) |
 | `:msg NICK TEXT` (`:dm`) | a direct message to one peer you're connected to: nobody else gets it, and it's never passed on (see [Direct messages](#security)) |
 | `:move` | move to a new room with the peers whose verify codes you compared, leaving the rest behind; each is asked first (see [Moving a room](#security)). With a request to move waiting, shows it again |
 | `:peers` | who's online, with verify codes and builds |

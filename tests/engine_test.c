@@ -792,6 +792,28 @@ static void test_direct_message(double *t) {
           "a direct message to a build that can't read one wasn't refused");
 }
 
+// Alice answers bob's last message: both show the start of it quoted in front of her answer. A
+// build that can't read replies gets an "m" with the quote in its text.
+#define QUOTED_BOB "\xe2\x86\xaa bob: what time is it \xc2\xb7 "
+static void test_reply(double *t) {
+    chat_send_text(&B, "what time is it", *t);
+    RUN_UNTIL(t, 10, log_count(&log_a, "what time is it") == 1);
+    chat_run_command(&A, "reply bob at noon");
+    RUN_UNTIL(t, 10, log_count(&log_b, "at noon") == 1);
+    CHECK(log_count(&log_b, QUOTED_BOB "at noon") == 1 && log_count(&log_a, QUOTED_BOB "at noon") == 1,
+          "alice's reply doesn't show bob's message quoted on both sides");
+    peer_t *ab = peer_named(&A, "bob");
+    CHECK(ab && ab->can_reply, "bob's build doesn't say it reads replies");
+    if (!ab) return;
+    ab->can_reply = 0;
+    chat_run_command(&A, "reply bob for an old build");
+    RUN_UNTIL(t, 10, log_count(&log_b, "for an old build") == 1);
+    ab->can_reply = 1;
+    CHECK(log_count(&log_b, QUOTED_BOB "for an old build") == 1,
+          "a build without replies didn't get the quote as text");
+    RUN_FOR(t, 4);
+}
+
 // A peer already connected is no candidate: the keepalive's static peers stop being tried.
 static void test_candidates_settle(double *t) {
     RUN_FOR(t, KEEPALIVE + 4.0);
@@ -2885,7 +2907,7 @@ int main(int argc, char **argv) {
         { "rekey", test_rekey }, { "rekey mid-message", test_message_across_rekey }, { "cookie rate", test_cookie_rate },
         { "udp masked", test_udp_masked },
         { "junk", test_junk }, { "lookalike nick", test_lookalike_nick }, { "delivered", test_delivered },
-        { "third peer", test_third_peer }, { "direct message", test_direct_message },
+        { "third peer", test_third_peer }, { "direct message", test_direct_message }, { "reply", test_reply },
         { "candidates settle", test_candidates_settle }, { "builds", test_builds },
         { "parsers", test_parsers }, { "toml", test_toml }, { "dht keys", test_dht_keys }, { "dht", test_dht }, { "read file", test_read_file },
         { "identity keys", test_identity_keys }, { "call room", test_contact_room },
