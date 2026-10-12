@@ -38,8 +38,6 @@
 #endif
 
 #define MAX_SESSIONS 12
-// A new session's id: this many characters from random_session_id.
-#define SESSION_ID_LEN 10
 #define MAX_PEER_ARGS 16
 
 #define PEER_ARG_LEN 256
@@ -80,6 +78,10 @@ typedef struct {
     size_t hist_len;
     int hist_dirty;
     char hist_save[INSTALL_NAME_MAX + 1];
+    // It moved to a new room (:move), so it's off the screen, and closes once the engine says it's done.
+    int leaving;
+    // The request to move (its seq) put away with Esc, which doesn't come up again until :move.
+    unsigned move_later;
 } session_slot_t;
 
 typedef enum {
@@ -121,7 +123,9 @@ typedef enum {
     MODE_UNLOCK_CODE,
     MODE_SHADOW_PASS,
     MODE_SHADOW_PASS2,
-    MODE_UPDATE
+    MODE_UPDATE,
+    MODE_MOVE,
+    MODE_MOVE_ASK
 } app_mode_t;
 
 // What a security key is being touched for: to register it for the open save or the new one
@@ -251,6 +255,7 @@ typedef struct {
     char save_random[INSTALL_NAME_MAX + 1];
     app_mode_t mode;
     int asking_quit;   // Ctrl+C's QUIT box, over whatever mode is showing
+    double move_shown;   // when a request to move came up by itself, for the keys typed just before
     char pending_session_id[MAX_SESSION_NAME + 1];
     int show_sidebar, show_console, show_chat;
     int dirty;
@@ -425,6 +430,7 @@ void tor_link_line(char *out, size_t cap);
 void app_session_opts(chat_opts_t *o);
 session_slot_t *start_session(const char *session_name, const char *password, int created, uint16_t port,
                               const addr_t *peers, int n_peers);
+session_slot_t *start_moved_session(const chat_move_to_t *to);
 int pgp_key_made_here(void);
 void pgp_public_key(char armor[PGP_ARMOR_MAX], uint8_t fp[PGP_FP_LEN]);
 void show_identity_result(void);
@@ -637,6 +643,7 @@ int on_chat_screen(void);
 tui_session_state_t session_state(const session_slot_t *s);
 tui_view_t current_view(char *sub, size_t cap);
 void chat_input(tui_bar_t *b, const tui_input_t *in);
+void move_tick(double now);
 
 // screen.c
 int add_para(tui_para_t *p, int n, tui_para_kind_t kind, const char *text);

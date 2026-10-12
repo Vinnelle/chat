@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- `:move` moves the room. With no server, nobody can be put out of a room and a leaked password
+  can't be changed. Instead, `:move` takes the peers whose verify codes you compared to a new room,
+  with an id and password chat makes up, and leaves everyone else in the old one. A box first says who
+  would come and who wouldn't, and why. The new room goes only to the peers asked along, over their
+  encrypted sessions, and each of them is asked in a box whether to go: `y` goes and leaves the old
+  room, `n` stays, and `Esc` puts the request away until `:move`. Someone who hasn't compared your
+  code yet is asked once they have. Codes compared in the old room count in the new one, since
+  everyone moving signs its sessions there with a key it showed the others over the old room. The
+  new room's console shows its id and password once, for coming back or inviting someone. Those left
+  behind keep the old room and everything said in it, and aren't told where you went. With
+  `--simple`, `:move yes` and `:move no` answer. Versions before this one can't move, so a move
+  leaves them behind.
+
 ## 0.5.0
 
 ### Security

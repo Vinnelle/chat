@@ -253,6 +253,109 @@ static cmd_result_t app_history(void *ctx, const char *arg) {
     return CMD_OK;
 }
 
+// ---- :move ----
+
+// A request to move that comes up by itself ignores keys for this long, so a word being typed when it
+// appears doesn't answer it.
+#define MOVE_KEY_GUARD 1.0
+
+// :move asks whether to move, in a box that says who comes and who's left behind. With a request to
+// move waiting, it shows that again instead.
+static cmd_result_t app_move(void *ctx, const char *arg) {
+    (void)ctx; (void)arg;
+    session_slot_t *s = g_app.selected;
+    if (!s || s->initialising) { note("open a session first"); return CMD_OK; }
+    if (chat_move_asked(&s->engine)) {
+        g_app.mode = MODE_MOVE_ASK;
+        g_app.move_shown = 0.0;
+        g_app.dirty = 1;
+        return CMD_OK;
+    }
+    chat_move_plan_t plan;
+    chat_move_plan(&s->engine, &plan);
+    if (!plan.coming) {
+        note(plan.left ? "nobody can come along yet - compare verify codes with them first (:peers lists them)"
+                       : "nobody else is here to move with");
+        return CMD_OK;
+    }
+    g_app.mode = MODE_MOVE;
+    g_app.dirty = 1;
+    return CMD_OK;
+}
+
+// The new room opens, selected, and the one being left goes off the screen until it's done.
+static void move_to_room(session_slot_t *old, const chat_move_to_t *to) {
+    session_slot_t *s = start_moved_session(to);
+    if (!s) { select_session(old); return; }
+    chat_move_go(&old->engine, to, &s->engine, now_seconds());
+    old->leaving = 1;
+}
+
+static void move_yes(void) {
+    session_slot_t *s = g_app.selected;
+    g_app.mode = MODE_CHAT;
+    g_app.dirty = 1;
+    if (!s || s->initialising) return;
+    chat_move_to_t to;
+    // Peers may have gone since the box came up, and the engine says so on the bar.
+    g_echo = 1;
+    int ok = chat_move_begin(&s->engine, &to) == 0;
+    g_echo = 0;
+    if (ok) move_to_room(s, &to);
+    crypto_wipe(&to, sizeof to);
+}
+
+static void move_no(void) {
+    g_app.mode = MODE_CHAT;
+    g_app.dirty = 1;
+}
+
+// y goes and n stays, which can't be undone, so Esc only puts the box away until :move.
+static void move_ask_key(const tui_key_t *key) {
+    session_slot_t *s = g_app.selected;
+    const chat_move_ask_t *a = s && !s->initialising ? chat_move_asked(&s->engine) : NULL;
+    if (!a) { g_app.mode = MODE_CHAT; g_app.dirty = 1; return; }
+    if (now_seconds() - g_app.move_shown < MOVE_KEY_GUARD) return;
+    char ch = key->type == TUI_KEY_CHAR && key->ch_len == 1 ? key->ch[0] : 0;
+    if (ch == 'y' || ch == 'Y') {
+        g_app.mode = MODE_CHAT;
+        g_app.dirty = 1;
+        chat_move_to_t to;
+        if (chat_move_accept(&s->engine, &to) == 0) move_to_room(s, &to);
+        crypto_wipe(&to, sizeof to);
+    } else if (ch == 'n' || ch == 'N') {
+        g_app.mode = MODE_CHAT;
+        g_app.dirty = 1;
+        chat_move_decline(&s->engine);
+        note("you stay in this room");
+    } else if (ch == 'q' || key->type == TUI_KEY_ESCAPE) {
+        s->move_later = a->seq;
+        g_app.mode = MODE_CHAT;
+        g_app.dirty = 1;
+        note("the request to move waits - :move shows it again");
+    }
+}
+
+// Closes the rooms that were left once they're done, and asks about a request to move in the session
+// on screen.
+void move_tick(double now) {
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        session_slot_t *s = &g_app.sessions[i];
+        if (!g_app.used[i] || !s->leaving || !chat_move_finished(&s->engine, now)) continue;
+        for (int j = 0; j < MAX_SESSIONS; j++)
+            if (g_app.used[j] && &g_app.sessions[j].engine == s->engine.move_to)
+                console_note(&g_app.sessions[j], "* left %s, the room you moved from", s->name);
+        close_session(s);
+    }
+    session_slot_t *s = g_app.selected;
+    const chat_move_ask_t *a = s && !s->initialising ? chat_move_asked(&s->engine) : NULL;
+    if (a && g_app.mode == MODE_CHAT && !g_app.asking_quit && s->move_later != a->seq) {
+        g_app.mode = MODE_MOVE_ASK;
+        g_app.move_shown = now;
+        g_app.dirty = 1;
+    }
+}
+
 // Checked before CHAT_COMMANDS, so entries here shadow the per-session ones of the same name.
 static const command_t APP_COMMANDS[] = {
     { "help",    NULL,                  NULL,     "list all commands and keybinds (F1)",          app_help },
@@ -262,6 +365,7 @@ static const command_t APP_COMMANDS[] = {
     { "quitall", "qa qall",             NULL,     "leave every session and quit (Ctrl+C)",           app_quitall },
     { "set",     NULL,        "[NAME [VALUE]]",   "change a setting; alone, opens them all (Ctrl+S)", app_set },
     { "copyid",  NULL,                  NULL,     "copy this session's id to the clipboard",         app_copyid },
+    { "move",    NULL,                  NULL,     "move to a new room with the peers whose codes you compared, leaving the rest behind", app_move },
     { "update",  NULL,                  NULL,     "install the latest release from GitHub",          app_update },
     { "install", NULL,                  "[NAME]", "save your settings and signing key on this computer (NAME: as a save of that name)", app_install },
     { "save",    NULL,                  NULL,     "save what's in use now to the open save, after asking (or :install it)", app_save },
@@ -971,6 +1075,8 @@ void handle_key(const tui_key_t *key) {
         case MODE_SHADOW_PASS:    field_key(key, commit_shadow_pass, cancel_shadow_pass); return;
         case MODE_SHADOW_PASS2:   field_key(key, commit_shadow_pass2, cancel_shadow_pass); return;
         case MODE_UPDATE:         update_key(key); return;
+        case MODE_MOVE:           confirm_key(key, move_yes, move_no); return;
+        case MODE_MOVE_ASK:       move_ask_key(key); return;
         default:
             break;
     }
@@ -1040,6 +1146,7 @@ int on_chat_screen(void) {
     switch (g_app.mode) {
         case MODE_CHAT: case MODE_NEW_PASSWORD: case MODE_JOIN_ID: case MODE_JOIN_PASSWORD:
         case MODE_UNINSTALL: case MODE_SAVES: case MODE_UNLOCK: case MODE_UPDATE: case MODE_UNLOCK_CODE:
+        case MODE_MOVE: case MODE_MOVE_ASK:
             return 1;
         case MODE_DEVICE_LOCK:
             return g_app.device_back == MODE_CHAT;
@@ -1053,7 +1160,7 @@ int on_chat_screen(void) {
 
 static int session_count(void) {
     int n = 0;
-    for (int i = 0; i < MAX_SESSIONS; i++) n += g_app.used[i] != 0;
+    for (int i = 0; i < MAX_SESSIONS; i++) n += g_app.used[i] && !g_app.sessions[i].leaving;
     return n;
 }
 
@@ -1086,7 +1193,7 @@ tui_view_t current_view(char *sub, size_t cap) {
                      NULL, NULL, 0, NULL, NULL, NULL, 0, 0, 0, NULL, TEST_BUILD ? TEST_LABEL : NULL };
     for (int i = 0; i < MAX_SESSIONS; i++) {
         const session_slot_t *o = &g_app.sessions[i];
-        if (!g_app.used[i] || o == g_app.selected) continue;
+        if (!g_app.used[i] || o->leaving || o == g_app.selected) continue;
         v.elsewhere += o->unread;
         v.elsewhere_mention |= o->mentioned;
     }

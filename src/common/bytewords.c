@@ -68,10 +68,10 @@ static const char WORDS[] =
     "whatwhenwhizwolfworkyankyawnyell" "yogayurtzapszerozestzinczonezoom";
 _Static_assert(sizeof WORDS == 256 * WORD_LEN + 1, "a word of four letters for each byte");
 
-void bytewords(const uint8_t *in, size_t len, char *out) {
+static void words(const uint8_t *in, size_t len, char *out, int grouped) {
     size_t o = 0;
     for (size_t i = 0; i < len; i++) {
-        const char *sep = i == 0 ? "" : i % GROUP == 0 ? DOT_SEP : " ";
+        const char *sep = i == 0 ? "" : grouped && i % GROUP == 0 ? DOT_SEP : " ";
         size_t n = strlen(sep);
         memcpy(out + o, sep, n);
         memcpy(out + o + n, WORDS + in[i] * WORD_LEN, WORD_LEN);
@@ -79,3 +79,7 @@ void bytewords(const uint8_t *in, size_t len, char *out) {
     }
     out[o] = '\0';
 }
+
+void bytewords(const uint8_t *in, size_t len, char *out) { words(in, len, out, 1); }
+
+void bytewords_plain(const uint8_t *in, size_t len, char *out) { words(in, len, out, 0); }

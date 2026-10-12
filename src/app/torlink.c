@@ -196,8 +196,10 @@ void app_session_opts(chat_opts_t *o) {
     copy_str(o->release_key, update_release_key(), sizeof o->release_key);
 }
 
-session_slot_t *start_session(const char *session_name, const char *password, int created,
-                                      uint16_t port, const addr_t *peers, int n_peers) {
+// move: the room :move made or was asked to, which gets a port of its own while the room being left
+// keeps ours, and is said to be new and where it came from.
+static session_slot_t *open_session(const char *session_name, const char *password, int created, uint16_t port,
+                                    const addr_t *peers, int n_peers, const chat_move_to_t *move) {
     session_slot_t *s = find_free_slot();
     if (!s) { push_log("* too many sessions open already"); return NULL; }
     int idx = slot_index(s);
@@ -220,7 +222,7 @@ session_slot_t *start_session(const char *session_name, const char *password, in
     copy_str(o.session_name, session_name, sizeof o.session_name);
     copy_str(o.password, pw, sizeof o.password);
     crypto_wipe(pw, sizeof pw);
-    o.port = port ? port : g_app.default_port;
+    o.port = move ? 0 : port ? port : g_app.default_port;
     if (n_peers > 0) { memcpy(o.peers, peers, sizeof(addr_t) * (size_t)n_peers); o.n_peers = n_peers; }
     o.route = g_app.route;
     if (o.route.mode == ROUTE_TOR) {
@@ -231,6 +233,7 @@ session_slot_t *start_session(const char *session_name, const char *password, in
     }
     o.created = created;
     app_session_opts(&o);
+    if (move) { o.moved = 1; o.moved_key = move->key; }
 
     chat_init(&s->engine, &o, session_print, session_notify, s);
     s->engine.file_view = session_file_view;
@@ -256,7 +259,14 @@ session_slot_t *start_session(const char *session_name, const char *password, in
     chat_set_history(&s->engine, s->hist != NULL);
 
     char idhex[SHORT_ID_HEX + 1]; hex_encode(s->engine.my_id, SHORT_ID_LEN, idhex);
-    if (created) {
+    if (move) {
+        console_note(s, "moved here from '%s' as %s (peer %s) - %s. Codes compared there count here as each peer arrives",
+                     move->from, s->engine.nick, idhex, created ? "the peers asked along come once they say yes"
+                                                                 : "chat opens once someone here answers");
+        // Nobody typed them, and nothing else shows them.
+        console_note(s, "this room's id is %s and its password \"%s\" - this is the only time they're shown, so keep them "
+                        "if you want to come back or invite someone", s->engine.session_name, move->password);
+    } else if (created) {
         console_note(s, "new session '%s' - share the id and password to invite others. you are %s (peer %s)",
                      s->engine.session_name, s->engine.nick, idhex);
     } else {
@@ -266,6 +276,15 @@ session_slot_t *start_session(const char *session_name, const char *password, in
     if (g_app.route.mode == ROUTE_TOR)
         console_note(s, "* routing: Tor onion services only - connecting takes a little longer");
     return s;
+}
+
+session_slot_t *start_session(const char *session_name, const char *password, int created, uint16_t port,
+                              const addr_t *peers, int n_peers) {
+    return open_session(session_name, password, created, port, peers, n_peers, NULL);
+}
+
+session_slot_t *start_moved_session(const chat_move_to_t *to) {
+    return open_session(to->session_name, to->password, to->created, 0, NULL, 0, to);
 }
 
 int pgp_key_made_here(void) {

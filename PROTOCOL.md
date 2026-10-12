@@ -54,7 +54,8 @@ Each time chat joins a session, it makes these:
 - an **id**: 16 random bytes, kept for the whole session. Members tell peers apart by their ids.
   An id isn't reused, so it doesn't link one session to the next.
 - an **X25519** key pair and an **ML-KEM-768** key pair;
-- a 32-byte **cookie secret**.
+- a 32-byte **cookie secret**;
+- an **Ed25519** key pair for moving the room (§7), only once a move needs it.
 
 A rekey (§6) replaces the key pairs and the cookie secret, and keeps the id. None of these are
 kept after the session ends.
@@ -305,7 +306,7 @@ Records go in session frames. A `k` and a `v` come first after each handshake.
 | `k` | NICK COLOUR FLAGS IDTYPE IDPUB SIG | Who the sender is (see below). |
 | `v` | VERSION PROOF LIST LISTSIG | Which build the sender runs (see below). |
 | `m` | MID ORIGIN NICK TEXT | A message (see below). |
-| `a` | MID | Acknowledges an `m` or `fo`. |
+| `a` | MID | Acknowledges an `m`, `fo`, `mv` or `mk`. |
 | `n` | NICK | A new nick. |
 | `c` | COLOUR | A new colour. |
 | `rk` | PUB | The sender's next X25519 key (§6). |
@@ -315,6 +316,9 @@ Records go in session frames. A `k` and a `v` come first after each handshake.
 | `fg` | FID OFFSET COUNT | Asks for COUNT chunks (at most 64) starting at byte OFFSET. |
 | `fd` | FID OFFSET DATA | One chunk: up to 690 bytes, in base64. |
 | `fx` | FID | The file isn't offered any more. |
+| `mv` | MID ID PASSWORD KEY COMING | Moves the room, and asks the receiver along (see below). It's acked and retried like `m`. |
+| `mk` | MID KEY | The sender's key for a move (see below). It's acked and retried like `m`. |
+| `mp` | SIG | In the room a move went to: the sender's session keys, signed with its key for the move (see below). |
 | `nop` | | Cover: sent when a slot has nothing else to carry. |
 | `bye` | | The sender is leaving. Sent straight away, outside the slots. |
 
@@ -326,7 +330,8 @@ Records go in session frames. A `k` and a `v` come first after each handshake.
   follow, which older builds ignore:
   - `r`: announces rekeys with `rk`;
   - `b`: reads several records in one frame;
-  - `l`: reads messages longer than 250 bytes.
+  - `l`: reads messages longer than 250 bytes;
+  - `m`: can move to a new room (`mv`, `mk` and `mp`).
 - IDTYPE is the signing identity: `0` none, `1` native, `2` AGE, `3` PGP. With `0`, IDPUB and
   SIG are empty.
 - IDPUB is an Ed25519 public key (64 hex digits).
@@ -372,6 +377,22 @@ decimal.
 **Files** go in the slots that would otherwise carry a `nop`. The receiver asks for a window of
 chunks at a time with `fg`, and asks again for any run of chunks that's missing. It keeps the file
 only if its SHA-256 matches the one in the offer.
+
+**Moving a room** (`:move`) takes some members to a new room and leaves the rest behind. The member
+moving it makes a new session id and password, and sends `mv` to each peer whose verify code it
+compared and whose `k` has `m`. Nobody else gets it, and it's never passed on.
+
+- ID and PASSWORD are the new room's. KEY is the mover's Ed25519 key for moves (64 hex digits).
+  COMING is the first 8 hex digits of the id of each peer asked along, comma-separated.
+- A receiver asks its user only once it has compared the mover's code too. It then sends
+  `mk MID KEY`, with its own key for moves, to the mover and to each peer in COMING that it's
+  connected to.
+- A member that goes keeps its old session open until the peers moving with it have its key and it
+  has theirs, or for 90 seconds at most, then leaves it with `bye`.
+- In the new room, a member that came from a move sends `mp SIG` ahead of each `k`. SIG is its key for
+  moves signing `"chat move v1"`, then what `k`'s SIG covers: the sender's X25519 key and id, then the
+  receiver's. A receiver that got that key in the old room from a peer whose code it had compared
+  there counts the sender as compared.
 
 ## 8. Slots and traffic shape
 
@@ -419,5 +440,7 @@ These are sent outside the slots:
 - 0.3.0 sends `v` with only VERSION and PROOF, and chat checks those against 0.3.0's published
   hashes, which are built in.
 - Builds without `l` cut longer messages off at 250 bytes. That's why messages to them go in parts.
+- Builds without `m` (0.5.0 and older) can't move to a new room. A move leaves them behind: they're
+  never sent `mv`, and would ignore it.
 - Builds before 0.5.0 called the first character of FLAGS the logging flag, and show it as
   `[logging chat locally]`.

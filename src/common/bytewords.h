@@ -10,5 +10,7 @@
 // for reading a code out over a call. out holds BYTEWORDS_LEN(len).
 #define BYTEWORDS_LEN(n) ((n) * 8 + 1)
 void bytewords(const uint8_t *in, size_t len, char *out);
+// The same words with one space between each, as someone would type them: "slot axis limp lava brag".
+void bytewords_plain(const uint8_t *in, size_t len, char *out);
 
 #endif

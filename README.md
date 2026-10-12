@@ -54,6 +54,21 @@ for that nick. `:verified` lists the keys, with their nicks and fingerprints, an
 forget NICK` (or `all`) removes them. A peer with no signing key has nothing to keep, so its
 code is compared again each session.
 
+**Moving a room.** With no server, nobody can be put out of a room, and a password that leaked
+can't be changed. `:move` is what you can do instead: it takes the peers whose verify codes you
+compared to a new room, with an id and password chat makes up, and leaves everyone else behind. A
+box says first who'd come and who wouldn't, and why: a code not compared, codes that differ, or a
+version too old to move. The new room goes only to the peers asked along, over their encrypted
+sessions, and they don't pass it on. Each of them gets a box naming who else is asked: `y` goes
+there and leaves the old room, `n` stays (and can't go later), and `Esc` puts the box away until
+`:move`. If they haven't compared your code yet, they're asked once they have. Codes compared in
+the old room count in the new one: everyone moving shows the others a key made for the move, over
+the old room, and signs its sessions in the new one with it. Nobody typed the new room's id and
+password, so its console shows them once: keep them to come back or to invite someone. Those left
+behind keep the old room and everything said in it. Nothing tells them where you went, but they see
+everyone leave together. A peer that only reaches the room through someone else is left behind
+too. With `--simple`, `:move` says who would come, and `:move yes` or `:move no` answers.
+
 **Identity signing** is optional, and lets peers check who they're talking to. Pick it under
 **Signing identity** on the settings page (or `:set sign`), or with `--identity`:
 
@@ -685,7 +700,8 @@ word for it, either way.
 
 `:history` says whether this session's is kept, `:history forget` deletes it, and `:history forget
 all` deletes every session's in the save. Turning history off keeps what was kept until you forget
-it. Only the full-screen UI keeps history, not `--simple`.
+it. Only the full-screen UI keeps history, not `--simple`. A room `:move` goes to has a new id and
+password, so it gets a history of its own, and the old room's stays as it was.
 
 #### A shadow passphrase, and self-destruct
 
@@ -949,6 +965,7 @@ puts it on the command line.
 | `:set [NAME [VALUE]]` | change a setting (see below); on its own, opens the settings page (`Ctrl+S`) |
 | `:verify NICK [ok\|no]` | show a peer's verify code and identity fingerprint; `ok` once the code matches theirs, `no` if it doesn't |
 | `:verified [forget NICK\|all]` | list the signing keys you verified, with nicks and fingerprints, or remove them |
+| `:move` | move to a new room with the peers whose verify codes you compared, leaving the rest behind; each is asked first (see [Moving a room](#security)). With a request to move waiting, shows it again |
 | `:peers` | who's online, with verify codes and builds |
 | `:net` | network report and diagnosis |
 | `:port [N]` | show or change this session's UDP port (`0` picks a free one) |

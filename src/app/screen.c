@@ -351,13 +351,68 @@ static int uninstall_paras(tui_para_t *p) {
                                       "traces of the files.");
 }
 
+// Text for a box with Markdown's marks escaped, since nicks can hold * _ ` [ ] and \.
+static void md_escape(const char *in, char *out, size_t cap) {
+    size_t o = 0;
+    for (; *in && o + 2 < cap; in++) {
+        if (strchr("\\`*_[]", *in)) out[o++] = '\\';
+        out[o++] = *in;
+    }
+    out[o] = '\0';
+}
+
+static int move_paras(tui_para_t *p) {
+    static char ask[MOVE_NAMES_LEN * 2 + 64], left[MOVE_NAMES_LEN * 2 + 160];
+    session_slot_t *s = g_app.selected;
+    chat_move_plan_t plan;
+    if (!s || s->initialising) return add_para(p, 0, TUI_P_TEXT, "That session isn't open any more.");
+    chat_move_plan(&s->engine, &plan);
+    if (!plan.coming) return add_para(p, 0, TUI_P_TEXT, "Nobody here can come along any more.");
+    char coming[MOVE_NAMES_LEN * 2], gone[MOVE_NAMES_LEN * 2];
+    md_escape(plan.coming_names, coming, sizeof coming);
+    md_escape(plan.left_names, gone, sizeof gone);
+    snprintf(ask, sizeof ask, "Move to a new room with **%s**?", coming);
+    if (plan.left)
+        snprintf(left, sizeof left, "Left behind: %s. Nothing tells them where you went: they keep this room, and "
+                 "everything said in it so far.", gone);
+    else
+        copy_str(left, "Everyone here is asked along, so this only gives the room a new id and password, as after a leak.",
+                 sizeof left);
+    int n = add_para(p, 0, TUI_P_TEXT, ask);
+    n = add_para(p, n, TUI_P_BLANK, "");
+    n = add_para(p, n, TUI_P_TEXT, left);
+    n = add_para(p, n, TUI_P_BLANK, "");
+    return add_para(p, n, TUI_P_TEXT, "chat makes up the new room's id and password, and sends them only to those asked "
+                                      "along, over their encrypted sessions. Each is asked first, and comes if they say "
+                                      "yes. Codes you compared here count there.");
+}
+
+static int move_ask_paras(tui_para_t *p) {
+    static char what[MOVE_NAMES_LEN * 2 + MOVE_NAME_LEN * 2 + 120];
+    session_slot_t *s = g_app.selected;
+    const chat_move_ask_t *a = s && !s->initialising ? chat_move_asked(&s->engine) : NULL;
+    if (!a) return add_para(p, 0, TUI_P_TEXT, "That request isn't here any more.");
+    char from[MOVE_NAME_LEN * 2], with[MOVE_NAMES_LEN * 2];
+    md_escape(a->from, from, sizeof from);
+    md_escape(a->coming_names, with, sizeof with);
+    if (a->coming)
+        snprintf(what, sizeof what, "**%s** wants to move this room to a new one, and asks you along with %s (at %s).",
+                 from, with, a->at);
+    else
+        snprintf(what, sizeof what, "**%s** wants to move this room to a new one, just the two of you (at %s).", from, a->at);
+    int n = add_para(p, 0, TUI_P_TEXT, what);
+    n = add_para(p, n, TUI_P_BLANK, "");
+    return add_para(p, n, TUI_P_TEXT, "Yes takes you there, and leaves this room. No keeps you here, and you can't go "
+                                      "later. Codes you compared here count there.");
+}
+
 static const tui_dialog_t *quit_dialog(void) {
     static tui_dialog_t d;
     static tui_para_t paras[MAX_DIALOG_PARAS];
     static char what[240], files[120], unsaved[200];
     int n_sessions = 0, online = 0, downloads = 0;
     for (int i = 0; i < MAX_SESSIONS; i++) {
-        if (!g_app.used[i]) continue;
+        if (!g_app.used[i] || g_app.sessions[i].leaving) continue;
         n_sessions++;
         if (g_app.sessions[i].initialising) continue;
         const chat_t *e = &g_app.sessions[i].engine;
@@ -600,6 +655,18 @@ static const tui_dialog_t *current_dialog(void) {
             d.n_text = file_ask_paras(paras, &d.title, &d.keys);
             d.input = NULL;
             break;
+        case MODE_MOVE:
+            d.title = "MOVE";
+            d.n_text = move_paras(paras);
+            d.input = NULL;
+            d.keys = "y move" DOT_SEP "n cancel";
+            break;
+        case MODE_MOVE_ASK:
+            d.title = "MOVE";
+            d.n_text = move_ask_paras(paras);
+            d.input = NULL;
+            d.keys = "y go" DOT_SEP "n stay" DOT_SEP "esc later";
+            break;
         case MODE_UPDATE: {
             static update_view_t v;
             static const char *lines[UPDATE_LOG_MAX];
@@ -793,6 +860,12 @@ static tui_bar_t current_bar(void) {
         case MODE_CHAT:
             chat_input(&b, &g_app.input);
             break;
+        case MODE_MOVE:
+        case MODE_MOVE_ASK:
+            chat_input(&b, &g_app.input);
+            b.chip = "MOVE";
+            b.tone = TUI_TONE_PROMPT;
+            break;
         case MODE_SAVES:
         case MODE_UNLOCK:
         case MODE_NEW_PASSWORD:
@@ -887,7 +960,7 @@ void render(void) {
     tui_session_row_t rows[MAX_SESSIONS];
     int n = 0, sel = -1;
     for (int i = 0; i < MAX_SESSIONS; i++) {
-        if (!g_app.used[i]) continue;
+        if (!g_app.used[i] || g_app.sessions[i].leaving) continue;
         session_slot_t *s = &g_app.sessions[i];
         tui_session_row_t *r = &rows[n];
         copy_str(r->label, s->name, sizeof r->label);

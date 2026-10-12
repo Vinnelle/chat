@@ -26,6 +26,8 @@
 #define OLD_MAX_TEXT 250
 #define MAX_TEXT_PARTS 8
 #define MAX_SESSION_NAME 64
+// A new session's id: this many characters from random_session_id.
+#define SESSION_ID_LEN 10
 #define MAX_PASSWORD 255
 #define MAX_STATIC_PEERS 16
 #define MAX_SELF_ADDRS 8
@@ -339,6 +341,17 @@ typedef struct {
     int batches;
     // Its k says it reads a message up to MAX_TEXT long ("l"), not just OLD_MAX_TEXT.
     int long_text;
+    // Its k says it can move to a new room with us ("m").
+    int can_move;
+    // :move, in the room being left. move_pub: the key it showed us for the move ("mv" or "mk"), and
+    // whether the room we moved to has it (move_passed). move_with: it moves with us, so this room
+    // waits for its key before closing. key_sent: it has ours.
+    uint8_t move_pub[ID_SIGN_PUB_LEN];
+    int move_pub_set, move_passed, move_with, key_sent;
+    // In the room moved to: its last "mp", kept until a key it can be checked with arrives, and which
+    // of those it matched (came_with, plus one).
+    uint8_t move_sig[ID_SIGN_LEN];
+    int move_sig_set, came_with;
 
     // The result of the user comparing the verify code with this peer over another channel: 0 not
     // yet, 1 the same, -1 different. When comparing is required, only 1 gets what's sent.
@@ -471,7 +484,65 @@ typedef void (*chat_file_fn)(void *ui, int num, const char *name, const uint8_t 
 // notify_preview allows the notification to show them.
 typedef void (*chat_notify_fn)(void *ui, const char *nick, const char *text, int mentioned);
 
+// ---- moving the room (:move) ----
+//
+// With no server, nobody can be put out of a room, and a password that leaked can't be changed. :move
+// instead takes the peers whose verify codes were compared, and whose builds can move, to a new room
+// with an id and password made up on the spot, and leaves everyone else in this one. Each of them is
+// sent the new room over its session ("mv"), and asked whether to go. Everyone moving shows the others
+// a key of its own for the move, over the sessions here ("mk", or in "mv"), and signs its sessions in
+// the new room with it ("mp"), so codes compared here count there.
+
+// The longest the room being left stays open, waiting for the keys of those moving with us.
+#define MOVE_LINGER 90.0
+// The new room's password: this many random bytes, as words.
+#define MOVE_PASSWORD_BYTES 8
+// How many names a list of peers spells out before it counts the rest.
+#define MOVE_NAMED 6
+#define MOVE_NAME_LEN (CHAT_NAME_LEN + 32)
+#define MOVE_NAMES_LEN (MOVE_NAMED * (MOVE_NAME_LEN + 5) + 32)
+// The peers asked along, as "mv" lists them: the start of each one's id, comma-separated.
+#define MOVE_COMING_LEN (MAX_PEERS * (SHORT_ID_HEX + 1) + 1)
+
+// Who :move would take along, and who it would leave behind (with why).
 typedef struct {
+    int coming, left;
+    char coming_names[MOVE_NAMES_LEN], left_names[MOVE_NAMES_LEN];
+} chat_move_plan_t;
+
+// Where a move goes, to open the new session with: its id and password, the room it's from, and the
+// key shown there, which signs our sessions in the new one. created: we're the one moving the room.
+typedef struct {
+    char session_name[MAX_SESSION_NAME + 1];
+    char password[MAX_PASSWORD + 1];
+    char from[MAX_SESSION_NAME + 1];
+    identity_keypair_t key;
+    int created;
+} chat_move_to_t;
+
+// A request to move, as it's shown: who asks (with their code's mark), who else is asked along, and
+// when it came. seq is new for each request.
+typedef struct {
+    unsigned seq;
+    char from[MOVE_NAME_LEN];
+    char coming_names[MOVE_NAMES_LEN];
+    int coming;
+    char at[HHMM_LEN];
+} chat_move_ask_t;
+
+// A request to move that came: who from (their name too, for once they've gone), and where to. asked:
+// it's shown, since the sender's code was compared. told: we said to compare codes first.
+typedef struct {
+    int used, asked, told;
+    uint8_t from[ID_LEN];
+    char name[CHAT_NAME_LEN];
+    char at[HHMM_LEN];
+    char session_name[MAX_SESSION_NAME + 1];
+    char password[MAX_PASSWORD + 1];
+    char coming[MOVE_COMING_LEN];
+} move_req_t;
+
+typedef struct chat_s {
     char nick[MAX_NICK + 1];
     char nick_skel[NICK_SKEL_LEN];
     char session_name[MAX_SESSION_NAME + 1];
@@ -488,6 +559,15 @@ typedef struct {
 
     identity_source_t identity_source;
     identity_keypair_t identity;
+
+    // :move. move_key: the key shown to those moving with us; moved_key: the one shown in the room we
+    // moved here from (moved), which signs our "mp" here. move_req: a request to move that came.
+    // move_staged: where --simple's ":move yes" goes, until it's opened.
+    identity_keypair_t move_key, moved_key;
+    int move_key_set, moved;
+    move_req_t move_req;
+    chat_move_to_t move_staged;
+    int move_staged_set;
 
     // We keep a history of this session, which our "k" tells peers.
     int persist;
@@ -568,6 +648,16 @@ typedef struct {
     int fast_files;         // our slots speed up while a transfer runs
     chat_file_fn file_view;
 
+    // Moving out (:move): the session we moved to, which is given the keys that come after, and since
+    // when this one has only stayed for them. move_ask: the request that's shown.
+    struct chat_s *move_to;
+    int move_leaving;
+    double move_since;
+    chat_move_ask_t move_ask;
+    // Keys shown to us in the room we moved here from, by peers whose codes we compared there, with their
+    // nick there. A peer here that signs its session with one ("mp") counts as compared.
+    struct { int used; uint8_t pub[ID_SIGN_PUB_LEN]; char nick[MAX_NICK + 1]; } came_with[MAX_PEERS];
+
     chat_print_fn print;
     chat_notify_fn notify;
     void *ui;
@@ -601,6 +691,10 @@ typedef struct {
     // their builds' lists. "" leaves them unchecked.
     chat_build_t build;
     char release_key[64];
+
+    // The session moved here from another room (:move), and moved_key signs our sessions here.
+    int moved;
+    identity_keypair_t moved_key;
 } chat_opts_t;
 
 void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify_fn notify, void *ui);
@@ -672,6 +766,27 @@ void chat_set_history(chat_t *c, int on);
 // and password, and nothing anyone else can work out.
 #define CHAT_HISTORY_ID_LEN 16
 void chat_history_id(const chat_t *c, uint8_t out[CHAT_HISTORY_ID_LEN]);
+
+// :move. Who it would take along: peers whose code was compared, whose builds can move.
+void chat_move_plan(chat_t *c, chat_move_plan_t *plan);
+// The one moving the room: a new id and password into to. 0, or -1 after saying why (nobody can come).
+int chat_move_begin(chat_t *c, chat_move_to_t *to);
+// The request to move that's waiting for an answer, or NULL. One from a peer whose code wasn't compared
+// waits for that first.
+const chat_move_ask_t *chat_move_asked(const chat_t *c);
+// The answer to it: yes fills to (0, or -1 if there's no request), no forgets it.
+int chat_move_accept(chat_t *c, chat_move_to_t *to);
+void chat_move_decline(chat_t *c);
+// Where --simple's ":move yes" goes, once: 1, with to filled.
+int chat_move_staged(chat_t *c, chat_move_to_t *to);
+// The new session opened (moved_to): the one moving the room now asks those coming. This session gives
+// moved_to the keys it's shown, now and as they come, and stays open only until chat_move_finished.
+// moved_to has to outlive it, or be unlinked first.
+void chat_move_go(chat_t *c, const chat_move_to_t *to, chat_t *moved_to, double now);
+void chat_move_unlink(chat_t *c, const chat_t *moved_to);
+// A session that moved out has done its part: those moving with us have our key and we theirs, or
+// MOVE_LINGER has passed. It can be closed.
+int chat_move_finished(const chat_t *c, double now);
 
 #define CHAT_MAX_SOCKS 12
 int chat_sockets(chat_t *c, sock_t out[CHAT_MAX_SOCKS]);

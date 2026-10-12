@@ -478,13 +478,14 @@ void select_session(session_slot_t *s) {
 
 // The first open session, or NULL.
 session_slot_t *first_session(void) {
-    for (int i = 0; i < MAX_SESSIONS; i++) if (g_app.used[i]) return &g_app.sessions[i];
+    for (int i = 0; i < MAX_SESSIONS; i++) if (g_app.used[i] && !g_app.sessions[i].leaving) return &g_app.sessions[i];
     return NULL;
 }
 
 void close_session(session_slot_t *s) {
     if (!s) return;
     int idx = slot_index(s);
+    for (int i = 0; i < MAX_SESSIONS; i++) if (g_app.used[i]) chat_move_unlink(&g_app.sessions[i].engine, &s->engine);
     view_forget(s);
     history_stop(s, 1);
     chat_shutdown(&s->engine);
@@ -500,7 +501,7 @@ void close_session(session_slot_t *s) {
 
 void select_step(int dir) {
     session_slot_t *vis[MAX_SESSIONS]; int n = 0;
-    for (int i = 0; i < MAX_SESSIONS; i++) if (g_app.used[i]) vis[n++] = &g_app.sessions[i];
+    for (int i = 0; i < MAX_SESSIONS; i++) if (g_app.used[i] && !g_app.sessions[i].leaving) vis[n++] = &g_app.sessions[i];
     if (n == 0) { select_session(NULL); return; }
     int cur = 0;
     for (int i = 0; i < n; i++) if (vis[i] == g_app.selected) { cur = i; break; }
@@ -682,6 +683,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
             if (ready[i]) chat_on_socket_readable(&owner[i]->engine, socks[i], now);
         for (int i = 0; i < MAX_SESSIONS; i++)
             if (g_app.used[i]) chat_tick(&g_app.sessions[i].engine, now_seconds());
+        move_tick(now_seconds());
         history_sync(now);
 
         if (!g_app.onboarding) {
@@ -784,6 +786,52 @@ static void plain_notify(void *ui, const char *nick, const char *text, int menti
     send_notification(nick, text, mentioned);
 }
 
+// A room :move left prints nothing while it closes.
+static void plain_quiet(void *ui, const char *hhmm, const char *text, const uint8_t *rgb, unsigned flags, int color_len,
+                        int file) {
+    (void)ui; (void)hhmm; (void)text; (void)rgb; (void)flags; (void)color_len; (void)file;
+}
+
+// --simple's :move opens the new room in whichever engine isn't in use. A room an earlier move left, if
+// it's still closing, closes first. Returns the new room, or NULL after saying why it didn't open.
+static chat_t *plain_move(chat_t *c, chat_t **left, chat_t engines[2], const chat_move_to_t *to) {
+    if (*left) { chat_shutdown(*left); *left = NULL; }
+    chat_t *n = c == &engines[0] ? &engines[1] : &engines[0];
+    chat_opts_t o; memset(&o, 0, sizeof o);
+    copy_str(o.nick, c->nick, sizeof o.nick);
+    copy_str(o.session_name, to->session_name, sizeof o.session_name);
+    copy_str(o.password, to->password, sizeof o.password);
+    o.created = to->created;
+    o.route = g_app.route;
+    if (o.route.mode == ROUTE_TOR) {
+        copy_str(o.route.tor.socks, g_tor.state == TL_READY ? g_tor.socks : "", sizeof o.route.tor.socks);
+        copy_str(o.route.tor.control, g_tor.state == TL_READY ? g_tor.control : "", sizeof o.route.tor.control);
+    }
+    app_session_opts(&o);
+    memcpy(o.color, c->my_color, 3);
+    o.moved = 1;
+    o.moved_key = to->key;
+    push_log("* moving to a new room - deriving its keys...");
+    chat_init(n, &o, plain_print, plain_notify, NULL);
+    crypto_wipe(&o, sizeof o);
+    if (!chat_started(n)) {
+        push_log("* couldn't open the new room: %s", chat_start_error(n));
+        chat_shutdown(n);
+        return NULL;
+    }
+    if (n->route.mode == ROUTE_TOR && g_tor.state == TL_READY && g_tor.proc)
+        chat_tor_set_ports(n, g_tor.socks, g_tor.control, torproc_password(g_tor.proc));
+    n->file_view = plain_file_view;
+    n->net_verbose = c->net_verbose;
+    chat_move_go(c, to, n, now_seconds());
+    c->print = plain_quiet;
+    push_log("* moved here from '%s' - %s. Codes compared there count here as each peer arrives", to->from,
+             to->created ? "the peers asked along come once they say yes" : "chat opens once someone here answers");
+    push_log("* this room's id is %s and its password \"%s\" - this is the only time they're shown, so keep them if you "
+             "want to come back or invite someone", n->session_name, to->password);
+    return n;
+}
+
 static int run_plain(const char *session_name, const char *password, uint16_t port,
                      const char peer_args[][PEER_ARG_LEN], int n_peer_args) {
     int tty = term_is_tty();
@@ -849,26 +897,28 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
     }
     app_session_opts(&o);
 
-    static chat_t c;
-    chat_init(&c, &o, plain_print, plain_notify, NULL);
-    c.file_view = plain_file_view;
-    g_plain_engine = &c;
+    // Two, so a room :move left can close while the new one runs.
+    static chat_t engines[2];
+    chat_t *c = &engines[0], *left = NULL;
+    chat_init(c, &o, plain_print, plain_notify, NULL);
+    c->file_view = plain_file_view;
+    g_plain_engine = c;
     crypto_wipe(&o, sizeof o);
-    if (!chat_started(&c)) {
-        fprintf(stderr, "chat: %s\n", chat_start_error(&c));
-        chat_shutdown(&c);
+    if (!chat_started(c)) {
+        fprintf(stderr, "chat: %s\n", chat_start_error(c));
+        chat_shutdown(c);
         g_plain_engine = NULL;
         tor_link_stop();
         return 1;
     }
-    c.net_verbose = g_app.net_verbose;
-    char idhex[SHORT_ID_HEX + 1]; hex_encode(c.my_id, SHORT_ID_LEN, idhex);
-    if (c.route.mode == ROUTE_TOR)
+    c->net_verbose = g_app.net_verbose;
+    char idhex[SHORT_ID_HEX + 1]; hex_encode(c->my_id, SHORT_ID_LEN, idhex);
+    if (c->route.mode == ROUTE_TOR)
         printf("session '%s', you are %s (peer %s). encrypted, over Tor only. :quit or EOF to stop.\n",
-               c.session_name, c.nick, idhex);
+               c->session_name, c->nick, idhex);
     else
         printf("session '%s', you are %s (peer %s). encrypted, udp/%u, routing: %s. :quit or EOF to stop.\n",
-               c.session_name, c.nick, idhex, (unsigned)c.port, route_label());
+               c->session_name, c->nick, idhex, (unsigned)c->port, route_label());
 
     catch_quit_signals();
     stdin_reader_t *reader = stdin_reader_start();
@@ -878,8 +928,9 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
     enum { CTRL_C_AGAIN = 3 };
     double ctrl_c_at = -CTRL_C_AGAIN;
     while (alive && !g_interrupted) {
-        sock_t socks[CHAT_MAX_SOCKS]; int ns = chat_sockets(&c, socks);
-        int ready[CHAT_MAX_SOCKS] = {0};
+        sock_t socks[2 * CHAT_MAX_SOCKS];
+        int nc = chat_sockets(c, socks), ns = nc + (left ? chat_sockets(left, socks + nc) : 0);
+        int ready[2 * CHAT_MAX_SOCKS] = {0};
         net_wait(socks, ready, ns, WAIT_MS);
         double now = now_seconds();
         if (g_ctrl_c) {
@@ -888,20 +939,31 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
             ctrl_c_at = now;
             push_log("* Ctrl+C again within %d seconds leaves the session and quits (so does :quit)", CTRL_C_AGAIN);
         }
-        for (int i = 0; i < ns; i++) if (ready[i]) chat_on_socket_readable(&c, socks[i], now);
+        for (int i = 0; i < ns; i++) if (ready[i]) chat_on_socket_readable(i < nc ? c : left, socks[i], now);
         char line[MAX_TEXT + 1];
         int rc = stdin_reader_poll(reader, line, sizeof line);
         static const char show[] = ":show ";
         int show_anyway, show_n = rc == 1 && starts_with(line, show) ? file_arg(line + sizeof show - 1, &show_anyway) : 0;
         if (rc == 1 && (strcmp(line, ":changelog") == 0 || strcmp(line, ":news") == 0)) { fputs(CHANGELOG_TEXT, stdout); fflush(stdout); }
-        else if (show_n) chat_file_fetch(&c, show_n, 1, show_anyway, NULL);
-        else if (rc == 1) alive = chat_submit_line(&c, line, now);
+        else if (show_n) chat_file_fetch(c, show_n, 1, show_anyway, NULL);
+        else if (rc == 1) alive = chat_submit_line(c, line, now);
         else if (rc == -1) alive = 0;
+        chat_move_to_t to;
+        if (alive && chat_move_staged(c, &to)) {
+            chat_t *n = plain_move(c, &left, engines, &to);
+            if (n) { left = c; c = n; g_plain_engine = c; }
+            crypto_wipe(&to, sizeof to);
+        }
         tor_link_ensure(now);
         tor_link_step(now);
-        chat_tick(&c, now_seconds());
+        chat_tick(c, now_seconds());
+        if (left) {
+            chat_tick(left, now_seconds());
+            if (chat_move_finished(left, now_seconds())) { chat_shutdown(left); left = NULL; }
+        }
     }
-    chat_shutdown(&c);
+    if (left) chat_shutdown(left);
+    chat_shutdown(c);
     g_plain_engine = NULL;
     tor_link_stop();
     if (reader) stdin_reader_stop(reader);

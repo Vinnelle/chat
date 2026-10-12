@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
 // Sessions talking over fake_net: handshake, verify codes, delivery, loss, rekey, the traffic's
-// shape on the wire, junk and a third peer.
+// shape on the wire, junk, a third peer and a move to a new room.
 #include "core/chat.h"
 #include "core/trust.h"
 #include "fake_net.h"
@@ -40,10 +40,14 @@ typedef struct {
     int key_warnings;      // a peer with a verified nick signs with another key
     int known_keys;        // a peer signs with a key verified before
     int histories;         // "* NICK keeps a history of this chat"
+    int move_asks;         // "* NICK wants to move this room ..."
+    int came_along;        // "* NICK came along from the room you moved from ..."
 } log_t;
 
-static chat_t A, B, C;
-static log_t log_a = { .who = "alice" }, log_b = { .who = "bob" }, log_c = { .who = "carol" };
+// A2 and B2: alice and bob in the room :move takes them to.
+static chat_t A, B, C, A2, B2;
+static log_t log_a = { .who = "alice" }, log_b = { .who = "bob" }, log_c = { .who = "carol" },
+             log_a2 = { .who = "alice, moved" }, log_b2 = { .who = "bob, moved" };
 static int checks, failures;
 // -v: everything the sessions print, and every check as written, pass or fail.
 static int verbose;
@@ -70,6 +74,8 @@ static void on_print(void *ui, const char *hhmm, const char *text, const uint8_t
         if ((flags & LINE_WARN) && strstr(text, "does not sign with the key you verified for")) l->key_warnings++;
         if (strstr(text, "signs with the key you verified")) l->known_keys++;
         if ((flags & LINE_WARN) && strstr(text, " keeps a history of this chat")) l->histories++;
+        if (strstr(text, " wants to move this room")) l->move_asks++;
+        if (strstr(text, " came along from the room you moved from")) l->came_along++;
         if (strncmp(text, "* joining: peer ", 16) == 0) l->joining++;
         else if (strstr(text, " joined (")) { if (l->joining > 0) l->joining--; else l->unheralded_joins++; }
         return;
@@ -138,8 +144,9 @@ static void start(chat_t *c, log_t *l, const char *nick, uint16_t port, const ui
     chat_init(c, &o, on_print, NULL, l);
 }
 
-static chat_t *const ALL[] = { &A, &B, &C };
+static chat_t *const ALL[] = { &A, &B, &C, &A2, &B2 };
 static const log_t *const ALL_LOGS[] = { &log_a, &log_b, &log_c };
+#define N_ALL ((int)(sizeof ALL / sizeof ALL[0]))
 static int n_live = 2;
 static int live_mask = 0x3;   // which of ALL run
 static double g_now;          // the time the sessions last ran at, for filters that note when
@@ -148,8 +155,8 @@ static double g_now;          // the time the sessions last ran at, for filters 
 static void pump(int rounds, double t) {
     g_now = t;
     for (int r = 0; r < rounds; r++) {
-        for (int i = 0; i < 3; i++) if (live_mask & (1 << i)) chat_on_socket_readable(ALL[i], ALL[i]->sock, t);
-        for (int i = 0; i < 3; i++) if (live_mask & (1 << i)) chat_tick(ALL[i], t);
+        for (int i = 0; i < N_ALL; i++) if (live_mask & (1 << i)) chat_on_socket_readable(ALL[i], ALL[i]->sock, t);
+        for (int i = 0; i < N_ALL; i++) if (live_mask & (1 << i)) chat_tick(ALL[i], t);
     }
 }
 
@@ -2120,6 +2127,98 @@ static void test_trust(double *t) {
     RUN_FOR(t, 2);
 }
 
+// The room a move goes to, opened as the app opens it.
+static void start_moved(chat_t *c, log_t *l, const char *nick, uint16_t port, const uint16_t *peer_ports, int n,
+                        const chat_move_to_t *to) {
+    chat_opts_t o;
+    base_opts(&o, nick, port, peer_ports, n, to->created);
+    copy_str(o.session_name, to->session_name, sizeof o.session_name);
+    copy_str(o.password, to->password, sizeof o.password);
+    o.moved = 1;
+    o.moved_key = to->key;
+    chat_init(c, &o, on_print, NULL, l);
+}
+
+// Whether x waits for y's ack of a record that starts with prefix.
+static int awaits_ack(const chat_t *x, const peer_t *y, const char *prefix) {
+    for (int i = 0; i < MAX_PENDING_MSGS; i++)
+        if (x->pending[i].used && x->pending[i].peer_slot == (int)(y - x->peers) && starts_with(x->pending[i].text, prefix))
+            return 1;
+    return 0;
+}
+
+// Alice moves the room. Bob, whose code she compared, is asked, says yes and meets her in the new room,
+// where the codes they compared still count. Carol runs a build that can't move (as far as alice
+// knows), so she's left behind: she never gets "mv", and the new room's id and password never reach
+// her. Who'd be left behind for a code not compared is checked too.
+static void test_move(double *t) {
+    for (int k = 0; k < 3; k++) ALL[k]->next_rekey = *t + 1000.0;
+    peer_t *ab = peer_named(&A, "bob"), *ac = peer_named(&A, "carol");
+    CHECK(ab && ac && ab->code_ok == CODE_SAME && ab->can_move, "alice hasn't compared codes with bob, or he can't move");
+    if (!ab || !ac) return;
+    chat_move_plan_t plan;
+    ac->code_ok = CODE_NOT_COMPARED;
+    chat_move_plan(&A, &plan);
+    CHECK(plan.coming == 1 && plan.left == 1 && strstr(plan.left_names, "carol (code not compared)"),
+          "the plan with carol's code not compared: %d coming, %d left (%s)", plan.coming, plan.left, plan.left_names);
+    ac->code_ok = CODE_SAME;
+    ac->can_move = 0;
+    chat_move_plan(&A, &plan);
+    CHECK(plan.coming == 1 && strcmp(plan.coming_names, "bob") == 0 && strstr(plan.left_names, "carol (an older version)"),
+          "the plan with carol on an older build: %s, leaving %s", plan.coming_names, plan.left_names);
+
+    chat_move_to_t ta, tb;
+    CHECK(chat_move_begin(&A, &ta) == 0 && ta.created && ta.session_name[0] && ta.password[0],
+          "alice couldn't begin the move");
+    start_moved(&A2, &log_a2, "alice", 40011, NULL, 0, &ta);
+    CHECK(chat_started(&A2), "alice's new room didn't open");
+    chat_move_go(&A, &ta, &A2, *t);
+    live_mask |= 1 << 3;
+    CHECK(awaits_ack(&A, ab, "mv\t") && !awaits_ack(&A, ac, "mv\t"), "\"mv\" didn't go to bob alone");
+
+    RUN_UNTIL(t, 30, chat_move_asked(&B) != NULL);
+    const chat_move_ask_t *ask = chat_move_asked(&B);
+    CHECK(ask && strstr(ask->from, "alice") && ask->coming == 0, "bob wasn't asked to move with alice alone");
+    // Bob's key goes to alice as he's asked, and reading the box takes longer than it takes to arrive.
+    peer_t *ba = peer_named(&B, "alice");
+    RUN_UNTIL(t, 10, ba && !awaits_ack(&B, ba, "mk\t") && ab->move_pub_set);
+    CHECK(ab->move_pub_set, "alice never got bob's key for the move");
+    CHECK(chat_move_accept(&B, &tb) == 0 && !tb.created && strcmp(tb.session_name, ta.session_name) == 0
+          && strcmp(tb.password, ta.password) == 0, "bob's answer doesn't lead to alice's new room");
+    uint16_t to_a2[1] = { 40011 };
+    start_moved(&B2, &log_b2, "bob", 40012, to_a2, 1, &tb);
+    CHECK(chat_started(&B2), "bob's new room didn't open");
+    chat_move_go(&B, &tb, &B2, *t);
+    live_mask |= 1 << 4;
+    double went = *t;
+
+    peer_t *a2b = NULL, *b2a = NULL;
+    RUN_UNTIL(t, 60, (a2b = peer_named(&A2, "bob")) && (b2a = peer_named(&B2, "alice")) && a2b->announced
+                     && b2a->announced && a2b->code_ok == CODE_SAME && b2a->code_ok == CODE_SAME);
+    CHECK(a2b && a2b->code_ok == CODE_SAME, "in the new room, alice's code with bob doesn't count as compared");
+    CHECK(b2a && b2a->code_ok == CODE_SAME, "in the new room, bob's code with alice doesn't count as compared");
+    CHECK(log_a2.compare_prompts == 0 && log_b2.compare_prompts == 0 && log_a2.came_along == 1 && log_b2.came_along == 1,
+          "the new room asked to compare codes (%d, %d) or didn't say they came along (%d, %d)", log_a2.compare_prompts,
+          log_b2.compare_prompts, log_a2.came_along, log_b2.came_along);
+    chat_send_text(&A2, "in the new room", *t);
+    RUN_UNTIL(t, 10, log_count(&log_b2, "alice: in the new room") == 1);
+    CHECK(log_count(&log_b2, "alice: in the new room") == 1, "bob didn't get alice's message in the new room");
+
+    RUN_UNTIL(t, MOVE_LINGER + 5, chat_move_finished(&A, *t) && chat_move_finished(&B, *t));
+    CHECK(chat_move_finished(&A, *t) && chat_move_finished(&B, *t) && *t - went < MOVE_LINGER,
+          "the room they left didn't finish before MOVE_LINGER");
+    CHECK(chat_move_asked(&C) == NULL && log_c.move_asks == 0, "carol was asked to move");
+    CHECK(!find_bytes((const uint8_t *)&C, sizeof C, ta.session_name) && !find_bytes((const uint8_t *)&C, sizeof C, ta.password),
+          "the new room's id or password reached carol");
+    chat_shutdown(&A);
+    chat_shutdown(&B);
+    live_mask &= ~0x3;
+    RUN_UNTIL(t, 10, chat_online_count(&C) == 0);
+    CHECK(chat_online_count(&C) == 0, "carol still sees %d of the peers that left", chat_online_count(&C));
+    crypto_wipe(&ta, sizeof ta);
+    crypto_wipe(&tb, sizeof tb);
+}
+
 int main(int argc, char **argv) {
     verbose = argc > 1 && (strcmp(argv[1], "-v") == 0 || strcmp(argv[1], "--verbose") == 0);
     double t_start = now_seconds();
@@ -2143,7 +2242,7 @@ int main(int argc, char **argv) {
         { "parsers", test_parsers }, { "toml", test_toml }, { "dht keys", test_dht_keys }, { "dht", test_dht }, { "read file", test_read_file },
         { "identity keys", test_identity_keys }, { "passphrase seal", test_passphrase_seal }, { "device lock", test_device_lock },
         { "factor locks", test_factor_locks }, { "totp", test_totp }, { "bytewords", test_bytewords }, { "qr", test_qr }, { "save factors", test_save_factors }, { "duress", test_duress }, { "history", test_history }, { "images", test_images }, { "file names", test_file_names }, { "files", test_files },
-        { "verified keys", test_trust },
+        { "verified keys", test_trust }, { "move", test_move },
     };
     size_t n_tests = sizeof tests / sizeof tests[0];
     int failed[sizeof tests / sizeof tests[0]], n_failed = 0;
@@ -2156,7 +2255,7 @@ int main(int argc, char **argv) {
         if (!ok) failed[n_failed++] = (int)i;
         printf("%s %-18s %6.0f ms\n", ok ? "ok  " : "FAIL", tests[i].name, (now_seconds() - t0) * 1000.0);
     }
-    for (int i = 0; i < n_live; i++) chat_shutdown(ALL[i]);
+    for (int i = 0; i < N_ALL; i++) if (live_mask & (1 << i)) chat_shutdown(ALL[i]);
 
     printf("\n%zu tests: %zu passed, %d failed | %d checks, %d failed | %.1f s\n",
            n_tests, n_tests - (size_t)n_failed, n_failed, checks, failures, now_seconds() - t_start);

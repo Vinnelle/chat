@@ -296,4 +296,14 @@ int identity_verify(const uint8_t id_pub[ID_SIGN_PUB_LEN], const uint8_t sig[ID_
                      const uint8_t their_eph_pub[PUB_LEN], const uint8_t their_id[ID_LEN],
                      const uint8_t my_eph_pub[PUB_LEN], const uint8_t my_id[ID_LEN]);
 
+// The same, with the key a peer showed in the room it moved from (:move), under a label of its own so
+// neither signature passes for the other.
+void move_sign(const identity_keypair_t *kp,
+               const uint8_t my_eph_pub[PUB_LEN], const uint8_t my_id[ID_LEN],
+               const uint8_t their_eph_pub[PUB_LEN], const uint8_t their_id[ID_LEN],
+               uint8_t sig[ID_SIGN_LEN]);
+int move_verify(const uint8_t pub[ID_SIGN_PUB_LEN], const uint8_t sig[ID_SIGN_LEN],
+                const uint8_t their_eph_pub[PUB_LEN], const uint8_t their_id[ID_LEN],
+                const uint8_t my_eph_pub[PUB_LEN], const uint8_t my_id[ID_LEN]);
+
 #endif

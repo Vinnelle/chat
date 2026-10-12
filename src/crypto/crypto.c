@@ -724,3 +724,29 @@ int identity_verify(const uint8_t id_pub[ID_SIGN_PUB_LEN], const uint8_t sig[ID_
     sign_message(buf, their_eph_pub, their_id, my_eph_pub, my_id);
     return crypto_sign_verify_detached(sig, buf, SIGN_MSG_LEN, id_pub) == 0 ? 0 : -1;
 }
+
+static const char MOVE_SIGN_LABEL[] = "chat move v1";
+#define MOVE_MSG_LEN (sizeof MOVE_SIGN_LABEL - 1 + SIGN_MSG_LEN)
+
+static void move_message(uint8_t buf[MOVE_MSG_LEN], const uint8_t a_pub[PUB_LEN], const uint8_t a_id[ID_LEN],
+                         const uint8_t b_pub[PUB_LEN], const uint8_t b_id[ID_LEN]) {
+    memcpy(buf, MOVE_SIGN_LABEL, sizeof MOVE_SIGN_LABEL - 1);
+    sign_message(buf + sizeof MOVE_SIGN_LABEL - 1, a_pub, a_id, b_pub, b_id);
+}
+
+void move_sign(const identity_keypair_t *kp,
+               const uint8_t my_eph_pub[PUB_LEN], const uint8_t my_id[ID_LEN],
+               const uint8_t their_eph_pub[PUB_LEN], const uint8_t their_id[ID_LEN],
+               uint8_t sig[ID_SIGN_LEN]) {
+    uint8_t buf[MOVE_MSG_LEN];
+    move_message(buf, my_eph_pub, my_id, their_eph_pub, their_id);
+    identity_sign_bytes(kp, buf, sizeof buf, sig);
+}
+
+int move_verify(const uint8_t pub[ID_SIGN_PUB_LEN], const uint8_t sig[ID_SIGN_LEN],
+                const uint8_t their_eph_pub[PUB_LEN], const uint8_t their_id[ID_LEN],
+                const uint8_t my_eph_pub[PUB_LEN], const uint8_t my_id[ID_LEN]) {
+    uint8_t buf[MOVE_MSG_LEN];
+    move_message(buf, their_eph_pub, their_id, my_eph_pub, my_id);
+    return crypto_sign_verify_detached(sig, buf, sizeof buf, pub) == 0 ? 0 : -1;
+}
