@@ -2029,10 +2029,20 @@ static void draw_input(wbuf_t *w, rect_t r, int boxed, const tui_bar_t *bar, con
     if (in->mode == TUI_IMODE_COMMAND) {
         char pre[2] = { in->cmd_prefix ? in->cmd_prefix : ':', '\0' };
         ptext(&p, S_ACCENT_BOLD, pre);
-        ptext(&p, S_PLAIN, in->cmd);
+        // A line wider than the box shows its end, where it's typed.
+        const char *shown = in->cmd;
+        int room = p.room - p.used - 1;
+        if (utf8_str_cols(shown) > room) {
+            while (*shown && utf8_str_cols(shown) > room - 1) {
+                size_t adv = utf8_lead_len((unsigned char)*shown);
+                shown += adv ? adv : 1;
+            }
+            ptext(&p, S_FAINT, G_ELLIPSIS);
+        }
+        ptext(&p, S_PLAIN, shown);
         cursor = p.used;
         tui_suggestion_t s;
-        if (tui_input_completion(in, &s)) ptext(&p, S_FAINT, s.line + in->cmd_len);
+        if (shown == in->cmd && tui_input_completion(in, &s)) ptext(&p, S_FAINT, s.line + in->cmd_len);
     } else {
         cursor = draw_field(&p, in, bar->mask_input, bar->placeholder);
     }

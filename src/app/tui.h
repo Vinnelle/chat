@@ -198,7 +198,8 @@ typedef struct {
     int len;
     int cursor;
     tui_input_mode_t mode;
-    char cmd[64];
+    // As long as a message, for the commands that send one (:msg, :reply).
+    char cmd[1024];
     int cmd_len;
     // ':' from NORMAL or '/' on an empty line opens the COMMAND line. Leaving it goes back to the mode
     // it came from. cmd_as_text: opened with '/' on an empty line, so it can still turn back into text
