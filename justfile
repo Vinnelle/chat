@@ -226,15 +226,20 @@ _can-release:
     test -z "$(git status --porcelain)" || { echo "working tree not clean" >&2; exit 1; }
     gh auth status >/dev/null 2>&1 || { echo "gh isn't logged in - run gh auth login" >&2; exit 1; }
 
-#   just release                  the next version: the one in CMakeLists.txt, or the patch after it
+#   just release patch            the patch after the last release, 0.5.0 -> 0.5.1
+#   just release minor            the minor after it, 0.5.0 -> 0.6.0
+#   just release major            the major after it, 0.5.0 -> 1.0.0
+#   just release                  the version in CMakeLists.txt, which finishes its betas, or the
+#                                 patch after it once that one is published
 #   just release 1.0.0            another version
-#   just release beta [VERSION]   a beta of the next version, or of VERSION, see _release-beta
+#   just release beta [KIND]      a beta of the version just release KIND would release, see
+#                                 _release-beta
 # Releases the sections at the top of CHANGELOG.md, "## Unreleased" and those of the betas since
 # the last release, as VERSION: they become one "## VERSION" (see _fold-changelog), CMakeLists.txt
-# gets the version, and both are committed and tagged vVERSION. VERSION defaults to the one in
-# CMakeLists.txt, or the patch after it once that one is published. Nothing is pushed until
-# SHA256SUMS is signed; if a later step fails, running this again picks up from the tag.
-# Build, sign and publish a release: [VERSION], or beta [VERSION] (needs zig, minisign, gh)
+# gets the version, and both are committed and tagged vVERSION. Betas of another version are
+# folded in too, so a cycle of 0.5.1 betas can come out as 0.6.0. Nothing is pushed until
+# SHA256SUMS is signed; if a later step fails, running the same again picks up from the tag.
+# Build, sign and publish a release: patch, minor, major, or beta [KIND] (needs zig, minisign, gh)
 [group('release')]
 release what="" *args: _can-release
     #!/bin/sh
@@ -242,19 +247,16 @@ release what="" *args: _can-release
     just={{quote(just_executable())}}
     if [ "${1:-}" = beta ]; then
         shift
-        if [ $# -gt 1 ]; then echo "just release beta takes one version at most, not $*" >&2; exit 1; fi
+        if [ $# -gt 1 ]; then echo "just release beta takes patch, minor, major or a version, not $*" >&2; exit 1; fi
         exec "$just" _release-beta "$@"
     fi
-    if [ $# -gt 1 ]; then echo "just release takes a version or beta [VERSION], not $*" >&2; exit 1; fi
+    if [ $# -gt 1 ]; then echo "just release takes patch, minor, major, beta or a version, not $*" >&2; exit 1; fi
     cmake_version() { sed -n 's/^project(chat VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt; }
     published() { gh release view "v$1" >/dev/null 2>&1; }
     pending() { awk '/^## [0-9]+\.[0-9]+\.[0-9]+$/ { exit } /^## / { printf "%s%s", (n++ ? ", " : ""), substr($0, 4) }' CHANGELOG.md; }
-    v="${1:-}"
-    if [ -z "$v" ]; then
-        v=$(cmake_version)
-        if published "$v"; then v=$(echo "$v" | awk -F. '{ print $1 "." $2 "." $3 + 1 }'); fi
-    fi
-    echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "not a version: $v (want MAJOR.MINOR.PATCH)" >&2; exit 1; }
+    v=$("$just" _next-version "${1:-}")
+    echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+        || { echo "not a version: $v (want patch, minor, major or MAJOR.MINOR.PATCH)" >&2; exit 1; }
     if published "$v"; then echo "release v$v is already published" >&2; exit 1; fi
     older=$(printf '%s\n%s\n' "$v" "$(cmake_version)" | sort -V | head -n 1)
     if [ "$older" = "$v" ] && [ "$v" != "$(cmake_version)" ]; then
@@ -283,22 +285,20 @@ release what="" *args: _can-release
 # A beta is for testers: tagged vVERSION-beta.N, signed and published like a release, but as a
 # GitHub pre-release, which :update only installs with betas on (:set betas on). Testers turn
 # that on or download it, and :update takes them on to VERSION once it's released. Releasing
-# VERSION deletes its betas' GitHub releases, but not their tags. VERSION defaults to the one
-# `just release` would release next, and N counts up from 1 (or picks up a beta whose publishing failed). "## Unreleased" becomes
+# VERSION, or one after it, deletes the betas' GitHub releases, but not their tags. VERSION is
+# the one `just release KIND` would release (see _next-version), so with no KIND it's the betas'
+# own, and N counts up from 1 (or picks up a beta whose publishing failed). "## Unreleased" becomes
 # "## VERSION-beta.N" and CMakeLists.txt gets the version, with "-beta.N" as CHAT_PRERELEASE.
-# Build, sign and publish a beta of the next release, or of VERSION
-_release-beta version="":
+# Build, sign and publish a beta of the next release, or of KIND's (patch, minor, major or a version)
+_release-beta kind="":
     #!/bin/sh
     set -eu
     just={{quote(just_executable())}}
     cmake_version() { sed -n 's/^project(chat VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt; }
     published() { gh release view "v$1" >/dev/null 2>&1; }
-    base="${1:-}"
-    if [ -z "$base" ]; then
-        base=$(cmake_version)
-        if published "$base"; then base=$(echo "$base" | awk -F. '{ print $1 "." $2 "." $3 + 1 }'); fi
-    fi
-    echo "$base" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "not a version: $base (want MAJOR.MINOR.PATCH)" >&2; exit 1; }
+    base=$("$just" _next-version "${1:-}")
+    echo "$base" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+        || { echo "not a version: $base (want patch, minor, major or MAJOR.MINOR.PATCH)" >&2; exit 1; }
     if published "$base"; then echo "v$base is already released" >&2; exit 1; fi
     older=$(printf '%s\n%s\n' "$base" "$(cmake_version)" | sort -V | head -n 1)
     if [ "$older" = "$base" ] && [ "$base" != "$(cmake_version)" ]; then
@@ -333,6 +333,35 @@ _release-beta version="":
     git rev-parse -q --verify "refs/tags/v$v" >/dev/null \
         || { echo "no tag v$v and no Unreleased section in CHANGELOG.md to release" >&2; exit 1; }
     exec "$just" _publish "$v"
+
+# patch, minor and major count on from the last release: the newest vMAJOR.MINOR.PATCH tag that's
+# published on GitHub, so after a failed publish the same KIND comes to the same version again.
+# With no KIND it's the version in CMakeLists.txt, or the patch after it once that one is
+# published. Anything else is taken as the version.
+# Print the version `just release KIND` releases
+_next-version kind="":
+    #!/bin/sh
+    set -eu
+    published() { gh release view "v$1" >/dev/null 2>&1; }
+    case "${1:-}" in
+        patch|minor|major)
+            last=0.0.0
+            for t in $(git tag -l --sort=-version:refname 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$'); do
+                if published "${t#v}"; then last=${t#v}; break; fi
+            done
+            echo "$last" | awk -F. -v k="$1" '{
+                if (k == "major") print $1 + 1 ".0.0"
+                else if (k == "minor") print $1 "." $2 + 1 ".0"
+                else print $1 "." $2 "." $3 + 1
+            }'
+            ;;
+        "")
+            v=$(sed -n 's/^project(chat VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+            if published "$v"; then v=$(echo "$v" | awk -F. '{ print $1 "." $2 "." $3 + 1 }'); fi
+            echo "$v"
+            ;;
+        *) echo "$1" ;;
+    esac
 
 # The sections above the last release's, newest first, become one "## VERSION" holding each
 # section's lines from the oldest on, under each ### heading once: Security, Added, Changed,
@@ -424,9 +453,12 @@ _publish version:
     case "$v" in *-*) pre=--prerelease ;; *) pre= ;; esac
     gh release create "v$v" --title "v$v" --notes-file dist/notes.md --verify-tag ${pre:+"$pre"} \
         dist/chat-linux-x86_64 dist/chat-windows-x86_64.exe dist/SHA256SUMS dist/SHA256SUMS.minisig
-    # The release replaces its betas as a download. Their tags stay, as the history of the release.
+    # The release replaces the betas up to it as a download, its own and those of a version it
+    # skipped. Their tags stay, as the history of the release.
     if [ -z "$pre" ]; then
-        for t in $(git tag -l "v$v-beta.*"); do
-            if gh release view "$t" >/dev/null 2>&1; then gh release delete "$t" --yes; fi
+        for t in $(gh release list --limit 100 --json tagName,isPrerelease -q '.[] | select(.isPrerelease) | .tagName'); do
+            b=${t#v}
+            b=${b%%-*}
+            if [ "$(printf '%s\n%s\n' "$b" "$v" | sort -V | tail -n 1)" = "$v" ]; then gh release delete "$t" --yes; fi
         done
     fi

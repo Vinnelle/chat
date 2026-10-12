@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- `just release patch`, `minor` and `major` release the next patch, minor or major version after
+  the last published release, and `just release beta patch`, `minor` or `major` a beta of it.
+  `just release` and `just release beta` still release the version in `CMakeLists.txt` (the
+  betas' own) or the patch after it. A release folds in, and deletes the GitHub releases of, the
+  betas of any version up to it, so a cycle of `0.5.1` betas can come out as `0.6.0`.
+
 ## 0.5.1-beta.1
 
 ### Added
