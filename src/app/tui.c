@@ -147,6 +147,7 @@ size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out) {
                 }
             }
             if (len >= 5 && buf[2] == '1' && buf[3] == '1' && buf[4] == '~') { out->type = TUI_KEY_HELP; return 5; }
+            if (len >= 5 && buf[2] == '2' && buf[3] == '0' && buf[4] == '~') { out->type = TUI_KEY_F9; return 5; }
             if (len >= 5 && buf[2] == '2' && buf[3] == '4' && buf[4] == '~') { out->type = TUI_KEY_F12; return 5; }
             // Parameter and intermediate bytes run up to a final byte from '@' to '~'.
             size_t k = 2;
@@ -190,6 +191,9 @@ size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out) {
         case CTRL_KEY('S'):           out->type = TUI_KEY_SETTINGS; return 1;
         case CTRL_KEY('F'):           out->type = TUI_KEY_FILES; return 1;
         case CTRL_KEY('C'):           out->type = TUI_KEY_CTRL_C; return 1;
+        case CTRL_KEY('G'):           out->type = TUI_KEY_CTRL_G; return 1;
+        case CTRL_KEY('K'):           out->type = TUI_KEY_CTRL_K; return 1;
+        case CTRL_KEY('L'):           out->type = TUI_KEY_CTRL_L; return 1;
         case CTRL_KEY('Q'):           out->type = TUI_KEY_CTRL_Q; return 1;
         case CTRL_KEY('X'):           out->type = TUI_KEY_CTRL_X; return 1;
         case CTRL_KEY('\\'):          out->type = TUI_KEY_CTRL_BACKSLASH; return 1;
@@ -1981,14 +1985,14 @@ static void draw_status(wbuf_t *w, int row, int cols, const tui_bar_t *bar) {
     sty_pill(w, bar->tone);
     p.used += wapp_trunc(w, chip, cols);
     ptext(&p, S_PLAIN, " ");
-    if (bar->badge == TUI_ID_NONE) {
+    if (!bar->anonymous && bar->badge == TUI_ID_NONE) {
         ptext(&p, S_YELLOW, G_RING " unsigned");
-    } else {
+    } else if (!bar->anonymous) {
         const char *kind = bar->badge == TUI_ID_AGE ? "age" : bar->badge == TUI_ID_PGP ? "pgp" : "native";
         ptext(&p, S_GREEN, G_CHECK " signed ");
         ptext(&p, S_FAINT, kind);
     }
-    if (bar->nick && bar->nick[0]) {
+    if (bar->nick && bar->nick[0] && !bar->anonymous) {
         ptext(&p, S_FAINT, "  ");
         if (bar->nick_color) prgb(&p, bar->nick_color, 1, bar->nick, p.room - p.used);
         else ptext(&p, S_BOLD, bar->nick);
@@ -2729,6 +2733,14 @@ void tui_render_picture(int rows, int cols, const tui_picture_t *pic, const tui_
         }
         inner_end(&p);
     }
+    finish_frame(&w, rows, cols, bar, 0, 0);
+}
+
+void tui_render_blank(int rows, int cols, const tui_bar_t *bar, int color_enabled) {
+    wbuf_t w = frame_init(&rows, &cols, color_enabled);
+    g_input_h = 0;
+    begin_frame(&w);
+    for (int r = 1; r < rows; r++) blank_row(&w, r, 1, cols);
     finish_frame(&w, rows, cols, bar, 0, 0);
 }
 

@@ -74,6 +74,14 @@ const setting_def_t SETTINGS[] = {
     { SET_AUTHENTICATOR, NULL, NULL, "authenticator", "Authenticator app", K_TOGGLE, "on|off",
       "Requires the 6-digit code from an authenticator app (Aegis, Google Authenticator, 2FAS...) to unlock the "
       "save." },
+    { SET_LOCK, NULL, "Lock screen", "lock", "Auto-lock", K_CHOICE, "off|1m|5m|15m|30m",
+      "Locks the screen after this long without a key, as the lock key and :lock do at once. Locked, chat draws "
+      "nothing but a box for the open save's passphrase, or with no save open, a PIN it asks for first, kept "
+      "hashed in memory until chat exits. Sessions carry on behind it, and notifications show no preview. Wrong "
+      "passphrases count toward self-destruct, and the shadow passphrase panics, leaving the decoy in the save's "
+      "place. Each try takes a second or two." },
+    { SET_LOCK_KEY, NULL, NULL, "lockkey", "Lock key", K_CHOICE, "off|ctrl+l|ctrl+g|ctrl+k|f9",
+      "The key that locks the screen at once, from anywhere in chat. off leaves :lock and auto-lock." },
     { SET_DESTROY, NULL, "Duress", "destroy", "Self-destruct", K_CHOICE, "off|3|5|10",
       "Deletes what :install saves after this many wrong passphrases in a row, so a found or taken device can't "
       "be guessed at forever. The count and the limit are kept next to the save, not sealed (they have to be read "
@@ -89,14 +97,14 @@ const setting_def_t SETTINGS[] = {
       "passphrase. Enter sets or removes it. Only while a save is open, and it needs the save's own factors to "
       "hand." },
     { SET_PANIC_KEY, NULL, NULL, "panickey", "Panic key", K_CHOICE, "off|ctrl+\\|ctrl+q|ctrl+x|f12",
-      "A key that, from anywhere in chat, clears the screen and quits at once, without asking: every session says "
-      "bye, memory is wiped and chat's own tor stops. Nothing is saved but what the rows below keep. Anyone at the "
-      "keyboard can press it. Ctrl+\\ is awkward on some keyboards, so there are others. In --simple, the "
-      "terminal's Ctrl+\\ panics unless this is off." },
+      "A key that, from anywhere in chat (the lock screen too), clears the screen and quits at once, without "
+      "asking: every session says bye, memory is wiped and chat's own tor stops. Nothing is saved but what the "
+      "rows below keep. Anyone at the keyboard can press it. Ctrl+\\ is awkward on some keyboards, so there are "
+      "others. In --simple, the terminal's Ctrl+\\ panics unless this is off." },
     { SET_PANIC_WIPE, NULL, NULL, "panicwipe", "Panic deletes the save", K_TOGGLE, "on|off",
       "on: the panic key also deletes the open save, as :uninstall does but without asking: its settings, signing "
       "key, verified keys and history. Deleting isn't erasing: the disk and its backups can keep traces of the "
-      "files." },
+      "files. The shadow passphrase on the lock screen leaves the decoy instead." },
     { SET_PANIC_HISTORY, NULL, NULL, "panichistory", "Panic writes history", K_TOGGLE, "on|off",
       "on: the panic key writes the history kept for each session before it quits. off: it isn't written, so "
       "each history loses up to its last 30 seconds." },
@@ -234,6 +242,12 @@ int setting_options(setting_id_t id, const char *const **names, int *n) {
             for (int i = 0; i < 4; i++) if (DESTROY_VALS[i] == g_app.destroy_limit) return i;
             return 0;
         }
+        case SET_LOCK: {
+            *names = LOCK_AFTER_NAMES; *n = N_LOCK_AFTER;
+            for (int i = 0; i < N_LOCK_AFTER; i++) if (LOCK_AFTER_SECONDS[i] == g_app.lock_after) return i;
+            return 0;
+        }
+        case SET_LOCK_KEY:   *names = LOCK_KEY_NAMES; *n = N_LOCK_KEYS; return g_app.lock_key;
         case SET_PANIC_KEY:  *names = PANIC_KEY_NAMES; *n = N_PANIC_KEYS; return g_app.panic_key;
         case SET_PANIC_WIPE: return g_app.panic_wipe != 0;
         case SET_PANIC_HISTORY: return g_app.panic_history != 0;
@@ -606,6 +620,8 @@ void setting_choose(setting_id_t id, int i) {
         case SET_AUTHENTICATOR: factor_choose(INSTALL_FACTOR_CODE, i); return;
         case SET_DESTROY: destroy_choose(DESTROY_VALS[i]); return;
         case SET_HISTORY: history_choose(i); return;
+        case SET_LOCK: lock_after_choose(i); return;
+        case SET_LOCK_KEY: g_app.lock_key = i; break;
         case SET_PANIC_KEY: g_app.panic_key = i; break;
         case SET_PANIC_WIPE:
             g_app.panic_wipe = i;

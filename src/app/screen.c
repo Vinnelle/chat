@@ -458,6 +458,33 @@ static const tui_dialog_t *quit_dialog(void) {
     return &d;
 }
 
+// Nothing says whose chat it is, or which save.
+static const tui_dialog_t *lock_dialog(void) {
+    static tui_dialog_t d;
+    d = (tui_dialog_t){ .title = "LOCKED", .input = &g_app.lock_input, .mask = 1,
+                        .placeholder = lock_by_passphrase() ? "passphrase" : "PIN", .keys = "enter unlock" };
+    if (g_app.lock_checking) {
+        d.input = NULL;
+        d.status = "checking\xe2\x80\xa6";
+    }
+    return &d;
+}
+
+static const tui_dialog_t *pin_dialog(void) {
+    static tui_dialog_t d;
+    static tui_para_t paras[1];
+    int first = g_app.pin_step == 1;
+    d = (tui_dialog_t){ .title = "LOCK SCREEN" DOT_SEP "PIN", .text = paras, .input = &g_app.lock_input, .mask = 1 };
+    d.n_text = add_para(paras, 0, TUI_P_TEXT, first
+        ? "No save is open, so a PIN unlocks the lock screen in place of a save's passphrase. It's kept only in "
+          "memory, hashed, until chat exits. Once a save is open, its passphrase unlocks it instead."
+        : "Type the PIN again, to be sure of it.");
+    d.placeholder = first ? "PIN" : "the same PIN";
+    d.keys = first ? "enter next" DOT_SEP "esc cancel"
+           : g_app.pin_then < 0 ? "enter lock" DOT_SEP "esc cancel" : "enter turn on" DOT_SEP "esc cancel";
+    return &d;
+}
+
 // Its field is the input line, saved meanwhile by begin_prompt and similar.
 static const tui_dialog_t *current_dialog(void) {
     static tui_dialog_t d;
@@ -895,6 +922,11 @@ static tui_bar_t current_bar(void) {
             break;
     }
     b.dialog = current_dialog();
+    if (g_app.pin_step) {
+        b.dialog = pin_dialog();
+        b.chip = "LOCK";
+        b.tone = TUI_TONE_PROMPT;
+    }
     if (g_app.asking_quit) {
         b.dialog = quit_dialog();
         b.chip = "QUIT";
@@ -905,7 +937,7 @@ static tui_bar_t current_bar(void) {
 }
 
 void render_bar(void) {
-    if (!on_chat_screen()) { render(); return; }
+    if (g_app.screen_locked || !on_chat_screen()) { render(); return; }
     int rows_n, cols_n; term_get_size(&rows_n, &cols_n);
     char sub[64]; tui_view_t view = current_view(sub, sizeof sub);
     tui_bar_t bar = current_bar();
@@ -956,7 +988,16 @@ static int build_net(tui_kv_t kv[MAX_NET], char vals[MAX_NET][NET_VALUE_MAX]) {
 _Static_assert((int)TUI_VERIFY_BAD == (int)VERIFY_FAILED && (int)TUI_CODE_KEY_CHANGED == (int)CODE_KEY_CHANGED,
                "the sidebar takes the engine's verify states and codes as they are");
 
+static void render_locked(void) {
+    int rows_n, cols_n; term_get_size(&rows_n, &cols_n);
+    tui_bar_t bar = { .chip = "LOCKED", .tone = TUI_TONE_PROMPT, .message = lock_note(), .anonymous = 1 };
+    bar.dialog = lock_dialog();
+    bar.hint = bar.dialog->keys;
+    tui_render_blank(rows_n, cols_n, &bar, g_app.color_enabled);
+}
+
 void render(void) {
+    if (g_app.screen_locked) { render_locked(); return; }
     tui_session_row_t rows[MAX_SESSIONS];
     int n = 0, sel = -1;
     for (int i = 0; i < MAX_SESSIONS; i++) {

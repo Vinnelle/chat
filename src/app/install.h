@@ -27,6 +27,7 @@
 #define INSTALL_KEY -6       // it needs its security key's secret first (install_key_open)
 #define INSTALL_LOST -7      // a file a factor needs is missing or damaged: install_why says which
 #define INSTALL_DESTROYED -8 // too many wrong passphrases: the save was deleted (install_why says)
+#define INSTALL_DECOY -9     // the shadow passphrase: the decoy has taken the save's place (install_lock_try)
 #define INSTALL_NAME_MAX 32
 // Paths: chat's config folder, a save's folder in it (as install_where gives it), and a file in that.
 #define INSTALL_TOP_MAX 900
@@ -185,5 +186,12 @@ int install_shadow_clear(void);
 #define INSTALL_SHADOW_LOST 2   // its decoy couldn't be kept when it opened or changed: the shadow passphrase is gone
 // What there is to say about the open save's decoy: LOST once, after it happened.
 int install_shadow_news(void);
+
+// The lock screen's passphrase, tried on the open save: 0 for its own, which starts a self-destruct
+// count again; INSTALL_DECOY for its shadow passphrase, and it's closed; PASS_WRONG, counted toward
+// self-destruct; INSTALL_DESTROYED once that's one too many; or PASS_NOMEM. Its own passphrase is
+// checked against the lock held for it, not its files, and Argon2id runs for it and its spare every
+// time, as when it's opened.
+int install_lock_try(const char *passphrase);
 
 #endif

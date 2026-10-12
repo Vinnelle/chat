@@ -15,11 +15,18 @@
   behind keep the old room and everything said in it, and aren't told where you went. With
   `--simple`, `:move yes` and `:move no` answer. Versions before this one can't move, so a move
   leaves them behind.
-- A panic key. `Ctrl+\` clears the screen and quits at once, from anywhere in chat: every session
-  says bye, nothing is saved, memory is wiped and chat's own tor stops. `:set panicwipe on` makes it
-  delete the open save as well, and `:set panichistory on` writes the history kept first.
-  `:set panickey` chooses another key, or none. In `--simple`, the terminal's `Ctrl+\` panics. It
-  used to end chat there, and in the full screen UI, with no bye and nothing cleaned up.
+- A lock screen. `Ctrl+L` (or `:lock`) locks chat's screen at once, and `:set lock 5m` (or `1m`,
+  `15m`, `30m`) locks it after that long without a key. Locked, chat draws nothing but a box for the
+  open save's passphrase, or with no save open, a PIN it asks for first and keeps hashed in memory
+  until it exits. Sessions carry on behind it, and notifications show no preview. Wrong passphrases
+  count toward self-destruct, and the shadow passphrase panics, leaving the decoy in the save's
+  place.
+- A panic key. `Ctrl+\` clears the screen and quits at once, from anywhere in chat, the lock screen
+  too: every session says bye, nothing is saved, memory is wiped and chat's own tor stops.
+  `:set panicwipe on` makes it delete the open save as well, and `:set panichistory on` writes the
+  history kept first. `:set lockkey` and `:set panickey` choose other keys, or none. In `--simple`,
+  the terminal's `Ctrl+\` panics. It used to end chat there, and in the full screen UI, with no
+  bye and nothing cleaned up.
 
 ## 0.5.0
 

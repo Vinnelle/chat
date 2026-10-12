@@ -47,7 +47,8 @@ session id and password, whether they were invited or the password leaked.
 | Root, or an administrator | Nothing chat can stop. | Read chat's memory, and everything above. |
 | Someone with the disk, or a backup (no save) | Find anything but the executable and the files you downloaded: chat writes nothing else unless you `:install`. Its own tor's folder is deleted when it stops. | See the executable, and that something downloaded those files. |
 | Someone with the disk, or a backup (with a save) | Read the save without its passphrase, and also the device or the security key if the save needs them. Link the files to your fingerprint. Tell from the files alone whether a save has a decoy. | See that chat is used there, the saves' folder names, which factors each save needs, whether self-destruct is on, and how many sessions a save keeps a history for. Guess passphrases offline, at the cost of a 512 MiB Argon2id run for each guess, unless the save needs the device or a security key too. |
-| Someone who makes you open a save | See what the real save holds, if you type the shadow passphrase. | Wonder whether a save with no key and no verified keys is a decoy. Find the real save's files in a backup or on the disk, since deleting isn't erasing. |
+| Someone at the keyboard while you're away | Read the screen, scroll back or type as you once chat is locked (the lock key, `:lock`, or `:set lock` after a while without a key): it shows nothing but a box for the save's passphrase, or a PIN. Try passphrases there faster than one every second or two, or past the self-destruct limit. | See what's on screen until it locks, and notifications, which only say that a message came while it's locked. End chat with the panic key, which works on the lock screen too, and with `:set panicwipe on`, delete the save with it. |
+| Someone who makes you open a save | See what the real save holds, if you type the shadow passphrase: when chat starts it opens the decoy, and on the lock screen it panics with the decoy in the save's place. | Wonder whether a save with no key and no verified keys is a decoy. Find the real save's files in a backup or on the disk, since deleting isn't erasing. |
 
 ### Things that are easy to get wrong
 
@@ -80,6 +81,10 @@ session id and password, whether they were invited or the password leaked.
   opens anything. Anyone who can read the folder sees the limit, and anyone who can copy or change
   the folder can put the count back. It stops someone guessing at the keyboard, not someone with a
   copy of the files.
+- **The lock screen only covers chat.** It hides what chat draws from the moment it locks: not what
+  was on screen before, a terminal that copies the full screen UI into its scrollback, or the
+  window's title. Anything that can read chat's memory can read past it. The panic key works on it,
+  so anyone at the keyboard can end chat, and with `:set panicwipe on`, delete the save.
 
 ### Forward secrecy
 

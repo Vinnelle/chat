@@ -69,14 +69,28 @@ behind keep the old room and everything said in it. Nothing tells them where you
 everyone leave together. A peer that only reaches the room through someone else is left behind
 too. With `--simple`, `:move` says who would come, and `:move yes` or `:move no` answers.
 
+**Lock screen.** Walk away from chat and anyone can read the screen, scroll back or type as you.
+`Ctrl+L` (or `:lock`) locks chat's screen at once, and `:set lock 5m` locks it after five minutes
+without a key (or `1m`, `15m`, `30m`). Locked, chat draws nothing but a box for the open save's
+passphrase. With no save open, it asks you for a PIN first, which it keeps hashed in memory until it
+exits, and a save's passphrase takes over once one is open. Sessions carry on behind the lock:
+messages arrive, files keep moving, and notifications show no preview whatever **Notification
+preview** says. Each try takes a second or two of Argon2id. Wrong passphrases count toward
+**Self-destruct**, like wrong ones when chat starts, and the shadow passphrase panics, leaving the
+decoy in the save's place (see
+[A shadow passphrase, and self-destruct](#a-shadow-passphrase-and-self-destruct)). The lock only
+hides what chat draws from then on: not what was on screen before, a terminal set to copy the full
+screen UI into its scrollback, or the window's title, and anything that can read chat's memory can
+read past it.
+
 **Panic key.** `Ctrl+\` clears the screen, the terminal's own as well, and quits at once, from
-anywhere in chat, without asking. Every session says bye, memory is wiped and chat's own tor stops.
-Nothing is saved: not settings, and not the last 30 seconds of a history unless
-`:set panichistory on`. `:set panicwipe on` makes it delete the open save too, as `:uninstall`
-would. Anyone at the keyboard can press it, so with that on, anyone can delete the save.
-`:set panickey` picks another key (`Ctrl+\` is awkward on some keyboards), or none. In `--simple`,
-the terminal's `Ctrl+\` panics, unless the panic key is off. Its lines are in the terminal's
-scrollback, so that's cleared too.
+anywhere in chat, the lock screen too, without asking. Every session says bye, memory is wiped and
+chat's own tor stops. Nothing is saved: not settings, and not the last 30 seconds of a history
+unless `:set panichistory on`. `:set panicwipe on` makes it delete the open save too, as
+`:uninstall` would. Anyone at the keyboard can press it, so with that on, anyone can delete the
+save. `:set lockkey` and `:set panickey` pick other keys (`Ctrl+\` is awkward on some keyboards),
+or none. In `--simple` there's no lock screen, and the terminal's `Ctrl+\` panics, unless the panic
+key is off. Its lines are in the terminal's scrollback, so that's cleared too.
 
 **Identity signing** is optional, and lets peers check who they're talking to. Pick it under
 **Signing identity** on the settings page (or `:set sign`), or with `--identity`:
@@ -166,8 +180,9 @@ can keep them out:
 What chat can't hide: root and administrators can read any program's memory. Anyone on the
 computer can see that chat is running, how much CPU time and memory it uses, and its network
 connections (in Tor mode, those only reach Tor relays, never a peer). Your terminal holds what's
-on screen, and the desktop's notification service gets each notification. Programs running as
-you can watch chat's files change, and can replace chat or tor before you next start them.
+on screen while it isn't locked, and the desktop's notification service gets each notification.
+Programs running as you can watch chat's files change, and can replace chat or tor before you next
+start them.
 
 > **Note:** the cryptography here has not been independently audited.
 
@@ -719,7 +734,8 @@ passphrase, for when you're made to open it. Typed in place of the real one, it 
 clean save with chat's defaults, no signing key, verified keys or history, that needs the same device,
 security key and code as the real one. The decoy takes the real save's place: the real save's
 files are replaced or deleted, and from then on its passphrase opens nothing. The shadow
-passphrase can't be the save's own, and `:set shadow off` removes the decoy.
+passphrase can't be the save's own, and `:set shadow off` removes the decoy. Typed on the
+[lock screen](#security), it puts the decoy in the save's place the same way, then panics.
 
 As far as chat can manage, nothing on disk or on screen says whether a save has a decoy:
 
@@ -740,7 +756,8 @@ the real passphrase, for anyone who later gets that passphrase too. And someone 
 decoys can wonder whether a save with no key and no verified keys is one.
 
 `:set destroy 3` (or `5` or `10`, the **Self-destruct** row) deletes the save after that many
-wrong passphrases in a row. The right passphrase, or the shadow one, starts the count again. The
+wrong passphrases in a row, when chat starts or on the lock screen, where the last one panics too.
+The right passphrase, or the shadow one, starts the count again. The
 count and the limit are in a `tries` file next to the save, not sealed, since chat has to read them
 before any passphrase opens anything: anyone who can read the folder sees the limit, and anyone who
 can copy or change it can put the count back. So it stops someone guessing at the keyboard, not
@@ -934,6 +951,7 @@ saved your settings, it starts on your sessions, and `Ctrl+S` opens the page.
 | `Ctrl+S` | settings |
 | `F1` | list all commands and keybinds (`?` in NORMAL, and `:help`, too) |
 | `Ctrl+C` | quit, after a `y`/`n` box saying what's open and what isn't saved (every session leaves cleanly first) |
+| `Ctrl+L` | lock the screen until the save's passphrase, or a PIN, unlocks it (`:lock` too; see [Lock screen](#security)) |
 | `Ctrl+\` | panic: clear the screen and quit at once, without asking (see [Panic key](#security)) |
 
 The bottom row is the same on every screen: a chip for where you are (`INSERT`, `NORMAL`,
@@ -972,6 +990,7 @@ puts it on the command line.
 | `:new`, `:join` | create / join a session (same as `Ctrl+N` / `Ctrl+J`) |
 | `:quit` (`:q`) | leave this session; quits when none is open |
 | `:quitall` (`:qa`) | leave every session and quit |
+| `:lock` | lock the screen until the save's passphrase, or a PIN, unlocks it (the lock key, `Ctrl+L`, does the same) |
 | `:set [NAME [VALUE]]` | change a setting (see below); on its own, opens the settings page (`Ctrl+S`) |
 | `:verify NICK [ok\|no]` | show a peer's verify code and identity fingerprint; `ok` once the code matches theirs, `no` if it doesn't |
 | `:verified [forget NICK\|all]` | list the signing keys you verified, with nicks and fingerprints, or remove them |
@@ -1017,6 +1036,8 @@ after a name. Under each row's help, the page shows the `:set` command that does
 | `authenticator` | `on` (the save asks for an authenticator app's code too), `off` |
 | `destroy` | `off`, `3`, `5`, `10` (the save is deleted after that many wrong passphrases in a row) |
 | `shadow` | `on` (asks for a second passphrase, which opens a decoy in the save's place), `off` |
+| `lock` | `off`, `1m`, `5m`, `15m`, `30m` (the screen locks after that long without a key; with no save open, it asks for a PIN first) |
+| `lockkey` | `ctrl+l`, `ctrl+g`, `ctrl+k`, `f9` (the key that locks the screen), `off` |
 | `panickey` | `ctrl+\`, `ctrl+q`, `ctrl+x`, `f12` (the key that panics), `off` |
 | `panicwipe` | `on` (the panic key deletes the open save too), `off` |
 | `panichistory` | `on` (the panic key writes the history kept first), `off` |

@@ -1426,6 +1426,53 @@ int install_shadow_clear(void) {
     return rc;
 }
 
+// ---- the lock screen ----
+
+// The lock held is checked rather than the save's settings file, so someone who can change the files
+// can't make its own passphrase fail, and with self-destruct on, delete it.
+int install_lock_try(const char *passphrase) {
+    static uint8_t spare[SETTINGS_FILE_MAX + 1], plain[SETTINGS_FILE_MAX];
+    g_why[0] = '\0';
+    if (!g_open) return PASS_WRONG;
+    pin_secrets();
+    pass_lock_t *lk = &g_opening.lock, *sl = &g_spare_lock;
+    size_t sn = 0, got = 0;
+    int old = 0, sr = read_sealed(g_name, SPARE_NAME, spare, SETTINGS_FILE_MAX, &sn);
+    if (sr == INSTALL_NO_FILE) {
+        sr = read_sealed(g_name, OLD_DECOY_SETTINGS, spare, SETTINGS_FILE_MAX, &sn);
+        old = sr == 0;
+    }
+    int rc = pass_lock_like(passphrase, &g_held.lock, lk);
+    if (sr == 0) sr = pass_lock_of(passphrase, spare, sn, sl);
+    if (sr != 0 && sr != PASS_NOMEM) sr = pass_lock_new(passphrase, sl) == PASS_NOMEM ? PASS_NOMEM : -1;
+    if (rc == 0 && sr == PASS_NOMEM) rc = PASS_NOMEM;
+    if (rc == 0 && crypto_equal(lk->base, g_held.lock.base, sizeof lk->base) != 0) rc = PASS_WRONG;
+    crypto_wipe(lk, sizeof *lk);
+    int decoy = 0;
+    if (rc == PASS_WRONG && sr == 0) {
+        unsigned sneeds = pass_needs(spare, sn);
+        if ((!(sneeds & F_DEVICE) || g_held.have_device) && (!(sneeds & F_KEY) || g_held.have_key)) {
+            pass_lock_set(sl, sneeds, g_held.device, g_held.key);
+            decoy = pass_unseal(sl, spare, sn, plain, sizeof plain, &got) == 0
+                 && (old || (got == SPARE_PLAIN_LEN && plain[0] == 1 && plain[1] <= 1));
+        }
+    }
+    char name[INSTALL_NAME_MAX + 1];
+    copy_str(name, g_name, sizeof name);
+    unsigned limit = 0, count = 0;
+    if (decoy) {
+        install_forget();
+        promote(name, sl, plain, old);
+        rc = INSTALL_DECOY;
+    } else if (rc == PASS_WRONG) {
+        rc = wrong_pass(name);
+    }
+    if ((rc == 0 || rc == INSTALL_DECOY) && read_tries(name, &limit, &count) == 0 && limit) write_tries(name, limit, 0);
+    crypto_wipe(plain, sizeof plain);
+    crypto_wipe(sl, sizeof *sl);
+    return rc;
+}
+
 // ---- uninstalling ----
 
 // Anything not chat's, and in the default save's folder, the saves folder if it has a save in it.

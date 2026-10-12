@@ -1301,6 +1301,64 @@ static void test_duress(double *t) {
     CHECK(install_remove("o") == 0, "it wasn't uninstalled");
 }
 
+// The lock screen's passphrase, through app/install.c: the open save's own unlocks it, checked against
+// the lock held rather than its files; a wrong one counts toward self-destruct, which its own starts
+// again; every try runs Argon2id for the save and its spare; the shadow passphrase closes the save
+// with the decoy in its place; one wrong too many deletes it. And the PIN's check, without a save.
+static void test_lock_screen(double *t) {
+    (void)t;
+    static char config[256];
+    CHECK(test_temp_dir("lock", config, sizeof config) == 0, "no temporary folder");
+    test_set_env(TEST_CONFIG_VAR, config);
+    static const char settings[] = "[profile]\nnick = \"alice\"\n";
+    static const uint8_t key[] = "a signing key";
+    static char buf[INSTALL_SETTINGS_MAX];
+
+    install_use("l");
+    CHECK(install_lock_new("l", "real", 0) == 0 && install_write_settings(settings) == 0
+          && install_write_key(key, sizeof key) == 0 && install_shadow_set("decoy") == 0,
+          "the save or its decoy wasn't made: %s", install_why());
+    unsigned long runs = pass_derivations();
+    CHECK(install_lock_try("real") == 0 && pass_derivations() - runs == 2
+          && install_read_settings(buf, sizeof buf) == (long)strlen(settings),
+          "its own passphrase didn't unlock it, or not with the same work");
+    runs = pass_derivations();
+    CHECK(install_lock_try("wrong") == PASS_WRONG && pass_derivations() - runs == 2
+          && install_read_settings(buf, sizeof buf) == (long)strlen(settings),
+          "a wrong passphrase didn't take the same work, or closed the save");
+
+    char path[600];
+    static const uint8_t junk[PASS_SEAL_OVERHEAD] = { 0 };
+    snprintf(path, sizeof path, "%s/chat/saves/l/settings", config);
+    CHECK(platform_write_private(path, junk, sizeof junk) == 0 && install_lock_try("real") == 0
+          && install_write_settings(settings) == 0, "a changed settings file made its own passphrase fail");
+
+    install_arm_destroy("l", 3);
+    CHECK(install_lock_try("x") == PASS_WRONG && install_tries_left("l") == 2,
+          "a wrong passphrase didn't count toward self-destruct");
+    CHECK(install_lock_try("real") == 0 && install_tries_left("l") == 3, "its own passphrase didn't start the count again");
+    CHECK(install_lock_try("x") == PASS_WRONG, "a wrong passphrase unlocked it");
+    runs = pass_derivations();
+    CHECK(install_lock_try("decoy") == INSTALL_DECOY && pass_derivations() - runs == 2
+          && install_read_settings(buf, sizeof buf) < 0 && install_tries_left("l") == 3,
+          "the shadow passphrase didn't close the save the same way, or left self-destruct counting");
+    CHECK(save_size(config, "l", "key") < 0 && save_size(config, "l", "spare") > 0 && install_unlock("l", "real") == PASS_WRONG
+          && install_unlock("l", "decoy") == 0 && install_read_settings(buf, sizeof buf) == 0,
+          "the decoy didn't take the save's place");
+
+    install_arm_destroy("l", 2);
+    CHECK(install_lock_try("y") == PASS_WRONG && install_lock_try("z") == INSTALL_DESTROYED
+          && save_size(config, "l", "settings") < 0 && save_size(config, "l", "spare") < 0
+          && install_read_settings(buf, sizeof buf) < 0, "one wrong passphrase too many didn't delete the save");
+
+    pass_lock_t pin, tried;
+    CHECK(pass_lock_new("1234", &pin) == 0 && pass_lock_like("1234", &pin, &tried) == 0
+          && crypto_equal(tried.base, pin.base, sizeof pin.base) == 0 && pass_lock_like("1235", &pin, &tried) == 0
+          && crypto_equal(tried.base, pin.base, sizeof pin.base) != 0, "a PIN's check didn't tell it from another");
+    crypto_wipe(&pin, sizeof pin);
+    crypto_wipe(&tried, sizeof tried);
+}
+
 // A session's history: named the same by every member, sealed in the open save, read back as
 // written, sealed again when the save's factors change, deleted by forget, by a decoy taking over
 // and with the save. A peer is told when someone starts keeping one, and when they stop.
@@ -2241,7 +2299,7 @@ int main(int argc, char **argv) {
         { "third peer", test_third_peer }, { "candidates settle", test_candidates_settle }, { "builds", test_builds },
         { "parsers", test_parsers }, { "toml", test_toml }, { "dht keys", test_dht_keys }, { "dht", test_dht }, { "read file", test_read_file },
         { "identity keys", test_identity_keys }, { "passphrase seal", test_passphrase_seal }, { "device lock", test_device_lock },
-        { "factor locks", test_factor_locks }, { "totp", test_totp }, { "bytewords", test_bytewords }, { "qr", test_qr }, { "save factors", test_save_factors }, { "duress", test_duress }, { "history", test_history }, { "images", test_images }, { "file names", test_file_names }, { "files", test_files },
+        { "factor locks", test_factor_locks }, { "totp", test_totp }, { "bytewords", test_bytewords }, { "qr", test_qr }, { "save factors", test_save_factors }, { "duress", test_duress }, { "lock screen", test_lock_screen }, { "history", test_history }, { "images", test_images }, { "file names", test_file_names }, { "files", test_files },
         { "verified keys", test_trust }, { "move", test_move },
     };
     size_t n_tests = sizeof tests / sizeof tests[0];

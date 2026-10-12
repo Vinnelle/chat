@@ -248,6 +248,9 @@ int pass_lock_new(const char *passphrase, pass_lock_t *lk);
 // The lock that sealed was sealed under, if passphrase is the right one (only pass_unseal can
 // tell): 0, PASS_FORMAT or PASS_NOMEM. If it needs more factors, nothing opens until pass_lock_set.
 int pass_lock_of(const char *passphrase, const uint8_t *sealed, size_t len, pass_lock_t *lk);
+// The lock passphrase makes with like's salt, whose base is like's only if it's the passphrase like
+// was made from: 0, PASS_FORMAT or PASS_NOMEM.
+int pass_lock_like(const char *passphrase, const pass_lock_t *like, pass_lock_t *lk);
 // The factors sealed was sealed under a lock needing (PASS_NEEDS_), or 0 for the passphrase alone.
 unsigned pass_needs(const uint8_t *sealed, size_t len);
 // The same passphrase and salt, needing these factors: device and key are their secrets, read only

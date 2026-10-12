@@ -4,8 +4,8 @@
 
 // ---- the help page: every key, then every command ----
 
-// The key the panic setting chooses, as help_rows last named it.
-static char g_panic_keys[16];
+// The keys the settings choose, as help_rows last named them.
+static char g_lock_keys[16], g_panic_keys[16];
 
 static const struct { const char *section, *keys, *what; } HELP_KEYS[] = {
     { "Sessions",    "ctrl+n",          "start a new session" },
@@ -13,6 +13,7 @@ static const struct { const char *section, *keys, *what; } HELP_KEYS[] = {
     { NULL,          "tab  shift+tab",  "next / previous session" },
     { NULL,          "ctrl+s",          "settings" },
     { NULL,          "ctrl+c",          "quit, after asking - every session leaves cleanly first" },
+    { NULL,          g_lock_keys,       "lock the screen, as :lock does (:set lockkey)" },
     { NULL,          g_panic_keys,      "panic: clear the screen and quit at once (:set panickey)" },
     { "Screen",      "ctrl+b",          "show or hide the sidebar" },
     { NULL,          "ctrl+o",          "show or hide the console" },
@@ -353,7 +354,8 @@ void move_tick(double now) {
     }
     session_slot_t *s = g_app.selected;
     const chat_move_ask_t *a = s && !s->initialising ? chat_move_asked(&s->engine) : NULL;
-    if (a && g_app.mode == MODE_CHAT && !g_app.asking_quit && s->move_later != a->seq) {
+    if (a && g_app.mode == MODE_CHAT && !g_app.asking_quit && !g_app.screen_locked && !g_app.pin_step
+        && s->move_later != a->seq) {
         g_app.mode = MODE_MOVE_ASK;
         g_app.move_shown = now;
         g_app.dirty = 1;
@@ -367,6 +369,7 @@ static const command_t APP_COMMANDS[] = {
     { "join",    NULL,                  NULL,     "join a session by id (Ctrl+J)",                   app_join },
     { "quit",    "q exit close bd bw",  NULL,     "leave this session; quits if none are open",       app_quit },
     { "quitall", "qa qall",             NULL,     "leave every session and quit (Ctrl+C)",           app_quitall },
+    { "lock",    NULL,                  NULL,     "lock the screen until the save's passphrase, or a PIN, unlocks it", app_lock },
     { "set",     NULL,        "[NAME [VALUE]]",   "change a setting; alone, opens them all (Ctrl+S)", app_set },
     { "copyid",  NULL,                  NULL,     "copy this session's id to the clipboard",         app_copyid },
     { "move",    NULL,                  NULL,     "move to a new room with the peers whose codes you compared, leaving the rest behind", app_move },
@@ -453,6 +456,7 @@ cmd_result_t app_hide(void *ctx, const char *arg) {
 static int help_rows(tui_row_t *rows, const command_t **cmds) {
     static char labels[MAX_HELP_COMMANDS][CMD_WORD_MAX + 24];
     int n = 0, k = 0;
+    copy_str(g_lock_keys, LOCK_KEY_NAMES[g_app.lock_key], sizeof g_lock_keys);
     copy_str(g_panic_keys, PANIC_KEY_NAMES[g_app.panic_key], sizeof g_panic_keys);
     for (int i = 0; i < N_HELP_KEYS; i++) {
         rows[n] = (tui_row_t){ HELP_KEYS[i].section, HELP_KEYS[i].keys, HELP_KEYS[i].what, TUI_V_TEXT, NULL, NULL, 0, 0 };
@@ -1036,10 +1040,14 @@ void handle_key(const tui_key_t *key) {
 
     // A message is the result of the previous key, so this key resets the bar.
     if (g_app.message[0]) { g_app.message[0] = '\0'; g_app.dirty = 1; }
+    lock_saw_key();
 
     if (panic_key_is(key)) { panic(PANIC_KEY); return; }
+    if (g_app.screen_locked) { locked_key(key); return; }
+    if (!g_app.pin_step && lock_key_is(key)) { lock_screen(); return; }
     if (key->type == TUI_KEY_CTRL_C) { g_app.asking_quit = 1; g_app.dirty = 1; return; }
     if (g_app.asking_quit) { quit_key(key); return; }
+    if (g_app.pin_step) { pin_key(key); return; }
 
     // The pages draw their fields in their rows, so a key there redraws the page.
     switch (g_app.mode) {

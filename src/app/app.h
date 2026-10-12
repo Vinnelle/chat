@@ -191,9 +191,10 @@ typedef struct {
     int betas;
     int history;    // keep each session's history, sealed in the save open
     int autosave;   // what's changed is saved as it changes, while installed
-    // The key that panics, by its place in PANIC_KEY_NAMES (0: no key). A panic deletes the open save
-    // with panic_wipe, and writes the histories kept with panic_history.
-    int panic_key, panic_wipe, panic_history;
+    // Seconds without a key before the screen locks itself (0 never), and the keys that lock it and
+    // panic, by their place in LOCK_KEY_NAMES and PANIC_KEY_NAMES (0: no key). A panic deletes the
+    // open save with panic_wipe, and writes the histories kept with panic_history.
+    int lock_after, lock_key, panic_key, panic_wipe, panic_history;
     // Locked to this device: the open save, or with none open, the new one :install is making for it
     // (install_for). device_want is what the DEVICE LOCK box asks to change it to, and device_back
     // where it goes back to.
@@ -258,6 +259,17 @@ typedef struct {
     char save_random[INSTALL_NAME_MAX + 1];
     app_mode_t mode;
     int asking_quit;   // Ctrl+C's QUIT box, over whatever mode is showing
+    // The lock screen, over whatever mode is showing: nothing is drawn but its box, and nothing but it
+    // and the panic key takes keys. lock_input is its field, apart from input, which a box under it
+    // may be using. lock_checking: what was typed there is being tried. last_key: when the last key
+    // came, for lock_after, in wall time (lock_saw_key).
+    int screen_locked, lock_checking;
+    double last_key;
+    tui_input_t lock_input;
+    // The LOCK SCREEN box asking for a PIN to unlock with while no save is open, over whatever mode is
+    // showing, in lock_input: pin_step 1, then 2 for it again. Then pin_then: lock (-1), or turn
+    // auto-lock on after that many seconds.
+    int pin_step, pin_then;
     double move_shown;   // when a request to move came up by itself, for the keys typed just before
     char pending_session_id[MAX_SESSION_NAME + 1];
     int show_sidebar, show_console, show_chat;
@@ -335,7 +347,7 @@ typedef enum {
     SET_NOSTR, SET_RELAYS,
     SET_NICK, SET_COLOUR, SET_SIGN, SET_AGE_RECIPIENT, SET_PGP_PUBKEY, SET_AUTOSAVE, SET_DEVICE_LOCK,
     SET_SECURITY_KEY, SET_AUTHENTICATOR, SET_DESTROY, SET_SHADOW,
-    SET_PANIC_KEY, SET_PANIC_WIPE, SET_PANIC_HISTORY,
+    SET_LOCK, SET_LOCK_KEY, SET_PANIC_KEY, SET_PANIC_WIPE, SET_PANIC_HISTORY,
     SET_VERIFY, SET_FILE_LIMIT, SET_FAST_FILES, SET_NOTIFY, SET_PREVIEW, SET_HISTORY, SET_NET, SET_PORT, SET_BETAS,
     N_SETTING_IDS
 } setting_id_t;
@@ -412,13 +424,32 @@ void osc52_copy(const char *text);
 void copy_session_id(session_slot_t *s);
 const char *route_label(void);
 void reapply_options(void);
-// Why the main loop is ending at once, with no frame after: the panic key, or SIGQUIT.
-typedef enum { PANIC_NONE, PANIC_KEY } panic_t;
+// Why the main loop is ending at once, with no frame after: the panic key (or SIGQUIT), or on the lock
+// screen, the shadow passphrase or the wrong passphrase that set off self-destruct.
+typedef enum { PANIC_NONE, PANIC_KEY, PANIC_DECOY, PANIC_DESTROYED } panic_t;
 extern panic_t g_panic;
 void panic(panic_t why);
 #define N_PANIC_KEYS 5
 extern const char *const PANIC_KEY_NAMES[N_PANIC_KEYS];
 int panic_key_is(const tui_key_t *key);
+
+// lock.c
+#define N_LOCK_AFTER 5
+#define N_LOCK_KEYS 5
+extern const char *const LOCK_AFTER_NAMES[N_LOCK_AFTER];
+extern const int LOCK_AFTER_SECONDS[N_LOCK_AFTER];
+extern const char *const LOCK_KEY_NAMES[N_LOCK_KEYS];
+int lock_by_passphrase(void);
+const char *lock_note(void);
+int lock_key_is(const tui_key_t *key);
+void lock_saw_key(void);
+void lock_screen(void);
+void lock_after_choose(int i);
+void lock_tick(void);
+void locked_key(const tui_key_t *key);
+void pin_key(const tui_key_t *key);
+void lock_forget(void);
+cmd_result_t app_lock(void *ctx, const char *arg);
 
 // history.c
 int history_possible(void);

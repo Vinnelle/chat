@@ -171,6 +171,7 @@ add_executable(chat
     src/app/pages.c
     src/app/saves.c
     src/app/commands.c
+    src/app/lock.c
     src/app/screen.c
     src/app/tui.c
     src/app/update.c

@@ -34,8 +34,9 @@ static const char *USAGE =
     "  Ctrl+F     files offered here and yours: show, save or stop them (f in NORMAL, :files)\n"
     "  F1         list all commands and keybinds (also ? in NORMAL, and :help)\n"
     "  Ctrl+C     quit chat, after asking (every open session leaves cleanly first)\n"
-    "  Ctrl+\\     panic: clear the screen and quit at once, without asking. :set panickey\n"
-    "             chooses another key, or none\n"
+    "  Ctrl+L     lock the screen (also :lock): the save's passphrase, or a PIN, unlocks it\n"
+    "  Ctrl+\\     panic: clear the screen and quit at once, without asking. :set lockkey and\n"
+    "             :set panickey choose other keys, or none\n"
     "\n"
     "Each session has two parts: the conversation, and a console above it for everything\n"
     "else, such as people joining and leaving, network lookups and command output. A session\n"
@@ -97,7 +98,9 @@ static const char *USAGE =
     "it opens (a check chat makes: the code's secret is kept in the save). One, the other or both.\n"
     ":set destroy N deletes a save after N wrong passphrases in a row, and :set shadow on adds a\n"
     "second passphrase that opens a decoy in its place and deletes the real save's files.\n"
-    ":set panicwipe on makes the panic key delete the open save too.\n"
+    ":set lock 5m locks the screen after five minutes without a key. Locked, nothing shows but a\n"
+    "box for the save's passphrase, where wrong ones count toward :set destroy and the shadow one\n"
+    "panics. :set panicwipe on makes the panic key delete the open save too.\n"
     "\n"
     "  --save      open the save with this name, without the list\n"
     "              (default is the one in ~/.config/chat itself). If there's no save\n"
@@ -433,6 +436,8 @@ void session_file_view(void *ui, int num, const char *name, const uint8_t *data,
 // is all someone needs to join it.
 static void send_notification(const char *nick, const char *text, int mentioned) {
     char title[CHAT_NAME_LEN * 2 + 48], body[MAX_TEXT + CHAT_NAME_LEN * 2 + 48];
+    // Locked, whatever preview says.
+    if (g_app.screen_locked) nick = text = NULL;
     if (nick && text) {
         snprintf(title, sizeof title, mentioned ? "%s mentioned you" : "%s", nick);
         copy_str(body, text, sizeof body);
@@ -631,12 +636,12 @@ void panic(panic_t why) {
     term_raw_disable();
 }
 
-// The open save goes first with panic_wipe. The histories kept are dropped unwritten, unless
-// panic_history keeps them.
+// The open save goes first with panic_wipe, unless the shadow passphrase has put the decoy in its place.
+// The histories kept are dropped unwritten, unless panic_history keeps them.
 static void panic_saves(void) {
-    int wipe = g_app.panic_wipe && g_app.installed && !g_app.locked;
+    int wipe = g_panic == PANIC_KEY && g_app.panic_wipe && g_app.installed && !g_app.locked;
     if (wipe && install_remove(install_current()) == 0) g_app.installed = 0;
-    int keep = g_app.panic_history && !wipe;
+    int keep = g_panic == PANIC_KEY && g_app.panic_history && !wipe;
     for (int i = 0; i < MAX_SESSIONS; i++)
         if (g_app.used[i] && !keep) history_stop(&g_app.sessions[i], 0);
 }
@@ -695,6 +700,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
 
     // Once a second at least, for the clock.
     double next_ui_tick = now_seconds() + 1.0;
+    lock_saw_key();
 
     while (!g_interrupted) {
         sock_t socks[PLATFORM_WAIT_MAX];
@@ -741,6 +747,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
         for (int i = 0; i < MAX_SESSIONS; i++)
             if (g_app.used[i]) chat_tick(&g_app.sessions[i].engine, now_seconds());
         move_tick(now_seconds());
+        lock_tick();
         history_sync(now);
 
         if (!g_app.onboarding) {
@@ -775,6 +782,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
     crypto_wipe(g_app.paste_buf, sizeof g_app.paste_buf);
     crypto_wipe(g_app.pending_auto_password, sizeof g_app.pending_auto_password);
     crypto_wipe(g_app.install_pass, sizeof g_app.install_pass);
+    lock_forget();
     install_forget();
     tui_scrollback_clear(&g_app.log);
 
@@ -1175,7 +1183,7 @@ int main(int argc, char **argv) {
     g_app.notify_mode = NOTIFY_MENTIONS;
     g_app.verify_optional = 1;
     g_app.show_sidebar = g_app.show_console = g_app.show_chat = 1;
-    g_app.panic_key = 1;
+    g_app.lock_key = g_app.panic_key = 1;
     note_setting_defaults();
     trust_on_change(save_verified);
     int exit_code = read_options(g_argc, g_argv, &g_opts);
@@ -1193,6 +1201,7 @@ int main(int argc, char **argv) {
     crypto_lock(g_app.paste_buf, sizeof g_app.paste_buf);
     crypto_lock(&g_app.input, sizeof g_app.input);
     crypto_lock(&g_app.saved_input, sizeof g_app.saved_input);
+    crypto_lock(&g_app.lock_input, sizeof g_app.lock_input);
     crypto_lock(g_app.pending_auto_password, sizeof g_app.pending_auto_password);
     crypto_lock(g_app.install_pass, sizeof g_app.install_pass);
 

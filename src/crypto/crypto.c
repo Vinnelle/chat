@@ -565,6 +565,11 @@ int pass_lock_of(const char *passphrase, const uint8_t *sealed, size_t len, pass
     return derive_lock_key(passphrase, lk);
 }
 
+int pass_lock_like(const char *passphrase, const pass_lock_t *like, pass_lock_t *lk) {
+    memmove(lk->header, like->header, PASS_HEADER_LEN);
+    return derive_lock_key(passphrase, lk);
+}
+
 int pass_seal(const pass_lock_t *lk, const void *plain, size_t len, uint8_t *out, size_t cap, size_t *out_len) {
     if (cap < len + PASS_SEAL_OVERHEAD || !lock_ready(lk)) return PASS_FORMAT;
     memcpy(out, lk->header, PASS_HEADER_LEN);

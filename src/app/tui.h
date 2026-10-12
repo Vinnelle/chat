@@ -120,10 +120,14 @@ typedef enum {
     TUI_KEY_FILES,
     TUI_KEY_CTRL_C,
     TUI_KEY_ESCAPE,
-    // The keys the panic setting chooses from.
+    // The keys the lock and panic settings choose from.
+    TUI_KEY_CTRL_G,
+    TUI_KEY_CTRL_K,
+    TUI_KEY_CTRL_L,
     TUI_KEY_CTRL_Q,
     TUI_KEY_CTRL_X,
     TUI_KEY_CTRL_BACKSLASH,
+    TUI_KEY_F9,
     TUI_KEY_F12,
     // Not keys: the terminal's reply to a background colour query (r, g, b in ch[0..2]), and its
     // report that it switched between a light and a dark theme.
@@ -310,6 +314,7 @@ typedef struct {
     int limit;
     const char *warn;
     const tui_dialog_t *dialog;
+    int anonymous;    // no identity or nick (the lock screen)
 } tui_bar_t;
 
 void tui_render(int rows, int cols,
@@ -415,5 +420,8 @@ typedef struct {
 
 void tui_picture_room(int rows, int cols, int *w, int *h);
 void tui_render_picture(int rows, int cols, const tui_picture_t *pic, const tui_bar_t *bar, int color_enabled);
+
+// Nothing but the bottom row, and the bar's dialog over an empty screen.
+void tui_render_blank(int rows, int cols, const tui_bar_t *bar, int color_enabled);
 
 #endif
