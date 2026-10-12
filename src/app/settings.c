@@ -20,10 +20,10 @@ const setting_def_t SETTINGS[] = {
       "Broadcasts an encrypted beacon on your local network, so room members on it can find you without the "
       "internet." },
     { SET_TOR_LAUNCH, NULL, "Tor", "torlaunch", "Start chat's own tor", K_CHOICE, "auto|always|never",
-      "auto: use a tor that's already running if its control port lets chat log in (it keeps its entry guards "
-      "and any bridges), otherwise start chat's own. always: chat's own, separate from any other tor, but with "
-      "new entry guards each run and nothing from your torrc. never: only a running tor. Chat's own tor uses "
-      "random 127.0.0.1 ports, a cookie login and a private temporary folder deleted on exit." },
+      "auto: a running tor if its control port lets chat log in, otherwise chat's own, as always with bridges set. "
+      "always: chat's own, ignoring your torrc. never: only a running tor. Chat's own tor gets random 127.0.0.1 "
+      "ports, a control password made at random each run that only chat knows (tor only gets its hash), and a "
+      "private temporary folder deleted on exit, and new entry guards each run unless Keep tor's guards is on." },
     { SET_TOR_PATH, NULL, NULL, "torpath", "Tor program", K_TEXT, "PATH",
       "The tor program chat starts: a full path, or empty for tor on PATH or in the usual folders. It must be a "
       "program that only root or you can change." },
@@ -35,6 +35,21 @@ const setting_def_t SETTINGS[] = {
       "able to read its cookie file (or have its password). Applies to sessions you open from now on." },
     { SET_TOR_PASSWORD, NULL, NULL, "torpassword", "Tor control password", K_SECRET, NULL,
       "Only for a tor set up with HashedControlPassword. Kept in memory only. Applies to sessions you open from now on." },
+    { SET_BRIDGES, NULL, NULL, "bridges", "Bridges", K_TEXT, "LINE; LINE ...",
+      "Bridge lines for chat's own tor, from bridges.torproject.org or a friend, separated by ;. With any set, "
+      "chat starts its own tor, which reaches the Tor network only through them: they go to it over its control "
+      "port, never on its command line or on disk. Sealed in the save, never shown in the console. obfs4, "
+      "webtunnel and meek_lite need lyrebird, snowflake needs snowflake-client (Transport programs)." },
+    { SET_TRANSPORTS, NULL, NULL, "transports", "Transport programs", K_TEXT, "FOLDER",
+      "The folder with lyrebird and snowflake-client, for bridges. Empty: next to tor (the Tor Expert Bundle and "
+      "Tor Browser keep them in a folder beside it), then on PATH and in the usual folders. They must be programs "
+      "only root or you can change, in a path without spaces. With the sandbox up, only those found as it went up "
+      "can run." },
+    { SET_TOR_STATE, NULL, NULL, "torguards", "Keep tor's guards", K_TOGGLE, "on|off",
+      "on: when chat's own tor stops, its entry guards and its copy of the Tor directory are sealed into the open "
+      "save, and the next one starts from them: the same guards each run, as Tor's design expects, and connected "
+      "in seconds. It adds tens of MB to the save, and anyone who opens the save sees which guards you use. Its "
+      "decoy gets none. off: deletes them. Needs a save; a tor already running keeps its own." },
     // After both modes' rows: the relays apply in both, so they stay put when the mode changes.
     { SET_NOSTR, NULL, "Relays", "nostr", "Nostr relays", K_CHOICE, "off|on|always",
       "on: DHT routing only connects to the relays while it needs them (nobody reached yet, or a peer UDP can't"
@@ -110,7 +125,7 @@ const setting_def_t SETTINGS[] = {
       "each history loses up to its last 30 seconds." },
     { SET_SANDBOX, NULL, "Sandbox", "sandbox", "Sandbox", K_TOGGLE, "on|off",
       "on: once chat reaches the network, it can only write to your home's folders that aren't hidden or on PATH, "
-      "its own and the temporary ones, and only run tor. Calls it never makes (ptrace, "
+      "its own and the temporary ones, and only run tor and its transport programs. Calls it never makes (ptrace, "
       "mount, bpf...) are refused, for tor too. A bug can't plant anything that runs later (.bashrc, ~/.local/bin), "
       "and saving elsewhere fails. Linux 5.13 or later. :update can't replace chat while it's up (chat --update "
       "can). From the next start." },
@@ -201,7 +216,7 @@ static int dht_routing_only_setting(setting_id_t id) { return id == SET_PORTMAP 
 
 static int tor_only_setting(setting_id_t id) {
     return id == SET_TOR_LAUNCH || id == SET_TOR_PATH || id == SET_TOR_SOCKS || id == SET_TOR_CONTROL
-        || id == SET_TOR_PASSWORD;
+        || id == SET_TOR_PASSWORD || id == SET_BRIDGES || id == SET_TRANSPORTS || id == SET_TOR_STATE;
 }
 
 // Settings that don't apply right now aren't listed: the DHT ones in Tor mode, the Tor ones in
@@ -268,6 +283,7 @@ int setting_options(setting_id_t id, const char *const **names, int *n) {
         case SET_PANIC_WIPE: return g_app.panic_wipe != 0;
         case SET_PANIC_HISTORY: return g_app.panic_history != 0;
         case SET_SANDBOX:    return g_app.sandbox != 0;
+        case SET_TOR_STATE:  return g_app.tor_state != 0;
         case SET_TOR_LAUNCH: *names = TOR_LAUNCH_NAMES; *n = 3; return g_app.tor_launch;
         case SET_NOTIFY:     *names = NOTIFY_NAMES; *n = 3; return (int)g_app.notify_mode;
         case SET_PREVIEW:    *names = PREVIEW_NAMES; *n = 3; return (int)g_app.notify_preview;
@@ -321,6 +337,14 @@ void setting_value(setting_id_t id, char *out, size_t cap) {
             else snprintf(out, cap, "not installed");
             break;
         }
+        case SET_BRIDGES: {
+            char kinds[80];
+            int n = bridge_count(g_app.bridges, kinds, sizeof kinds);
+            if (n) snprintf(out, cap, "%d (%s)", n, kinds);
+            else snprintf(out, cap, "none");
+            break;
+        }
+        case SET_TRANSPORTS:   transport_line(out, cap); break;
         case SET_FILE_LIMIT:   file_format_size(file_cap(), out, cap); break;
         case SET_TOR_SOCKS:    snprintf(out, cap, "%s", r->tor.socks); break;
         case SET_TOR_CONTROL:  snprintf(out, cap, "%s", r->tor.control); break;
@@ -386,6 +410,8 @@ int setting_text(setting_id_t id, char *out, size_t cap) {
         }
         case SET_PORT:     snprintf(out, cap, "%u", (unsigned)g_app.default_port); break;
         case SET_TOR_PATH: copy_str(out, g_app.tor_path, cap); break;
+        case SET_BRIDGES:  copy_str(out, g_app.bridges, cap); break;
+        case SET_TRANSPORTS: copy_str(out, g_app.pt_dir, cap); break;
         case SET_FILE_LIMIT: file_format_size_exact(file_cap(), out, cap); break;
         default: setting_value(id, out, cap); break;
     }
@@ -430,15 +456,19 @@ size_t put_text(char *out, size_t p, size_t cap, const char *s) {
 static size_t put_row_value(int i, const char *v, char *out, size_t p, size_t cap) {
     if (SETTINGS[i].kind == K_TOGGLE) return put_text(out, p, cap, strcmp(v, "on") == 0 ? "true" : "false");
     if (SETTINGS[i].id == SET_PORT) return put_text(out, p, cap, v);
-    if (SETTINGS[i].id != SET_RELAYS) return toml_put_str(out, p, cap, v);
-    char urls[ROW_TEXT_MAX];
-    copy_str(urls, v, sizeof urls);
+    if (SETTINGS[i].id != SET_RELAYS && SETTINGS[i].id != SET_BRIDGES) return toml_put_str(out, p, cap, v);
+    // A list: relays are separated by spaces, bridges (which have spaces) by "; ".
+    char items[ROW_TEXT_MAX];
+    copy_str(items, v, sizeof items);
     p = put_text(out, p, cap, "[");
     int first = 1;
-    for (char *url = strtok(urls, " "); url; url = strtok(NULL, " "), first = 0) {
+    for (char *s = strtok(items, SETTINGS[i].id == SET_RELAYS ? " " : ";"); s;
+         s = strtok(NULL, SETTINGS[i].id == SET_RELAYS ? " " : ";"), first = 0) {
+        while (*s == ' ') s++;
         if (!first) p = put_text(out, p, cap, ", ");
-        p = toml_put_str(out, p, cap, url);
+        p = toml_put_str(out, p, cap, s);
     }
+    crypto_wipe(items, sizeof items);
     return put_text(out, p, cap, "]");
 }
 
@@ -651,6 +681,7 @@ void setting_choose(setting_id_t id, int i) {
             if (i) { note("Panic deletes the save: on - the panic key deletes the open save too, without asking"); return; }
             break;
         case SET_PANIC_HISTORY: g_app.panic_history = i; break;
+        case SET_TOR_STATE: tor_state_choose(i); return;
         case SET_SANDBOX:
             g_app.sandbox = i;
             // It goes up at Start chatting, and can't come down once it's up.
@@ -727,6 +758,32 @@ void setting_apply_text(setting_id_t id, const char *typed) {
             memcpy(r->relays, urls, sizeof urls);
             r->n_relays = n;
             routing_changed(id);
+            return;
+        }
+        case SET_BRIDGES: {
+            char lines[sizeof g_app.bridges], why[200], kinds[80];
+            int rc = bridges_parse(text, lines, sizeof lines, why, sizeof why);
+            crypto_wipe(text, sizeof text);
+            if (rc != 0) { note("Bridges: %s", why); return; }
+            int changed = strcmp(lines, g_app.bridges) != 0;
+            copy_str(g_app.bridges, lines, sizeof g_app.bridges);
+            crypto_wipe(lines, sizeof lines);
+            int n = bridge_count(g_app.bridges, kinds, sizeof kinds);
+            if (n) note("Bridges: %d (%s) - chat's own tor reaches the Tor network only through them", n, kinds);
+            else note("Bridges: none");
+            if (changed) tor_link_restart();
+            return;
+        }
+        case SET_TRANSPORTS: {
+            char full[TOR_PATH_MAX], line[TOR_PATH_MAX + 80];
+            if (text[0] && platform_full_path(text, full, sizeof full) != 0) { note("that path is too long"); return; }
+            if (text[0] && strchr(full, ' ')) { note("tor can't run a program from a path with spaces in it"); return; }
+            copy_str(g_app.pt_dir, text[0] ? full : "", sizeof g_app.pt_dir);
+            transport_line(line, sizeof line);
+            // The sandbox only lets chat, and tor, run what was found as it went up.
+            note("Transport programs: %s%s", line, g_app.sandboxed & PLATFORM_SANDBOX_FILES
+                 ? " - with the sandbox up, programs it didn't find as it went up run from the next start" : "");
+            if (g_app.bridges[0]) tor_link_restart();
             return;
         }
         case SET_TOR_SOCKS:

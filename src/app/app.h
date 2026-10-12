@@ -125,7 +125,8 @@ typedef enum {
     MODE_SHADOW_PASS2,
     MODE_UPDATE,
     MODE_MOVE,
-    MODE_MOVE_ASK
+    MODE_MOVE_ASK,
+    MODE_TOR_STATE
 } app_mode_t;
 
 // What a security key is being touched for: to register it for the open save or the new one
@@ -186,6 +187,13 @@ typedef struct {
     int path_from_browser;         // the path field was opened from the browser, so Esc goes back there
     int tor_launch;
     char tor_path[TOR_PATH_MAX];
+    // Bridge lines for chat's own tor, separated by ';', and the folder with the programs they need
+    // ("": next to tor, then PATH). tor_state: its guards and directory are kept in the save, once the
+    // box MODE_TOR_STATE shows over tor_state_back says what that means.
+    char bridges[TUI_LINE_MAX];
+    char pt_dir[TOR_PATH_MAX];
+    int tor_state;
+    app_mode_t tor_state_back;
     uint64_t file_cap;   // 0: the default
     int fast_files;
     int picture_noise;   // a JPEG sent gets noise nobody can see (common/clean.h)
@@ -336,6 +344,7 @@ typedef struct {
     torproc_t *proc;
     char socks[TOR_HOST_MAX], control[TOR_HOST_MAX];
     int boot_told, starts;
+    int bridged;   // chat's own, started holding the network until it has its bridges
     double retry_at;
 } tor_link_t;
 
@@ -349,7 +358,8 @@ enum { K_TOGGLE, K_CHOICE, K_TEXT, K_SECRET, K_ACTION };
 // In the order of the settings file's tables (setting_table).
 typedef enum {
     SET_ROUTING, SET_DHT4, SET_DHT6, SET_PORTMAP, SET_LAN,
-    SET_TOR_LAUNCH, SET_TOR_PATH, SET_TOR_SOCKS, SET_TOR_CONTROL, SET_TOR_PASSWORD,
+    SET_TOR_LAUNCH, SET_TOR_PATH, SET_TOR_SOCKS, SET_TOR_CONTROL, SET_TOR_PASSWORD, SET_BRIDGES, SET_TRANSPORTS,
+    SET_TOR_STATE,
     SET_NOSTR, SET_RELAYS,
     SET_NICK, SET_COLOUR, SET_SIGN, SET_AGE_RECIPIENT, SET_PGP_PUBKEY, SET_AUTOSAVE, SET_DEVICE_LOCK,
     SET_SECURITY_KEY, SET_AUTHENTICATOR, SET_DESTROY, SET_SHADOW,
@@ -371,7 +381,8 @@ typedef struct {
 
 #define N_SETTINGS ((int)COUNT_OF(SETTINGS))
 
-#define ROW_TEXT_MAX (NOSTR_MAX_RELAYS * NOSTR_URL_MAX)
+// What a row's edit line holds.
+#define ROW_TEXT_MAX TUI_LINE_MAX
 
 // The page shows one section at a time, its listed rows and then a Done button.
 #define SETTINGS_DONE N_SETTINGS   // settings_sel of the Done button, on g_app.settings_page
@@ -476,6 +487,18 @@ void tor_link_ensure(double now);
 void tor_link_step(double now);
 void tor_link_stop(void);
 void tor_link_line(char *out, size_t cap);
+void tor_link_restart(void);
+// Bridge lines as typed (separated by ';'), as "LINE; LINE" in out, or -1 with why. How many there
+// are, and their transports in kinds ("obfs4, snowflake").
+int bridges_parse(const char *typed, char *out, size_t cap, char *why, size_t why_cap);
+int bridge_count(const char *text, char *kinds, size_t cap);
+// The transport programs bridges can need, found as chat's own tor would find them: their paths, and a
+// line for the settings page saying which are there.
+int transport_paths(char out[][TOR_PATH_MAX], int max);
+void transport_line(char *out, size_t cap);
+void tor_state_choose(int on);
+void tor_state_yes(void);
+void tor_state_no(void);
 void app_session_opts(chat_opts_t *o);
 session_slot_t *start_session(const char *session_name, const char *password, int created, uint16_t port,
                               const addr_t *peers, int n_peers);
@@ -508,6 +531,7 @@ extern char g_saved_rows[N_SETTINGS][ROW_TEXT_MAX];
 extern char g_seen_rows[N_SETTINGS][ROW_TEXT_MAX];
 extern int g_unsaved_rows[N_SETTINGS];
 extern int g_hold_sessions;
+extern int g_loading_settings;
 extern const char DEVICE_REMINDER[];
 extern const char KEY_REMINDER[];
 extern const sign_pick_row_t SIGN_PICKS[N_PICKS];

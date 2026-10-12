@@ -361,6 +361,21 @@ static void md_escape(const char *in, char *out, size_t cap) {
     out[o] = '\0';
 }
 
+static int tor_state_paras(tui_para_t *p) {
+    static char intro[400];
+    snprintf(intro, sizeof intro, "When chat's own tor stops, its entry guards and its copy of the Tor directory are "
+             "sealed into the save `%s`, and the next one starts from them: the same guards from run to run, as Tor's "
+             "design expects, and connected in seconds instead of a minute or more.",
+             install_shown_name(install_current()));
+    int n = add_para(p, 0, TUI_P_TEXT, intro);
+    n = add_para(p, n, TUI_P_BLANK, "");
+    n = add_para(p, n, TUI_P_TEXT, "**It adds to the save:**");
+    n = add_para(p, n, TUI_P_BULLET, "which guards you use, for anyone who can open it");
+    n = add_para(p, n, TUI_P_BULLET, "tens of MB, mostly the directory, in a file called `cache`");
+    n = add_para(p, n, TUI_P_BLANK, "");
+    return add_para(p, n, TUI_P_TEXT, "Its decoy gets none. `:set torguards off` deletes them from the save.");
+}
+
 static int move_paras(tui_para_t *p) {
     static char ask[MOVE_NAMES_LEN * 2 + 64], left[MOVE_NAMES_LEN * 2 + 160];
     session_slot_t *s = g_app.selected;
@@ -682,6 +697,12 @@ static const tui_dialog_t *current_dialog(void) {
             d.n_text = file_ask_paras(paras, &d.title, &d.keys);
             d.input = NULL;
             break;
+        case MODE_TOR_STATE:
+            d.title = "TOR GUARDS";
+            d.n_text = tor_state_paras(paras);
+            d.input = NULL;
+            d.keys = "y keep them" DOT_SEP "n cancel";
+            break;
         case MODE_MOVE:
             d.title = "MOVE";
             d.n_text = move_paras(paras);
@@ -866,6 +887,11 @@ static tui_bar_t current_bar(void) {
             b.chip = g_app.device_new ? "INSTALL" : "SETTINGS";
             b.tone = TUI_TONE_PROMPT;
             break;
+        case MODE_TOR_STATE:
+            if (g_app.tor_state_back == MODE_CHAT) chat_input(&b, &g_app.saved_input);
+            b.chip = "SETTINGS";
+            b.tone = TUI_TONE_PROMPT;
+            break;
         case MODE_FACTOR:
         case MODE_CODE_SETUP:
         case MODE_KEY_WAIT:
@@ -1025,6 +1051,9 @@ void render(void) {
         case MODE_SETTINGS_EDIT:   render_settings(rows_n, cols_n, hhmm, &bar); return;
         case MODE_DEVICE_LOCK:
             if (g_app.device_back == MODE_SETTINGS) { render_settings(rows_n, cols_n, hhmm, &bar); return; }
+            break;
+        case MODE_TOR_STATE:
+            if (g_app.tor_state_back == MODE_SETTINGS) { render_settings(rows_n, cols_n, hhmm, &bar); return; }
             break;
         case MODE_FACTOR:
         case MODE_CODE_SETUP:

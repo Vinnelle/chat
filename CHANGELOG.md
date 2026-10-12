@@ -47,6 +47,26 @@
   and the reply says what went. With **Noise in pictures** on, a baseline JPEG also gets noise
   nobody can see, so no two copies are the same bytes. `:send asis` sends a file as it is, and a
   HEIC, raw, video, PDF or office file says it can't be cleaned.
+- Bridges for chat's own tor, for networks that block Tor. `:set bridges LINE; LINE` (the
+  **Bridges** row) takes bridge lines from bridges.torproject.org or a friend. With any set, chat
+  starts its own tor with its network off, gives it the bridges over its control port and only then
+  lets it connect, so it never reaches the Tor network except through them, and stops it rather
+  than connect without them. The lines never go on tor's command line or on disk: they're sealed in
+  the save with the other settings, and the console only says how many there are. obfs4, webtunnel
+  and meek_lite need lyrebird (or obfs4proxy, without webtunnel), and snowflake snowflake-client,
+  found next to tor (as the Tor Expert Bundle and Tor Browser have them), on PATH, or in the folder
+  `:set transports` names. The sandbox lets tor run them.
+- `:set torguards on` (**Keep tor's guards**) keeps chat's own tor's entry guards and its copy of
+  the directory in the open save, sealed: written when tor stops, once it has connected, and put
+  back before the next one starts. It keeps the same guards from run to run, as Tor's design
+  expects, and connects in seconds. A box first says what it adds to the save: which guards you
+  use, in tens of MB, mostly the directory. The decoy never gets them, and turning it off deletes them.
+
+### Fixed
+- The help for **Start chat's own tor** said its tor takes a cookie login. It never has: its
+  control port only takes a password made at random each run that only chat knows, with only its
+  hash on tor's command line, and no cookie file another program could read. The help says so now,
+  and so does the console as chat starts it.
 
 ## 0.5.0
 

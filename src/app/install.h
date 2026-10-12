@@ -154,6 +154,14 @@ int install_forget_history(const uint8_t *id);
 // How many sessions have one.
 int install_histories(void);
 
+// What chat's own tor keeps between runs (transport/torproc.h torproc_finish), sealed in the open
+// save like the rest. The decoy never has one. Read gives it malloc'd: 0, INSTALL_NO_FILE or a PASS_
+// code.
+#define INSTALL_TOR_MAX (64u * 1024 * 1024)
+int install_read_tor(uint8_t **out, size_t *len);
+int install_write_tor(const uint8_t *data, size_t len);
+void install_forget_tor(void);
+
 // Deletes a save's files, what this device keeps for it if it's locked to it, then its folder and
 // the folders above it that nothing else is in. If it's the save in use, its passphrase is forgotten.
 int install_remove(const char *name);

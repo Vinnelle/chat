@@ -28,15 +28,15 @@ static const char *row_from_toml(const setting_def_t *d, const toml_value *v, ch
     if (d->kind == K_TOGGLE) {
         if (v->type != TOML_BOOL) return "true or false";
         copy_str(out, v->b ? "on" : "off", cap);
-    } else if (d->id == SET_RELAYS) {
-        if (v->type != TOML_ARRAY) return "a list of \"wss://...\" strings";
+    } else if (d->id == SET_RELAYS || d->id == SET_BRIDGES) {
+        if (v->type != TOML_ARRAY) return d->id == SET_RELAYS ? "a list of \"wss://...\" strings" : "a list of strings";
         size_t p = 0;
         out[0] = '\0';
         for (int k = 0; k < v->n; k++) {
-            if (k) p = put_text(out, p, cap, " ");
+            if (k) p = put_text(out, p, cap, d->id == SET_RELAYS ? " " : "; ");
             p = put_text(out, p, cap, v->items[k]);
         }
-        if (p >= cap) return "fewer relays";
+        if (p >= cap) return d->id == SET_RELAYS ? "fewer relays" : "fewer bridges";
     } else if (v->type == TOML_INT && (d->id == SET_PORT || d->id == SET_FILE_LIMIT)) {
         snprintf(out, cap, "%lld", v->i);
     } else if (v->type == TOML_STRING && d->id != SET_PORT) {
@@ -64,6 +64,9 @@ static void apply_row(const setting_def_t *d, const char *value) {
 
 typedef struct { char where[INSTALL_PATH_MAX]; } loading_t;
 
+// While a save's settings load, a row that would open a box to ask is just set.
+int g_loading_settings;
+
 static void load_setting(void *ctx, const char *table, const char *key, const toml_value *tv) {
     loading_t *l = ctx;
     const setting_def_t *d = setting_by_key(key);
@@ -82,7 +85,9 @@ static void load_setting(void *ctx, const char *table, const char *key, const to
     // One that didn't apply stays saved anyway, since a tor that's gone now may be back next time.
     setting_text(d->id, now, sizeof now);
     int took = strcmp(now, value) == 0 || strcmp(now, before) != 0;
-    if (!took) saved_note("* %s: %s %.60s wasn't used - %s", l->where, d->key, value, g_app.message);
+    // Bridge lines are kept out of the console.
+    if (!took && d->id == SET_BRIDGES) saved_note("* %s: the bridges weren't used - %s", l->where, g_app.message);
+    else if (!took) saved_note("* %s: %s %.60s wasn't used - %s", l->where, d->key, value, g_app.message);
     copy_str(g_saved_rows[settings_index(d->id)], took ? now : value, ROW_TEXT_MAX);
     if (took && d->id == SET_ROUTING) g_app.route_chosen = 1;
 }
@@ -99,7 +104,9 @@ static void load_saved_settings(void) {
     // Like the startup settings page, nothing goes on the network meanwhile.
     int was = g_app.onboarding, bad_line = 0;
     g_app.onboarding = 1;
+    g_loading_settings = 1;
     int bad = toml_parse(text, load_setting, &l, &bad_line);
+    g_loading_settings = 0;
     g_app.onboarding = was;
     g_app.message[0] = '\0';
     crypto_wipe(text, sizeof text);
@@ -845,7 +852,10 @@ static void use_save_now(void) {
             g_app.message[0] = '\0';
             apply_row(d, loaded[i]);
             setting_text(d->id, now, sizeof now);
-            if (strcmp(now, loaded[i]) != 0) saved_note("* %s %.60s wasn't used - %s", d->key, loaded[i], g_app.message);
+            if (strcmp(now, loaded[i]) != 0 && d->id == SET_BRIDGES)
+                saved_note("* the save's bridges weren't used - %s", g_app.message);
+            else if (strcmp(now, loaded[i]) != 0)
+                saved_note("* %s %.60s wasn't used - %s", d->key, loaded[i], g_app.message);
             else if (d->id == SET_ROUTING) g_app.route_chosen = 1;
         }
         if (strcmp(g_saved_rows[i], g_setting_defaults[i]) != 0 || strcmp(now, ran[i]) != 0) continue;

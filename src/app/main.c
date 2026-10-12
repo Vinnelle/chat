@@ -649,15 +649,18 @@ void sandbox_up(void) {
         push_log("* sandbox: off %s", g_opts.nosandbox ? "for this run (--nosandbox)" : "- :set sandbox on puts it up from the next start");
         return;
     }
-    char tor[1024], why[160];
-    const char *run[] = { tor };
-    int n = platform_find_program("tor", g_app.tor_path, tor, sizeof tor) == 0;
+    // tor, and the transport programs its bridges can need, even with none set yet.
+    char found[4][TOR_PATH_MAX], why[160];
+    const char *run[4];
+    int tor = platform_find_program("tor", g_app.tor_path, found[0], sizeof found[0]) == 0;
+    int n = tor ? 1 + transport_paths(found + 1, 3) : 0;
+    for (int i = 0; i < n; i++) run[i] = found[i];
     unsigned up = g_app.sandboxed = platform_sandbox(run, n, why, sizeof why);
     if (up & PLATFORM_SANDBOX_FILES)
         push_log("* sandbox: on - from now on chat%s can only write to the folders in your home that aren't hidden or on "
-                 "PATH, its own folder and the temporary folders, and only run %s%s", n ? " and tor" : "",
-                 n ? "tor" : "nothing else", up & PLATFORM_SANDBOX_CALLS ? "; calls chat never makes (ptrace, mount, bpf...) "
-                 "are refused" : "");
+                 "PATH, its own folder and the temporary folders, and only run %s%s", tor ? " and tor" : "",
+                 n > 1 ? "tor and its transport programs" : tor ? "tor" : "nothing else", up & PLATFORM_SANDBOX_CALLS
+                 ? "; calls chat never makes (ptrace, mount, bpf...) are refused" : "");
     else if (up & PLATFORM_SANDBOX_CALLS)
         push_log("* sandbox: partly up - calls chat never makes are refused, but %s, so it can still write anywhere you can",
                  why);

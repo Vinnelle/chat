@@ -188,8 +188,9 @@ can keep them out:
 DHT's bencode from anyone on the internet, the relays' JSON. In case a bug there gets past the
 fuzzers, chat puts up a sandbox as it starts reaching the network (at **Start chatting**, or as
 `--simple` starts). From then on chat, and tor, can only write under the folders in your home that
-aren't hidden or on `PATH`, chat's own folder and the temporary folders, can only run tor, and are
-refused the system calls chat never makes (`ptrace`, `mount`, `bpf`, `io_uring` and the like). A bug
+aren't hidden or on `PATH`, chat's own folder and the temporary folders, can only run tor and the
+transport programs for bridges (the ones found as it goes up), and are refused the system calls
+chat never makes (`ptrace`, `mount`, `bpf`, `io_uring` and the like). A bug
 can't plant anything that runs later: not in `.bashrc`, `~/.config/autostart`, `~/.ssh` or
 `~/.local/bin`. It still runs as you, though, so it can read what you can and send it out. It's
 Landlock (Linux 5.13 or later) and seccomp, with no root needed, and without Landlock chat carries on
@@ -290,11 +291,12 @@ chat uses depends on `--tor-launch`, or **Start chat's own tor** in settings:
   the system service on 9050/9051 or Tor Browser on 9150/9151, with a control port it can log
   into. It logs in with tor's cookie file if it can read it (SAFECOOKIE only, so tor has to
   prove it read the cookie before chat sends anything), a password from the settings page, or
-  no login if tor allows it. A running tor is the better option, since it keeps its entry
-  guards between runs and uses any bridges in its torrc. If there isn't one, chat starts its
-  own.
-- **always**: always chat's own tor, separate from any other. It picks new entry guards every
-  run and ignores your torrc, bridges included.
+  no login if tor allows it. A running tor keeps its entry guards between runs and uses any
+  bridges in its torrc. If there isn't one, chat starts its own. With bridges set (below), chat
+  always starts its own, since a tor that's already running may not use them.
+- **always**: always chat's own tor, separate from any other. It ignores your torrc, bridges
+  included, so give it its own (below), and it picks new entry guards every run unless **Keep
+  tor's guards** is on (below).
 - **never**: only use a tor that's already running.
 
 chat's own tor is whatever `tor` is on `PATH` or in the usual folders, or what you give
@@ -309,6 +311,32 @@ on Windows. chat deletes the folder when it stops tor. If chat crashes, tor noti
 within a few seconds, and on Windows a job object ends it straight away. The next run of chat
 deletes the folder the crash left behind. A fresh private tor downloads the Tor directory every
 time, so it can take a minute or more to connect.
+
+**Bridges**, for a network that blocks Tor, or where using it stands out. Get bridge lines from
+[bridges.torproject.org](https://bridges.torproject.org) or a friend, and give them to
+**Bridges** in settings (`:set bridges LINE; LINE`), separated by `;`. A line can start with
+`Bridge`, as in a torrc. With any set, chat starts its own tor with its network off, gives it the
+bridges over its control port (`SETCONF`), and only then lets it connect, so it never reaches the
+Tor network except through them. If tor won't take them, chat stops it rather than connect
+without. The lines never go on tor's command line, which other programs can read, or into a
+file. They're sealed in the save with your other settings, and the console only says how many
+there are and their transports. obfs4, webtunnel and meek_lite bridges need lyrebird (obfs4proxy
+works too, but has no webtunnel), and snowflake ones need snowflake-client. chat looks for them
+in **Transport programs** (`:set transports FOLDER`), or else next to tor, where the Tor Expert
+Bundle and Tor Browser keep them (a `pluggable_transports` or `PluggableTransports` folder), then
+on `PATH` and in the usual folders. Like tor, they have to be programs only root or you can
+change, and tor can't run one from a path with a space in it. chat doesn't come with bridge lines
+of its own: ones that are handed out to everyone get blocked.
+
+**Keeping tor's guards.** chat's own tor picks new entry guards every run, and Tor's guards are
+meant to last for months: each new pick is another chance of a malicious one. With a save open,
+**Keep tor's guards** (`:set torguards on`) seals tor's `state` file (its guards) and its copy of
+the directory (`cached-certs`, `cached-microdesc-consensus` and `cached-microdescs`) into the save
+when tor stops, in a file called `cache`. The next run puts them in tor's new private folder
+before it starts, so it keeps the same guards and connects in seconds. They're only kept from a
+tor that connected, so a run that never does leaves the last ones. It adds tens of MB to the save,
+and anyone who can open the save sees which guards you use. The decoy never gets them, and
+turning it off deletes them.
 
 > **Note:** Tor and DHT members of a room can only reach each other through the Nostr
 > relays, so both need them on: a DHT member with option 1 (DHT + Nostr fallback), and a
@@ -530,8 +558,9 @@ and one that asks for an authenticator code has an `authenticator` file, sealed 
 [A security key and an authenticator app](#a-security-key-and-an-authenticator-app)). Every save
 also has a `spare` and a `spare-lock` file, and one that deletes itself after wrong passphrases a
 `tries` file (see [A shadow passphrase, and self-destruct](#a-shadow-passphrase-and-self-destruct)).
-With history on, there's a `history-...` file for each session it's kept for, sealed too. chat
-never writes your settings in plain text, as `settings.toml` or anything else. The TOML above
+With history on, there's a `history-...` file for each session it's kept for, sealed too, and
+with **Keep tor's guards** on, a `cache` file (see [Routing](#routing)). chat never writes your
+settings in plain text, as `settings.toml` or anything else. The TOML above
 only exists inside the sealed file. If there's a plain text file in that folder, like a
 `settings.toml`, it didn't come from chat. chat doesn't read it, update it or delete it, and
 `:uninstall` leaves it and the folder alone. Delete it yourself if you don't want it on disk.
@@ -1071,6 +1100,9 @@ after a name. Under each row's help, the page shows the `:set` command that does
 | `torlaunch` | `auto`, `always`, `never` |
 | `torpath`, `torsocks`, `torcontrol` | a path, `HOST:PORT`, `HOST:PORT` |
 | `torpassword` | only on the page, where it's hidden |
+| `bridges` | bridge lines for chat's own tor, separated by `;` (the console only shows how many) |
+| `transports` | the folder with lyrebird and snowflake-client, or empty to look next to tor and on `PATH` |
+| `torguards` | `on` (chat's own tor keeps its guards and directory in the save), `off` |
 | `nick`, `colour` | a name; a colour name or `#RRGGBB` |
 | `sign` | `off`, an `age` or `pgp` key made from a password typed on the page, or `age:PATH` / `pgp:PATH` for a key file; a pasted key is picked on the page |
 | `autosave` | `on` (once installed, a setting or verified key you change is saved straight away), `off` (it's kept until `:save`) |
@@ -1084,7 +1116,7 @@ after a name. Under each row's help, the page shows the `:set` command that does
 | `panickey` | `ctrl+\`, `ctrl+q`, `ctrl+x`, `f12` (the key that panics), `off` |
 | `panicwipe` | `on` (the panic key deletes the open save too), `off` |
 | `panichistory` | `on` (the panic key writes the history kept first), `off` |
-| `sandbox` | `on` (Linux: once chat reaches the network, it can only write to the folders in your home that aren't hidden or on `PATH`, its own and the temporary folders, and only run tor), `off`; from the next start |
+| `sandbox` | `on` (Linux: once chat reaches the network, it can only write to the folders in your home that aren't hidden or on `PATH`, its own and the temporary folders, and only run tor and its transport programs), `off`; from the next start |
 | `verify` | `required` (nothing goes to a peer until you've compared its code), `optional` |
 | `filelimit` | the biggest file fetched without `anyway`: `8M`, `500K`, `1G` |
 | `fastfiles` | `on` (what you send goes in quick bursts; through the relays, as fast as they allow), `off` (chat's regular slots) |

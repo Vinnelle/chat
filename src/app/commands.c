@@ -1097,6 +1097,7 @@ void handle_key(const tui_key_t *key) {
         case MODE_SHADOW_PASS2:   field_key(key, commit_shadow_pass2, cancel_shadow_pass); return;
         case MODE_UPDATE:         update_key(key); return;
         case MODE_MOVE:           confirm_key(key, move_yes, move_no); return;
+        case MODE_TOR_STATE:      confirm_key(key, tor_state_yes, tor_state_no); return;
         case MODE_MOVE_ASK:       move_ask_key(key); return;
         default:
             break;
@@ -1171,6 +1172,8 @@ int on_chat_screen(void) {
             return 1;
         case MODE_DEVICE_LOCK:
             return g_app.device_back == MODE_CHAT;
+        case MODE_TOR_STATE:
+            return g_app.tor_state_back == MODE_CHAT;
         case MODE_FACTOR: case MODE_CODE_SETUP: case MODE_KEY_WAIT: case MODE_KEY_PIN:
         case MODE_SHADOW_PASS: case MODE_SHADOW_PASS2:
             return g_app.factor_back == MODE_CHAT;

@@ -4,6 +4,7 @@
 #define CHAT_TORPROC_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 // A tor of chat's own, for Tor mode when no usable tor is running. It runs from a private
 // temporary folder (its data and log) with an empty configuration, so nothing from
@@ -16,8 +17,22 @@ typedef struct torproc torproc_t;
 
 typedef enum { TORPROC_STARTING, TORPROC_READY, TORPROC_EXITED } torproc_state_t;
 
+// hold_network: tor starts with DisableNetwork, and reaches the Tor network only once
+// torproc_setconf has given it what it needs first (bridges). state: tor's state and directory from
+// an earlier run (torproc_state), put in its data folder before it starts, so it keeps its entry
+// guards and needn't fetch the directory again.
+typedef struct {
+    int hold_network;
+    const uint8_t *state;
+    size_t state_len;
+} torproc_opts_t;
+
 // Starts tor from program (a full path). Returns NULL with the reason in err.
-torproc_t *torproc_start(const char *program, char *err, size_t cap);
+torproc_t *torproc_start(const char *program, const torproc_opts_t *o, char *err, size_t cap);
+// Once it's READY: logs in to its control port, sets conf ("UseBridges=1 Bridge=\"...\" ...", as
+// SETCONF takes it), then lets it reach the network. Over the control port, so none of it is on
+// tor's command line, where anyone can read it, or on disk. 0, or -1 with why.
+int torproc_setconf(torproc_t *p, const char *conf, char *why, size_t cap);
 torproc_state_t torproc_poll(torproc_t *p);
 const char *torproc_socks(const torproc_t *p);
 const char *torproc_control(const torproc_t *p);
@@ -31,5 +46,8 @@ const char *torproc_version(torproc_t *p);
 void torproc_problem(torproc_t *p, char *out, size_t cap);
 // Stops tor and deletes its folder.
 void torproc_stop(torproc_t *p);
+// Stops tor, letting it write its state first, then gives that and its copy of the directory, packed
+// for torproc_opts_t's state (malloc'd, or NULL if it can't), and deletes its folder.
+void torproc_finish(torproc_t *p, uint8_t **state, size_t *len);
 
 #endif

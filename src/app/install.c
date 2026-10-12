@@ -18,6 +18,9 @@
 #define TRIES_NAME "tries"
 #define SPARE_NAME "spare"
 #define SPARE_LOCK_NAME "spare-lock"
+// What chat's own tor keeps between runs (install_write_tor), named so it doesn't say so.
+#define CACHE_NAME "cache"
+#define CACHE_FILE_MAX (INSTALL_TOR_MAX + PASS_SEAL_OVERHEAD)
 // A decoy as 0.5.0's betas made it, in files only a save with a decoy had: still opened, until the
 // shadow passphrase is set again.
 #define OLD_DECOY_SETTINGS "shadow-settings"
@@ -75,7 +78,8 @@ static const char *const FILES[] = { SETTINGS_NAME, KEY_NAME, VERIFIED_NAME, COD
                                      SETTINGS_NAME ".new", KEY_NAME ".new", VERIFIED_NAME ".new", CODE_NAME ".new",
                                      SECKEY_NAME ".new", TRIES_NAME ".new", SPARE_NAME ".new", SPARE_LOCK_NAME ".new",
                                      OLD_DECOY_SETTINGS ".new", OLD_DECOY_KEY ".new", OLD_DECOY_VERIFIED ".new",
-                                     OLD_DECOY_CODE ".new", DEVICE_NAME ".new", DEVICE_NAME };
+                                     OLD_DECOY_CODE ".new", DEVICE_NAME ".new", DEVICE_NAME, CACHE_NAME,
+                                     CACHE_NAME ".new" };
 #define N_FILES (sizeof FILES / sizeof FILES[0])
 static const char *const SEALED[] = { SETTINGS_NAME, KEY_NAME, VERIFIED_NAME, CODE_NAME, SPARE_LOCK_NAME };
 #define N_SEALED (sizeof SEALED / sizeof SEALED[0])
@@ -724,6 +728,7 @@ static void promote(const char *name, const pass_lock_t *sl, const uint8_t *spar
     }
     history_list_t *hl = list_histories(name);
     for (int i = 0; i < hl->n; i++) remove_file(name, hl->names[i]);
+    remove_file(name, CACHE_NAME);
     write_spare_lock(name, sl, NULL);
     write_chaff(name, sl->needs);
     remove_old_decoy(name);
@@ -1051,6 +1056,56 @@ int install_forget_history(const uint8_t *id) {
 
 int install_histories(void) { return g_open ? list_histories(g_name)->n : 0; }
 
+// ---- tor's state ----
+
+// Read at the size it is, since it can be tens of MB.
+int install_read_tor(uint8_t **out, size_t *len) {
+    char path[INSTALL_PATH_MAX];
+    uint64_t size = 0;
+    *out = NULL;
+    *len = 0;
+    FILE *f = NULL;
+    if (g_open && save_path(g_name, CACHE_NAME, path, sizeof path, 0) == 0) f = platform_open_regular(path, &size);
+    if (!f) return INSTALL_NO_FILE;
+    if (size < PASS_SEAL_OVERHEAD || size > CACHE_FILE_MAX) { fclose(f); return PASS_FORMAT; }
+    size_t n = (size_t)size, cap = n - PASS_SEAL_OVERHEAD;
+    uint8_t *sealed = malloc(n), *plain = malloc(cap ? cap : 1);
+    int rc = sealed && plain && fread(sealed, 1, n, f) == n ? unseal(sealed, n, plain, cap, len) : PASS_FORMAT;
+    fclose(f);
+    free(sealed);
+    if (rc == 0) { *out = plain; return 0; }
+    if (plain) crypto_wipe(plain, cap ? cap : 1);
+    free(plain);
+    *len = 0;
+    return rc;
+}
+
+static int write_tor_with(const pass_lock_t *lk, const uint8_t *data, size_t len) {
+    char path[INSTALL_PATH_MAX];
+    size_t cap = len + PASS_SEAL_OVERHEAD, n;
+    if (!g_open || len > INSTALL_TOR_MAX || save_path(g_name, CACHE_NAME, path, sizeof path, 1) != 0) return -1;
+    uint8_t *sealed = malloc(cap);
+    int rc = sealed && pass_seal(lk, data, len, sealed, cap, &n) == 0 ? platform_write_private(path, sealed, n) : -1;
+    free(sealed);
+    return rc;
+}
+
+int install_write_tor(const uint8_t *data, size_t len) { return write_tor_with(&g_held.lock, data, len); }
+
+void install_forget_tor(void) {
+    if (g_open) remove_file(g_name, CACHE_NAME);
+}
+
+// Only a cache: one that can't be read or sealed again goes, and tor starts afresh.
+static void reseal_tor(const pass_lock_t *lk) {
+    uint8_t *plain;
+    size_t len;
+    int rc = install_read_tor(&plain, &len);
+    if (rc == INSTALL_NO_FILE) return;
+    if (rc != 0 || write_tor_with(lk, plain, len) != 0) install_forget_tor();
+    if (plain) { crypto_wipe(plain, len); free(plain); }
+}
+
 // ---- changing the factors ----
 
 // One of the open save's files sealed again under lk. 0 once it is (or if there's no such file),
@@ -1105,6 +1160,7 @@ static int set_lock(unsigned target) {
         if (r > 0) skipped++;
         else rc = r;
     }
+    if (rc == 0) reseal_tor(&next);
     if (rc == 0 && !fewer) rc = reseal_lock_file(first, &next);
     crypto_wipe(&next, sizeof next);
     if (rc != 0) return -1;

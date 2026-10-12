@@ -1498,6 +1498,45 @@ static void test_history(double *t) {
     CHECK(pa && !pa->persists, "bob wasn't told alice stopped keeping one");
 }
 
+// What chat's own tor keeps in the save: read back as it was written, sealed again when the save's
+// lock changes, and gone when it's forgotten, with the decoy and with the save.
+static void test_tor_state(double *t) {
+    (void)t;
+    static char config[256];
+    CHECK(test_temp_dir("torstate", config, sizeof config) == 0, "no temporary folder");
+    test_set_env(TEST_CONFIG_VAR, config);
+    enum { STATE_LEN = 3 * 1024 * 1024 };
+    uint8_t *state = malloc(STATE_LEN), *back = NULL;
+    size_t len = 0;
+    CHECK(state != NULL, "out of memory");
+    gen_random(state, STATE_LEN);
+
+    install_use("g");
+    CHECK(install_lock_new("g", "pw", 0) == 0 && install_write_settings("") == 0, "the save wasn't made: %s",
+          install_why());
+    CHECK(install_read_tor(&back, &len) == INSTALL_NO_FILE && !back, "a new save had tor's state");
+    CHECK(install_write_tor(state, STATE_LEN) == 0
+          && save_size(config, "g", "cache") == (long)(STATE_LEN + PASS_SEAL_OVERHEAD),
+          "tor's state wasn't written, sealed");
+    CHECK(install_set_factor(INSTALL_FACTOR_DEVICE, 1) == 0, "locking it to the device failed: %s", install_why());
+    install_forget();
+    CHECK(install_unlock("g", "pw") == 0 && install_read_tor(&back, &len) == 0 && len == (size_t)STATE_LEN
+          && memcmp(back, state, STATE_LEN) == 0, "tor's state didn't open once the save was locked to the device");
+    free(back);
+    back = NULL;
+    install_forget_tor();
+    CHECK(save_size(config, "g", "cache") < 0 && install_read_tor(&back, &len) == INSTALL_NO_FILE,
+          "forgetting tor's state left it");
+    CHECK(install_write_tor(state, STATE_LEN) == 0 && install_shadow_set("decoy") == 0,
+          "the shadow passphrase wasn't set: %s", install_why());
+    install_forget();
+    CHECK(install_unlock("g", "decoy") == 0 && save_size(config, "g", "cache") < 0
+          && install_read_tor(&back, &len) == INSTALL_NO_FILE, "the decoy kept the real save's tor state");
+    CHECK(install_write_tor(state, STATE_LEN) == 0 && install_remove("g") == 0 && save_size(config, "g", "cache") < 0,
+          "uninstalling left tor's state");
+    free(state);
+}
+
 static void test_identity_keys(double *t) {
     (void)t;
     // An identity file age-keygen wrote, and the recipient it gave for it.
@@ -2708,7 +2747,7 @@ int main(int argc, char **argv) {
         { "candidates settle", test_candidates_settle }, { "builds", test_builds },
         { "parsers", test_parsers }, { "toml", test_toml }, { "dht keys", test_dht_keys }, { "dht", test_dht }, { "read file", test_read_file },
         { "identity keys", test_identity_keys }, { "passphrase seal", test_passphrase_seal }, { "device lock", test_device_lock },
-        { "factor locks", test_factor_locks }, { "totp", test_totp }, { "bytewords", test_bytewords }, { "qr", test_qr }, { "save factors", test_save_factors }, { "duress", test_duress }, { "lock screen", test_lock_screen }, { "sandbox", test_sandbox }, { "history", test_history }, { "images", test_images }, { "file names", test_file_names }, { "clean", test_clean }, { "files", test_files }, { "clean offer", test_clean_offer },
+        { "factor locks", test_factor_locks }, { "totp", test_totp }, { "bytewords", test_bytewords }, { "qr", test_qr }, { "save factors", test_save_factors }, { "duress", test_duress }, { "lock screen", test_lock_screen }, { "sandbox", test_sandbox }, { "history", test_history }, { "tor state", test_tor_state }, { "images", test_images }, { "file names", test_file_names }, { "clean", test_clean }, { "files", test_files }, { "clean offer", test_clean_offer },
         { "verified keys", test_trust }, { "move", test_move },
     };
     size_t n_tests = sizeof tests / sizeof tests[0];
