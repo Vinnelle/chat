@@ -28,6 +28,7 @@ static const char *USAGE =
     "  Ctrl+J     join an existing session (asks for its id, then its password), or a kept one\n"
     "  Tab        next session       Shift+Tab   previous session (j/k in NORMAL too)\n"
     "  PgUp/PgDn  scroll the chat back and forward (Ctrl+U/Ctrl+D in NORMAL, G the newest)\n"
+    "  Up/Down    scroll the chat by a message, as the mouse wheel does\n"
     "  Ctrl+B     hide/show the sidebar   Ctrl+O   hide/show the console\n"
     "  Ctrl+T     hide/show the chat (hide two of the three and the last one fills the screen)\n"
     "  Ctrl+S     settings: routing, identity, files, notifications (also :set)\n"
@@ -636,10 +637,11 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
 
 // The longest the main loops wait for a socket or a key before doing their timed work.
 #define WAIT_MS 200
-// The full-screen UI: the window's title saved and set to chat, then the alternate screen, cleared.
-// Leaving it undoes that.
-#define SCREEN_ENTER "\x1b[22;0t\x1b]0;chat\x07\x1b[?1049h\x1b[2J\x1b[H"
-#define SCREEN_LEAVE "\x1b[?7h\x1b[0 q\x1b[?25h\x1b[?1049l\x1b[23;0t"
+// The full-screen UI: the window's title saved and set to chat, the mouse wheel's setting saved and
+// set to send Up and Down (mode 1007), then the alternate screen, cleared. Leaving it undoes that.
+// The wheel's setting is restored rather than turned off, since many terminals have it on already.
+#define SCREEN_ENTER "\x1b[22;0t\x1b]0;chat\x07\x1b[?1007s\x1b[?1007h\x1b[?1049h\x1b[2J\x1b[H"
+#define SCREEN_LEAVE "\x1b[?7h\x1b[0 q\x1b[?25h\x1b[?1007r\x1b[?1049l\x1b[23;0t"
 #define CLEAR_SCREEN "\x1b[2J\x1b[H"
 #define CLEAR_SCROLLBACK "\x1b[3J"
 

@@ -19,6 +19,7 @@ static const struct { const char *section, *keys, *what; } HELP_KEYS[] = {
     { NULL,          "ctrl+o",          "show or hide the console" },
     { NULL,          "ctrl+t",          "show or hide the chat" },
     { NULL,          "pgup  pgdn",      "scroll the chat back / forward" },
+    { NULL,          "up  down",        "scroll the chat by a message (the mouse wheel too)" },
     { NULL,          "f1",              "this page" },
     { "Typing",      "enter",           "send" },
     { NULL,          "/",               "on an empty line: a command (what isn't one stays text)" },
@@ -1024,15 +1025,18 @@ static void submit_chat_line(void) {
     g_app.selected->has_new = 0;
 }
 
-// PgUp and PgDn (Ctrl+U and Ctrl+D in NORMAL) scroll the chat by a third of the screen's rows. G
-// goes back to the newest.
-static void scroll_chat(int dir) {
-    session_slot_t *s = g_app.selected;
-    if (!s) return;
+static int chat_page(void) {
     int rows_n, cols_n;
     term_get_size(&rows_n, &cols_n);
-    int page = rows_n / 3 > 1 ? rows_n / 3 : 1;
-    long v = dir == 0 ? 0 : (long)s->scroll + (long)dir * page;
+    return rows_n / 3 > 1 ? rows_n / 3 : 1;
+}
+
+// PgUp and PgDn (Ctrl+U and Ctrl+D in NORMAL) scroll the chat by a third of the screen's rows, and Up
+// and Down, which the mouse wheel sends, by a message. G goes back to the newest.
+static void scroll_chat(int dir, int step) {
+    session_slot_t *s = g_app.selected;
+    if (!s) return;
+    long v = dir == 0 ? 0 : (long)s->scroll + (long)dir * step;
     if (v > s->sb.count - 1) v = s->sb.count - 1;
     if (v < 0) v = 0;
     s->scroll = (int)v;
@@ -1128,7 +1132,7 @@ void handle_key(const tui_key_t *key) {
         switch (key->ch[0]) {
             case 'j': select_step(1); break;
             case 'k': select_step(-1); break;
-            case 'G': scroll_chat(0); break;
+            case 'G': scroll_chat(0, 0); break;
             case '?': begin_help(); break;
             case 'f': begin_files(); break;
             case 'c': g_app.show_console = !g_app.show_console; g_app.dirty = 1; break;
@@ -1151,9 +1155,11 @@ void handle_key(const tui_key_t *key) {
         case TUI_KEY_HELP:           begin_help(); break;
         case TUI_KEY_FILES:          begin_files(); break;
         case TUI_KEY_PAGE_UP:
-        case TUI_KEY_CTRL_U:         scroll_chat(1); break;
+        case TUI_KEY_CTRL_U:         scroll_chat(1, chat_page()); break;
         case TUI_KEY_PAGE_DOWN:
-        case TUI_KEY_CTRL_D:         scroll_chat(-1); break;
+        case TUI_KEY_CTRL_D:         scroll_chat(-1, chat_page()); break;
+        case TUI_KEY_UP:             scroll_chat(1, 1); break;
+        case TUI_KEY_DOWN:           scroll_chat(-1, 1); break;
         case TUI_KEY_ENTER:          submit_chat_line(); break;
         default: break;
     }

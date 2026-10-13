@@ -1073,6 +1073,7 @@ saved your settings, it starts on your sessions, and `Ctrl+S` opens the page.
 | `Ctrl+J` | join an existing session (id, then password), or with rooms kept, pick one of them |
 | `Tab` / `Shift+Tab` | next / previous session (`j` / `k` in NORMAL too) |
 | `PgUp` / `PgDn` | scroll the chat back / forward (`Ctrl+U` / `Ctrl+D` in NORMAL, `G` the newest) |
+| `Up` / `Down` | scroll the chat by a message, as the mouse wheel does (it scrolls lists elsewhere) |
 | `Ctrl+B` / `Ctrl+O` / `Ctrl+T` | toggle sidebar / console / chat pane (`s` / `c` / `C` in NORMAL) |
 | `Ctrl+F` | the files page: what's been offered here and yours, to show, save or stop (`f` in NORMAL) |
 | `Ctrl+S` | settings |

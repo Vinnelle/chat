@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+- The mouse wheel scrolls the chat, and the lists on pages and in boxes. chat asks the terminal to
+  send the wheel as Up and Down (mode 1007), and gives back the terminal's own setting when it
+  leaves. On the chat screen Up and Down scroll the chat by a message. Selecting text with the
+  mouse works as before.
+
 ### Changed
 - `just release patch`, `minor` and `major` release the next patch, minor or major version after
   the last published release, and `just release beta patch`, `minor` or `major` a beta of it.
