@@ -1053,18 +1053,8 @@ int platform_remove_tree(const char *path) { return remove_at(AT_FDCWD, path, 0)
 
 struct platform_proc { pid_t pid; int exited, code; };
 
-platform_proc_t *platform_spawn(const char *const argv[], const char *out_path) {
-    if (!argv[0] || argv[0][0] != '/') return NULL;
-    platform_proc_t *p = calloc(1, sizeof *p);
-    if (!p) return NULL;
-    posix_spawn_file_actions_t fa;
-    posix_spawn_file_actions_init(&fa);
-    posix_spawn_file_actions_addopen(&fa, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
-    if (out_path)
-        posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, out_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, MODE_PRIVATE_FILE);
-    else posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
-    posix_spawn_file_actions_adddup2(&fa, STDOUT_FILENO, STDERR_FILENO);
-    // Its own process group, so Ctrl+C in the terminal goes to chat, which then stops it.
+// Its own process group, so Ctrl+C in the terminal goes to chat, which then stops it.
+static int spawn_grouped(pid_t *pid, const char *path, const char *const argv[], const posix_spawn_file_actions_t *fa) {
     posix_spawnattr_t attr;
     posix_spawnattr_init(&attr);
     posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
@@ -1079,7 +1069,7 @@ platform_proc_t *platform_spawn(const char *const argv[], const char *out_path) 
     size_t n = 0;
     while (environ[n]) n++;
     char **env = calloc(n + 1, sizeof *env);
-    if (!env) { posix_spawnattr_destroy(&attr); posix_spawn_file_actions_destroy(&fa); free(p); return NULL; }
+    if (!env) { posix_spawnattr_destroy(&attr); return ENOMEM; }
     static const char *const SYSTEMD_VARS[] = { "NOTIFY_SOCKET=", "LISTEN_PID=", "LISTEN_FDS=", "LISTEN_FDNAMES=" };
     size_t k = 0;
     for (size_t i = 0; i < n; i++) {
@@ -1087,9 +1077,24 @@ platform_proc_t *platform_spawn(const char *const argv[], const char *out_path) 
         for (size_t j = 0; j < COUNT_OF(SYSTEMD_VARS) && !skip; j++) skip = starts_with(environ[i], SYSTEMD_VARS[j]);
         if (!skip) env[k++] = environ[i];
     }
-    int rc = posix_spawn(&p->pid, argv[0], &fa, &attr, (char *const *)argv, env);
+    int rc = posix_spawn(pid, path, fa, &attr, (char *const *)argv, env);
     free(env);
     posix_spawnattr_destroy(&attr);
+    return rc;
+}
+
+platform_proc_t *platform_spawn(const char *const argv[], const char *out_path) {
+    if (!argv[0] || argv[0][0] != '/') return NULL;
+    platform_proc_t *p = calloc(1, sizeof *p);
+    if (!p) return NULL;
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_addopen(&fa, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    if (out_path)
+        posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, out_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, MODE_PRIVATE_FILE);
+    else posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+    posix_spawn_file_actions_adddup2(&fa, STDOUT_FILENO, STDERR_FILENO);
+    int rc = spawn_grouped(&p->pid, argv[0], argv, &fa);
     posix_spawn_file_actions_destroy(&fa);
     if (rc != 0) { free(p); return NULL; }
     return p;
@@ -1198,6 +1203,7 @@ static struct {
     int broad_config;   // chat's folder wasn't there yet, so the folder it goes in was let in instead
     char run[SANDBOX_RUN_MAX][PATH_BUF];
     int n_run;
+    char write_only[PATH_BUF];
 } g_sb;
 
 static int ll_add(int ruleset, const char *path, uint64_t allowed) {
@@ -1334,11 +1340,15 @@ static int ll_apply(void) {
     struct ll_ruleset attr = { handled, 0, g_sb.abi >= LL_ABI_SCOPE ? LL_SCOPE_SIGNAL : 0 };
     int rs = (int)syscall(SYS_landlock_create_ruleset, &attr, sizeof attr, 0);
     if (rs < 0) { g_sb.err = errno; return -1; }
-    ll_add_home(rs, write);
-    char downloads[PATH_BUF];
-    if (platform_downloads_dir(downloads, sizeof downloads) == 0) ll_add(rs, downloads, write);
-    ll_add_config(rs, write);
-    ll_add(rs, tempdir_base(), write);
+    if (g_sb.write_only[0]) {
+        ll_add(rs, g_sb.write_only, write);
+    } else {
+        ll_add_home(rs, write);
+        char downloads[PATH_BUF];
+        if (platform_downloads_dir(downloads, sizeof downloads) == 0) ll_add(rs, downloads, write);
+        ll_add_config(rs, write);
+        ll_add(rs, tempdir_base(), write);
+    }
     // Opening a device to write to it: /dev/null, a security key's hidraw, the TPM.
     ll_add(rs, "/dev", LL_WRITE_FILE | (g_sb.abi >= LL_ABI_TRUNCATE ? LL_TRUNCATE : 0));
     for (int i = 0; i < g_sb.n_run; i++) ll_add(rs, g_sb.run[i], LL_EXECUTE);
@@ -1545,8 +1555,9 @@ static int sc_apply(void) {
 #endif
 }
 
-unsigned platform_sandbox(const char *const run[], int n_run, char *why, size_t cap) {
+unsigned platform_sandbox(const char *const run[], int n_run, const char *write_only, char *why, size_t cap) {
     if (cap) why[0] = '\0';
+    copy_str(g_sb.write_only, write_only ? write_only : "", sizeof g_sb.write_only);
     g_sb.n_run = 0;
     for (int i = 0; i < n_run; i++) if (run[i] && run[i][0]) sb_run(run[i], 0);
     long abi = syscall(SYS_landlock_create_ruleset, NULL, 0, LL_CREATE_RULESET_VERSION);
@@ -1566,12 +1577,67 @@ void platform_sandbox_narrow(void) {
     if (!g_sb.layers || !g_sb.broad_config) return;
     if (platform_config_dir(dir, sizeof dir, 0) == 0 && stat(dir, &st) == 0 && S_ISDIR(st.st_mode)) ll_apply();
 }
+
+platform_proc_t *platform_spawn_self(const char *name, const char *arg, int *link) {
+    int sv[2];
+    platform_proc_t *p = calloc(1, sizeof *p);
+    if (!p) return NULL;
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sv) != 0) { free(p); return NULL; }
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_adddup2(&fa, sv[1], STDIN_FILENO);
+    posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+    posix_spawn_file_actions_adddup2(&fa, STDOUT_FILENO, STDERR_FILENO);
+    const char *const argv[] = { name, arg, NULL };
+    // The file this process was started from, even if it has been replaced since: the same build.
+    // The kernel names the new process after it ("exe") until it calls platform_set_name.
+    int rc = spawn_grouped(&p->pid, "/proc/self/exe", argv, &fa);
+    posix_spawn_file_actions_destroy(&fa);
+    close(sv[1]);
+    if (rc != 0) { close(sv[0]); free(p); return NULL; }
+    *link = sv[0];
+    return p;
+}
+
+int platform_parent_link(void) {
+    int type = 0;
+    socklen_t len = sizeof type;
+    if (getsockopt(STDIN_FILENO, SOL_SOCKET, SO_TYPE, &type, &len) != 0 || type != SOCK_SEQPACKET) return -1;
+    return STDIN_FILENO;
+}
+
+void platform_set_name(const char *name) { prctl(PR_SET_NAME, name, 0, 0, 0); }
+
+int platform_link_send(int link, const void *msg, size_t len) {
+    ssize_t n;
+    while ((n = send(link, msg, len, MSG_NOSIGNAL)) < 0 && errno == EINTR) {}
+    return n == (ssize_t)len ? 0 : -1;
+}
+
+int platform_link_recv(int link, void *msg, size_t len) {
+    ssize_t n;
+    // MSG_TRUNC returns a longer message's whole length, so it isn't taken for one that fits.
+    while ((n = recv(link, msg, len, MSG_TRUNC)) < 0 && errno == EINTR) {}
+    return n == (ssize_t)len ? 0 : -1;
+}
+
+void platform_link_close(int link) { close(link); }
 #else
-unsigned platform_sandbox(const char *const run[], int n_run, char *why, size_t cap) {
-    (void)run; (void)n_run;
+unsigned platform_sandbox(const char *const run[], int n_run, const char *write_only, char *why, size_t cap) {
+    (void)run; (void)n_run; (void)write_only;
     copy_str(why, "it's only on Linux", cap);
     return 0;
 }
 
 void platform_sandbox_narrow(void) {}
+
+platform_proc_t *platform_spawn_self(const char *name, const char *arg, int *link) {
+    (void)name; (void)arg; (void)link;
+    return NULL;
+}
+int platform_parent_link(void) { return -1; }
+void platform_set_name(const char *name) { (void)name; }
+int platform_link_send(int link, const void *msg, size_t len) { (void)link; (void)msg; (void)len; return -1; }
+int platform_link_recv(int link, void *msg, size_t len) { (void)link; (void)msg; (void)len; return -1; }
+void platform_link_close(int link) { (void)link; }
 #endif

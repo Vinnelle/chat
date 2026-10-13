@@ -139,8 +139,8 @@ void platform_harden_process(const char *const secret_env[]) {
     }
 }
 
-unsigned platform_sandbox(const char *const run[], int n_run, char *why, size_t cap) {
-    (void)run; (void)n_run;
+unsigned platform_sandbox(const char *const run[], int n_run, const char *write_only, char *why, size_t cap) {
+    (void)run; (void)n_run; (void)write_only;
     copy_str(why, "it's only on Linux", cap);
     return 0;
 }
@@ -1091,6 +1091,16 @@ void platform_proc_stop(platform_proc_t *p, int wait_ms) {
     CloseHandle(p->job);
     free(p);
 }
+
+platform_proc_t *platform_spawn_self(const char *name, const char *arg, int *link) {
+    (void)name; (void)arg; (void)link;
+    return NULL;
+}
+int platform_parent_link(void) { return -1; }
+void platform_set_name(const char *name) { (void)name; }
+int platform_link_send(int link, const void *msg, size_t len) { (void)link; (void)msg; (void)len; return -1; }
+int platform_link_recv(int link, void *msg, size_t len) { (void)link; (void)msg; (void)len; return -1; }
+void platform_link_close(int link) { (void)link; }
 
 long platform_pid(void) { return (long)GetCurrentProcessId(); }
 

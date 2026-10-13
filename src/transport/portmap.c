@@ -102,10 +102,10 @@ struct portmap {
     char why[120];
 };
 
-static void logf_(portmap_t *p, int verbose_only, const char *fmt, ...) {
+static void logf_(portmap_t *p, int kind, const char *fmt, ...) {
     char msg[300];
     va_list ap; va_start(ap, fmt); vsnprintf(msg, sizeof msg, fmt, ap); va_end(ap);
-    if (p->log) p->log(p->ctx, verbose_only, msg);
+    if (p->log) p->log(p->ctx, kind, msg);
 }
 
 static int is_private_v4(const uint8_t ip[IP4_LEN]) {

@@ -35,9 +35,8 @@
 typedef struct nostr nostr_t;
 
 typedef void (*nostr_deliver_fn)(void *ctx, const uint8_t *data, size_t len, addr_t from, double now);
-// verbose_only: a detail only shown with verbose network logging. Otherwise it gets its own
-// console line.
-typedef void (*nostr_log_fn)(void *ctx, int verbose_only, const char *msg);
+// kind: NET_LINE_NEWS, _DETAIL or _PROBLEM, which says when the line is shown.
+typedef void (*nostr_log_fn)(void *ctx, int kind, const char *msg);
 
 // proxy: NULL connects to relays directly. Otherwise (Tor mode) every connection goes through
 // that SOCKS proxy, never directly, and "" means none is known yet, so nothing connects until
@@ -47,6 +46,9 @@ nostr_t *nostr_new(const uint8_t tag_key[NOSTR_KEY_LEN], const uint8_t wrap_key[
                    const char *proxy, nostr_deliver_fn deliver, nostr_log_fn log, void *ctx);
 void nostr_free(nostr_t *n);
 void nostr_set_proxy(nostr_t *n, const char *socks);
+// Closes every relay connection and opens them again straight away. Through Tor each has a SOCKS
+// login of its own, so they come back on new circuits, through new exits.
+void nostr_reconnect(nostr_t *n);
 // The proxy's tor has just connected to the Tor network, so anything that failed before is retried.
 void nostr_retry_now(nostr_t *n);
 // On: connect and stay connected. Off: close every connection and open none until it's on again.

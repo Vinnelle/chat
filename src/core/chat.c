@@ -28,7 +28,7 @@ static void ui_print(chat_t *c, const char *fmt, ...);
 static void ui_warn(chat_t *c, const char *fmt, ...);
 static int check_trust(chat_t *c, peer_t *p);
 static void net_report(chat_t *c);
-static void module_log(void *ctx, int verbose_only, const char *msg);
+static void module_log(void *ctx, int kind, const char *msg);
 static void knock_room_slots(chat_t *c);
 
 static const char *const DEFAULT_RELAYS[] = {
@@ -39,14 +39,14 @@ static const char *const DEFAULT_RELAYS[] = {
 
 void routing_defaults(routing_t *r) {
     memset(r, 0, sizeof *r);
-    r->mode = ROUTE_DHT;
+    r->mode = ROUTE_UDP;
     r->dht4 = r->dht6 = r->lan = r->portmap = r->nostr = 1;
     for (size_t i = 0; i < COUNT_OF(DEFAULT_RELAYS); i++)
         copy_str(r->relays[r->n_relays++], DEFAULT_RELAYS[i], NOSTR_URL_MAX);
     r->tor = TOR_DEFAULTS;
 }
 
-const char *routing_mode_name(route_mode_t m) { return m == ROUTE_TOR ? "tor" : "dht"; }
+const char *routing_mode_name(route_mode_t m) { return m == ROUTE_TOR ? "tor" : "udp"; }
 static void ui_print_colored(chat_t *c, const uint8_t rgb[3], const char *fmt, ...);
 static void ui_chat(chat_t *c, const uint8_t rgb[3], int mention, const char *name, const char *text);
 static void ui_chat_file(chat_t *c, const uint8_t rgb[3], int mention, const char *name, const char *text, int file);
@@ -616,7 +616,7 @@ static int queue_record(chat_t *c, peer_t *p, const char *text, int old_chain) {
 
 static int send_peer(chat_t *c, peer_t *p, const char *text) { return queue_record(c, p, text, 0); }
 
-// Sent immediately, outside the slots. Only used for the "bye" of a session that's ending.
+// Sent immediately, outside the slots. Only used for the "bye" or "off" of a session that's ending.
 static void send_now(chat_t *c, peer_t *p, const char *text) {
     uint8_t frame[UDP_CELL]; size_t len; uint32_t idx;
     if (frame_on_chain(send_chain_for(p), text, SESSION_PAD_TARGET, frame, sizeof frame, &len, &idx) != 0) return;
@@ -776,8 +776,9 @@ static void build_k_message(chat_t *c, peer_t *p, char *out, size_t out_cap) {
     }
     // After the logging flag, features this build has that older ones don't: "r" announces rekeys,
     // "b" reads several records per frame, "l" reads messages up to MAX_TEXT, "m" moves rooms, "p"
-    // reads direct messages, "q" reads replies, "t" keeps to message timers, then our timer.
-    snprintf(out, out_cap, "k\t%s\t%s\t%drblmpqt%u\t%d\t%s\t%s", c->nick, colorhex, c->persist, c->timer, idtype,
+    // reads direct messages, "q" reads replies, "o" reads "off", "t" keeps to message timers, then our
+    // timer.
+    snprintf(out, out_cap, "k\t%s\t%s\t%drblmpqot%u\t%d\t%s\t%s", c->nick, colorhex, c->persist, c->timer, idtype,
              idpubhex, sighex);
 }
 
@@ -1482,8 +1483,8 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         if (parse_color(f[2], rgb) == 0) memcpy(p->color, rgb, 3);
         // f[3] is the history flag, then capability letters older builds ignore: "r" = sends rk,
         // "b" = reads records joined by newlines, "l" = reads messages up to MAX_TEXT, "m" = moves rooms,
-        // "p" = reads direct messages, "q" = reads replies ("mr"), "t" = keeps to message timers, then the
-        // seconds of the one it asks for.
+        // "p" = reads direct messages, "q" = reads replies ("mr"), "o" = reads "off", "t" = keeps to message
+        // timers, then the seconds of the one it asks for.
         int had_history = p->persists;
         p->persists = (f[3][0] == '1');
         if (p->announced && had_history != p->persists) {
@@ -1497,6 +1498,7 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         p->can_move = strchr(f[3], 'm') != NULL;
         p->can_pm = strchr(f[3], 'p') != NULL;
         p->can_reply = strchr(f[3], 'q') != NULL;
+        p->can_offline = strchr(f[3], 'o') != NULL;
         const char *tp = strchr(f[3], 't');
         unsigned long asked = tp ? strtoul(tp + 1, NULL, 10) : 0;
         unsigned had_timer = p->timer;
@@ -1572,7 +1574,7 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
                 // Only Tor mode uses onion addresses. Nothing else may ever look them up.
                 item[TOR_ADDR_LEN] = '\0';
                 if (c->tor && tor_target(c->tor, item, &a) == 0) add_candidate(c, a);
-            } else if (c->route.mode == ROUTE_DHT && addr_parse_ip_port(item, &a) == 0) {
+            } else if (c->route.mode == ROUTE_UDP && addr_parse_ip_port(item, &a) == 0) {
                 // Numeric only. A hostname here would make us resolve any name a peer sends.
                 add_candidate(c, a);
             }
@@ -1687,6 +1689,8 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         file_on_record(c, p, f, n, now);
     } else if (n == 1 && strcmp(f[0], "bye") == 0) {
         drop_peer(c, p, "left");
+    } else if (n == 1 && strcmp(f[0], "off") == 0) {
+        drop_peer(c, p, "went offline");
     }
 }
 
@@ -2203,11 +2207,11 @@ static void tor_tick(chat_t *c, double now) {
     }
 }
 
-// Whether the relays are needed: always in Tor mode (that's where DHT members are met) or when set
-// to always. Otherwise while nobody is reached yet, while a peer is reached (or being reached)
-// only through them, or while a peer's UDP has gone quiet and they may be needed next.
+// Whether the relays are needed, the same in both routes: always when set to always. Otherwise while
+// nobody is reached yet, while a peer is reached (or being reached) only through them, or while a
+// peer's own path has gone quiet and they may be needed next.
 static int relays_needed(chat_t *c, double now) {
-    if (c->route.mode == ROUTE_TOR || c->route.nostr == NOSTR_ALWAYS) return 1;
+    if (c->route.nostr == NOSTR_ALWAYS) return 1;
     if (live_count(c) == 0) return 1;
     for (int i = 0; i < c->peer_hi; i++) {
         const peer_t *p = &c->peers[i];
@@ -2254,8 +2258,9 @@ void chat_tick(chat_t *c, double now) {
         c->dht.peers_now = live_count(c) > 0;
         if (dht_step(&c->dht, now) && !c->dht_summary_printed) {
             c->dht_summary_printed = 1;
-            ui_print(c, "* internet lookup done: %d nodes reached, %d peers found",
-                      dht_queried_count(&c->dht), dht_found_count(&c->dht));
+            if (!c->net_quiet)
+                ui_print(c, "* internet lookup done: %d nodes reached, %d peers found",
+                         dht_queried_count(&c->dht), dht_found_count(&c->dht));
         }
     }
     for (int i = 0; i < MAX_CANDS; i++) {
@@ -2405,11 +2410,11 @@ void chat_tick(chat_t *c, double now) {
         c->warned_lonely = 1;
         ui_print(c, "* nobody has answered for this session yet - check the id and password with "
                      "whoever shared them, or they may not have started their app yet");
-        // DHT and Tor sessions only meet on the relays. Without them the room splits in two without any
+        // UDP and Tor sessions only meet on the relays. Without them the room splits in two without any
         // warning.
         if (!c->nostr)
-            ui_print(c, "* Nostr relays are off here, so members using %s routing can't reach you - :set nostr on turns them on%s",
-                     c->route.mode == ROUTE_TOR ? "DHT" : "Tor", c->route.mode == ROUTE_TOR ? " (through Tor)" : "");
+            ui_print(c, "* Nostr relays are off here, so members using %s routing can't reach you - :set nostr fallback turns them on%s",
+                     c->route.mode == ROUTE_TOR ? "UDP" : "Tor", c->route.mode == ROUTE_TOR ? " (through Tor)" : "");
         net_report(c);
     }
 }
@@ -2422,7 +2427,7 @@ static void net_report(chat_t *c) {
         if (c->tor) tor_status(c->tor, ts, sizeof ts);
         ui_print(c, "* net: tor | %s | candidates to try: %d | handshakes in progress: %d | connected: %d",
                  ts, cands, pending_peer_count(c), live_count(c));
-        char ns[300] = "off - DHT peers can't reach this session";
+        char ns[300] = "off - members using UDP routing can't reach this session";
         if (c->nostr) nostr_status(c->nostr, ns, sizeof ns);
         ui_print(c, "* nostr relays through Tor: %s | peers through relays: %d", ns, relayed_count(c));
     } else if (c->dht_on) {
@@ -2509,6 +2514,11 @@ void chat_set_history(chat_t *c, int on) {
     for (int i = 0; i < c->peer_hi; i++)
         if (c->peers[i].used && c->peers[i].ok) send_k_now(c, &c->peers[i]);
     if (live_count(c) > 0) ui_print(c, "* everyone here is told you %s", on ? "keep a history of this chat now" : "stopped keeping a history of it");
+}
+
+void chat_set_net_log(chat_t *c, int level) {
+    c->net_verbose = level == NET_LOG_VERBOSE;
+    c->net_quiet = level == NET_LOG_OFF;
 }
 
 void chat_format_timer(unsigned seconds, char *out, size_t cap) {
@@ -2748,7 +2758,11 @@ static cmd_result_t cmd_verified(void *ctx, const char *arg) {
 
 static const char *const NOTIFY_NAMES[] = { "none", "mentions", "all" };
 static const char *const PREVIEW_NAMES[] = { "off", "nick", "message" };
-static const char *const NET_LOG_NAMES[] = { "normal", "verbose" };
+static const char *const NET_LOG_NAMES[] = { "normal", "verbose", "off" };
+
+static int net_log_level(const chat_t *c) {
+    return c->net_quiet ? NET_LOG_OFF : c->net_verbose ? NET_LOG_VERBOSE : NET_LOG_NORMAL;
+}
 
 static int name_index(const char *const *names, int n, const char *s) {
     for (int i = 0; i < n; i++) if (strcmp(names[i], s) == 0) return i;
@@ -2764,7 +2778,7 @@ static cmd_result_t cmd_set(void *ctx, const char *arg) {
     char hex[COLOR_HEX_LEN + 1]; color_to_hex(c->my_color, hex);
     if (!key[0]) {
         ui_print(c, "* nick %s, colour #%s, notify %s, preview %s, net %s - :set NAME VALUE changes one", c->nick, hex,
-                 NOTIFY_NAMES[c->notify_mode], PREVIEW_NAMES[c->notify_preview], NET_LOG_NAMES[c->net_verbose != 0]);
+                 NOTIFY_NAMES[c->notify_mode], PREVIEW_NAMES[c->notify_preview], NET_LOG_NAMES[net_log_level(c)]);
     } else if (strcmp(key, "nick") == 0) {
         if (!value[0]) ui_print(c, "* nick: %s. usage: :set nick NAME", c->nick);
         else chat_set_nick(c, value);
@@ -2800,10 +2814,11 @@ static cmd_result_t cmd_set(void *ctx, const char *arg) {
     } else if (strcmp(key, "net") == 0) {
         int v = name_index(NET_LOG_NAMES, (int)COUNT_OF(NET_LOG_NAMES), value);
         if (v < 0) {
-            ui_print(c, "* net: %s. usage: :set net normal|verbose", NET_LOG_NAMES[c->net_verbose != 0]);
+            ui_print(c, "* net: %s. usage: :set net normal|verbose|off", NET_LOG_NAMES[net_log_level(c)]);
         } else {
-            c->net_verbose = v;
-            ui_print(c, v ? "* net: verbose - every handshake packet now gets its own console line" : "* net: normal");
+            chat_set_net_log(c, v);
+            ui_print(c, v == NET_LOG_VERBOSE ? "* net: verbose - every handshake packet now gets its own console line"
+                      : v == NET_LOG_OFF ? "* net: off - only the network's problems get a console line" : "* net: normal");
         }
     } else {
         ui_print(c, "* no setting %s here - :set lists them", key);
@@ -2819,7 +2834,7 @@ static cmd_result_t cmd_net(void *ctx, const char *arg) {
 
 static cmd_result_t cmd_port(void *ctx, const char *arg) {
     chat_t *c = ctx;
-    if (c->route.mode != ROUTE_DHT) {
+    if (c->route.mode != ROUTE_UDP) {
         ui_print(c, "* this session runs over Tor and has no udp port of its own");
         return CMD_OK;
     }
@@ -4271,9 +4286,9 @@ int chat_submit_line(chat_t *c, const char *line_in, double now) {
     return 1;
 }
 
-static void module_log(void *ctx, int verbose_only, const char *msg) {
+static void module_log(void *ctx, int kind, const char *msg) {
     chat_t *c = ctx;
-    if (!verbose_only || c->net_verbose) ui_print(c, "%s", msg);
+    if (kind == NET_LINE_PROBLEM || (kind == NET_LINE_DETAIL ? c->net_verbose : !c->net_quiet)) ui_print(c, "%s", msg);
 }
 
 static void module_deliver(void *ctx, const uint8_t *data, size_t len, addr_t from, double now) {
@@ -4310,7 +4325,7 @@ static void start_nostr(chat_t *c) {
     if (c->nostr || !c->route.nostr || c->route.n_relays == 0) return;
     uint8_t tag_key[NOSTR_KEY_LEN], wrap_key[NOSTR_KEY_LEN];
     derive_nostr_keys(c->master, tag_key, wrap_key);
-    // In Tor mode the relays are where DHT peers can be met, and they're only reached through Tor:
+    // In Tor mode the relays are where UDP peers can be met, and they're only reached through Tor:
     // its SOCKS port, or not at all until chat has one.
     const char *proxy = c->route.mode == ROUTE_TOR ? c->route.tor.socks : NULL;
     c->nostr = nostr_new(tag_key, wrap_key, c->my_id, (const char (*)[NOSTR_URL_MAX])c->route.relays, c->route.n_relays,
@@ -4385,6 +4400,12 @@ void chat_tor_set_ports(chat_t *c, const char *socks, const char *control, const
 
 void chat_tor_connected(chat_t *c) {
     if (c->nostr) nostr_retry_now(c->nostr);
+}
+
+void chat_tor_refresh(chat_t *c) {
+    if (!c->tor) return;
+    tor_refresh(c->tor);
+    if (c->nostr) nostr_reconnect(c->nostr);
 }
 
 void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify_fn notify, void *ui) {
@@ -4480,7 +4501,8 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
 
 void chat_shutdown(chat_t *c) {
     for (int i = 0; i < c->peer_hi; i++)
-        if (c->peers[i].used && c->peers[i].ok) send_now(c, &c->peers[i], "bye");
+        if (c->peers[i].used && c->peers[i].ok)
+            send_now(c, &c->peers[i], c->coming_back && c->peers[i].can_offline ? "off" : "bye");
     nostr_free(c->nostr);
     tor_free(c->tor);
     portmap_free(c->pm);

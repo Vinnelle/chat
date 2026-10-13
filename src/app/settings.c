@@ -3,11 +3,12 @@
 #include "app/app.h"
 
 const setting_def_t SETTINGS[] = {
-    { SET_ROUTING, "Network", NULL, "routing", "Routing", K_CHOICE, "dht|tor",
-      "dht: UDP directly between peers, found using the options below. tor: onion services, plus the Nostr "
-      "relays through Tor to meet DHT members. Hides your IP address from everyone. Uses a running tor or "
-      "starts chat's own, and connecting takes longer. Applies to sessions you open from now on." },
-    { SET_DHT4, NULL, "DHT", "dht", "BitTorrent DHT (IPv4)", K_TOGGLE, "on|off",
+    { SET_ROUTING, "Network", NULL, "routing", "Routing", K_CHOICE, "udp|tor",
+      "udp: UDP straight between peers, found using the options below. Peers see your IP address. tor: onion "
+      "services, which hide your IP address from everyone. Uses a running tor or starts chat's own, and "
+      "connecting takes longer. UDP and Tor members only meet on the Nostr relays. Applies to sessions you open "
+      "from now on." },
+    { SET_DHT4, NULL, "UDP", "dht", "BitTorrent DHT (IPv4)", K_TOGGLE, "on|off",
       "Finds peers on the internet through the public BitTorrent DHT. DHT nodes see your IP address next to a "
       "lookup key only room members can work out, and a node id that changes with it every hour." },
     { SET_DHT6, NULL, NULL, "dht6", "IPv6 DHT", K_TOGGLE, "on|off",
@@ -51,19 +52,20 @@ const setting_def_t SETTINGS[] = {
       "in seconds. It adds tens of MB to the save, and anyone who opens the save sees which guards you use. Its "
       "decoy gets none. off: deletes them. Needs a save; a tor already running keeps its own." },
     // After both modes' rows: the relays apply in both, so they stay put when the mode changes.
-    { SET_NOSTR, NULL, "Relays", "nostr", "Nostr relays", K_CHOICE, "off|on|always",
-      "on: DHT routing only connects to the relays while it needs them (nobody reached yet, or a peer UDP can't"
-      " reach) and disconnects a minute after. always: stays connected, so Tor members can find a room whose "
-      "members all reach each other directly (they only meet on the relays). Tor routing reaches them through "
-      "Tor and always stays connected. Each event has a one-off key, a random kind, a fixed size and fresh "
-      "encryption, under a tag that changes every 10 minutes, with a new connection for each tag." },
+    { SET_NOSTR, NULL, "Relays", "nostr", "Nostr relays", K_CHOICE, "off|fallback|always",
+      "Public relays that carry traffic the route can't, and where UDP and Tor members meet. Tor routing reaches "
+      "them through Tor. fallback: connected only while needed (nobody reached yet, or a peer the route can't "
+      "reach), until a minute after. always: stays connected, so members on the other route can find a room "
+      "whose members all reach each other. Each event has a one-off key, a random kind, a fixed size and fresh "
+      "encryption." },
     { SET_RELAYS, NULL, NULL, "relays", "Relay list", K_TEXT, "wss://URL ... (up to 6)",
       "The relays the fallback uses: up to 6 wss:// URLs, separated by spaces or commas." },
     { SET_PORT, NULL, "Advanced", "port", "UDP port for new sessions", K_TEXT, "N",
       "The UDP port new sessions listen on. 0 picks a free one each time. :port moves an open session to another." },
-    { SET_NET, NULL, NULL, "net", "Network log", K_CHOICE, "normal|verbose",
+    { SET_NET, NULL, NULL, "net", "Network log", K_CHOICE, "normal|verbose|off",
       "How much of the network the console shows, in every session. verbose adds every handshake packet, relay "
-      "and Tor event." },
+      "and Tor event. off leaves out its news too (lookups, relays dropping and coming back, Tor starting up), "
+      "showing only problems that keep a session from connecting." },
     { SET_NICK, "Profile", NULL, "nick", "Nickname", K_TEXT, "NAME", "Your name in every session." },
     { SET_COLOUR, NULL, NULL, "colour", "Colour", K_TEXT, "NAME|#RRGGBB",
       "Your colour in every session. h/l step through the palette, and Enter takes a name or #RRGGBB." },
@@ -113,9 +115,10 @@ const setting_def_t SETTINGS[] = {
       "hand." },
     { SET_PANIC_KEY, NULL, NULL, "panickey", "Panic key", K_CHOICE, "off|ctrl+\\|ctrl+q|ctrl+x|f12",
       "A key that, from anywhere in chat (the lock screen too), clears the screen and quits at once, without "
-      "asking: every session says bye, memory is wiped and chat's own tor stops. Nothing is saved but what the "
-      "rows below keep. Anyone at the keyboard can press it. Ctrl+\\ is awkward on some keyboards, so there are "
-      "others. In --simple, the terminal's Ctrl+\\ panics unless this is off." },
+      "asking: every session says bye (one kept to reopen goes offline), memory is wiped and chat's own tor "
+      "stops. Nothing is saved but what the rows below keep. Anyone at the keyboard can press it. Ctrl+\\ is "
+      "awkward on some keyboards, so there are others. In --simple, the terminal's Ctrl+\\ panics unless this is "
+      "off." },
     { SET_PANIC_WIPE, NULL, NULL, "panicwipe", "Panic deletes the save", K_TOGGLE, "on|off",
       "on: the panic key also deletes the open save, as :uninstall does but without asking: its settings, signing "
       "key, verified keys and history. Deleting isn't erasing: the disk and its backups can keep traces of the "
@@ -127,8 +130,12 @@ const setting_def_t SETTINGS[] = {
       "on: once chat reaches the network, it can only write to your home's folders that aren't hidden or on PATH, "
       "its own and the temporary ones, and only run tor and its transport programs. Calls it never makes (ptrace, "
       "mount, bpf...) are refused, for tor too. A bug can't plant anything that runs later (.bashrc, ~/.local/bin), "
-      "and saving elsewhere fails. Linux 5.13 or later. :update can't replace chat while it's up (chat --update "
-      "can). From the next start." },
+      "and saving elsewhere fails, though :update still works through the updater. Linux 5.13 or later. From the next start." },
+    { SET_UPDATER, NULL, NULL, "updater", "Updater", K_TOGGLE, "on|off",
+      "on: just before the sandbox goes up, chat starts chat-updater, a second process that :update asks to "
+      "replace chat, since chat can't once it's sandboxed. It holds none of chat's keys, saves or messages, can "
+      "only write in chat's executable's folder and run curl, and installs only what the release key signed. off: "
+      "no second process, and :update sends you to chat --update. off stops it now, on waits for the next start." },
     { SET_VERIFY, "Chat", NULL, "verify", "Compare verify codes", K_CHOICE, "required|optional",
       "Anyone with a session's id and password could sit between two members and read what they say. When a peer "
       "joins, chat shows a code to compare with them over another channel. It only matches on both ends if "
@@ -145,12 +152,17 @@ const setting_def_t SETTINGS[] = {
       "you join that session again with the same id and password. Everyone in the session is told while you keep "
       "it, and you're told when they do. Only the full-screen UI keeps it. :history forget deletes this "
       "session's, :history forget all every session's." },
+    { SET_REOPEN, NULL, NULL, "reopen", "Reopen sessions", K_TOGGLE, "on|off",
+      "on: keeps the sessions you have open, their ids and passwords sealed in the save that's open (so it "
+      "needs :install), and opens them again when chat starts. Ctrl+C then quits without leaving them: peers "
+      "see you go offline, or leave on older versions. :quit leaves one for good, :quitall every one. Calls "
+      "aren't kept. Only the full-screen UI keeps them." },
     { SET_FILE_LIMIT, NULL, "Files", "filelimit", "File size limit", K_TEXT, "SIZE (8M, 500K, 1G)",
       "The largest file chat fetches when you ask. An offer over the limit says so, and :download N anyway (or "
       ":show N anyway) fetches it regardless. Nothing is fetched until you ask. Files can be up to 1 GB." },
     { SET_FAST_FILES, NULL, NULL, "fastfiles", "Fast file transfers", K_TOGGLE, "on|off",
       "off: files are sent in chat's regular slots, so a transfer doesn't show up on the network, but it's slow: "
-      "about 25 KB a minute, half that through the relays (where Tor and DHT members meet). on: while you send a "
+      "about 25 KB a minute, half that through the relays (where Tor and UDP members meet). on: while you send a "
       "file, your slots to that peer come every few milliseconds. It takes seconds instead of minutes, but anyone "
       "watching the network sees a burst about the size of the file. Through the relays it goes as often as they "
       "allow, about twice the normal rate, and the relays can see that. Only the sender's setting matters." },
@@ -173,13 +185,13 @@ static const char *const PREVIEW_NAMES[] = { "off", "nick", "message" };
 
 static const char *const ON_OFF[] = { "off", "on" };
 
-static const char *const ROUTE_NAMES[] = { "dht", "tor" };
+const char *const ROUTE_NAMES[] = { "udp", "tor" };
 
-static const char *const NOSTR_NAMES[] = { "off", "on", "always" };
+const char *const NOSTR_NAMES[] = { "off", "fallback", "always" };
 
 static const char *const VERIFY_NAMES[] = { "required", "optional" };
 
-static const char *const NET_LOG_NAMES[] = { "normal", "verbose" };
+static const char *const NET_LOG_NAMES[] = { "normal", "verbose", "off" };
 
 static const char *const DESTROY_NAMES[] = { "off", "3", "5", "10" };
 
@@ -212,37 +224,41 @@ const setting_def_t *setting_by_key(const char *key) {
 
 static int dht_setting(setting_id_t id) { return id == SET_DHT4 || id == SET_DHT6; }
 
-static int dht_routing_only_setting(setting_id_t id) { return id == SET_PORTMAP || id == SET_LAN; }
+static int udp_routing_only_setting(setting_id_t id) { return id == SET_PORTMAP || id == SET_LAN; }
 
 static int tor_only_setting(setting_id_t id) {
     return id == SET_TOR_LAUNCH || id == SET_TOR_PATH || id == SET_TOR_SOCKS || id == SET_TOR_CONTROL
         || id == SET_TOR_PASSWORD || id == SET_BRIDGES || id == SET_TRANSPORTS || id == SET_TOR_STATE;
 }
 
-// Settings that don't apply right now aren't listed: the DHT ones in Tor mode, the Tor ones in
-// DHT mode, the relay list with relays off, the AGE recipient without an AGE identity, and the
+// Settings that don't apply right now aren't listed: the UDP ones in Tor mode, the Tor ones in
+// UDP mode, the relay list with relays off, the AGE recipient without an AGE identity, and the
 // PGP public key without a PGP key made here.
 int setting_shown(setting_id_t id) {
     route_mode_t m = g_app.route.mode;
-    if (m != ROUTE_DHT && dht_routing_only_setting(id)) return 0;
+    if (m != ROUTE_UDP && udp_routing_only_setting(id)) return 0;
     if (m == ROUTE_TOR && dht_setting(id)) return 0;
     if (m != ROUTE_TOR && tor_only_setting(id)) return 0;
     if (id == SET_RELAYS && !g_app.route.nostr) return 0;
     if (id == SET_AGE_RECIPIENT && g_app.identity_source != IDENT_AGE) return 0;
     if (id == SET_PGP_PUBKEY && !pgp_key_made_here()) return 0;
 #ifndef __linux__
-    if (id == SET_SANDBOX) return 0;
+    if (id == SET_SANDBOX || id == SET_UPDATER) return 0;
 #endif
+    if (id == SET_UPDATER && !g_app.sandbox && !(g_app.sandboxed & PLATFORM_SANDBOX_FILES)) return 0;
     return 1;
 }
 
 static const char *setting_hidden_why(setting_id_t id) {
-    if (dht_routing_only_setting(id)) return "it only applies with dht routing";
+    if (udp_routing_only_setting(id)) return "it only applies with udp routing";
     if (dht_setting(id)) return "it doesn't apply with tor routing";
     if (tor_only_setting(id)) return "it only applies with tor routing";
     if (id == SET_RELAYS) return "it only applies with the Nostr relays on";
     if (id == SET_PGP_PUBKEY) return "it needs a PGP signing key made here";
-    if (id == SET_SANDBOX) return "the sandbox is only on Linux";
+#ifndef __linux__
+    if (id == SET_SANDBOX || id == SET_UPDATER) return "the sandbox is only on Linux";
+#endif
+    if (id == SET_UPDATER) return "it only applies with the sandbox on";
     return "it needs an AGE signing identity";
 }
 
@@ -263,6 +279,7 @@ int setting_options(setting_id_t id, const char *const **names, int *n) {
         case SET_FAST_FILES: return g_app.fast_files != 0;
         case SET_NOISE:      return g_app.picture_noise != 0;
         case SET_HISTORY:    return g_app.history != 0;
+        case SET_REOPEN:     return g_app.reopen != 0;
         case SET_BETAS:      return g_app.betas != 0;
         case SET_AUTOSAVE:   return g_app.autosave != 0;
         case SET_DEVICE_LOCK: return g_app.device_lock != 0;
@@ -283,11 +300,12 @@ int setting_options(setting_id_t id, const char *const **names, int *n) {
         case SET_PANIC_WIPE: return g_app.panic_wipe != 0;
         case SET_PANIC_HISTORY: return g_app.panic_history != 0;
         case SET_SANDBOX:    return g_app.sandbox != 0;
+        case SET_UPDATER:    return g_app.updater != 0;
         case SET_TOR_STATE:  return g_app.tor_state != 0;
         case SET_TOR_LAUNCH: *names = TOR_LAUNCH_NAMES; *n = 3; return g_app.tor_launch;
         case SET_NOTIFY:     *names = NOTIFY_NAMES; *n = 3; return (int)g_app.notify_mode;
         case SET_PREVIEW:    *names = PREVIEW_NAMES; *n = 3; return (int)g_app.notify_preview;
-        case SET_NET:        *names = NET_LOG_NAMES; return g_app.net_verbose != 0;
+        case SET_NET:        *names = NET_LOG_NAMES; *n = 3; return g_app.net_log;
         default:             *names = NULL; *n = 0; return -1;
     }
 }
@@ -493,10 +511,11 @@ int settings_text(char *out, size_t cap) {
         p = put_text(out, p, cap, "\n");
     }
     p = rooms_text(out, p, cap);
+    p = reopen_text(out, p, cap);
     return p < cap ? 0 : -1;
 }
 
-// The rows saved so far and the kept rooms, written to the open save. 0 or -1.
+// The rows saved so far, the kept rooms and the sessions to reopen, written to the open save. 0 or -1.
 int settings_write(void) {
     static char text[INSTALL_SETTINGS_MAX];
     int rc = settings_text(text, sizeof text) == 0 && install_write_settings(text) == 0 ? 0 : -1;
@@ -556,7 +575,7 @@ void settings_to_sessions(void) {
         e->verify_required = !g_app.verify_optional || g_app.sessions[i].contact;
         e->notify_mode = g_app.notify_mode;
         e->notify_preview = g_app.notify_preview;
-        e->net_verbose = g_app.net_verbose;
+        chat_set_net_log(e, g_app.net_log);
         if (strcmp(e->nick, g_app.nick) != 0) chat_set_nick(e, g_app.nick);
         if (memcmp(e->my_color, g_app.color, 3) != 0) chat_set_colour(e, g_app.color);
     }
@@ -575,7 +594,7 @@ static void routing_changed(setting_id_t id) {
     }
     char v[160]; setting_value(id, v, sizeof v);
     const char *label = setting_def(id)->label;
-    if (id == SET_ROUTING || tor_only_setting(id) || (later && !dht_routing_only_setting(id)))
+    if (id == SET_ROUTING || tor_only_setting(id) || (later && !udp_routing_only_setting(id)))
         note("%s: %s - for sessions you open from now on%s", label, v, any ? "; open ones keep their routing" : "");
     else
         note("%s: %s%s", label, v, any ? " - applied to open sessions too" : "");
@@ -624,6 +643,17 @@ static void history_choose(int on) {
     else note("Keep history: off - what was kept stays in the save until :history forget");
 }
 
+static void reopen_choose(int on) {
+    if (on && (!g_app.installed || g_app.locked)) {
+        note("Reopen sessions: they're kept sealed in a save, so it needs one open - :install makes one");
+        return;
+    }
+    g_app.reopen = on;
+    if (on) note("Reopen sessions: on - the sessions open are kept in the save %s, and open again when chat starts",
+                 install_shown_name(install_current()));
+    else note("Reopen sessions: off - the save forgets the sessions it kept");
+}
+
 // Sets a toggle or choice row to its i-th value, wherever it applies.
 void setting_choose(setting_id_t id, int i) {
     routing_t *r = &g_app.route;
@@ -655,9 +685,9 @@ void setting_choose(setting_id_t id, int i) {
                 if (takes_settings(s)) g_app.sessions[s].engine.notify_preview = g_app.notify_preview;
             break;
         case SET_NET:
-            g_app.net_verbose = i;
+            g_app.net_log = i;
             for (int s = 0; s < MAX_SESSIONS; s++)
-                if (takes_settings(s)) g_app.sessions[s].engine.net_verbose = i;
+                if (takes_settings(s)) chat_set_net_log(&g_app.sessions[s].engine, i);
             break;
         case SET_FAST_FILES:
             g_app.fast_files = i;
@@ -681,6 +711,7 @@ void setting_choose(setting_id_t id, int i) {
         case SET_AUTHENTICATOR: factor_choose(INSTALL_FACTOR_CODE, i); return;
         case SET_DESTROY: destroy_choose(DESTROY_VALS[i]); return;
         case SET_HISTORY: history_choose(i); return;
+        case SET_REOPEN: reopen_choose(i); return;
         case SET_LOCK: lock_after_choose(i); return;
         case SET_LOCK_KEY: g_app.lock_key = i; break;
         case SET_PANIC_KEY: g_app.panic_key = i; break;
@@ -695,6 +726,18 @@ void setting_choose(setting_id_t id, int i) {
             // It goes up at Start chatting, and can't come down once it's up.
             if (!g_app.onboarding) { note("Sandbox: %s - from the next start", i ? "on" : "off"); return; }
             break;
+        case SET_UPDATER: {
+            int was = update_helper_running();
+            g_app.updater = i;
+            update_helper_enable(i);
+            if (!i && was) {
+                note("Updater: off - %s", update_helper_running() ? "it stops once this update is done" : "stopped");
+                return;
+            }
+            // It can only start before the sandbox goes up.
+            if (i && !was && (g_app.sandboxed & PLATFORM_SANDBOX_FILES)) { note("Updater: on - from the next start"); return; }
+            break;
+        }
         default: return;
     }
     char v[32]; setting_value(id, v, sizeof v);
@@ -969,7 +1012,7 @@ void settings_done(void) {
     g_app.mode = MODE_CHAT;
     if (g_app.onboarding) {
         g_app.onboarding = 0;
-        push_log("* routing: %s", route_label());
+        if (g_app.net_log != NET_LOG_OFF) push_log("* routing: %s", route_label());
         sandbox_up();
         sync_update_proxy();
         tor_link_ensure(now_seconds());

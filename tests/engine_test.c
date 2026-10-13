@@ -55,6 +55,7 @@ typedef struct {
     int came_along;        // "* NICK came along from the room you moved from ..."
     int dm_old;            // "* NICK's chat is too old for direct messages"
     int timer_asks, timer_stops;   // "* NICK asks for messages here to go after ...", "... stopped asking ..."
+    int offline, lefts;    // "* NICK went offline (...)", "* NICK left (...)"
 } log_t;
 
 // A2 and B2: alice and bob in the room :move takes them to.
@@ -92,6 +93,8 @@ static void on_print(void *ui, const char *hhmm, const char *text, const uint8_t
         if (strstr(text, "'s chat is too old for direct messages")) l->dm_old++;
         if (strstr(text, " asks for messages here to go after ")) l->timer_asks++;
         if (strstr(text, " stopped asking for messages here to go")) l->timer_stops++;
+        if (strstr(text, " went offline (")) l->offline++;
+        if (strstr(text, " left (")) l->lefts++;
         if (strncmp(text, "* joining: peer ", 16) == 0) l->joining++;
         else if (strstr(text, " joined (")) { if (l->joining > 0) l->joining--; else l->unheralded_joins++; }
         return;
@@ -1526,7 +1529,7 @@ static void test_sandbox(double *t) {
         setenv("PATH", path, 1);
         prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
         char why[160];
-        unsigned up = (unsigned)platform_sandbox(NULL, 0, why, sizeof why);
+        unsigned up = (unsigned)platform_sandbox(NULL, 0, NULL, why, sizeof why);
         if (!(up & PLATFORM_SANDBOX_FILES)) _exit(SKIP);
         int bad = 0, fd;
         snprintf(path, sizeof path, "%s/.bashrc", home);
@@ -1559,6 +1562,29 @@ static void test_sandbox(double *t) {
     CHECK(!(code & OWN_DIR), "chat's own folder couldn't be written");
     CHECK(!(code & RAN), "a program it wasn't given still ran");
     CHECK(!(code & TRACED), "ptrace wasn't refused");
+
+    // The updater's: only the executable's folder, even on PATH, where it can replace chat.
+    enum { REPLACED = 1, ELSEWHERE = 2 };
+    snprintf(path, sizeof path, "%s/bin/chat", home);
+    f = fopen(path, "w");
+    if (f) fclose(f);
+    pid = fork();
+    if (pid == 0) {
+        char why[160], dir[600], from[700];
+        snprintf(dir, sizeof dir, "%s/bin", home);
+        prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+        if (!(platform_sandbox(NULL, 0, dir, why, sizeof why) & PLATFORM_SANDBOX_FILES)) _exit(SKIP);
+        int bad = 0, fd;
+        snprintf(from, sizeof from, "%s/bin/chat.download", home);
+        if ((fd = open(from, O_WRONLY | O_CREAT | O_CLOEXEC, 0700)) < 0 || rename(from, path) != 0) bad |= REPLACED;
+        snprintf(from, sizeof from, "%s/Documents/other", home);
+        if ((fd = open(from, O_WRONLY | O_CREAT | O_CLOEXEC, 0600)) >= 0 || errno != EACCES) bad |= ELSEWHERE;
+        _exit(bad);
+    }
+    CHECK(pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status), "the updater's sandboxed child didn't finish");
+    code = WIFEXITED(status) ? WEXITSTATUS(status) : 0;
+    CHECK(!(code & REPLACED), "the updater couldn't replace chat in its own folder");
+    CHECK(!(code & ELSEWHERE), "the updater could write outside the executable's folder");
 #endif
 }
 
@@ -1607,6 +1633,7 @@ static void room_back(void *ctx, const char *table, const char *key, const toml_
     (void)key;
     int *bad = ctx;
     if (strcmp(table, "rooms") == 0 && rooms_load(v) != 0) (*bad)++;
+    if (strcmp(table, "open") == 0 && reopen_load(v) != 0) (*bad)++;
 }
 
 // Kept rooms through the settings file's [rooms] table and back, with odd labels and passwords, and
@@ -1633,6 +1660,29 @@ static void test_rooms(double *t) {
     rooms_forget(0);
     CHECK(rooms_count() == 2 && rooms_find("ABC234") < 0 && rooms_find("QQQ222") == 1, "forgetting a room didn't");
 
+    // The sessions to reopen, in their own table beside the rooms: only a change counts as one, and one
+    // that couldn't open is marked until it's listed again without.
+    reopen_begin();
+    reopen_add("XYZ789", pw, 0);
+    reopen_add("QQQ222", "", 1);
+    reopen_add("\x1b[2J", "x", 0);
+    CHECK(reopen_end() == 1 && reopen_count() == 2 && !reopen_at(0)->unopened && reopen_at(1)->unopened,
+          "the sessions to reopen weren't listed as they were added, or a bad id was");
+    reopen_begin();
+    reopen_add("XYZ789", pw, 0);
+    reopen_add("QQQ222", "", 0);
+    CHECK(reopen_end() == 0 && !reopen_at(1)->unopened, "the same list counted as a change, or kept its mark");
+    n = rooms_text(text, 0, sizeof text);
+    n = reopen_text(text, n, sizeof text);
+    CHECK(n > 0 && n < sizeof text && strstr(text, "\n[open]\n"), "the sessions to reopen weren't written");
+    rooms_clear();
+    CHECK(reopen_count() == 0, "rooms_clear left the sessions to reopen");
+    bad = 0;
+    CHECK(toml_parse(text, room_back, &bad, &bad_line) == 0 && bad == 0 && rooms_count() == 2 && reopen_count() == 2
+          && strcmp(reopen_at(0)->id, "XYZ789") == 0 && strcmp(reopen_at(0)->password, pw) == 0
+          && strcmp(reopen_at(1)->id, "QQQ222") == 0 && !reopen_at(1)->password[0] && !reopen_at(1)->unopened,
+          "the sessions to reopen didn't come back as they were:\n%s", text);
+
     // As many as can be kept, each as long as it can be with a password that's all quotes, leave room
     // for the settings beside them.
     rooms_clear();
@@ -1648,6 +1698,18 @@ static void test_rooms(double *t) {
     CHECK(rooms_keep("one more", "MORE22", "p") < 0, "more than %d rooms were kept", ROOMS_MAX);
     n = rooms_text(text, 0, sizeof text);
     CHECK(n + 6000 < INSTALL_SETTINGS_MAX, "the most rooms there can be take %zu bytes of the settings", n);
+    // And beside those, as many sessions to reopen with the longest ids, and long plain passwords.
+    char plain[65];
+    memset(plain, 'p', 64);
+    plain[64] = '\0';
+    reopen_begin();
+    for (int i = 0; i < ROOMS_MAX; i++) {
+        snprintf(id, sizeof id, "%0*d", MAX_SESSION_NAME, i);
+        reopen_add(id, plain, 0);
+    }
+    CHECK(reopen_end() == 1 && reopen_count() == ROOMS_MAX, "the sessions to reopen weren't all listed");
+    n = reopen_text(text, n, sizeof text);
+    CHECK(n + 6000 < INSTALL_SETTINGS_MAX, "the most rooms and sessions to reopen take %zu bytes of the settings", n);
     rooms_clear();
 
     CHECK(test_temp_dir("rooms", config, sizeof config) == 0, "no temporary folder");
@@ -2914,13 +2976,25 @@ static void test_move(double *t) {
     CHECK(chat_move_asked(&C) == NULL && log_c.move_asks == 0, "carol was asked to move");
     CHECK(!find_bytes((const uint8_t *)&C, sizeof C, ta.session_name) && !find_bytes((const uint8_t *)&C, sizeof C, ta.password),
           "the new room's id or password reached carol");
+    crypto_wipe(&ta, sizeof ta);
+    crypto_wipe(&tb, sizeof tb);
+}
+
+// The room alice and bob moved out of closes as chat would close a session kept to reopen: carol
+// reads "off", so alice shows as going offline, but bob takes her for an older build and says bye.
+static void test_offline(double *t) {
+    peer_t *ac = peer_named(&A, "carol"), *bc = peer_named(&B, "carol");
+    CHECK(ac && bc && ac->can_offline && bc->can_offline, "alice or bob doesn't see carol, or her k has no o");
+    if (bc) bc->can_offline = 0;
+    int offline = log_c.offline, lefts = log_c.lefts;
+    A.coming_back = B.coming_back = 1;
     chat_shutdown(&A);
     chat_shutdown(&B);
     live_mask &= ~0x3;
     RUN_UNTIL(t, 10, chat_online_count(&C) == 0);
     CHECK(chat_online_count(&C) == 0, "carol still sees %d of the peers that left", chat_online_count(&C));
-    crypto_wipe(&ta, sizeof ta);
-    crypto_wipe(&tb, sizeof tb);
+    CHECK(log_c.offline - offline == 1 && log_c.lefts - lefts == 1, "carol saw %d go offline and %d leave, want one each",
+          log_c.offline - offline, log_c.lefts - lefts);
 }
 
 int main(int argc, char **argv) {
@@ -2949,7 +3023,7 @@ int main(int argc, char **argv) {
         { "identity keys", test_identity_keys }, { "call room", test_contact_room },
         { "passphrase seal", test_passphrase_seal }, { "device lock", test_device_lock },
         { "factor locks", test_factor_locks }, { "totp", test_totp }, { "bytewords", test_bytewords }, { "qr", test_qr }, { "save factors", test_save_factors }, { "duress", test_duress }, { "lock screen", test_lock_screen }, { "sandbox", test_sandbox }, { "history", test_history }, { "tor state", test_tor_state }, { "rooms", test_rooms }, { "images", test_images }, { "file names", test_file_names }, { "clean", test_clean }, { "files", test_files }, { "clean offer", test_clean_offer },
-        { "verified keys", test_trust }, { "move", test_move },
+        { "verified keys", test_trust }, { "move", test_move }, { "went offline", test_offline },
     };
     size_t n_tests = sizeof tests / sizeof tests[0];
     int failed[sizeof tests / sizeof tests[0]], n_failed = 0;

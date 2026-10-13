@@ -73,6 +73,10 @@ static void load_setting(void *ctx, const char *table, const char *key, const to
         if (rooms_load(tv) != 0) saved_note("* %s: kept room %.10s can't be read - left out", l->where, key);
         return;
     }
+    if (strcmp(table, "open") == 0) {
+        if (reopen_load(tv) != 0) saved_note("* %s: session to reopen %.10s can't be read - left out", l->where, key);
+        return;
+    }
     const setting_def_t *d = setting_by_key(key);
     char value[ROW_TEXT_MAX], before[ROW_TEXT_MAX], now[ROW_TEXT_MAX];
     if (!d || strcmp(setting_table(d->id), table) != 0 || !setting_text(d->id, before, sizeof before)) {
@@ -103,6 +107,7 @@ static void load_saved_settings(void) {
     install_where(install_current(), where, sizeof where);
     snprintf(l.where, sizeof l.where, "%s/settings", where);
     rooms_clear();
+    g_app.reopen_due = 1;
     long n = install_read_settings(text, sizeof text);
     if (n == INSTALL_NO_FILE) return;
     if (n < 0) { saved_note("* %s is damaged, or isn't sealed with this passphrase - left out", l.where); return; }
@@ -1510,11 +1515,11 @@ void confirm_key(const tui_key_t *key, void (*yes)(void), void (*no)(void)) {
     else if (ch == 'n' || ch == 'N' || ch == 'q' || key->type == TUI_KEY_ESCAPE) no();
 }
 
-// Only y quits: not a second Ctrl+C, the easy mistake, nor q, which closes boxes elsewhere. Staying
-// leaves whatever the box was over as it was.
+// y or a second Ctrl+C quits, not q, which closes boxes elsewhere. Staying leaves whatever the box was
+// over as it was.
 void quit_key(const tui_key_t *key) {
     char ch = key->type == TUI_KEY_CHAR && key->ch_len == 1 ? key->ch[0] : 0;
-    if (ch == 'y' || ch == 'Y') g_interrupted = 1;
+    if (ch == 'y' || ch == 'Y' || key->type == TUI_KEY_CTRL_C) g_interrupted = 1;
     else if (ch == 'n' || ch == 'N' || key->type == TUI_KEY_ESCAPE) { g_app.asking_quit = 0; g_app.dirty = 1; }
 }
 

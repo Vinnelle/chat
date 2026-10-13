@@ -77,7 +77,7 @@ typedef struct {
 
 // Control-port states, and what the command in flight was.
 enum { C_IDLE, C_CONNECTING, C_PROTOCOLINFO, C_CHALLENGE, C_AUTH, C_READY, C_FAILED };
-enum { CMD_NONE, CMD_ADD_ME, CMD_ADD_ROOM, CMD_DEL_ROOM };
+enum { CMD_NONE, CMD_ADD_ME, CMD_ADD_ROOM, CMD_DEL_ROOM, CMD_DEL_OLD };
 
 struct tor {
     tor_opts_t o;
@@ -98,6 +98,9 @@ struct tor {
     sock_t listener;
     uint16_t listen_port;
     char my_onion[TOR_ADDR_LEN + 1];
+    // tor_refresh: a new onion is wanted, and the one it replaces until tor has removed it.
+    int renew;
+    char old_onion[TOR_ADDR_LEN + 1];
     char room_onion[TOR_ROOM_SLOTS][TOR_ADDR_LEN + 1];
     uint8_t room_keys[TOR_ROOM_SLOTS][TOR_KEY_LEN];
     int room_targets[TOR_ROOM_SLOTS];
@@ -117,10 +120,10 @@ struct tor {
     char last_error[160];
 };
 
-static void logf_(tor_t *t, int verbose_only, const char *fmt, ...) {
+static void logf_(tor_t *t, int kind, const char *fmt, ...) {
     char msg[300];
     va_list ap; va_start(ap, fmt); vsnprintf(msg, sizeof msg, fmt, ap); va_end(ap);
-    if (t->log) t->log(t->ctx, verbose_only, msg);
+    if (t->log) t->log(t->ctx, kind, msg);
 }
 
 static const char B32[] = "abcdefghijklmnopqrstuvwxyz234567";
@@ -211,6 +214,12 @@ static tor_t *tor_alloc(const tor_opts_t *o) {
     return t;
 }
 
+static void new_socks_user(tor_t *t) {
+    uint8_t user[SOCKS_USER_LEN / 2];
+    gen_random(user, sizeof user);
+    hex_encode(user, sizeof user, t->socks_user);
+}
+
 tor_t *tor_new(const tor_opts_t *o, const uint8_t room_keys[TOR_ROOM_SLOTS][TOR_KEY_LEN],
                const uint8_t room_pubs[TOR_ROOM_SLOTS][TOR_PUB_LEN], tor_deliver_fn deliver, tor_log_fn log, void *ctx) {
     tor_t *t = tor_alloc(o);
@@ -225,9 +234,7 @@ tor_t *tor_new(const tor_opts_t *o, const uint8_t room_keys[TOR_ROOM_SLOTS][TOR_
         t->room_targets[i] = add_target(t, t->room_onion[i]);
         t->targets[t->room_targets[i]].room = 1;
     }
-    uint8_t user[SOCKS_USER_LEN / 2];
-    gen_random(user, sizeof user);
-    hex_encode(user, sizeof user, t->socks_user);
+    new_socks_user(t);
     t->listener = net_tcp_listen_loopback(&t->listen_port);
     if (t->listener == SOCK_INVALID) {
         // The room's keys are in there, so wipe it like tor_free does.
@@ -257,6 +264,7 @@ static void close_stream(tor_t *t, int i) {
 static void close_ctl(tor_t *t) {
     if (t->ctl != SOCK_INVALID) net_close(t->ctl);
     t->ctl = SOCK_INVALID;
+    t->old_onion[0] = '\0';
     t->ctl_in_len = t->reply_len = 0;
     t->cmd = CMD_NONE;
 }
@@ -287,6 +295,19 @@ void tor_set_ports(tor_t *t, const char *socks, const char *control, const char 
     t->ctl_warned = 0;
     t->ctl_state = C_IDLE;
     t->ctl_next_try = 0;
+}
+
+void tor_refresh(tor_t *t) {
+    // Streams peers opened to us stay, since they're how those peers reach us. Ones to our old onion
+    // close when tor removes it.
+    for (int i = 0; i < MAX_STREAMS; i++) {
+        stream_t *s = t->streams[i];
+        if (!s || s->target < 0) continue;
+        t->targets[s->target].next_try = 0;
+        close_stream(t, i);
+    }
+    new_socks_user(t);
+    t->renew = 1;
 }
 
 static const char *control_addr(const tor_t *t) {
@@ -322,7 +343,7 @@ static void ctl_fail(tor_t *t, double now, const char *why, int fatal) {
     }
     if (!t->ctl_warned || fatal) {
         t->ctl_warned = 1;
-        logf_(t, 0, "* tor: %s", why);
+        logf_(t, NET_LINE_PROBLEM, "* tor: %s", why);
     } else {
         logf_(t, 1, "* tor: %s", why);
     }
@@ -480,6 +501,12 @@ static void on_command_reply(tor_t *t, double now, int ok) {
     if (cmd == CMD_ADD_ME) {
         if (!ok || !onion_valid(sid)) { ctl_fail(t, now, "Tor refused to publish an onion service for this session", 0); return; }
         copy_str(t->my_onion, sid, sizeof t->my_onion);
+        if (t->old_onion[0]) {
+            char line[100];
+            snprintf(line, sizeof line, "DEL_ONION %s\r\n", t->old_onion);
+            t->cmd = CMD_DEL_OLD;
+            ctl_send(t, line);
+        }
         t->ctl_warned = 0;
         t->ctl_fails = 0;
         logf_(t, 0, "* tor: your onion service is %s.onion - peers reach you only through Tor", t->my_onion);
@@ -488,8 +515,8 @@ static void on_command_reply(tor_t *t, double now, int ok) {
         const char *room = t->room_onion[t->host_slot];
         if (ok && strcmp(sid, room) != 0) {
             // Joiners work out the address themselves, so if Tor's is different they'd connect to the wrong one.
-            logf_(t, 0, "* tor: the room's onion address came out as %.56s, not %s - joining through it won't work",
-                  sid, room);
+            logf_(t, NET_LINE_PROBLEM,
+                  "* tor: the room's onion address came out as %.56s, not %s - joining through it won't work", sid, room);
         }
         if (ok || strstr(t->reply, "collision")) {
             t->room_up = 1;
@@ -501,6 +528,8 @@ static void on_command_reply(tor_t *t, double now, int ok) {
         }
     } else if (cmd == CMD_DEL_ROOM) {
         t->room_up = 0;
+    } else if (cmd == CMD_DEL_OLD) {
+        t->old_onion[0] = '\0';
     }
 }
 
@@ -520,6 +549,7 @@ static void on_reply(tor_t *t, double now) {
             if (!ok) { ctl_fail(t, now, "Tor's control port refused the login - check :set torpassword", 1); return; }
             t->ctl_state = C_READY;
             if (t->probe) { t->probe_done = 1; close_ctl(t); return; }
+            t->renew = 0;
             send_add_me(t);
             return;
         case C_READY:
@@ -601,6 +631,12 @@ static void ctl_step(tor_t *t, double now) {
         default:
             if (t->ctl != SOCK_INVALID) ctl_read(t, now);
             if (t->ctl_state == C_READY && t->cmd == CMD_NONE && t->my_onion[0]) {
+                if (t->renew) {
+                    t->renew = 0;
+                    copy_str(t->old_onion, t->my_onion, sizeof t->old_onion);
+                    send_add_me(t);
+                    return;
+                }
                 if (t->want_room && t->room_republish && now - t->room_published_at >= REPUBLISH_MIN_GAP) {
                     t->room_republish = 0;
                     if (t->room_up) {

@@ -6,8 +6,8 @@
 static const char *USAGE =
     "usage: chat [--nick NAME] [--colour NAME|#HEX] [--identity age|pgp[:KEYFILE]] [--simple]\n"
     "            [--save NAME]\n"
-    "            [--routing dht+nostr|dht|tor] [--nodht] [--noipv6] [--nolan]\n"
-    "            [--noportmap] [--nonostr] [--nostr-always] [--relay wss://HOST ...]\n"
+    "            [--routing udp|tor] [--nodht] [--noipv6] [--nolan] [--noportmap]\n"
+    "            [--nostr off|fallback|always] [--relay wss://HOST ...]\n"
     "            [--tor-launch auto|always|never] [--tor-path PATH] [--tor-socks HOST:PORT]\n"
     "            [--tor-control HOST:PORT] [--verify-required] [--file-limit SIZE]\n"
     "            [--fast-files] [--betas] [--nosandbox]\n"
@@ -34,7 +34,7 @@ static const char *USAGE =
     "  Ctrl+S     settings: routing, identity, files, notifications (also :set)\n"
     "  Ctrl+F     files offered here and yours: show, save or stop them (f in NORMAL, :files)\n"
     "  F1         list all commands and keybinds (also ? in NORMAL, and :help)\n"
-    "  Ctrl+C     quit chat, after asking (every open session leaves cleanly first)\n"
+    "  Ctrl+C     quit chat: twice, or y (sessions leave, or go offline with :set reopen on)\n"
     "  Ctrl+L     lock the screen (also :lock): the save's passphrase, or a PIN, unlocks it\n"
     "  Ctrl+\\     panic: clear the screen and quit at once, without asking. :set lockkey and\n"
     "             :set panickey choose other keys, or none\n"
@@ -111,21 +111,19 @@ static const char *USAGE =
     "              :set nick changes it at any time, for every session\n"
     "  --colour    your display colour in every session; random by default (--color too)\n"
     "  --routing   how sessions reach peers, preset on the settings page chat opens on.\n"
-    "              dht+nostr: UDP between peers, found through the BitTorrent DHT (IPv4\n"
-    "              and IPv6), the LAN and router port mapping, with Nostr relays carrying\n"
-    "              encrypted traffic when UDP can't get through. dht: the same without\n"
-    "              relays. tor: Tor onion services, plus the relays through Tor. Tor and\n"
-    "              DHT members can only reach each other on the relays, so both need them.\n"
+    "              udp: UDP straight between peers, found through the BitTorrent DHT\n"
+    "              (IPv4 and IPv6), the LAN and router port mapping. Peers see your IP\n"
+    "              address. tor: Tor onion services, which hide it. UDP and Tor members\n"
+    "              only reach each other on the Nostr relays\n"
     "  --nodht     don't use the BitTorrent DHT (IPv4 and IPv6)\n"
     "  --noipv6    don't use the IPv6 DHT\n"
     "  --nolan     don't use LAN broadcast discovery\n"
     "  --noportmap don't ask the router to forward a port (UPnP-IGD, NAT-PMP, PCP)\n"
-    "  --nonostr   no Nostr relays. Tor and DHT members can only reach each other\n"
-    "              through them, so with this set they can't\n"
-    "  --nostr-always\n"
-    "              stay connected to the relays. By default DHT routing only uses them\n"
-    "              while nobody is reached yet or a peer's UDP fails, so Tor members\n"
-    "              can't find a room whose members all reach each other directly\n"
+    "  --nostr     the Nostr relays, which carry encrypted traffic the route can't,\n"
+    "              through Tor with tor routing. fallback (default): only while they're\n"
+    "              needed. always: stay connected, so members on the other route can\n"
+    "              find a room whose members all reach each other. off: none, so UDP\n"
+    "              and Tor members can't reach each other\n"
     "  --verify-required\n"
     "              send nothing to a peer until you've compared its verify code. By\n"
     "              default messages go to everyone, compared or not\n"
@@ -134,7 +132,7 @@ static const char *USAGE =
     "  --fast-files\n"
     "              send files in quick bursts instead of chat's regular slots. It takes\n"
     "              seconds instead of minutes, but the transfer is visible on the network.\n"
-    "              Through the relays (Tor and DHT members) it goes as often as they\n"
+    "              Through the relays (Tor and UDP members) it goes as often as they\n"
     "              allow, about twice as fast\n"
     "  --relay     a Nostr relay (wss://...) to use instead of the defaults; repeatable\n"
     "  --tor-launch\n"
@@ -232,10 +230,11 @@ static void on_quit_signal(int sig) {
 #endif
 }
 
-// A kill, a closed terminal or a confirmed Ctrl+C all end the main loop, so sessions say bye, keys
-// are wiped, the terminal is restored and chat's own tor is stopped, instead of the process just
-// dying. The handler has to stay in place for a second signal too. With plain signal() and
-// _POSIX_C_SOURCE, glibc resets it after the first, and a second Ctrl+C or kill skipped all of that.
+// A kill, a closed terminal or a confirmed Ctrl+C all end the main loop, so sessions say bye (or go
+// offline, if kept), keys are wiped, the terminal is restored and chat's own tor is stopped, instead
+// of the process just dying. The handler has to stay in place for a second signal too. With plain
+// signal() and _POSIX_C_SOURCE, glibc resets it after the first, and a second Ctrl+C or kill skipped
+// all of that.
 static void catch_quit_signals(void) {
 #ifdef _WIN32
     signal(SIGINT, on_quit_signal);
@@ -601,35 +600,30 @@ void copy_session_id(session_slot_t *s) {
 
 static const char *const ROUTE_CHOICE_LINES[] = {
     "* how should chat reach people?",
-    ("*   [1] DHT + Nostr fallback (recommended): UDP straight to peers, found through the BitTorrent DHT "
-     "(IPv4 and IPv6), your LAN and a router port mapping. Public Nostr relays carry the traffic, encrypted "
-     "and padded, when UDP can't get through"),
-    "*   [2] DHT only: the same without relays. Some peers behind strict NATs won't connect, and neither can "
-        "members using Tor",
-    ("*   [3] Tor: onion services, and the Nostr relays reached through Tor to meet DHT peers. Hides "
-     "your IP address from peers and everyone else. Uses tor or Tor Browser if one is running, else starts "
-     "its own; connecting takes longer"),
+    ("*   [1] UDP (recommended): straight to peers, found through the BitTorrent DHT (IPv4 and IPv6), your "
+     "LAN and a router port mapping. Peers see your IP address"),
+    ("*   [2] Tor: onion services, which hide your IP address from peers and everyone else. Uses tor or Tor "
+     "Browser if one is running, else starts its own; connecting takes longer"),
+    ("* either way, public Nostr relays carry the traffic, encrypted and padded, when the route can't, and "
+     "UDP and Tor members meet there (--nostr off turns them off)"),
 };
 
-// The choices, by their numbers above.
-enum { CHOICE_DHT_NOSTR = 1, CHOICE_DHT, CHOICE_TOR };
-
-// A routing choice doesn't override --nonostr or --nostr-always. DHT + Nostr uses the relays as
-// those options say, and only DHT alone turns the relays off.
-static void apply_route_choice(int choice) {
-    if (choice == CHOICE_TOR) {
-        g_app.route.mode = ROUTE_TOR;
-    } else {
-        g_app.route.mode = ROUTE_DHT;
-        g_app.route.nostr = choice == CHOICE_DHT ? NOSTR_OFF : g_app.nostr_flag >= 0 ? g_app.nostr_flag : NOSTR_FALLBACK;
-    }
+static void choose_route(route_mode_t m) {
+    g_app.route.mode = m;
     g_app.route_chosen = 1;
 }
 
 const char *route_label(void) {
-    if (g_app.route.mode == ROUTE_TOR) return "Tor onion services only";
-    return g_app.route.nostr == NOSTR_ALWAYS ? "DHT, with Nostr relays always"
-         : g_app.route.nostr ? "DHT, with Nostr relay fallback" : "DHT only";
+    static const char *const RELAYS[] = { "without relays", "with Nostr relay fallback", "with Nostr relays always" };
+    static char label[64];
+    snprintf(label, sizeof label, "%s, %s", g_app.route.mode == ROUTE_TOR ? "Tor onion services" : "UDP",
+             RELAYS[g_app.route.nostr]);
+    return label;
+}
+
+static int name_index(const char *v, const char *const *names, int n) {
+    for (int i = 0; i < n; i++) if (strcmp(v, names[i]) == 0) return i;
+    return -1;
 }
 
 static int run_plain(const char *session_name, const char *password, uint16_t port,
@@ -690,7 +684,10 @@ void sandbox_up(void) {
     int tor = platform_find_program("tor", g_app.tor_path, found[0], sizeof found[0]) == 0;
     int n = tor ? 1 + transport_paths(found + 1, 3) : 0;
     for (int i = 0; i < n; i++) run[i] = found[i];
-    unsigned up = g_app.sandboxed = platform_sandbox(run, n, why, sizeof why);
+    // Once the sandbox is up, nothing chat starts is outside it.
+    if (g_app.updater) update_helper_start();
+    unsigned up = g_app.sandboxed = platform_sandbox(run, n, NULL, why, sizeof why);
+    if (!(up & PLATFORM_SANDBOX_FILES)) update_helper_stop();
     if (up & PLATFORM_SANDBOX_FILES)
         push_log("* sandbox: on - from now on chat%s can only write to the folders in your home that aren't hidden or on "
                  "PATH, its own folder and the temporary folders, and only run %s%s", tor ? " and tor" : "",
@@ -785,7 +782,12 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
         int stdin_ready = 0;
         platform_wait(socks, n, ready, &stdin_ready, WAIT_MS);
 
-        if (g_ctrl_c) { g_ctrl_c = 0; g_app.asking_quit = 1; g_app.dirty = 1; }
+        if (g_ctrl_c) {
+            g_ctrl_c = 0;
+            // A second one quits once the QUIT box shows, as a second Ctrl+C key does.
+            if (g_app.asking_quit && !g_app.screen_locked) g_interrupted = 1;
+            else { g_app.asking_quit = 1; g_app.dirty = 1; }
+        }
         if (g_sigquit) {
             g_sigquit = 0;
             if (g_app.panic_key) panic(PANIC_KEY);
@@ -816,6 +818,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
             if (g_app.used[i]) chat_tick(&g_app.sessions[i].engine, now_seconds());
         move_tick(now_seconds());
         contacts_tick();
+        reopen_tick();
         timers_tick(now_seconds());
         lock_tick();
         history_sync(now);
@@ -838,12 +841,17 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
         // The terminal may have redrawn or reflowed the screen, so the next frame is sent in full.
         if (term_resized()) { g_app.dirty = 1; tui_invalidate(); }
         if (now >= next_ui_tick) { next_ui_tick = now + 1.0; g_app.dirty = 1; }
-        if (g_app.dirty) { keep_settings_saved(); render(); g_app.dirty = 0; g_app.input_dirty = 0; }
+        if (g_app.dirty) { keep_settings_saved(); keep_sessions_saved(); render(); g_app.dirty = 0; g_app.input_dirty = 0; }
         else if (g_app.input_dirty) { render_bar(); g_app.input_dirty = 0; }
     }
 
     if (g_panic) panic_saves();
-    for (int i = 0; i < MAX_SESSIONS; i++) if (g_app.used[i]) close_session(&g_app.sessions[i]);
+    else keep_sessions_saved();
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        if (!g_app.used[i]) continue;
+        g_app.sessions[i].engine.coming_back = session_kept(&g_app.sessions[i]);
+        close_session(&g_app.sessions[i]);
+    }
     // After the sessions, so their onion services are removed with their control connections first.
     tor_link_stop();
     install_key_cancel();
@@ -968,6 +976,7 @@ static chat_t *plain_move(chat_t *c, chat_t **left, chat_t engines[2], const cha
     n->file_view = plain_file_view;
     n->delivery = plain_delivery;
     n->net_verbose = c->net_verbose;
+    n->net_quiet = c->net_quiet;
     chat_move_go(c, to, n, now_seconds());
     c->print = plain_quiet;
     push_log("* moved here from '%s' - %s. Codes compared there count here as each peer arrives", to->from,
@@ -1007,17 +1016,16 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
 
     o.port = port;
     if (!g_app.route_chosen) {
-        // Without a terminal to ask, --nonostr means DHT only.
-        int choice = g_app.nostr_flag == NOSTR_OFF ? CHOICE_DHT : CHOICE_DHT_NOSTR;
+        route_mode_t m = ROUTE_UDP;
         if (tty) {
             // Without the "* " the log puts first.
             for (size_t i = 0; i < COUNT_OF(ROUTE_CHOICE_LINES); i++)
                 printf("%s\n", ROUTE_CHOICE_LINES[i] + 2);
             char line[16];
-            if (term_read_line("routing [1/2/3, Enter = 1]: ", line, sizeof line) != 0) return 1;
-            if (line[0] >= '0' + CHOICE_DHT_NOSTR && line[0] <= '0' + CHOICE_TOR) choice = line[0] - '0';
+            if (term_read_line("routing [1/2, Enter = 1]: ", line, sizeof line) != 0) return 1;
+            if (line[0] == '2') m = ROUTE_TOR;
         }
-        apply_route_choice(choice);
+        choose_route(m);
     }
     sandbox_up();
     // --peer names are only looked up once the routing is decided, and never for Tor, where the lookup
@@ -1058,7 +1066,7 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
         tor_link_stop();
         return 1;
     }
-    c->net_verbose = g_app.net_verbose;
+    chat_set_net_log(c, g_app.net_log);
     char idhex[SHORT_ID_HEX + 1]; hex_encode(c->my_id, SHORT_ID_LEN, idhex);
     if (c->route.mode == ROUTE_TOR)
         printf("session '%s', you are %s (peer %s). encrypted, over Tor only. :quit or EOF to stop.\n",
@@ -1097,6 +1105,7 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
         static const char show[] = ":show ";
         int show_anyway, show_n = rc == 1 && starts_with(line, show) ? file_arg(line + sizeof show - 1, &show_anyway) : 0;
         if (rc == 1 && (strcmp(line, ":changelog") == 0 || strcmp(line, ":news") == 0)) { fputs(CHANGELOG_TEXT, stdout); fflush(stdout); }
+        else if (rc == 1 && strcmp(line, ":newtor") == 0) { app_newtor(NULL, NULL); push_log("* %s", g_app.message); g_app.message[0] = '\0'; }
         else if (show_n) chat_file_fetch(c, show_n, 1, show_anyway, NULL);
         else if (rc == 1) alive = chat_submit_line(c, line, now);
         else if (rc == -1) alive = 0;
@@ -1164,10 +1173,10 @@ static int read_options(int argc, char **argv, options_t *o) {
             g_app.route.lan = 0;
         } else if (strcmp(key, "noportmap") == 0) {
             g_app.route.portmap = 0;
-        } else if (strcmp(key, "nonostr") == 0) {
-            g_app.route.nostr = g_app.nostr_flag = NOSTR_OFF;
-        } else if (strcmp(key, "nostr-always") == 0) {
-            g_app.route.nostr = g_app.nostr_flag = NOSTR_ALWAYS;
+        } else if (strcmp(key, "nostr") == 0 && i + 1 < argc) {
+            int k = name_index(argv[++i], NOSTR_NAMES, 3);
+            if (k < 0) { fprintf(stderr, "chat: --nostr takes off, fallback or always\n"); return 1; }
+            g_app.route.nostr = k;
         } else if (strcmp(key, "file-limit") == 0 && i + 1 < argc) {
             uint64_t v;
             if (file_parse_size(argv[++i], &v) != 0 || v == 0 || v > FILE_HARD_MAX) {
@@ -1184,13 +1193,9 @@ static int read_options(int argc, char **argv, options_t *o) {
         } else if (strcmp(key, "verify-required") == 0) {
             g_app.verify_optional = 0;
         } else if (strcmp(key, "routing") == 0 && i + 1 < argc) {
-            const char *v = argv[++i];
-            // direct+nostr and direct: the modes' old names, still accepted.
-            if (strcmp(v, "dht+nostr") == 0 || strcmp(v, "nostr") == 0 || strcmp(v, "direct+nostr") == 0)
-                apply_route_choice(CHOICE_DHT_NOSTR);
-            else if (strcmp(v, "dht") == 0 || strcmp(v, "direct") == 0) apply_route_choice(CHOICE_DHT);
-            else if (strcmp(v, "tor") == 0) apply_route_choice(CHOICE_TOR);
-            else { fprintf(stderr, "chat: --routing takes dht+nostr, dht or tor\n"); return 1; }
+            int k = name_index(argv[++i], ROUTE_NAMES, 2);
+            if (k < 0) { fprintf(stderr, "chat: --routing takes udp or tor\n"); return 1; }
+            choose_route((route_mode_t)k);
         } else if (strcmp(key, "relay") == 0 && i + 1 < argc) {
             const char *v = argv[++i];
             if (nostr_url_ok(v) != 0) { fprintf(stderr, "chat: bad --relay %s (want wss://host[:port][/path])\n", v); return 1; }
@@ -1259,13 +1264,17 @@ int main(int argc, char **argv) {
     g_argv = copy_args(argc, argv);
     if (!g_argv) return 1;
     platform_hide_args(argc, argv);
+    int link;
+    if (g_argc == 2 && strcmp(g_argv[1], UPDATE_HELPER_ARG) == 0 && (link = platform_parent_link()) >= 0) {
+        crypto_setup();
+        return update_helper(link);
+    }
     routing_defaults(&g_app.route);
-    g_app.nostr_flag = -1;
     g_app.notify_mode = NOTIFY_MENTIONS;
     g_app.verify_optional = 1;
     g_app.show_sidebar = g_app.show_console = g_app.show_chat = 1;
     g_app.lock_key = g_app.panic_key = 1;
-    g_app.sandbox = 1;
+    g_app.sandbox = g_app.updater = 1;
     g_app.picture_noise = 1;
     note_setting_defaults();
     trust_on_change(save_verified);

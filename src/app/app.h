@@ -175,11 +175,10 @@ typedef struct {
     int color_enabled;
     routing_t route;
     int route_chosen;
-    int nostr_flag;   // what --nonostr or --nostr-always asked for, or -1
     notify_mode_t notify_mode;
     notify_preview_t notify_preview;
     int verify_optional;
-    int net_verbose;
+    int net_log;   // NET_LOG_NORMAL, _VERBOSE or _OFF
     uint16_t default_port;
     int settings_sel;
     int settings_page;   // the section shown: settings_sel's, or the one whose Done button it is
@@ -210,15 +209,19 @@ typedef struct {
     int picture_noise;   // a JPEG sent gets noise nobody can see (common/clean.h)
     int betas;
     int history;    // keep each session's history, sealed in the save open
+    // Keep the sessions open in the save open, to open again as chat starts. reopen_due: a save was
+    // opened, and its sessions haven't been. quit_leaving: :quitall, which leaves them for good.
+    int reopen, reopen_due, quit_leaving;
     int autosave;   // what's changed is saved as it changes, while installed
     // Seconds without a key before the screen locks itself (0 never), and the keys that lock it and
     // panic, by their place in LOCK_KEY_NAMES and PANIC_KEY_NAMES (0: no key). A panic deletes the
     // open save with panic_wipe, and writes the histories kept with panic_history.
     int lock_after, lock_key, panic_key, panic_wipe, panic_history;
     // Put the sandbox up once chat starts reaching the network (Linux), and what of it is up
-    // (PLATFORM_SANDBOX_).
+    // (PLATFORM_SANDBOX_), and start the updater outside it just before.
     int sandbox;
     unsigned sandboxed;
+    int updater;
     // Locked to this device: the open save, or with none open, the new one :install is making for it
     // (install_for). device_want is what the DEVICE LOCK box asks to change it to, and device_back
     // where it goes back to.
@@ -374,8 +377,9 @@ typedef enum {
     SET_NOSTR, SET_RELAYS,
     SET_NICK, SET_COLOUR, SET_SIGN, SET_AGE_RECIPIENT, SET_PGP_PUBKEY, SET_AUTOSAVE, SET_DEVICE_LOCK,
     SET_SECURITY_KEY, SET_AUTHENTICATOR, SET_DESTROY, SET_SHADOW,
-    SET_LOCK, SET_LOCK_KEY, SET_PANIC_KEY, SET_PANIC_WIPE, SET_PANIC_HISTORY, SET_SANDBOX,
-    SET_VERIFY, SET_FILE_LIMIT, SET_FAST_FILES, SET_NOISE, SET_NOTIFY, SET_PREVIEW, SET_HISTORY, SET_NET, SET_PORT, SET_BETAS,
+    SET_LOCK, SET_LOCK_KEY, SET_PANIC_KEY, SET_PANIC_WIPE, SET_PANIC_HISTORY, SET_SANDBOX, SET_UPDATER,
+    SET_VERIFY, SET_FILE_LIMIT, SET_FAST_FILES, SET_NOISE, SET_NOTIFY, SET_PREVIEW, SET_HISTORY, SET_REOPEN, SET_NET, SET_PORT,
+    SET_BETAS,
     N_SETTING_IDS
 } setting_id_t;
 
@@ -500,7 +504,9 @@ void sync_update_proxy(void);
 void tor_link_ensure(double now);
 void tor_link_step(double now);
 void tor_link_stop(void);
-void tor_link_line(char *out, size_t cap);
+// Whose tor Tor mode uses ("own" or "running", NULL until that's known), and how far it has got.
+const char *tor_link_whose(void);
+void tor_link_status(char *out, size_t cap);
 void tor_link_restart(void);
 // Bridge lines as typed (separated by ';'), as "LINE; LINE" in out, or -1 with why. How many there
 // are, and their transports in kinds ("obfs4, snowflake").
@@ -537,14 +543,21 @@ void contacts_tick(void);
 void begin_rooms(void);
 void rooms_key(const tui_key_t *key);
 void rooms_join_at_start(void);
+void reopen_tick(void);
+void keep_sessions_saved(void);
+// Kept in the open save to open again (Reopen sessions), so it goes offline rather than leaving.
+int session_kept(const session_slot_t *s);
 cmd_result_t app_quit(void *ctx, const char *arg);
 cmd_result_t app_quitall(void *ctx, const char *arg);
 cmd_result_t app_copyid(void *ctx, const char *arg);
+cmd_result_t app_newtor(void *ctx, const char *arg);
 cmd_result_t app_update(void *ctx, const char *arg);
 void update_key(const tui_key_t *key);
 
 // settings.c
 extern const setting_def_t SETTINGS[N_SETTING_IDS];
+extern const char *const ROUTE_NAMES[];
+extern const char *const NOSTR_NAMES[];
 extern setting_id_t g_edit_id;
 extern char g_setting_defaults[N_SETTINGS][ROW_TEXT_MAX];
 extern char g_saved_rows[N_SETTINGS][ROW_TEXT_MAX];

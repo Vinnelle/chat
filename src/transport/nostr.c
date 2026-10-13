@@ -198,10 +198,10 @@ static secp256k1_context *secp(void) {
     return g_secp;
 }
 
-static void logf_(nostr_t *n, int verbose_only, const char *fmt, ...) {
+static void logf_(nostr_t *n, int kind, const char *fmt, ...) {
     char msg[300];
     va_list ap; va_start(ap, fmt); vsnprintf(msg, sizeof msg, fmt, ap); va_end(ap);
-    if (n->log) n->log(n->ctx, verbose_only, msg);
+    if (n->log) n->log(n->ctx, kind, msg);
 }
 
 int nostr_url_ok(const char *url) {
@@ -1056,16 +1056,20 @@ int nostr_send(nostr_t *n, addr_t to, const uint8_t *data, size_t len, double no
     return sent > 0 ? 0 : -1;
 }
 
-void nostr_set_proxy(nostr_t *n, const char *socks) {
-    if (!n->must_proxy || strcmp(n->proxy, socks) == 0) return;
-    copy_str(n->proxy, socks, sizeof n->proxy);
-    // Everything that went through the old tor is gone, so start again through the new one.
+void nostr_reconnect(nostr_t *n) {
     for (int i = 0; i < n->n_relays; i++) {
         relay_t *r = &n->relays[i];
         for (int k = 0; k < CONNS_PER_RELAY; k++) close_conn(&r->conns[k]);
         r->next_try = 0;
         r->fails = 0;
     }
+}
+
+void nostr_set_proxy(nostr_t *n, const char *socks) {
+    if (!n->must_proxy || strcmp(n->proxy, socks) == 0) return;
+    copy_str(n->proxy, socks, sizeof n->proxy);
+    // Everything that went through the old tor is gone, so start again through the new one.
+    nostr_reconnect(n);
 }
 
 void nostr_retry_now(nostr_t *n) {

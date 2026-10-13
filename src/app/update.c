@@ -31,6 +31,7 @@
 #define EXE_PATH_MAX 1024
 #define EXE_TMP_MAX 1100
 #define SHA256_HEX (2 * crypto_hash_sha256_BYTES)
+#define HELPER_STOP_MS 1000
 
 #if defined(__x86_64__) || defined(_M_X64)
 #define UPDATE_ARCH "x86_64"
@@ -76,6 +77,36 @@ enum {
 static void view_lock(void) { while (__atomic_test_and_set(&g_lock, __ATOMIC_ACQUIRE)) {} }
 static void view_unlock(void) { __atomic_clear(&g_lock, __ATOMIC_RELEASE); }
 
+// What chat asks the updater for, and what the updater sends back after each step.
+typedef struct { uint8_t betas; char proxy[sizeof g_proxy]; } helper_ask_t;
+typedef struct {
+    update_view_t view;
+    char dl_path[EXE_TMP_MAX];
+    long dl_total;
+    int done, ok;
+    char msg[UPDATE_MSG_MAX];
+} helper_report_t;
+
+static platform_proc_t *g_helper;
+static int g_helper_link = -1;
+static int g_helper_off;         // turned off during an update, so it stops once that's done
+static int g_report_link = -1;   // in the updater
+
+static void report(int done) {
+    if (g_report_link < 0) return;
+    helper_report_t r;
+    memset(&r, 0, sizeof r);
+    view_lock();
+    r.view = g_view;
+    copy_str(r.dl_path, g_dl_path, sizeof r.dl_path);
+    r.dl_total = g_dl_total;
+    view_unlock();
+    r.done = done;
+    r.ok = g_ok;
+    copy_str(r.msg, g_msg, sizeof r.msg);
+    platform_link_send(g_report_link, &r, sizeof r);
+}
+
 static void view_reset(void) {
     view_lock();
     memset(&g_view, 0, sizeof g_view);
@@ -101,6 +132,7 @@ static void say(update_line_kind_t kind, const char *fmt, ...) {
     copy_str(g_view.log[g_view.n_log], line, sizeof g_view.log[0]);
     g_view.kind[g_view.n_log++] = (unsigned char)kind;
     view_unlock();
+    report(0);
 }
 
 // A short description of the current step, and how far along it is.
@@ -109,6 +141,7 @@ static void stage(int permille, const char *fmt, const char *arg) {
     g_view.permille = permille;
     snprintf(g_view.step, sizeof g_view.step, fmt, arg);
     view_unlock();
+    report(0);
 }
 
 static void downloading(const char *path, long total) {
@@ -116,6 +149,7 @@ static void downloading(const char *path, long total) {
     copy_str(g_dl_path, path ? path : "", sizeof g_dl_path);
     g_dl_total = total;
     view_unlock();
+    report(0);
 }
 
 void update_view(update_view_t *v) {
@@ -362,6 +396,7 @@ static void finish(const char *fmt, const char *arg) {
     g_view.ok = g_ok;
     g_view.running = 0;
     view_unlock();
+    report(1);
     __atomic_store_n(&g_state, UPD_DONE, __ATOMIC_RELEASE);
 }
 
@@ -492,6 +527,33 @@ static void update_thread(void *unused) {
 #endif
 }
 
+// The update runs in the updater, and its progress shows here as if it ran in chat.
+static void relay_thread(void *unused) {
+    (void)unused;
+    helper_ask_t ask;
+    memset(&ask, 0, sizeof ask);
+    ask.betas = (uint8_t)(g_betas != 0);
+    copy_str(ask.proxy, g_proxy, sizeof ask.proxy);
+    helper_report_t r;
+    if (platform_link_send(g_helper_link, &ask, sizeof ask) == 0) {
+        while (platform_link_recv(g_helper_link, &r, sizeof r) == 0) {
+            view_lock();
+            g_view = r.view;
+            copy_str(g_dl_path, r.dl_path, sizeof g_dl_path);
+            g_dl_total = r.dl_total;
+            view_unlock();
+            if (r.done) {
+                g_ok = r.ok;
+                copy_str(g_msg, r.msg, sizeof g_msg);
+                __atomic_store_n(&g_state, UPD_DONE, __ATOMIC_RELEASE);
+                return;
+            }
+        }
+    }
+    update_helper_stop();
+    finish(UPDATE_PREFIX "the updater has stopped - quit chat and run chat --update%s", "");
+}
+
 int update_start(int betas) {
     int idle = UPD_IDLE;
     if (!__atomic_compare_exchange_n(&g_state, &idle, UPD_RUNNING, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
@@ -499,7 +561,7 @@ int update_start(int betas) {
     g_ok = 0;
     g_betas = betas;
     view_reset();
-    if (platform_spawn_thread(update_thread, NULL) != 0) {
+    if (platform_spawn_thread(update_helper_running() ? relay_thread : update_thread, NULL) != 0) {
         view_lock();
         g_view.running = 0;
         view_unlock();
@@ -513,6 +575,7 @@ int update_poll(char *msg, size_t cap) {
     if (__atomic_load_n(&g_state, __ATOMIC_ACQUIRE) != UPD_DONE) return 0;
     copy_str(msg, g_msg, cap);
     __atomic_store_n(&g_state, UPD_IDLE, __ATOMIC_RELEASE);
+    if (g_helper_off) update_helper_stop();
     return 1;
 }
 
@@ -523,6 +586,57 @@ int update_run(int betas, char *msg, size_t cap) {
     update_thread(NULL);
     update_poll(msg, cap);
     return g_ok ? 0 : -1;
+}
+
+// ---- the updater, outside chat's sandbox (Linux) ----
+
+void update_helper_start(void) {
+    int link;
+    platform_proc_t *p = platform_spawn_self(UPDATE_HELPER_NAME, UPDATE_HELPER_ARG, &link);
+    if (!p) return;
+    g_helper_link = link;
+    __atomic_store_n(&g_helper, p, __ATOMIC_RELEASE);
+}
+
+void update_helper_stop(void) {
+    platform_proc_t *p = __atomic_exchange_n(&g_helper, NULL, __ATOMIC_ACQ_REL);
+    if (!p) return;
+    platform_link_close(g_helper_link);
+    g_helper_link = -1;
+    platform_proc_stop(p, HELPER_STOP_MS);
+}
+
+int update_helper_running(void) { return __atomic_load_n(&g_helper, __ATOMIC_ACQUIRE) != NULL; }
+
+// The relay thread uses the link until the update is done, so it can't be closed under it.
+void update_helper_enable(int on) {
+    g_helper_off = !on;
+    if (!on && __atomic_load_n(&g_state, __ATOMIC_ACQUIRE) != UPD_RUNNING) update_helper_stop();
+}
+
+// A bug in chat could be what's asking, so the proxy can only be a host and port.
+static int ask_ok(const helper_ask_t *a) {
+    static const char HOST_PORT[] = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-:[]";
+    return a->betas <= 1 && memchr(a->proxy, '\0', sizeof a->proxy) && strspn(a->proxy, HOST_PORT) == strlen(a->proxy);
+}
+
+int update_helper(int link) {
+    char exe[EXE_PATH_MAX], curl[EXE_PATH_MAX], why[160];
+    platform_set_name(UPDATE_HELPER_NAME);
+    if (platform_exe_path(exe, sizeof exe) != 0) return 1;
+    char *slash = strrchr(exe, '/');
+    if (!slash) return 1;
+    if (slash == exe) slash[1] = '\0'; else *slash = '\0';
+    const char *run[] = { curl };
+    platform_sandbox(run, platform_find_program("curl", NULL, curl, sizeof curl) == 0, exe, why, sizeof why);
+    g_report_link = link;
+    helper_ask_t ask;
+    char msg[UPDATE_MSG_MAX];
+    while (platform_link_recv(link, &ask, sizeof ask) == 0 && ask_ok(&ask)) {
+        update_set_proxy(ask.proxy);
+        update_run(ask.betas, msg, sizeof msg);
+    }
+    return 0;
 }
 
 // ---- this build, as reported to peers ----

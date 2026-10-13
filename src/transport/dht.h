@@ -134,5 +134,7 @@ int dht_queried_count(const dht_state_t *d);
 int dht_found_count(const dht_state_t *d);
 int dht_queried_count_fam(const dht_state_t *d, int fam);
 int dht_found_count_fam(const dht_state_t *d, int fam);
+// Nodes that have answered and not since gone quiet, over both families: 0 until the DHT is reached.
+int dht_known_count(const dht_state_t *d);
 
 #endif

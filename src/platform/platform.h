@@ -18,10 +18,11 @@ void platform_harden_process(const char *const secret_env[]);
 // starts, can only write under the folders in the home folder that aren't hidden or on PATH,
 // Downloads, chat's own folder and the temporary folders' base, and can only run the programs in
 // run (the interpreters they need too): Landlock. Calls chat never makes are refused: seccomp.
+// With write_only, the one folder it can write under is that one (the updater's sandbox).
 // Returns which of the two are up (PLATFORM_SANDBOX_), with why the rest isn't.
 #define PLATFORM_SANDBOX_FILES 1u
 #define PLATFORM_SANDBOX_CALLS 2u
-unsigned platform_sandbox(const char *const run[], int n_run, char *why, size_t cap);
+unsigned platform_sandbox(const char *const run[], int n_run, const char *write_only, char *why, size_t cap);
 // Until chat's own folder exists, its parent folder is writable in its place. Once the first
 // :install has made it, this narrows that down to the folder itself.
 void platform_sandbox_narrow(void);
@@ -216,6 +217,18 @@ platform_proc_t *platform_spawn(const char *const argv[], const char *out_path);
 int platform_proc_exited(platform_proc_t *p, int *code);
 // Asks it to stop, waits up to wait_ms, then kills it, and frees p.
 void platform_proc_stop(platform_proc_t *p, int wait_ms);
+// Linux: this executable started again as name, with arg alone, as platform_spawn starts a program,
+// but with a link to it on its standard input: a socket that keeps each send a message of its own.
+// *link is this end. Elsewhere, NULL.
+platform_proc_t *platform_spawn_self(const char *name, const char *arg, int *link);
+// In a process platform_spawn_self started, its link. Otherwise -1.
+int platform_parent_link(void);
+// The name the process list shows for this process (Linux, at most 15 bytes).
+void platform_set_name(const char *name);
+int platform_link_send(int link, const void *msg, size_t len);
+// Waits for the next message. -1 once the other end has gone, or if the message isn't len bytes.
+int platform_link_recv(int link, void *msg, size_t len);
+void platform_link_close(int link);
 long platform_pid(void);
 void platform_sleep_ms(int ms);
 

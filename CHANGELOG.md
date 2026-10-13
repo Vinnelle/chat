@@ -7,13 +7,44 @@
   send the wheel as Up and Down (mode 1007), and gives back the terminal's own setting when it
   leaves. On the chat screen Up and Down scroll the chat by a message. Selecting text with the
   mouse works as before.
+- `:newtor` gives every session in Tor mode new circuits and a new onion address. It closes the
+  streams to peers' onion services and the connections to the Nostr relays, which open again with
+  new SOCKS logins, so on new circuits and through new exits. Each session then publishes a new
+  onion address, sends it to its peers and removes the old one. Streams peers opened to you, the
+  room's onion services and tor's entry guards stay the same. It works in `--simple` too.
+- `:set reopen on` (**Reopen sessions**) keeps the sessions you have open in the open save, sealed
+  like the rooms `:keep` keeps, and opens them again when chat starts. The save follows what's
+  open: `:quit` takes a session out, and turning the setting off empties the list. With it on,
+  `Ctrl+C` closes chat without leaving: peers see you go offline, through a new `off` record (`o`
+  in `k`), and older versions get a bye as before. `:quitall` still leaves every session.
+- `:set net off` (**Network log**: off) keeps the network's news out of the console: lookups,
+  relays dropping and coming back, port mapping, and Tor starting up and connecting. Problems that
+  keep a session from connecting, such as a tor that won't start, still show.
 
 ### Changed
+- Routing is two settings, named the same on the settings page, with `:set` and on the command
+  line. **Routing** (`routing`, `--routing`) is `udp` (`dht` before) or `tor`. **Nostr relays**
+  (`nostr`, `--nostr`) is `fallback` (`on` before), `always` or `off`, and means the same with
+  either: a Tor session now leaves the relays a minute after it last needed them, as a UDP one
+  does, so `always` is what keeps it findable by UDP members of a room whose Tor members already
+  reach each other. `--routing dht+nostr` and `dht`, `--nonostr` and `--nostr-always` are gone,
+  and `--simple` asks only UDP or Tor. Saves are unaffected: the old names were the defaults,
+  which a save never holds.
+- `:update` works with the sandbox up. Just before the sandbox goes up, chat starts itself again
+  as the updater, a second process `:update` asks to do the update, shown as `chat-updater` in the
+  process list. It holds none of chat's keys, saves, messages or passwords, and has a sandbox of
+  its own that only lets it write in the executable's folder and run curl. It still installs only
+  what the release key signed. `:set updater off` stops it and keeps it from starting. Before, the
+  sandbox kept chat from replacing itself, and `:update` sent you to `chat --update`.
 - `just release patch`, `minor` and `major` release the next patch, minor or major version after
   the last published release, and `just release beta patch`, `minor` or `major` a beta of it.
   `just release` and `just release beta` still release the version in `CMakeLists.txt` (the
   betas' own) or the patch after it. A release folds in, and deletes the GitHub releases of, the
   betas of any version up to it, so a cycle of `0.5.1` betas can come out as `0.6.0`.
+- A second `Ctrl+C` quits from the QUIT box, as `y` does.
+- The sidebar's NETWORK box says whose tor the route uses (`tor (own)` or `tor (running)`) and how
+  far it has got (`Connecting (24%)`, then `Connected`). In UDP mode the route carries the port
+  (`udp/PORT`) and the DHT says `Connecting` until a node answers, then `Connected`.
 
 ## 0.5.1-beta.1
 

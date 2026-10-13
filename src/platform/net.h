@@ -10,6 +10,10 @@
 
 #define ADDR_STR_LEN 72
 
+// A network module's console line, for the Network log setting: news shows unless the log is off, a
+// detail only when it's verbose, and a problem always.
+enum { NET_LINE_NEWS = 0, NET_LINE_DETAIL = 1, NET_LINE_PROBLEM = 2 };
+
 // Where a datagram goes. ADDR_UDP is a real address. The others name a peer on a relayed
 // transport. ip holds an id the transport picked (a Nostr key prefix, a Tor stream id) and port is 1.
 typedef enum { ADDR_UDP = 0, ADDR_NOSTR = 1, ADDR_TOR = 2 } addr_kind_t;

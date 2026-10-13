@@ -228,6 +228,11 @@ own onion addresses (`ta` and `px`, §7) and connect to those. Frames go over To
 after its BE16 length, and are at most 4096 bytes. They aren't masked, since Tor encrypts the
 stream.
 
+`:newtor` swaps a running session's own onion service for one with a new key: the new one is
+published first, then the old one removed. The member sends `ta` again with the new address, and
+a receiver keeps the newest. Its room slot and the streams others opened to it stay. It opens its
+own streams again, over new circuits.
+
 ## 5. Handshake
 
 ### 5.1 Hello and cookie
@@ -342,6 +347,7 @@ Records go in session frames. A `k` and a `v` come first after each handshake.
 | `pm` | MID TEXT | A direct message, for the receiver alone (see below). It's acked and retried like `m`. |
 | `nop` | | Cover: sent when a slot has nothing else to carry. |
 | `bye` | | The sender is leaving. Sent straight away, outside the slots. |
+| `off` | | The sender is closing chat but keeps the session, to come back to it: the receiver drops it as for `bye`, but shows it going offline. Sent straight away, outside the slots, and only to peers with `o`; the rest get `bye`. |
 
 **`k`** says who the sender is:
 
@@ -355,6 +361,7 @@ Records go in session frames. A `k` and a `v` come first after each handshake.
   - `m`: can move to a new room (`mv`, `mk` and `mp`);
   - `p`: reads direct messages (`pm`);
   - `q`: reads replies (`mr`);
+  - `o`: reads `off`;
   - `t` and a number after it: keeps to message timers, and asks for messages to go after that
     many seconds (`0`: none; otherwise 60 to 604800). Each chat keeps to the shortest timer that
     it or any peer whose code it compared asks for. A new `k` goes out when it changes.
@@ -449,7 +456,7 @@ These are sent outside the slots:
 
 - room frames to addresses that aren't connected peers (handshakes with candidates, and beacons);
 - DHT messages;
-- `bye`;
+- `bye` and `off`;
 - a `nop` sent over a better path to test it (UDP after the relays, for example);
 - fast file transfers, when the sender turns them on. Slots to the peer it's sending to then come
   every 5 ms. Through the relays they come no closer than 2.5 seconds, and at most 0.4 a second
@@ -462,7 +469,7 @@ These are sent outside the slots:
 | A quiet peer gets a `hi` after | 10 s |
 | A peer is dropped after | 40 s without a frame |
 | UDP counts as broken, and traffic moves to the relays, after | 25 s without a frame |
-| Relays stay connected after they were last needed (DHT routing) | 60 s |
+| Relays stay connected after they were last needed (`fallback`) | 60 s |
 | Rekey interval | 300 s, put off by up to 120 s |
 | Old chains kept after a rekey | 90 s |
 | Connected peers | at most 50, plus 64 handshaking |
@@ -484,5 +491,7 @@ These are sent outside the slots:
 - Builds without `p` would drop a `pm` without a word, so they're never sent one: chat says the
   peer's build is too old instead.
 - Builds without `q` would drop an `mr`, so they get an `m` with the quote in its text instead.
+- Builds without `o` (0.5.1-beta.1 and older) would drop an `off` and time the sender out, so they
+  get `bye` instead, and show the sender leaving.
 - Builds before 0.5.0 called the first character of FLAGS the logging flag, and show it as
   `[logging chat locally]`.

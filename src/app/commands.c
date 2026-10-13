@@ -12,7 +12,7 @@ static const struct { const char *section, *keys, *what; } HELP_KEYS[] = {
     { NULL,          "ctrl+j",          "join a session by its id and password, or one you kept (:keep)" },
     { NULL,          "tab  shift+tab",  "next / previous session" },
     { NULL,          "ctrl+s",          "settings" },
-    { NULL,          "ctrl+c",          "quit, after asking - every session leaves cleanly first" },
+    { NULL,          "ctrl+c",          "quit, pressed twice (or y) - sessions leave, or go offline if kept" },
     { NULL,          g_lock_keys,       "lock the screen, as :lock does (:set lockkey)" },
     { NULL,          g_panic_keys,      "panic: clear the screen and quit at once (:set panickey)" },
     { "Screen",      "ctrl+b",          "show or hide the sidebar" },
@@ -371,11 +371,12 @@ static const command_t APP_COMMANDS[] = {
     { "keep",    NULL,      "[LABEL | forget]", "keep this room in the open save, to join it again from Ctrl+J; forget lets it go", app_keep },
     { "call",    NULL,                  "NICK",   "open the room only you and a verified key can work out; they :call you too", app_call },
     { "quit",    "q exit close bd bw",  NULL,     "leave this session; quits if none are open",       app_quit },
-    { "quitall", "qa qall",             NULL,     "leave every session and quit (Ctrl+C)",           app_quitall },
+    { "quitall", "qa qall",             NULL,     "leave every session and quit, kept ones too",     app_quitall },
     { "lock",    NULL,                  NULL,     "lock the screen until the save's passphrase, or a PIN, unlocks it", app_lock },
     { "set",     NULL,        "[NAME [VALUE]]",   "change a setting; alone, opens them all (Ctrl+S)", app_set },
     { "copyid",  NULL,                  NULL,     "copy this session's id to the clipboard",         app_copyid },
     { "move",    NULL,                  NULL,     "move to a new room with the peers whose codes you compared, leaving the rest behind", app_move },
+    { "newtor",  NULL,                  NULL,     "new Tor circuits and onion addresses for every session that goes through Tor", app_newtor },
     { "update",  NULL,                  NULL,     "install the latest release from GitHub",          app_update },
     { "install", NULL,                  "[NAME]", "save your settings and signing key on this computer (NAME: as a save of that name)", app_install },
     { "save",    NULL,                  NULL,     "save what's in use now to the open save, after asking (or :install it)", app_save },
@@ -1065,7 +1066,7 @@ void handle_key(const tui_key_t *key) {
     if (panic_key_is(key)) { panic(PANIC_KEY); return; }
     if (g_app.screen_locked) { locked_key(key); return; }
     if (!g_app.pin_step && lock_key_is(key)) { lock_screen(); return; }
-    if (key->type == TUI_KEY_CTRL_C) { g_app.asking_quit = 1; g_app.dirty = 1; return; }
+    if (key->type == TUI_KEY_CTRL_C && !g_app.asking_quit) { g_app.asking_quit = 1; g_app.dirty = 1; return; }
     if (g_app.asking_quit) { quit_key(key); return; }
     if (g_app.pin_step) { pin_key(key); return; }
 

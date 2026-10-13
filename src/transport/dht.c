@@ -422,6 +422,7 @@ int dht_queried_count_fam(const dht_state_t *d, int fam) { return queried_in(&d-
 int dht_found_count_fam(const dht_state_t *d, int fam) { return d->lk[fam].found; }
 int dht_queried_count(const dht_state_t *d) { return dht_queried_count_fam(d, DHT_V4) + dht_queried_count_fam(d, DHT_V6); }
 int dht_found_count(const dht_state_t *d) { return d->lk[DHT_V4].found + d->lk[DHT_V6].found; }
+int dht_known_count(const dht_state_t *d) { return known_count(d, DHT_V4) + known_count(d, DHT_V6); }
 
 // A compact address (BEP 5, BEP 32): the IP, then the port. -1 for port 0.
 static int compact_addr(const uint8_t *e, size_t iplen, addr_t *a) {

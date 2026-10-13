@@ -127,8 +127,9 @@ enum { CHUNK_ID_AT = 2, CHUNK_ID_LEN = 4, CHUNK_INDEX_AT = 6, CHUNK_COUNT_AT = 7
 #define NOSTR_FAST_INTERVAL 2.5
 // A peer's UDP path counts as broken after this long without a frame, and its traffic moves to the relays.
 #define UDP_STALE 25.0
-// DHT routing only connects to the relays while something needs them: nobody reached yet, a peer
-// only reachable through them, or a peer whose UDP has gone quiet. They're disconnected this long after.
+// With the relays on fallback, they're only connected while something needs them: nobody reached
+// yet, a peer only reachable through them, or a peer whose own path has gone quiet. They're
+// disconnected this long after.
 #define RELAY_LINGER 60.0
 #define NOSTR_BEACON_ALONE 20.0
 #define NOSTR_BEACON_CONNECTED 90.0
@@ -183,14 +184,15 @@ enum { CHUNK_ID_AT = 2, CHUNK_ID_LEN = 4, CHUNK_INDEX_AT = 6, CHUNK_COUNT_AT = 7
 #define MID_LEN 4
 #define MID_HEX (2 * MID_LEN)
 
-typedef enum { ROUTE_DHT = 0, ROUTE_TOR = 1 } route_mode_t;
+typedef enum { ROUTE_UDP = 0, ROUTE_TOR = 1 } route_mode_t;
 
-// The relays: off, only while something needs them (DHT routing), or always.
+// The relays, the same in both routes: off, only while something needs them, or always.
 enum { NOSTR_OFF = 0, NOSTR_FALLBACK = 1, NOSTR_ALWAYS = 2 };
 
-// How a session reaches peers. DHT: UDP, found through the DHT (IPv4, IPv6), LAN broadcast
-// and relays, with a router port mapping so more of them can connect, and Nostr relays carrying
-// traffic when UDP can't. Tor: onion services only. Nothing else goes on the network.
+// How a session reaches peers. UDP: straight between peers, found through the DHT (IPv4, IPv6),
+// LAN broadcast and relays, with a router port mapping so more of them can connect. Tor: onion
+// services. Either way, Nostr relays carry traffic when the route can't, through Tor in Tor
+// routing. Nothing else goes on the network.
 typedef struct {
     route_mode_t mode;
     int dht4, dht6, lan, portmap, nostr;
@@ -346,6 +348,8 @@ typedef struct {
     int long_text;
     // Its k says it can move to a new room with us ("m"), and reads direct messages ("p").
     int can_move, can_pm, can_reply;
+    // Its k says it reads "off" ("o"), so it can be told we went offline rather than that we left.
+    int can_offline;
     // :move, in the room being left. move_pub: the key it showed us for the move ("mv" or "mk"), and
     // whether the room we moved to has it (move_passed). move_with: it moves with us, so this room
     // waits for its key before closing. key_sent: it has ours.
@@ -609,7 +613,8 @@ typedef struct chat_s {
 
     int once, once_used;
 
-    int net_verbose;
+    // The console's network lines (chat_set_net_log): every handshake packet too, or none but problems.
+    int net_verbose, net_quiet;
 
     // Nothing that's sent goes to a peer until the user has compared its verify code (code_ok).
     int verify_required;
@@ -621,7 +626,7 @@ typedef struct chat_s {
     int started;
     const char *start_error;   // why it didn't start, when it didn't
     nostr_t *nostr;
-    double relays_until;   // the relays stay on until then (DHT routing)
+    double relays_until;   // the relays stay on until then (fallback)
     tor_t *tor;
     portmap_t *pm;
     double next_beacon;
@@ -682,6 +687,9 @@ typedef struct chat_s {
     chat_file_fn file_view;
     unsigned own_seq;
     chat_delivery_fn delivery;
+    // The session is kept to come back to (Reopen sessions), so chat_shutdown tells the peers that read
+    // "off" that we went offline, not that we left.
+    int coming_back;
 
     // Moving out (:move): the session we moved to, which is given the keys that come after, and since
     // when this one has only stayed for them. move_ask: the request that's shown.
@@ -799,6 +807,11 @@ void chat_set_identity(chat_t *c, identity_source_t source, const identity_keypa
 // Whether we keep a history of the session: peers' "k" is sent again so they're told straight away.
 void chat_set_history(chat_t *c, int on);
 
+// How much of the network the console shows, as :set net names it: its news, every handshake packet
+// too, or only its problems.
+enum { NET_LOG_NORMAL = 0, NET_LOG_VERBOSE, NET_LOG_OFF };
+void chat_set_net_log(chat_t *c, int level);
+
 // The message timer (:timer): messages older than this go from the screen and from memory, and a
 // history keeps no longer. Ours goes to peers in "k", like history, and every chat that keeps to
 // timers ("t") keeps to the shortest anyone in the session asks for. It's a request: a modified chat,
@@ -859,6 +872,9 @@ int chat_apply_routing(chat_t *c, const routing_t *r);
 void chat_tor_set_ports(chat_t *c, const char *socks, const char *control, const char *password);
 // That tor has connected to the Tor network, so relays that failed while it was connecting are retried.
 void chat_tor_connected(chat_t *c);
+// New Tor circuits for the session, its relay connections' too, and a new onion address for its
+// peers (tor_refresh).
+void chat_tor_refresh(chat_t *c);
 int chat_online_count(const chat_t *c);
 int chat_pending_count(const chat_t *c);
 int chat_candidate_count(const chat_t *c);

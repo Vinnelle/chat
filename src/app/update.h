@@ -46,6 +46,21 @@ void update_view(update_view_t *v);
 
 void update_cleanup_stale(void);
 
+// chat started as `chat UPDATE_HELPER_ARG` by update_helper_start: the updater, which the process
+// list shows as UPDATE_HELPER_NAME (at most 15 bytes).
+#define UPDATE_HELPER_ARG "--updater"
+#define UPDATE_HELPER_NAME "chat-updater"
+// Just before the sandbox goes up (Linux): chat starts itself again as the updater, which the
+// sandbox doesn't cover, so :update can still replace chat. It holds none of chat's data, and has a
+// sandbox of its own: it can only write in the executable's folder, and only run curl.
+void update_helper_start(void);
+void update_helper_stop(void);
+int update_helper_running(void);
+// The updater setting: off stops it now, or once the update it's running is done; on keeps it.
+void update_helper_enable(int on);
+// The updater: runs each update chat asks for on link, until chat goes.
+int update_helper(int link);
+
 // The release key (minisign, base64) built in from minisign.pub, or "" if there was none.
 const char *update_release_key(void);
 

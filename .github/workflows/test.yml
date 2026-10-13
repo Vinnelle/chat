@@ -95,7 +95,7 @@ jobs:
       - name: chat starts, opens a session and quits
         run: |
           win/chat.exe --version
-          printf ':quit\n' | win/chat.exe --simple --routing dht --nodht --nonostr --noportmap --nolan
+          printf ':quit\n' | win/chat.exe --simple --routing udp --nodht --nostr off --noportmap --nolan
 
   # The same for macOS on Apple silicon, which zig cross-builds without Apple's SDK.
   macos-build:
@@ -146,7 +146,7 @@ jobs:
       - name: chat starts, opens a session and quits
         run: |
           mac/chat --version
-          printf ':quit\n' | mac/chat --simple --routing dht --nodht --nonostr --noportmap --nolan
+          printf ':quit\n' | mac/chat --simple --routing udp --nodht --nostr off --noportmap --nolan
 
   fuzz:
     runs-on: ubuntu-24.04

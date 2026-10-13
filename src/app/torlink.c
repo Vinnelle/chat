@@ -14,7 +14,7 @@ tor_link_t g_tor;
 #define NO_PROXY "127.0.0.1:1"
 
 void sync_update_proxy(void) {
-    if (g_app.route.mode == ROUTE_DHT) update_set_proxy(NULL);
+    if (g_app.route.mode == ROUTE_UDP) update_set_proxy(NULL);
     else update_set_proxy(g_tor.state == TL_READY ? g_tor.socks : NO_PROXY);
 }
 
@@ -315,10 +315,11 @@ static void tor_link_start_own(double now) {
     g_tor.state = TL_STARTING;
     g_tor.boot_told = -1;
     g_tor.bridged = o.hold_network;
-    push_log("* tor: starting chat's own tor (%s)%s - its control port only takes a password made at random for this "
-             "run, which only chat knows (tor is given its hash), and its data is kept in a private temporary folder, "
-             "deleted when chat exits%s", program, o.hold_network ? " with your bridges" : "",
-             o.state ? ". It starts from the guards and directory kept in the save" : "");
+    if (g_app.net_log != NET_LOG_OFF)
+        push_log("* tor: starting chat's own tor (%s)%s - its control port only takes a password made at random for "
+                 "this run, which only chat knows (tor is given its hash), and its data is kept in a private temporary "
+                 "folder, deleted when chat exits%s", program, o.hold_network ? " with your bridges" : "",
+                 o.state ? ". It starts from the guards and directory kept in the save" : "");
 }
 
 // Makes sure Tor mode has a tor, or is getting one.
@@ -347,9 +348,10 @@ void tor_link_step(double now) {
             g_tor.probe = NULL;
             if (r > 0) {
                 g_tor.state = TL_READY;
-                push_log("* tor: using the tor that's already running (control port %s) - it keeps its entry guards "
-                         "and any bridges it's set up with%s", g_tor.control, g_app.bridges[0]
-                         ? ". Your bridges are only for chat's own tor, which torlaunch never doesn't start" : "");
+                if (g_app.net_log != NET_LOG_OFF)
+                    push_log("* tor: using the tor that's already running (control port %s) - it keeps its entry "
+                             "guards and any bridges it's set up with%s", g_tor.control, g_app.bridges[0]
+                             ? ". Your bridges are only for chat's own tor, which torlaunch never doesn't start" : "");
                 tor_link_apply();
             } else if (g_app.tor_launch == TOR_LAUNCH_NEVER) {
                 if (r == -2) push_log("* tor: the running tor won't let chat in: %s", why);
@@ -357,8 +359,10 @@ void tor_link_step(double now) {
                               "own (:set torlaunch auto)", g_app.route.tor.control);
                 tor_link_fail(now, TOR_RETRY);
             } else {
-                if (r == -2) push_log("* tor: a tor is running but won't let chat in (%s) - starting chat's own", why);
-                else push_log("* tor: no tor running - starting chat's own");
+                if (g_app.net_log != NET_LOG_OFF) {
+                    if (r == -2) push_log("* tor: a tor is running but won't let chat in (%s) - starting chat's own", why);
+                    else push_log("* tor: no tor running - starting chat's own");
+                }
                 tor_link_start_own(now);
             }
             return;
@@ -397,15 +401,22 @@ void tor_link_step(double now) {
                 copy_str(g_tor.socks, torproc_socks(g_tor.proc), sizeof g_tor.socks);
                 copy_str(g_tor.control, torproc_control(g_tor.proc), sizeof g_tor.control);
                 const char *v = torproc_version(g_tor.proc);
-                push_log("* tor: %s is up on %s, connecting to the Tor network...", v[0] ? v : "tor", g_tor.control);
+                if (g_app.net_log != NET_LOG_OFF)
+                    push_log("* tor: %s is up on %s, connecting to the Tor network...", v[0] ? v : "tor", g_tor.control);
                 tor_link_apply();
             }
             int b = torproc_bootstrap(g_tor.proc);
             if (g_tor.state == TL_READY && b >= 0
                 && (b == BOOT_DONE ? g_tor.boot_told < BOOT_DONE : b >= g_tor.boot_told + BOOT_STEP)) {
                 g_tor.boot_told = b;
-                if (b == BOOT_DONE) { g_tor.starts = 0; push_log("* tor: connected to the Tor network"); tor_link_connected(); }
-                else push_log("* tor: connecting to the Tor network: %d%%", b);
+                int news = g_app.net_log != NET_LOG_OFF;
+                if (b == BOOT_DONE) {
+                    g_tor.starts = 0;
+                    if (news) push_log("* tor: connected to the Tor network");
+                    tor_link_connected();
+                } else if (news) {
+                    push_log("* tor: connecting to the Tor network: %d%%", b);
+                }
             }
             return;
         }
@@ -440,6 +451,23 @@ void tor_link_restart(void) {
     tor_link_ensure(now_seconds());
 }
 
+static int g_refreshed;
+
+static void refresh_session(chat_t *e) {
+    chat_tor_refresh(e);
+    g_refreshed++;
+}
+
+cmd_result_t app_newtor(void *ctx, const char *arg) {
+    (void)ctx; (void)arg;
+    g_refreshed = 0;
+    each_tor_session(refresh_session);
+    if (g_refreshed == 0) note("no session goes through Tor - :set routing tor sends the next ones through it");
+    else note("new Tor circuits and onion address%s for %d session%s", g_refreshed == 1 ? "" : "es", g_refreshed,
+              g_refreshed == 1 ? "" : "s");
+    return CMD_OK;
+}
+
 void tor_state_choose(int on) {
     if (g_loading_settings || !on) {
         g_app.tor_state = on;
@@ -472,19 +500,24 @@ void tor_state_no(void) {
     note("Keep tor's guards: off");
 }
 
-void tor_link_line(char *out, size_t cap) {
+const char *tor_link_whose(void) {
+    if (g_tor.proc) return "own";
+    return g_tor.state == TL_READY ? "running" : NULL;
+}
+
+void tor_link_status(char *out, size_t cap) {
     switch (g_tor.state) {
-        case TL_PROBING:  snprintf(out, cap, "tor: looking"); break;
-        case TL_STARTING: snprintf(out, cap, "tor: starting"); break;
-        case TL_FAILED:   snprintf(out, cap, "tor: none"); break;
+        case TL_PROBING:  snprintf(out, cap, "Looking"); break;
+        case TL_STARTING: snprintf(out, cap, "Starting"); break;
+        case TL_FAILED:   snprintf(out, cap, "Failed"); break;
         case TL_READY: {
+            // A running tor isn't asked how far it has got: it's taken to be connected.
             int b = g_tor.proc ? torproc_bootstrap(g_tor.proc) : 0;
-            if (!g_tor.proc) snprintf(out, cap, "tor: running one");
-            else if (g_tor.boot_told < BOOT_DONE) snprintf(out, cap, "tor: own %d%%", b < 0 ? 0 : b);
-            else snprintf(out, cap, "tor: own");
+            if (g_tor.proc && g_tor.boot_told < BOOT_DONE) snprintf(out, cap, "Connecting (%d%%)", b < 0 ? 0 : b);
+            else snprintf(out, cap, "Connected");
             break;
         }
-        default: snprintf(out, cap, "tor: off"); break;
+        default: snprintf(out, cap, "Off"); break;
     }
 }
 
@@ -565,7 +598,7 @@ static session_slot_t *open_session(const char *session_name, const char *passwo
     // The session's routing holds the password for a running tor, not the one chat's own tor takes.
     if (s->engine.route.mode == ROUTE_TOR && g_tor.state == TL_READY && g_tor.proc)
         chat_tor_set_ports(&s->engine, g_tor.socks, g_tor.control, torproc_password(g_tor.proc));
-    s->engine.net_verbose = g_app.net_verbose;
+    chat_set_net_log(&s->engine, g_app.net_log);
     s->initialising = 0;
     g_app.dirty = 1;
     // Before anyone can connect, so peers hear of it in the handshake.
@@ -587,8 +620,8 @@ static session_slot_t *open_session(const char *session_name, const char *passwo
         console_note(s, "joining '%s' as %s (peer %s) - chat opens once someone answers",
                      s->engine.session_name, s->engine.nick, idhex);
     }
-    if (g_app.route.mode == ROUTE_TOR)
-        console_note(s, "* routing: Tor onion services only - connecting takes a little longer");
+    if (g_app.route.mode == ROUTE_TOR && g_app.net_log != NET_LOG_OFF)
+        console_note(s, "* routing: %s - connecting takes a little longer", route_label());
     return s;
 }
 
@@ -892,6 +925,56 @@ void rooms_join_at_start(void) {
     }
 }
 
+// ---- reopening sessions ----
+
+// Only once the row's saved, so with autosave off nothing goes in the save before :save.
+static int reopen_saving(void) {
+    return g_app.reopen && !g_app.quit_leaving && g_app.installed && !g_app.locked
+           && strcmp(g_saved_rows[settings_index(SET_REOPEN)], "on") == 0;
+}
+
+// Calls aren't kept: :call finds the day's room again.
+int session_kept(const session_slot_t *s) {
+    return reopen_saving() && !g_app.reopen_due && !s->leaving && !s->contact && !s->initialising;
+}
+
+// The sessions kept in a save that's just opened, once chat reaches the network. One that can't open
+// (a port in use, say) stays kept for the next start.
+void reopen_tick(void) {
+    if (!g_app.reopen_due || g_app.onboarding || !g_app.installed || g_app.locked) return;
+    g_app.reopen_due = 0;
+    if (!reopen_saving()) return;
+    for (int i = 0; i < reopen_count(); i++) {
+        const room_t *r = reopen_at(i);
+        if (!r || open_room(r->id)) continue;
+        char id[MAX_SESSION_NAME + 1], pw[MAX_PASSWORD + 1];
+        copy_str(id, r->id, sizeof id);
+        copy_str(pw, r->password, sizeof pw);
+        if (!start_session(id, pw, 0, 0, NULL, 0)) reopen_failed(i);
+        crypto_wipe(pw, sizeof pw);
+    }
+}
+
+// Before every frame, like the settings: the open save keeps the sessions open as they open and close.
+void keep_sessions_saved(void) {
+    if (g_app.reopen_due || g_app.onboarding || !g_app.installed || g_app.locked) return;
+    reopen_begin();
+    if (reopen_saving()) {
+        for (int i = 0; i < MAX_SESSIONS; i++)
+            if (g_app.used[i] && session_kept(&g_app.sessions[i]))
+                reopen_add(g_app.sessions[i].name, g_app.sessions[i].password, 0);
+        for (int i = 0; i < reopen_count(); i++) {
+            const room_t *r = reopen_at(i);
+            if (r->unopened && !open_room(r->id)) reopen_add(r->id, r->password, 1);
+        }
+    }
+    if (reopen_end() && settings_write() != 0) {
+        char where[APP_PATH_MAX] = "";
+        install_where(install_current(), where, sizeof where);
+        note("couldn't write the sessions to reopen to %s/settings", where);
+    }
+}
+
 // ---- calls ----
 
 static session_slot_t *open_call(const uint8_t pub[ID_SIGN_PUB_LEN]) {
@@ -975,6 +1058,7 @@ cmd_result_t app_quit(void *ctx, const char *arg) {
 
 cmd_result_t app_quitall(void *ctx, const char *arg) {
     (void)ctx; (void)arg;
+    g_app.quit_leaving = 1;
     g_interrupted = 1;
     return CMD_OK;
 }
@@ -987,9 +1071,13 @@ cmd_result_t app_copyid(void *ctx, const char *arg) {
 
 cmd_result_t app_update(void *ctx, const char *arg) {
     (void)ctx; (void)arg;
-    if (g_app.sandboxed & PLATFORM_SANDBOX_FILES) {
-        note("the sandbox keeps chat from replacing itself - quit and run chat --update, or :set sandbox off for the "
-             "next start");
+    if ((g_app.sandboxed & PLATFORM_SANDBOX_FILES) && !update_helper_running()) {
+        if (g_app.updater)
+            note("the sandbox keeps chat from replacing itself, and the updater isn't running - quit and run chat "
+                 "--update");
+        else
+            note("the sandbox keeps chat from replacing itself, and the updater is off - quit and run chat --update, "
+                 "or :set updater on for the next start");
         return CMD_OK;
     }
     if (g_app.route.mode == ROUTE_TOR && g_tor.state != TL_READY) {

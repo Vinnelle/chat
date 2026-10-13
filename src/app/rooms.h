@@ -18,6 +18,7 @@ typedef struct {
     char id[MAX_SESSION_NAME + 1];
     char password[MAX_PASSWORD + 1];
     int at_start;
+    int unopened;   // one to reopen that couldn't open this run
 } room_t;
 
 int rooms_count(void);
@@ -36,5 +37,19 @@ int rooms_load(const toml_value *v);
 // The [rooms] table, appended at p as settings_text writes the rest. The new length, or cap if it
 // didn't fit.
 size_t rooms_text(char *out, size_t p, size_t cap);
+
+// With Reopen sessions on, the sessions to open again as chat starts: each one's id and password, as
+// the open save's [open] table (no labels). In locked memory too, and rooms_clear wipes them.
+int reopen_count(void);
+const room_t *reopen_at(int i);
+void reopen_failed(int i);
+// The list is made again with reopen_add for each session, in order, between reopen_begin and
+// reopen_end. reopen_end returns 1 if that changed what goes in the save.
+void reopen_begin(void);
+void reopen_add(const char *id, const char *password, int unopened);
+int reopen_end(void);
+// One entry of the [open] table: ["ID", "PASSWORD"]. 0, or -1 if it isn't one.
+int reopen_load(const toml_value *v);
+size_t reopen_text(char *out, size_t p, size_t cap);
 
 #endif

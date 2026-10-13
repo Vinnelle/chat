@@ -424,11 +424,12 @@ static int move_ask_paras(tui_para_t *p) {
 static const tui_dialog_t *quit_dialog(void) {
     static tui_dialog_t d;
     static tui_para_t paras[MAX_DIALOG_PARAS];
-    static char what[240], files[120], unsaved[200];
-    int n_sessions = 0, online = 0, downloads = 0;
+    static char what[320], files[120], unsaved[200];
+    int n_sessions = 0, online = 0, downloads = 0, kept = 0;
     for (int i = 0; i < MAX_SESSIONS; i++) {
         if (!g_app.used[i] || g_app.sessions[i].leaving) continue;
         n_sessions++;
+        kept += session_kept(&g_app.sessions[i]);
         if (g_app.sessions[i].initialising) continue;
         const chat_t *e = &g_app.sessions[i].engine;
         online += chat_online_count(e);
@@ -438,7 +439,16 @@ static const tui_dialog_t *quit_dialog(void) {
     const char *tor = g_tor.proc ? " Chat's own tor stops too." : "";
     if (n_sessions == 0)
         snprintf(what, sizeof what, "No sessions are open.%s", tor);
-    else
+    else if (kept) {
+        char which[40];
+        if (kept < n_sessions) snprintf(which, sizeof which, "%d of its %d sessions", kept, n_sessions);
+        else if (kept > 1) snprintf(which, sizeof which, "its %d sessions", kept);
+        else copy_str(which, "its session", sizeof which);
+        snprintf(what, sizeof what, "Quitting closes chat but keeps %s in the save %s: %s again as chat starts, and "
+                 "peers see you go offline until then.%s Keys are wiped from memory.%s", which,
+                 install_shown_name(install_current()), kept == 1 ? "it opens" : "they open",
+                 kept < n_sessions ? " Calls say bye." : "", tor);
+    } else
         snprintf(what, sizeof what, "Quitting leaves %d session%s, with %d peer%s online: each says bye, then closes, "
                  "and its keys are wiped from memory.%s", n_sessions, n_sessions == 1 ? "" : "s",
                  online, online == 1 ? "" : "s", tor);
@@ -469,7 +479,7 @@ static const tui_dialog_t *quit_dialog(void) {
     if (n_lost) n = add_para(paras, n, TUI_P_BLANK, "");
     for (int i = 0; i < n_lost; i++) n = add_para(paras, n, TUI_P_BULLET, lost[i]);
 
-    d = (tui_dialog_t){ .title = "QUIT", .text = paras, .n_text = n, .keys = "y quit" DOT_SEP "n stay" };
+    d = (tui_dialog_t){ .title = "QUIT", .text = paras, .n_text = n, .keys = "ctrl+c/y quit" DOT_SEP "n stay" };
     return &d;
 }
 
@@ -1015,15 +1025,15 @@ static int build_net(tui_kv_t kv[MAX_NET], char vals[MAX_NET][NET_VALUE_MAX]) {
     int n = 0;
 #define KV(l, ...) do { snprintf(vals[n], NET_VALUE_MAX, __VA_ARGS__); kv[n].label = (l); kv[n].value = vals[n]; n++; } while (0)
     if (e->route.mode == ROUTE_TOR) {
-        char t[32];
-        tor_link_line(t, sizeof t);
-        KV("route", "tor");
-        static const char tor[] = "tor: ";
-        KV("tor", "%s", starts_with(t, tor) ? t + sizeof tor - 1 : t);
+        const char *whose = tor_link_whose();
+        if (whose) KV("route", "tor (%s)", whose);
+        else KV("route", "tor");
+        char t[NET_VALUE_MAX];
+        tor_link_status(t, sizeof t);
+        KV("tor", "%s", t);
         KV("onion", "%s", e->tor && tor_my_onion(e->tor)[0] ? "published" : "waiting");
     } else {
-        KV("route", "dht");
-        KV("port", "udp/%u", (unsigned)e->port);
+        KV("route", "udp/%u", (unsigned)e->port);
         KV("portmap", "%s", !e->pm ? "off" : portmap_mapped(e->pm, NULL) ? "mapped" : "not yet");
     }
     if (e->nostr && !nostr_active(e->nostr)) KV("relays", "not needed");
@@ -1031,10 +1041,10 @@ static int build_net(tui_kv_t kv[MAX_NET], char vals[MAX_NET][NET_VALUE_MAX]) {
     else KV("relays", "off");
     if (e->route.mode != ROUTE_TOR) {
         if (e->dht_on) {
-            KV("dht", "%d nodes", dht_queried_count(&e->dht));
+            KV("dht", "%s", dht_known_count(&e->dht) ? "Connected" : "Connecting");
             KV("found", "%d peers", dht_found_count(&e->dht));
         } else {
-            KV("dht", "off");
+            KV("dht", "Off");
         }
     }
     KV("cands", "%d", chat_candidate_count(e));

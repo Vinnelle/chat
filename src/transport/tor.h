@@ -35,7 +35,7 @@ typedef struct {
 } tor_opts_t;
 
 typedef void (*tor_deliver_fn)(void *ctx, const uint8_t *data, size_t len, addr_t from, double now);
-typedef void (*tor_log_fn)(void *ctx, int verbose_only, const char *msg);
+typedef void (*tor_log_fn)(void *ctx, int kind, const char *msg);
 
 extern const tor_opts_t TOR_DEFAULTS;
 
@@ -46,6 +46,11 @@ void tor_free(tor_t *t);
 // Points a session at another tor, and the password its control port takes: the one chat
 // started, or one it found running. An empty control address means none yet; the session waits.
 void tor_set_ports(tor_t *t, const char *socks, const char *control, const char *password);
+
+// New circuits: a new SOCKS login, and our streams to onion services closed, to open again on the
+// next send. Streams peers opened to us stay. Tor publishes a new onion address for this session,
+// then removes the old one. The room's slot stays as it is.
+void tor_refresh(tor_t *t);
 
 // Checks whether a running tor is one chat can use: its control port answers and lets chat log
 // in (onion services need that). Nothing is published. tor_probe_result: 1 usable (the ports

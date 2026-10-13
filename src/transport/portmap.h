@@ -13,7 +13,7 @@
 
 typedef struct portmap portmap_t;
 
-typedef void (*portmap_log_fn)(void *ctx, int verbose_only, const char *msg);
+typedef void (*portmap_log_fn)(void *ctx, int kind, const char *msg);
 
 portmap_t *portmap_new(uint16_t internal_port, portmap_log_fn log, void *ctx);
 void portmap_step(portmap_t *p, double now);

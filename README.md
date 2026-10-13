@@ -103,13 +103,14 @@ screen UI into its scrollback, or the window's title, and anything that can read
 read past it.
 
 **Panic key.** `Ctrl+\` clears the screen, the terminal's own as well, and quits at once, from
-anywhere in chat, the lock screen too, without asking. Every session says bye, memory is wiped and
-chat's own tor stops. Nothing is saved: not settings, and not the last 30 seconds of a history
-unless `:set panichistory on`. `:set panicwipe on` makes it delete the open save too, as
-`:uninstall` would. Anyone at the keyboard can press it, so with that on, anyone can delete the
-save. `:set lockkey` and `:set panickey` pick other keys (`Ctrl+\` is awkward on some keyboards),
-or none. In `--simple` there's no lock screen, and the terminal's `Ctrl+\` panics, unless the panic
-key is off. Its lines are in the terminal's scrollback, so that's cleared too.
+anywhere in chat, the lock screen too, without asking. Every session says bye (one kept to
+[reopen](#kept-rooms) goes offline), memory is wiped and chat's own tor stops. Nothing is saved:
+not settings, and not the last 30 seconds of a history unless `:set panichistory on`.
+`:set panicwipe on` makes it delete the open save too, as `:uninstall` would. Anyone at the
+keyboard can press it, so with that on, anyone can delete the save. `:set lockkey` and
+`:set panickey` pick other keys (`Ctrl+\` is awkward on some keyboards), or none. In `--simple`
+there's no lock screen, and the terminal's `Ctrl+\` panics, unless the panic key is off. Its lines
+are in the terminal's scrollback, so that's cleared too.
 
 **Identity signing** is optional, and lets peers check who they're talking to. Pick it under
 **Signing identity** on the settings page (or `:set sign`), or with `--identity`:
@@ -206,10 +207,20 @@ chat never makes (`ptrace`, `mount`, `bpf`, `io_uring` and the like). A bug
 can't plant anything that runs later: not in `.bashrc`, `~/.config/autostart`, `~/.ssh` or
 `~/.local/bin`. It still runs as you, though, so it can read what you can and send it out. It's
 Landlock (Linux 5.13 or later) and seccomp, with no root needed, and without Landlock chat carries on
-with seccomp alone. While it's up, saving a file anywhere else fails, and so does `:update`
-(`chat --update` from the shell works). Until `:install` has made chat's own folder, the folder it
-goes in (`~/.config`) stays writable. `:set sandbox off` (from the next start) or `--nosandbox` (for
-one run) leave it down.
+with seccomp alone. While it's up, saving a file anywhere else fails. Until `:install` has made
+chat's own folder, the folder it goes in (`~/.config`) stays writable. `:set sandbox off` (from the
+next start) or `--nosandbox` (for one run) leave it down.
+
+Nothing chat starts once the sandbox is up can get out of it, so just before it goes up, chat starts
+itself again as the updater, a second process that `:update` asks to do the update. The process
+list shows it as `chat-updater`, under chat. The updater holds none of chat's data: it's a new
+process, without chat's keys, saves, messages or passwords. It has a sandbox of its own, which only
+lets it write in the folder the executable is in and run curl, and it still installs only what the
+release key signed. All chat can do with it is ask for an update, so a bug in chat can't use it to
+get out of the sandbox. The updater ends with chat, once any update it's in the middle of has
+finished. `:set updater off` stops it (after the update it's running, if there is one) and doesn't
+start it again; `:update` then sends you to `chat --update`. `:set updater on` starts it from the
+next start.
 
 What chat can't hide: root and administrators can read any program's memory. Anyone on the
 computer can see that chat is running, how much CPU time and memory it uses, and its network
@@ -230,13 +241,22 @@ chat opens on its settings page, with **Routing** at the top. `--routing` preset
 `Ctrl+S` or `:set` opens the page again later. Once `:install` has saved your settings, chat
 starts straight on your sessions instead.
 
-1. **DHT + Nostr fallback** (recommended). Peers talk directly over UDP.
-2. **DHT only.** Same, without relays. Some peers behind strict NATs won't connect, and Tor
-   members can't reach you at all.
-3. **Tor.** Onion services, plus the Nostr relays reached through Tor so DHT members can still
-   meet you. Nothing else goes on the network.
+Two settings decide how a session reaches peers, named the same on the settings page, with
+`:set` and on the command line:
 
-DHT routing uses these, and you can turn each one off:
+- **Routing** (`routing`, `--routing`):
+  - `udp` (recommended): peers talk straight to each other over UDP, so they see your IP
+    address.
+  - `tor`: onion services, which hide your IP address from peers and everyone else. Nothing
+    goes on the network except through Tor.
+- **Nostr relays** (`nostr`, `--nostr`), the same with either routing:
+  - `fallback` (default): public relays carry the traffic while the routing can't, and are where
+    UDP and Tor members meet. chat connects to them only while it needs them.
+  - `always`: stays connected to them.
+  - `off`: no relays. Some peers behind strict NATs won't connect, and members using the other
+    routing can't reach you at all.
+
+UDP routing finds peers with these, and you can turn each one off:
 
 | Part | What it does | Who sees what |
 | --- | --- | --- |
@@ -244,15 +264,14 @@ DHT routing uses these, and you can turn each one off:
 | IPv6 DHT ([BEP 32](https://www.bittorrent.org/beps/bep_0032.html)) | the same on the IPv6 DHT, where there's usually no NAT | as above, with your IPv6 address, which often stays the same for longer than an IPv4 one |
 | Router port mapping | asks the router (PCP, NAT-PMP or UPnP-IGD) to forward the session's UDP port, so peers behind NATs that can't be hole punched still get in. Removed when the session ends | your router, which may log it, and any device on the LAN that asks it |
 | LAN discovery | an encrypted broadcast beacon on the local network, to a UDP port picked from the room's id and password (49152-65535) | the local network sees something broadcasting, on the same port for every member of the room |
-| Nostr relay fallback | public relays carry traffic when UDP can't get through | the relays (see below) |
 
-Direct UDP is preferred. A peer only moves to the relays while UDP to it is quiet, and moves
-back as soon as UDP works again. With DHT routing, chat only connects to the relays while it
+UDP is preferred. A peer only moves to the relays while UDP to it is quiet, and moves back as
+soon as UDP works again. With the relays on `fallback`, chat only connects to them while it
 needs them: before anyone is reached, while a peer is only reachable through them, or while a
-peer's UDP has gone quiet. It disconnects a minute after. Tor members only meet DHT members on
-the relays, so a room where all the DHT members already reach each other can't be found by a
-Tor member. Setting **Nostr relays** to `always` (`:set nostr always`, `--nostr-always`) keeps
-them connected.
+peer's own path (UDP, or its onion service) has gone quiet. It disconnects a minute after. Tor
+routing does the same. UDP and Tor members only meet on the relays, so a room whose members on
+one routing already reach each other can't be found by a member on the other. `:set nostr
+always` (`--nostr always`) on their side keeps the relays connected, so they can be.
 
 **What the network sees of UDP.** Everything sent over UDP is masked with a key made from the
 session id and password, so to anyone else each datagram is random bytes. There's no ratchet
@@ -350,19 +369,18 @@ tor that connected, so a run that never does leaves the last ones. It adds tens 
 and anyone who can open the save sees which guards you use. The decoy never gets them, and
 turning it off deletes them.
 
-> **Note:** Tor and DHT members of a room can only reach each other through the Nostr
-> relays, so both need them on: a DHT member with option 1 (DHT + Nostr fallback), and a
-> Tor member with the relays left on, as they are by default. With option 2 (DHT only) or
-> `--nonostr` on either side, the room splits in two, and neither half sees the other.
+> **Note:** UDP and Tor members of a room can only reach each other through the Nostr
+> relays, so both need them on. With `nostr off` on either side, the room splits in two, and
+> neither half sees the other.
 
-**Tor and DHT members in the same room** can't reach each other over onion services or UDP.
-They meet on the Nostr relays. A Tor session connects to the same relays as DHT ones, but only
+**UDP and Tor members in the same room** can't reach each other over onion services or UDP.
+They meet on the Nostr relays. A Tor session connects to the same relays as UDP ones, but only
 through Tor's SOCKS port. Each relay gets its own circuit, and the relay's name is resolved at
 the exit, so local DNS is never used. Until chat has a tor, it doesn't connect to any relay.
 Relays see a Tor exit, never your address, and the events look the same whoever sends them.
 Between two Tor members, traffic moves to their onion services as soon as those connect, with
-the relays kept as a fallback. Turn the relays off with the **Nostr relays** setting (or
-`--nonostr`) and only other Tor members can reach you. chat tells you if nobody answers.
+the relays kept as a fallback. Turn the relays off (`:set nostr off`, `--nostr off`) and
+only other Tor members can reach you. chat tells you if nobody answers.
 
 Each session publishes its own onion service, plus one of six room onion services whose keys
 come from the session id and password. People joining knock on those to find the room, then
@@ -370,6 +388,16 @@ connect to each member's own onion service. They all go away when the session en
 session's streams get their own Tor circuits. In Tor mode chat never sends UDP, never connects
 anywhere directly, and never looks up an `.onion` name or a relay's name through DNS.
 Connecting takes a minute or two while the onion services get published and found.
+
+**New circuits.** A session's streams to other members' onion services stay open, on the same
+circuits, for as long as it runs, and its onion address doesn't change, so anyone who has it can
+tell whether you're online. `:newtor` gives every Tor session new ones: it closes its streams
+and relay connections, which open again with new SOCKS logins, so on new circuits and through
+new exits, and each session publishes a new onion address, sends it to its peers, then removes
+the old one. Streams peers opened to you stay as they are, and so do the room's onion services,
+since the session id and password make their keys, and tor's entry guards (see **Keeping tor's
+guards**). Your peers still know it's you, since the session stays the same. What you send waits
+a few seconds while the new circuits are built.
 
 Settings only last until chat exits. Like everything else, they aren't written to disk unless
 you ask. `:install` saves them, and after that `:save` saves what you change, or turn
@@ -436,7 +464,7 @@ fetching it and who it has gone to in full. The reply to `:download`, `:show`, `
   your slots to the peer you're sending to come every few milliseconds while it runs. That's
   seconds instead of minutes, but anyone watching your network can see a burst about the size
   of the file (not what's in it). It's the sender's setting that makes it faster.
-- **Through the relays.** Tor and DHT members only meet on the Nostr relays, where slots are a
+- **Through the relays.** Tor and UDP members only meet on the Nostr relays, where slots are a
   few seconds apart. Every relay event is sealed to the same size, so each slot fits two chunks
   at no extra cost, about 12 KB a minute. Fast transfers can't burst there, but your slots to that peer
   come as often as the relays allow, about twice the normal rate, and the relays can see that.
@@ -552,6 +580,10 @@ not the key's public half, so neither file can be linked to the fingerprint peer
 
   [rooms]
   1 = ["book club", "K7M2Q9XRT4", "correct horse battery staple", "start"]
+
+  [open]
+  1 = ["K7M2Q9XRT4", "correct horse battery staple"]
+  2 = ["P3W8C6NHVA", "plum orbit lantern"]
   ```
 
   The keys are the names `:set` takes: the routing, Tor and relay ones in `[network]`, `nick`,
@@ -559,14 +591,16 @@ not the key's public half, so neither file can be linked to the fingerprint peer
   switch is `true` or `false`, `port` is a number, `relays` and `bridges` are lists, and the rest
   are strings, written the way `:set` takes them. A key chat can't use is skipped, and the console
   says so. `[rooms]` holds the rooms you `:keep`: each one's label, id and password, and `"start"`
-  for one joined as chat starts. The file is padded with zeros to a multiple of 4 KB, so its size
-  says little about how many rooms it keeps.
+  for one joined as chat starts. `[open]` holds the sessions open with `:set reopen on`: each
+  one's id and password. The file is padded with zeros to a multiple of 4 KB, so its size says
+  little about how many rooms it keeps.
 - `~/.config/chat/saves/NAME/key`: your signing key, what kind it is and where it came from.
 
 Only you can open the folder and the files (`0700`, `0600`). Each file is written in full and
 then renamed into place, so a crash can't leave half a file. A session's id and password are only
-saved for a room you `:keep` (see [Kept rooms](#kept-rooms)). Peers and files are never saved, and
-messages only with history on (see [History](#history)).
+saved for a room you `:keep`, or for each session open with `:set reopen on` (see
+[Kept rooms](#kept-rooms)). Peers and files are never saved, and messages only with history on
+(see [History](#history)).
 
 `settings` and `key` are the only files chat writes there (and the same two in `~/.config/chat`
 itself for the save called `default`, see [More than one save](#more-than-one-save)), and both are always sealed, as is
@@ -842,6 +876,19 @@ the rooms it keeps. Since nobody has to remember a kept room's password, a long 
 nothing. The decoy keeps none, and `:uninstall` deletes them with the rest. Only the full-screen UI
 keeps rooms, not `--simple`.
 
+**Reopening sessions.** `:set reopen on` (the **Reopen sessions** row) keeps every session you have
+open in the open save, and opens them all again when chat starts, or as soon as a save opens later
+on. The save follows what's open: a session you open is added, `:quit` takes one out, and turning
+the setting off empties the list. They're kept in the same sealed `settings` file, as its `[open]`
+table, apart from the rooms `Ctrl+J` lists. Calls aren't kept, since `:call` finds the day's room
+again. A session that can't open again (its port in use, say) stays kept for the next start. With
+autosave off, nothing is kept until `:save` saves the setting.
+
+With it on, `Ctrl+C` closes chat without leaving its sessions: each tells its peers it went offline
+(`off`) instead of saying bye, and they show `* alice went offline`. Peers on 0.5.1-beta.1 or older
+don't read that, so they're sent a bye and show you leaving, as before. `:quitall` still leaves every
+session, and empties the list.
+
 #### A shadow passphrase, and self-destruct
 
 `:set shadow on` (the **Shadow password** row on the settings page) gives the open save a second
@@ -1023,8 +1070,8 @@ Commit `minisign.pub`, and keep the secret key backed up and off GitHub.
 
 ```
 chat [--nick NAME] [--colour NAME|#HEX] [--identity age|pgp[:KEYFILE]] [--simple]
-     [--routing dht+nostr|dht|tor] [--nodht] [--noipv6] [--nolan]
-     [--noportmap] [--nonostr] [--nostr-always] [--relay wss://HOST ...]
+     [--routing udp|tor] [--nodht] [--noipv6] [--nolan] [--noportmap]
+     [--nostr off|fallback|always] [--relay wss://HOST ...]
      [--tor-launch auto|always|never] [--tor-path PATH] [--tor-socks HOST:PORT]
      [--tor-control HOST:PORT] [--verify-required] [--file-limit SIZE]
      [--fast-files] [--betas] [--nosandbox]
@@ -1078,7 +1125,7 @@ saved your settings, it starts on your sessions, and `Ctrl+S` opens the page.
 | `Ctrl+F` | the files page: what's been offered here and yours, to show, save or stop (`f` in NORMAL) |
 | `Ctrl+S` | settings |
 | `F1` | list all commands and keybinds (`?` in NORMAL, and `:help`, too) |
-| `Ctrl+C` | quit, after a `y`/`n` box saying what's open and what isn't saved (every session leaves cleanly first) |
+| `Ctrl+C` | quit, after a box saying what's open and what isn't saved: `Ctrl+C` again (or `y`) quits. Every session leaves cleanly first, or with `:set reopen on` goes offline, to open again as chat starts |
 | `Ctrl+L` | lock the screen until the save's passphrase, or a PIN, unlocks it (`:lock` too; see [Lock screen](#security)) |
 | `Ctrl+\` | panic: clear the screen and quit at once, without asking (see [Panic key](#security)) |
 
@@ -1119,7 +1166,7 @@ puts it on the command line.
 | `:call NICK` | open the room only you and a verified key can work out, which they open with `:call` too (see [Calls](#security)) |
 | `:keep [LABEL\|forget]` | keep this room in the open save, under LABEL (or its id), to join it again from `Ctrl+J`; `forget` lets it go (see [Kept rooms](#kept-rooms)) |
 | `:quit` (`:q`) | leave this session; quits when none is open |
-| `:quitall` (`:qa`) | leave every session and quit |
+| `:quitall` (`:qa`) | leave every session and quit, keeping none to reopen |
 | `:lock` | lock the screen until the save's passphrase, or a PIN, unlocks it (the lock key, `Ctrl+L`, does the same) |
 | `:set [NAME [VALUE]]` | change a setting (see below); on its own, opens the settings page (`Ctrl+S`) |
 | `:verify NICK [ok\|no]` | show a peer's verify code and identity fingerprint; `ok` once the code matches theirs, `no` if it doesn't |
@@ -1132,6 +1179,7 @@ puts it on the command line.
 | `:net` | network report and diagnosis |
 | `:port [N]` | show or change this session's UDP port (`0` picks a free one) |
 | `:copyid` | copy the session id to the clipboard |
+| `:newtor` | new Tor circuits and a new onion address for every session in Tor mode (see [Routing](#routing)) |
 | `:update` | install the latest release |
 | `:install [NAME]` | save your settings and signing key on this computer, after telling you what that leaves on disk; a new save asks for its name (blank picks a random one), and with NAME it's a save of that name (see [Installing](#installing)) |
 | `:save` | save what's in use now to the save that's open, after asking (`:install` if none is) |
@@ -1154,9 +1202,9 @@ after a name. Under each row's help, the page shows the `:set` command that does
 
 | Name | Values |
 | --- | --- |
-| `routing` | `dht`, `tor` |
+| `routing` | `udp`, `tor` |
 | `dht`, `dht6`, `portmap`, `lan` | `on`, `off` |
-| `nostr` | `on` (only while needed), `always`, `off` |
+| `nostr` | `fallback` (only while needed), `always`, `off` |
 | `relays` | up to 6 `wss://` URLs |
 | `torlaunch` | `auto`, `always`, `never` |
 | `torpath`, `torsocks`, `torcontrol` | a path, `HOST:PORT`, `HOST:PORT` |
@@ -1178,6 +1226,7 @@ after a name. Under each row's help, the page shows the `:set` command that does
 | `panicwipe` | `on` (the panic key deletes the open save too), `off` |
 | `panichistory` | `on` (the panic key writes the history kept first), `off` |
 | `sandbox` | `on` (Linux: once chat reaches the network, it can only write to the folders in your home that aren't hidden or on `PATH`, its own and the temporary folders, and only run tor and its transport programs), `off`; from the next start |
+| `updater` | `on` (Linux, with the sandbox on: `chat-updater`, a second process started just before the sandbox goes up, does `:update`'s work outside it), `off` (no second process, and `:update` sends you to `chat --update`); off stops it now, on starts it from the next start |
 | `verify` | `required` (nothing goes to a peer until you've compared its code), `optional` |
 | `filelimit` | the biggest file fetched without `anyway`: `8M`, `500K`, `1G` |
 | `fastfiles` | `on` (what you send goes in quick bursts; through the relays, as fast as they allow), `off` (chat's regular slots) |
@@ -1185,7 +1234,8 @@ after a name. Under each row's help, the page shows the `:set` command that does
 | `notify` | `all`, `mentions`, `none` |
 | `preview` | what a notification shows: `off` (only that a message came), `nick` (who from), `message` (who, and what); never the session |
 | `history` | `on` (each session's messages are kept, sealed in the save that's open, and everyone in it is told), `off` |
-| `net` | `normal`, `verbose` (every handshake packet, relay and Tor event) |
+| `reopen` | `on` (the sessions open are kept, sealed in the save that's open, and open again as chat starts; `Ctrl+C` then goes offline in them rather than leaving), `off` |
+| `net` | `normal`, `verbose` (every handshake packet, relay and Tor event), `off` (none of the network's news, such as lookups, relays and Tor starting up: only problems that keep a session from connecting) |
 | `port` | the UDP port for new sessions (`0` picks a free one) |
 | `betas` | `on` (`:update` installs betas too), `off` (only releases) |
 
@@ -1228,13 +1278,12 @@ Options given here override what `:install` saved, for that run.
 | --- | --- |
 | `--nick NAME` | Display name (random `swift-otter42` style name if left out) |
 | `--colour NAME\|#HEX` | Display colour (random by default; `--color` works too) |
-| `--routing` | `dht+nostr`, `dht` or `tor` (`direct+nostr` and `direct` still work), preset on the settings page (see [Routing](#routing)) |
+| `--routing` | `udp` or `tor`, preset on the settings page (see [Routing](#routing)) |
 | `--nodht` | Don't use the BitTorrent DHT (IPv4 and IPv6) |
 | `--noipv6` | Don't use the IPv6 DHT |
 | `--nolan` | Don't use LAN broadcast discovery |
 | `--noportmap` | Don't ask the router to forward a port |
-| `--nonostr` | No Nostr relay fallback |
-| `--nostr-always` | Stay on the relays all the time, not just while they're needed |
+| `--nostr` | The Nostr relays: `fallback` (only while they're needed, the default), `always` or `off` |
 | `--verify-required` | Send nothing to a peer until you've compared its verify code |
 | `--file-limit SIZE` | The biggest file fetched without `anyway` (default `8M`, up to `1G`) |
 | `--fast-files` | Send files in quick bursts instead of chat's regular slots (through the relays, as fast as they allow) |
