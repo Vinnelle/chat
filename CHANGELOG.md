@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.1-beta.2
 
 ### Added
 - The mouse wheel scrolls the chat, and the lists on pages and in boxes. chat asks the terminal to
