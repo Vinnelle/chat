@@ -369,6 +369,11 @@ typedef struct {
 
     ratchet_t old_send, old_recv;
     double old_until;
+    // The keys "k" and "mp" sign: ours of this session (c->keys moves on at our rekey, before p has
+    // re-handshaken), and both of the session before, which a record signed before the re-handshake
+    // can still arrive under.
+    uint8_t my_pub[PUB_LEN], prev_pub[PUB_LEN], prev_my_pub[PUB_LEN];
+    int prev_set;
 
     // Chunks of one of our files this peer asked for, sent in slots that would carry a nop, and when
     // it last asked or was sent one.

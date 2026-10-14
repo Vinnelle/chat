@@ -19,6 +19,13 @@
   programs. A key's sequence split between two reads (Windows passes input on a few dozen
   characters at a time) waits for the rest instead of ending up as text.
 
+### Fixed
+- A peer whose key you verified could be warned about as signing "with a key with an invalid
+  signature" for a moment around a rekey, and show as verified again soon after. Its key hadn't
+  changed: the signature it sends with it was checked against our newest session key, not the one
+  of the session it came in. It's checked against the session it was made for now, or the one just
+  before a re-handshake, and signed for the session it goes out in.
+
 ## 0.5.1-beta.2
 
 ### Added

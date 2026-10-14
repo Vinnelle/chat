@@ -575,6 +575,24 @@ static ratchet_t *send_chain_for(peer_t *p) {
     return &p->send_chain;
 }
 
+// The session keys, ours and p's, of the chain p's records are sealed on now, for "k" and "mp" to sign.
+static void signed_pubs(peer_t *p, const uint8_t **mine, const uint8_t **theirs) {
+    int prev = send_chain_for(p) == &p->old_send;
+    *mine = prev ? p->prev_my_pub : p->my_pub;
+    *theirs = prev ? p->prev_pub : p->pub;
+}
+
+typedef int (*session_sig_fn)(const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *,
+                              const uint8_t *);
+
+// 0 if sig by key signs this session with p, or the one before its last re-handshake: a record
+// signed then can still arrive, on either chain, while each side's rekey reaches the other.
+static int check_session_sig(const chat_t *c, const peer_t *p, session_sig_fn verify, const uint8_t *key,
+                             const uint8_t *sig) {
+    if (verify(key, sig, p->pub, p->id, p->my_pub, c->my_id) == 0) return 0;
+    return p->prev_set && verify(key, sig, p->prev_pub, p->id, p->prev_my_pub, c->my_id) == 0 ? 0 : -1;
+}
+
 // Seals text as the chain's next frame, with a body of body bytes (a UDP cell, or a relay frame)
 // unless it needs more.
 static int frame_on_chain(ratchet_t *chain, const char *text, size_t body, uint8_t *frame, size_t frame_cap,
@@ -771,7 +789,9 @@ static void build_k_message(chat_t *c, peer_t *p, char *out, size_t out_cap) {
         idtype = c->identity_source;
         hex_encode(c->identity.pub, ID_SIGN_PUB_LEN, idpubhex);
         uint8_t sig[ID_SIGN_LEN];
-        identity_sign(&c->identity, c->keys.pub, c->my_id, p->pub, p->id, sig);
+        const uint8_t *mine, *theirs;
+        signed_pubs(p, &mine, &theirs);
+        identity_sign(&c->identity, mine, c->my_id, theirs, p->id, sig);
         hex_encode(sig, ID_SIGN_LEN, sighex);
     }
     // After the logging flag, features this build has that older ones don't: "r" announces rekeys,
@@ -798,7 +818,9 @@ static void send_build(chat_t *c, peer_t *p) {
 // "mp": this session's keys, signed with the key we showed in the room we moved here from.
 static void send_move_proof(chat_t *c, peer_t *p) {
     uint8_t sig[ID_SIGN_LEN];
-    move_sign(&c->moved_key, c->keys.pub, c->my_id, p->pub, p->id, sig);
+    const uint8_t *mine, *theirs;
+    signed_pubs(p, &mine, &theirs);
+    move_sign(&c->moved_key, mine, c->my_id, theirs, p->id, sig);
     char sighex[ID_SIGN_LEN * 2 + 1]; hex_encode(sig, ID_SIGN_LEN, sighex);
     char msg[8 + ID_SIGN_LEN * 2];
     snprintf(msg, sizeof msg, "mp\t%s", sighex);
@@ -878,8 +900,12 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
     slot->ok = 0;
     slot->keygen = c->keygen;
     memcpy(slot->pub, their_pub, PUB_LEN);
+    memcpy(slot->my_pub, c->keys.pub, PUB_LEN);
     memcpy(slot->kem_pub, their_kem_pub, KEM_PUB_LEN);
     if (rejoin) {
+        memcpy(slot->prev_pub, carry.pub, PUB_LEN);
+        memcpy(slot->prev_my_pub, carry.my_pub, PUB_LEN);
+        slot->prev_set = 1;
         memcpy(slot->nick, carry.nick, sizeof slot->nick);
         memcpy(slot->nick_skel, carry.nick_skel, sizeof slot->nick_skel);
         memcpy(slot->color, carry.color, 3);
@@ -1435,7 +1461,7 @@ static void check_came_with(chat_t *c, peer_t *p) {
     if (!p->move_sig_set || p->code_ok != CODE_NOT_COMPARED) return;
     for (int i = 0; i < MAX_PEERS; i++) {
         if (!c->came_with[i].used
-            || move_verify(c->came_with[i].pub, p->move_sig, p->pub, p->id, c->keys.pub, c->my_id) != 0) continue;
+            || check_session_sig(c, p, move_verify, c->came_with[i].pub, p->move_sig) != 0) continue;
         p->code_ok = CODE_SAME;
         p->came_with = i + 1;
         if (p->announced) { tell_came_with(c, p); file_offer_all(c, p); }
@@ -1523,7 +1549,7 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
                 p->identity_source = (identity_source_t)idtype;
                 memcpy(p->identity_pub, idpub, ID_SIGN_PUB_LEN);
                 identity_fingerprint(idpub, p->identity_fp);
-                p->identity_state = identity_verify(idpub, sig, p->pub, p->id, c->keys.pub, c->my_id) == 0
+                p->identity_state = check_session_sig(c, p, identity_verify, idpub, sig) == 0
                                      ? VERIFY_VERIFIED : VERIFY_FAILED;
             } else {
                 p->identity_source = IDENT_NONE; p->identity_state = VERIFY_UNVERIFIED;

@@ -2886,6 +2886,17 @@ static void test_trust(double *t) {
     RUN_UNTIL(t, 10, log_a.known_keys > known);
     CHECK(pb->code_ok == 1 && pb->trust == 1, "bob's verified key still needed comparing");
 
+    // Both rekey with bob's k on its way: it signs the session it was sent in, not a changed key.
+    warned = log_a.key_warnings;
+    uint32_t gen_a = A.keygen, gen_b = B.keygen;
+    chat_set_identity(&B, IDENT_AGE, &id_new);
+    A.next_rekey = B.next_rekey = 0;
+    RUN_UNTIL(t, 90, A.keygen == gen_a + 1 && B.keygen == gen_b + 1 && rekeyed(&A, "bob") && rekeyed(&B, "alice"));
+    RUN_FOR(t, K_SENDS * K_EVERY);
+    CHECK(log_a.key_warnings == warned && pb->identity_state == VERIFY_VERIFIED && pb->trust == 1,
+          "a rekey with bob's k on its way warned about his key (%d warnings, state %d, trust %d)",
+          log_a.key_warnings - warned, pb->identity_state, pb->trust);
+
     chat_run_command(&A, "verified forget bob");
     CHECK(trust_count() == 0, "forgetting bob left %d keys", trust_count());
     chat_set_identity(&B, IDENT_NONE, NULL);
