@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.1-beta.3
 
 ### Added
 - The mouse wheel scrolls the console when it's over it, a line at a time, and the chat anywhere
