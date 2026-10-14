@@ -20,7 +20,8 @@ static const struct { const char *section, *keys, *what; } HELP_KEYS[] = {
     { NULL,          "ctrl+t",          "show or hide the chat" },
     { NULL,          "pgup  pgdn",      "scroll the chat back / forward" },
     { NULL,          "up  down",        "scroll the chat by a message" },
-    { NULL,          "mouse wheel",     "scroll the chat, or the console under it; shift+drag selects text" },
+    { NULL,          "mouse wheel",     "scroll what it's over: chat, console, sessions, peers" },
+    { NULL,          "shift+drag",      "select text with the mouse" },
     { NULL,          "f1",              "this page" },
     { "Typing",      "enter",           "send" },
     { NULL,          "/",               "on an empty line: a command (what isn't one stays text)" },
@@ -1048,7 +1049,7 @@ static void scroll_chat(int dir, int step) {
 // The wheel over the console scrolls it by a line, as far as the last frame showed it could go.
 static void scroll_console(int dir) {
     int *scroll = g_app.selected ? &g_app.selected->console_scroll : &g_app.log_scroll;
-    int most = tui_console_most();
+    int most = tui_area_most(TUI_AREA_CONSOLE);
     int v = dir == 0 ? 0 : (*scroll < most ? *scroll : most) + dir;
     *scroll = v < 0 ? 0 : v > most ? most : v;
     g_app.dirty = 1;
@@ -1129,8 +1130,16 @@ void handle_key(const tui_key_t *key) {
             break;
     }
 
-    if (key->wheel && input->mode != TUI_IMODE_COMMAND && tui_over_console(key->row, key->col)) {
+    // The wheel scrolls the console, or the sessions or peers while they don't all fit, if it's over
+    // them. Anywhere else it's Up and Down.
+    tui_area_t area = key->wheel && input->mode != TUI_IMODE_COMMAND ? tui_area_at(key->row, key->col) : TUI_AREA_NONE;
+    if (area == TUI_AREA_CONSOLE) {
         scroll_console(key->type == TUI_KEY_UP ? 1 : -1);
+        return;
+    }
+    if (area != TUI_AREA_NONE) {
+        tui_scroll_list(area, key->type == TUI_KEY_UP ? -1 : 1);
+        g_app.dirty = 1;
         return;
     }
 

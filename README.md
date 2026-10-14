@@ -1088,7 +1088,9 @@ box at the bottom.
 In the chat, a symbol after a name stands for what chat adds to it: `◆` you, `✓` code
 compared, `?` code not compared, `✗` codes differ. Under each peer, the sidebar spells out the
 symbols that apply to them, with `h` for a peer keeping a history and `!` for a modified
-client. When the sidebar is too short for that, the symbols go next to each name instead.
+client. When the sidebar is too short for that, the symbols go next to each name instead. With
+more sessions or peers than fit, those lists scroll with the mouse wheel, a row says how many more
+are above or below, and the sessions keep the selected one in view as you switch.
 
 A faint `•` after a message of yours means every peer it went to has it: each acked it. Acks
 were always sent, so nothing new goes on the network. If a peer still hasn't after the last try,
@@ -1121,7 +1123,7 @@ saved your settings, it starts on your sessions, and `Ctrl+S` opens the page.
 | `Tab` / `Shift+Tab` | next / previous session (`j` / `k` in NORMAL too) |
 | `PgUp` / `PgDn` | scroll the chat back / forward (`Ctrl+U` / `Ctrl+D` in NORMAL, `G` the newest) |
 | `Up` / `Down` | scroll the chat by a message (they move through lists elsewhere) |
-| mouse wheel | scroll the console a line at a time when it's over it, otherwise the chat by a message (or a list). chat has the terminal report the mouse, so hold `Shift` to select text (`Option` in iTerm2) |
+| mouse wheel | scroll what it's over: the console a line at a time, the sidebar's sessions or peers when there are more than fit, otherwise the chat by a message (or a list). chat has the terminal report the mouse, so hold `Shift` to select text (`Option` in iTerm2) |
 | `Ctrl+B` / `Ctrl+O` / `Ctrl+T` | toggle sidebar / console / chat pane (`s` / `c` / `C` in NORMAL) |
 | `Ctrl+F` | the files page: what's been offered here and yours, to show, save or stop (`f` in NORMAL) |
 | `Ctrl+S` | settings |

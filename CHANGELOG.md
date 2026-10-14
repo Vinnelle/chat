@@ -7,6 +7,10 @@
   else. While it's scrolled back, the console's title says how many newer lines are below, and it
   stays on the lines in view as new ones come. `G` in NORMAL goes back to the newest line as well
   as the newest message.
+- The sidebar's sessions and peers scroll when there are more than fit, with the mouse wheel over
+  them, and a row says how many more are above or below. The sessions follow the selected one as
+  `Tab`, `Shift+Tab` and `j`/`k` switch, and the network section stays at the bottom instead of
+  being pushed off.
 
 ### Changed
 - chat has the terminal report the mouse (modes 1000 and 1006) instead of sending the wheel as Up

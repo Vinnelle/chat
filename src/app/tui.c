@@ -35,6 +35,7 @@
 #define G_ELLIPSIS "\xe2\x80\xa6"  // …
 #define G_LSAQ    "\xe2\x80\xb9"   // ‹
 #define G_RSAQ    "\xe2\x80\xba"   // ›
+#define G_UP      "\xe2\x86\x91"   // ↑
 #define G_DOWN    "\xe2\x86\x93"   // ↓
 #define G_BLOCK   "\xe2\x96\x88"   // █
 #define G_UPPER   "\xe2\x96\x80"   // ▀
@@ -1590,48 +1591,49 @@ static void chat_title(span_t *t, const tui_view_t *v, int sidebar_shown) {
 #define CHAT_ROWS_MIN 4
 #define CONSOLE_TITLE "console"
 
-// Where the console is in the last chat frame, its edges included, and how far back it can scroll
-// there, for the mouse wheel.
-static rect_t g_console_at;
-static int g_console_most;
+// Where each area is in the last chat frame, its edges or heading included, and how far it can
+// scroll there, for the mouse wheel.
+static rect_t g_area_at[TUI_AREA_N];
+static int g_area_most[TUI_AREA_N];
 
-int tui_over_console(int row, int col) {
-    const rect_t *r = &g_console_at;
-    return row >= r->top && row < r->top + r->h && col >= r->left && col < r->left + r->w;
+tui_area_t tui_area_at(int row, int col) {
+    for (int a = TUI_AREA_NONE + 1; a < TUI_AREA_N; a++) {
+        const rect_t *r = &g_area_at[a];
+        if (row >= r->top && row < r->top + r->h && col >= r->left && col < r->left + r->w) return (tui_area_t)a;
+    }
+    return TUI_AREA_NONE;
 }
 
-int tui_console_most(void) { return g_console_most; }
+int tui_area_most(tui_area_t a) { return a > TUI_AREA_NONE && a < TUI_AREA_N ? g_area_most[a] : 0; }
 
 // The console scrolls back until its oldest line is at the top, laid out as draw_lines() does.
 static int console_skip(const tui_scrollback_t *sb, int scroll, int w, int nrows) {
-    int pre = w >= TIME_MIN_W ? TIME_COLS : 0, rows = 0;
+    int pre = w >= TIME_MIN_W ? TIME_COLS : 0, rows = 0, *most = &g_area_most[TUI_AREA_CONSOLE];
     if (pre > w - 1) pre = w - 1 > 0 ? w - 1 : 0;
-    g_console_most = 0;
+    *most = 0;
     for (int k = sb->count - 1; k >= 0; k--) {
         const char *body = SB_AT(sb, k)->text;
         if (body[0] == '*' && body[1] == ' ') body += 2;
         size_t off[WRAP_ROWS_MAX], len[WRAP_ROWS_MAX];
         rows += wrap_rows(body, w - pre, w - pre, off, len, WRAP_ROWS_MAX);
         if (rows > nrows) {
-            g_console_most = k + 1 < sb->count ? k + 1 : k;
+            *most = k + 1 < sb->count ? k + 1 : k;
             break;
         }
     }
-    return scroll < g_console_most ? scroll : g_console_most;
+    return scroll < *most ? scroll : *most;
 }
 
 // The console above the chat, sharing an edge, in one box. Either one fills it if shown alone.
 static void draw_main(wbuf_t *w, rect_t m, int boxed, int sidebar_shown, const tui_scrollback_t *sb,
                       const tui_scrollback_t *console, const tui_view_t *v) {
     int show_con = console && v->console, show_chat = v->chat;
-    g_console_at = (rect_t){ 0, 0, 0, 0 };
-    g_console_most = 0;
     if (!boxed) {
         grid_reset(&g_grid, m.h, m.w);
         if (show_chat) draw_chat_pane(&g_grid, 0, m.h, sb, v);
         else if (show_con) {
             draw_lines(&g_grid, 0, m.h, console, console_skip(console, v->console_scroll, m.w, m.h), 1, NULL);
-            g_console_at = m;
+            g_area_at[TUI_AREA_CONSOLE] = m;
         } else draw_center(&g_grid, 0, m.h, HIDDEN_HINT, NULL);
         grid_emit(w, &g_grid, m.top, m.left, 0);
         return;
@@ -1679,7 +1681,7 @@ static void draw_main(wbuf_t *w, rect_t m, int boxed, int sidebar_shown, const t
         draw_lines(&g_grid, 0, g_grid.rows, console, kskip, 1, NULL);
         grid_emit(w, &g_grid, row, m.left + 1, 1);
         row += g_grid.rows;
-        g_console_at = (rect_t){ m.top, m.left, row - m.top, m.w };
+        g_area_at[TUI_AREA_CONSOLE] = (rect_t){ m.top, m.left, row - m.top, m.w };
         if (show_chat) edge(w, row++, m.left, m.w, G_LT, G_RT, bs, &ctitle, &clock);
     }
     if (show_chat || !show_con) {
@@ -1692,7 +1694,62 @@ static void draw_main(wbuf_t *w, rect_t m, int boxed, int sidebar_shown, const t
 
 // ---- the sidebar: sessions, the peers in the selected one, and how it reaches them ----
 
-enum { L_BLANK, L_HEAD_SESSIONS, L_NO_SESSIONS, L_SESSION, L_HEAD_PEERS, L_PEER, L_PEER_MARKS, L_HEAD_NET, L_NET };
+enum { L_BLANK, L_HEAD_SESSIONS, L_NO_SESSIONS, L_SESSION, L_HEAD_PEERS, L_PEER, L_PEER_MARKS, L_HEAD_NET, L_NET,
+       L_ABOVE, L_BELOW };
+
+// A list with more entries than rows scrolls, with a row saying how many are above and one saying
+// how many are below while there are any, given LIST_ROWS_MIN rows for them.
+#define LIST_ROWS_MIN 3
+
+typedef struct { int top, shown, above, below, most; } list_view_t;
+
+static list_view_t list_view(int n, int rows, int top) {
+    list_view_t v = { 0, n < rows ? n : rows, 0, 0, 0 };
+    if (v.shown < 0) v.shown = 0;
+    if (n <= rows || rows <= 0) return v;
+    int marks = rows >= LIST_ROWS_MIN;
+    v.most = marks ? n - rows + 1 : n - rows;
+    v.top = top < 0 ? 0 : top > v.most ? v.most : top;
+    v.above = marks && v.top > 0;
+    v.shown = rows - v.above;
+    if (marks && v.top + v.shown < n) {
+        v.below = 1;
+        v.shown--;
+    }
+    return v;
+}
+
+// Scrolled so entry sel is in view.
+static list_view_t list_view_at(int n, int rows, int top, int sel) {
+    list_view_t v = list_view(n, rows, top);
+    if (sel < 0 || sel >= n) return v;
+    if (sel < v.top) v = list_view(n, rows, sel);
+    while (sel >= v.top + v.shown && v.top < v.most) v = list_view(n, rows, v.top + 1);
+    return v;
+}
+
+// Each list's two rows, the entries split between them: either gets all it needs while that leaves
+// the other half, otherwise they share them evenly.
+static void split_rows(int rows, int a, int b, int *ra, int *rb) {
+    if (rows < 0) rows = 0;
+    int half = rows / 2;
+    if (a + b <= rows) { *ra = a; *rb = b; }
+    else if (a <= rows - half) { *ra = a; *rb = rows - a; }
+    else if (b <= half) { *ra = rows - b; *rb = b; }
+    else { *ra = rows - half; *rb = half; }
+}
+
+static int list_cramped(int rows, int n) { return rows < n && rows < LIST_ROWS_MIN; }
+
+// Where the sessions and the peers are scrolled to, the selected session they're for, and the rows
+// the sessions had.
+static int g_list_top[TUI_AREA_N], g_list_sel = -1, g_list_rows = -1;
+
+void tui_scroll_list(tui_area_t a, int dir) {
+    if (a != TUI_AREA_SESSIONS && a != TUI_AREA_PEERS) return;
+    int v = g_list_top[a] + dir;
+    g_list_top[a] = v < 0 ? 0 : v > g_area_most[a] ? g_area_most[a] : v;
+}
 
 static void heading(pen_t *p, const char *title, int count) {
     ptext(p, S_FAINT, title);
@@ -1843,20 +1900,54 @@ static void draw_sidebar(wbuf_t *w, rect_t r, const tui_session_row_t *sessions,
     // before the network.
     int room = r.w - 4, under = 0;
     for (int i = 0; i < n_peers; i++) under += peer_mark_rows(&peers[i], room);
-    int spelled = 1 + (n_sessions > 0 ? n_sessions : 1) + 2 + n_peers + under + (n_net > 0 ? 2 + n_net : 0) <= h;
+    int s_need = n_sessions > 0 ? n_sessions : 1, p_head = n_peers > 0 ? 2 : 0, net_rows = n_net > 0 ? 2 + n_net : 0;
+    int spelled = 1 + s_need + 2 + n_peers + under + net_rows <= h;
+    // Too many sessions or peers to fit, and they scroll. Rather than lists too short for that, the
+    // network goes.
+    int s_rows, p_rows;
+    split_rows(h - 1 - p_head - net_rows, s_need, n_peers, &s_rows, &p_rows);
+    if (net_rows && (list_cramped(s_rows, s_need) || list_cramped(p_rows, n_peers))) {
+        net_rows = 0;
+        split_rows(h - 1 - p_head, s_need, n_peers, &s_rows, &p_rows);
+    }
+    // The sessions follow the selected one as it changes (there's no clicking on one), and when they
+    // have more rows or fewer.
+    if (selected != g_list_sel) {
+        g_list_sel = selected;
+        g_list_top[TUI_AREA_PEERS] = 0;
+        g_list_rows = -1;
+    }
+    if (s_rows != g_list_rows) {
+        g_list_rows = s_rows;
+        g_list_top[TUI_AREA_SESSIONS] = list_view_at(n_sessions, s_rows, g_list_top[TUI_AREA_SESSIONS], selected).top;
+    }
+    list_view_t sv = list_view(n_sessions, s_rows, g_list_top[TUI_AREA_SESSIONS]);
+    list_view_t pv = list_view(n_peers, p_rows, g_list_top[TUI_AREA_PEERS]);
+    g_list_top[TUI_AREA_SESSIONS] = sv.top;
+    g_list_top[TUI_AREA_PEERS] = pv.top;
+    g_area_most[TUI_AREA_SESSIONS] = sv.most;
+    g_area_most[TUI_AREA_PEERS] = pv.most;
+
     ADD(L_HEAD_SESSIONS, 0);
     if (n_sessions == 0) ADD(L_NO_SESSIONS, 0);
-    for (int i = 0; i < n_sessions; i++) ADD(L_SESSION, i);
+    if (sv.above) ADD(L_ABOVE, sv.top);
+    for (int i = sv.top; i < sv.top + sv.shown; i++) ADD(L_SESSION, i);
+    if (sv.below) ADD(L_BELOW, n_sessions - sv.top - sv.shown);
+    if (sv.most > 0) g_area_at[TUI_AREA_SESSIONS] = (rect_t){ r.top + 1, r.left, n, r.w };
     if (n_peers > 0) {
         ADD(L_BLANK, 0);
+        int head = n;
         ADD(L_HEAD_PEERS, 0);
-        for (int i = 0; i < n_peers; i++) {
+        if (pv.above) ADD(L_ABOVE, pv.top);
+        for (int i = pv.top; i < pv.top + pv.shown; i++) {
             ADD(L_PEER, i);
             int rows = spelled ? peer_mark_rows(&peers[i], room) : 0;
             for (int j = 0; j < rows; j++) ADD(L_PEER_MARKS, i * PEER_MARKS_MAX + j);
         }
+        if (pv.below) ADD(L_BELOW, n_peers - pv.top - pv.shown);
+        if (pv.most > 0) g_area_at[TUI_AREA_PEERS] = (rect_t){ r.top + 1 + head, r.left, n - head, r.w };
     }
-    if (n_net > 0) {
+    if (net_rows) {
         // At the bottom when there's room, otherwise straight after the rest.
         int start = h - n_net - 1;
         if (start < n + 1) start = n + 1;
@@ -1884,6 +1975,13 @@ static void draw_sidebar(wbuf_t *w, rect_t r, const tui_session_row_t *sessions,
             case L_PEER:          peer_line(&p, &peers[a], spelled); break;
             case L_PEER_MARKS:    peer_marks_line(&p, &peers[a / PEER_MARKS_MAX], a % PEER_MARKS_MAX); break;
             case L_HEAD_NET:      heading(&p, "NETWORK", -1); break;
+            case L_ABOVE:
+            case L_BELOW: {
+                char t[32];
+                snprintf(t, sizeof t, "%s %d more", k == L_ABOVE ? G_UP : G_DOWN, a);
+                ptext(&p, S_FAINT, t);
+                break;
+            }
             case L_NET:
                 ptext(&p, S_FAINT, net[a].label);
                 pspace(&p, lw + 2);
@@ -2242,6 +2340,8 @@ void tui_render(int rows, int cols,
     int boxed;
     chat_layout(rows, cols, view, bar, &side, &main_r, &input, &boxed);
     g_input_h = input.h;
+    memset(g_area_at, 0, sizeof g_area_at);
+    memset(g_area_most, 0, sizeof g_area_most);
 
     begin_frame(&w);
     if (side.w > 0) draw_sidebar(&w, side, sessions, n_sessions, selected, peers, n_peers, net, n_net);

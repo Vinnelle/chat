@@ -362,10 +362,18 @@ void tui_render(int rows, int cols,
 // has to be drawn again.
 int tui_render_bar(int rows, int cols, const tui_view_t *view, const tui_bar_t *bar, int color_enabled);
 
-// Whether row and col (from 1) are on the console in the last chat frame drawn, and how far back
-// it could scroll there: until its oldest line is at the top.
-int tui_over_console(int row, int col);
-int tui_console_most(void);
+// What the mouse wheel scrolls by itself on the chat screen: the console, and the sidebar's sessions
+// and peers while there are more than fit.
+typedef enum { TUI_AREA_NONE = 0, TUI_AREA_CONSOLE, TUI_AREA_SESSIONS, TUI_AREA_PEERS, TUI_AREA_N } tui_area_t;
+
+// The area row and col (from 1) are on in the last chat frame drawn, and how far it could scroll
+// there (the console back, until its oldest line is at the top).
+tui_area_t tui_area_at(int row, int col);
+int tui_area_most(tui_area_t a);
+
+// Scrolls the sessions or the peers by dir rows, down for more than 0. The sessions follow the
+// selected one when it changes, and the peers go back to the top.
+void tui_scroll_list(tui_area_t a, int dir);
 
 // A frame that's the same as the last one isn't sent again. After anything that may have changed
 // the screen without chat knowing (a resize), this forces the next one to be sent.
