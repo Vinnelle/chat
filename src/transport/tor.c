@@ -172,6 +172,12 @@ static void target_id(const char *host, uint8_t id[TARGET_ID_LEN]) {
     memcpy(id, h, TARGET_ID_LEN);
 }
 
+static int find_target(const tor_t *t, addr_t to) {
+    for (int i = 0; i < MAX_TARGETS; i++)
+        if (t->targets[i].used && memcmp(t->targets[i].id, to.ip, TARGET_ID_LEN) == 0) return i;
+    return -1;
+}
+
 static int target_has_stream(const tor_t *t, int target) {
     for (int i = 0; i < MAX_STREAMS; i++)
         if (t->streams[i] && t->streams[i]->target == target) return 1;
@@ -672,8 +678,9 @@ static void stream_fail(tor_t *t, int i, double now, const char *why) {
     if (s->target >= 0) {
         target_t *g = &t->targets[s->target];
         g->next_try = now + backoff(g->fails, TARGET_RETRY_BASE, TARGET_RETRY_SHIFT, TARGET_RETRY_MAX);
+        // Room slots nobody publishes fail every time they're tried, so only the first is news.
+        if (!g->room || g->fails == 0) logf_(t, 1, "* tor: stream to %.16s... %s", g->host, why);
         g->fails++;
-        logf_(t, 1, "* tor: stream to %.16s... %s", g->host, why);
     }
     close_stream(t, i);
 }
@@ -848,9 +855,7 @@ int tor_send(tor_t *t, addr_t to, const uint8_t *data, size_t len, double now) {
         if (idx < 0 || s->state == S_OPEN) idx = i;
     }
     if (idx < 0) {
-        int target = -1;
-        for (int i = 0; i < MAX_TARGETS; i++)
-            if (t->targets[i].used && memcmp(t->targets[i].id, to.ip, TARGET_ID_LEN) == 0) { target = i; break; }
+        int target = find_target(t, to);
         if (target < 0) return -1;
         t->targets[target].last_used = now;
         idx = open_stream(t, target, now);
@@ -866,6 +871,19 @@ int tor_send(tor_t *t, addr_t to, const uint8_t *data, size_t len, double now) {
     s->tx_len += len;
     if (s->state == S_OPEN && idx != t->busy) stream_flush(t, idx, now);
     return 0;
+}
+
+int tor_can_open(const tor_t *t, addr_t to, double now) {
+    if (to.kind != ADDR_TOR) return 0;
+    for (int i = 0; i < MAX_STREAMS; i++)
+        if (t->streams[i] && memcmp(t->streams[i]->id, to.ip, TARGET_ID_LEN) == 0) return 0;
+    int target = find_target(t, to);
+    return target >= 0 && now >= t->targets[target].next_try;
+}
+
+int tor_failing(const tor_t *t, addr_t to) {
+    int target = find_target(t, to);
+    return target >= 0 && t->targets[target].fails > 0;
 }
 
 int tor_target(tor_t *t, const char *onion, addr_t *out) {

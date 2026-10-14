@@ -29,7 +29,7 @@ static void ui_warn(chat_t *c, const char *fmt, ...);
 static int check_trust(chat_t *c, peer_t *p);
 static void net_report(chat_t *c);
 static void module_log(void *ctx, int kind, const char *msg);
-static void knock_room_slots(chat_t *c);
+static void knock_room_slots(chat_t *c, double now);
 
 static const char *const DEFAULT_RELAYS[] = {
     "wss://relay.primal.net",
@@ -720,11 +720,16 @@ static void run_slot(chat_t *c, peer_t *p) {
     crypto_wipe(text, sizeof text);
 }
 
-static void add_candidate(chat_t *c, addr_t a) {
-    if (a.port == 0) return;
-    for (int i = 0; i < c->n_self_addrs; i++) if (addr_equal(c->self_addrs[i], a)) return;
+// One of our own addresses, or one a peer (connected or still handshaking) is at, so not worth a hi.
+static int known_addr(const chat_t *c, addr_t a) {
+    for (int i = 0; i < c->n_self_addrs; i++) if (addr_equal(c->self_addrs[i], a)) return 1;
     for (int i = 0; i < c->peer_hi; i++)
-        if (c->peers[i].used && addr_equal(c->peers[i].addr, a)) return;
+        if (c->peers[i].used && addr_equal(c->peers[i].addr, a)) return 1;
+    return 0;
+}
+
+static void add_candidate(chat_t *c, addr_t a) {
+    if (a.port == 0 || known_addr(c, a)) return;
     int same_host = 0;
     for (int i = 0; i < MAX_CANDS; i++) {
         if (!c->cands[i].used) continue;
@@ -2223,9 +2228,6 @@ static void tor_tick(chat_t *c, double now) {
     if (!c->tor_hosting && (c->ever_connected || now - c->start > TOR_HOST_AFTER)) {
         c->tor_hosting = 1;
         tor_host_room(c->tor, -1);
-        // Trying our own slot from now on would only reach ourselves.
-        addr_t mine = tor_room_target(c->tor, tor_hosted_slot(c->tor));
-        for (int i = 0; i < MAX_CANDS; i++) if (c->cands[i].used && addr_equal(c->cands[i].addr, mine)) c->cands[i].used = 0;
     }
     if (c->tor_republish_at > 0.0 && now >= c->tor_republish_at) {
         c->tor_republish_at = 0.0;
@@ -2366,7 +2368,7 @@ void chat_tick(chat_t *c, double now) {
     if (now >= c->next_alive) {
         c->next_alive = now + KEEPALIVE + jitter(KEEPALIVE_SPREAD);
         for (int i = 0; i < c->n_static; i++) add_candidate(c, c->static_peers[i]);
-        if (c->tor) knock_room_slots(c);
+        if (c->tor) knock_room_slots(c, now);
     }
     if (c->lan_sock != SOCK_INVALID && now >= c->next_lan) {
         c->next_lan = now + LAN_EVERY + jitter(LAN_SPREAD);
@@ -4325,10 +4327,15 @@ static void module_deliver(void *ctx, const uint8_t *data, size_t len, addr_t fr
 }
 
 // The room slots someone else may publish. Always worth a hi, since members publishing different
-// slots only find each other by trying them.
-static void knock_room_slots(chat_t *c) {
-    for (int i = 0; i < TOR_ROOM_SLOTS; i++)
-        if (i != tor_hosted_slot(c->tor)) add_candidate(c, tor_room_target(c->tor, i));
+// slots only find each other by trying them. Each hi opens a stream: Tor's backoff paces the slots
+// nobody publishes, and a stream that's open already took a hi, which either got an answer or won't.
+static void knock_room_slots(chat_t *c, double now) {
+    for (int i = 0; i < TOR_ROOM_SLOTS; i++) {
+        addr_t a = tor_room_target(c->tor, i);
+        if (i == tor_hosted_slot(c->tor) || known_addr(c, a) || !tor_can_open(c->tor, a, now)) continue;
+        if (c->net_verbose && !tor_failing(c->tor, a)) ui_print(c, "* hi -> room slot %d", i);
+        send_room(c, c->hi_msg, a, c->sock);
+    }
 }
 
 static void start_dht(chat_t *c) {
@@ -4499,7 +4506,7 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
         c->started = c->tor != NULL;
         if (!c->started) c->start_error = "could not set up Tor";
         if (c->tor && c->created) { tor_host_room(c->tor, 0); c->tor_hosting = 1; }
-        if (c->tor) { knock_room_slots(c); start_nostr(c); }
+        if (c->tor) { knock_room_slots(c, now_seconds()); start_nostr(c); }
     } else {
         // Without the main socket the caller abandons this session, so nothing else is started.
         c->sock = net_udp_open(o->port, NET_DUAL, &c->port);

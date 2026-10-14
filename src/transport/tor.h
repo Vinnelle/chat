@@ -64,6 +64,11 @@ int tor_sockets(const tor_t *t, sock_t *out, int max);
 
 // Queues a datagram. Sending to a target with no stream opens one through Tor.
 int tor_send(tor_t *t, addr_t to, const uint8_t *data, size_t len, double now);
+// Whether a datagram for to would open a new stream now: there's none to it, and it isn't waiting
+// out a failure.
+int tor_can_open(const tor_t *t, addr_t to, double now);
+// Whether the last stream to to failed, with none opened since.
+int tor_failing(const tor_t *t, addr_t to);
 
 // The address to send to for the onion service at onion (56 characters, no ".onion").
 // Returns -1 for a malformed address, or our own.
