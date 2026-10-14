@@ -19,7 +19,8 @@ static const struct { const char *section, *keys, *what; } HELP_KEYS[] = {
     { NULL,          "ctrl+o",          "show or hide the console" },
     { NULL,          "ctrl+t",          "show or hide the chat" },
     { NULL,          "pgup  pgdn",      "scroll the chat back / forward" },
-    { NULL,          "up  down",        "scroll the chat by a message (the mouse wheel too)" },
+    { NULL,          "up  down",        "scroll the chat by a message" },
+    { NULL,          "mouse wheel",     "scroll the chat, or the console under it; shift+drag selects text" },
     { NULL,          "f1",              "this page" },
     { "Typing",      "enter",           "send" },
     { NULL,          "/",               "on an empty line: a command (what isn't one stays text)" },
@@ -30,7 +31,7 @@ static const struct { const char *section, *keys, *what; } HELP_KEYS[] = {
     { NULL,          "h  l  0  $  x",   "move, to the start / end, delete" },
     { NULL,          "j  k",            "next / previous session" },
     { NULL,          "ctrl+u  ctrl+d",  "scroll the chat back / forward" },
-    { NULL,          "G",               "back to the newest message" },
+    { NULL,          "G",               "back to the newest message and console line" },
     { NULL,          "s  c  C",         "show or hide the sidebar / console / chat" },
     { NULL,          "f",               "the files" },
     { NULL,          ":  /",            "the command line" },
@@ -1044,6 +1045,15 @@ static void scroll_chat(int dir, int step) {
     g_app.dirty = 1;
 }
 
+// The wheel over the console scrolls it by a line, as far as the last frame showed it could go.
+static void scroll_console(int dir) {
+    int *scroll = g_app.selected ? &g_app.selected->console_scroll : &g_app.log_scroll;
+    int most = tui_console_most();
+    int v = dir == 0 ? 0 : (*scroll < most ? *scroll : most) + dir;
+    *scroll = v < 0 ? 0 : v > most ? most : v;
+    g_app.dirty = 1;
+}
+
 void handle_key(const tui_key_t *key) {
     tui_input_t *input = &g_app.input;
 
@@ -1058,6 +1068,7 @@ void handle_key(const tui_key_t *key) {
         g_app.dirty = 1;
         return;
     }
+    if (key->type == TUI_KEY_MOUSE) return;
 
     // A message is the result of the previous key, so this key resets the bar.
     if (g_app.message[0]) { g_app.message[0] = '\0'; g_app.dirty = 1; }
@@ -1118,6 +1129,11 @@ void handle_key(const tui_key_t *key) {
             break;
     }
 
+    if (key->wheel && input->mode != TUI_IMODE_COMMAND && tui_over_console(key->row, key->col)) {
+        scroll_console(key->type == TUI_KEY_UP ? 1 : -1);
+        return;
+    }
+
     tui_input_mode_t was = input->mode;
     if (tui_input_feed(input, key)) {
         // The menu above the COMMAND line covers part of the chat, so it needs a full frame.
@@ -1127,13 +1143,13 @@ void handle_key(const tui_key_t *key) {
     }
 
     // NORMAL leaves these to the app: j and k switch sessions, like moving through a list, G goes back
-    // to the newest message, ? opens the help, f the files, and c, C and s show or hide the console,
-    // the chat and the sidebar.
+    // to the newest message and console line, ? opens the help, f the files, and c, C and s show or
+    // hide the console, the chat and the sidebar.
     if (key->type == TUI_KEY_CHAR && input->mode == TUI_IMODE_NORMAL) {
         switch (key->ch[0]) {
             case 'j': select_step(1); break;
             case 'k': select_step(-1); break;
-            case 'G': scroll_chat(0, 0); break;
+            case 'G': scroll_chat(0, 0); scroll_console(0); break;
             case '?': begin_help(); break;
             case 'f': begin_files(); break;
             case 'c': g_app.show_console = !g_app.show_console; g_app.dirty = 1; break;
@@ -1231,18 +1247,20 @@ static const char *session_empty_text(const session_slot_t *s) {
 // where the messages that arrived while it was away start, and unread counts for other sessions.
 tui_view_t current_view(char *sub, size_t cap) {
     tui_view_t v = { g_app.show_sidebar, g_app.show_console, g_app.show_chat, NULL, NULL, TUI_SESSION_LIVE,
-                     NULL, NULL, 0, NULL, NULL, NULL, 0, 0, 0, NULL, TEST_BUILD ? TEST_LABEL : NULL };
+                     NULL, NULL, 0, NULL, NULL, NULL, 0, 0, 0, NULL, TEST_BUILD ? TEST_LABEL : NULL, 0 };
     for (int i = 0; i < MAX_SESSIONS; i++) {
         const session_slot_t *o = &g_app.sessions[i];
         if (!g_app.used[i] || o->leaving || o == g_app.selected) continue;
         v.elsewhere += o->unread;
         v.elsewhere_mention |= o->mentioned;
     }
+    v.console_scroll = g_app.log_scroll;
     const session_slot_t *s = g_app.selected;
     if (!s) return v;
     v.title = s->name;
     v.state = session_state(s);
     v.scroll = s->scroll;
+    v.console_scroll = s->console_scroll;
     v.empty = session_empty_text(s);
     v.image = pic_for;
     v.image_ctx = s;

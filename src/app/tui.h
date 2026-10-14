@@ -147,20 +147,34 @@ typedef enum {
     TUI_KEY_CTRL_BACKSLASH,
     TUI_KEY_F9,
     TUI_KEY_F12,
-    // Not keys: the terminal's reply to a background colour query (r, g, b in ch[0..2]), and its
-    // report that it switched between a light and a dark theme.
+    // Not keys: the terminal's reply to a background colour query (r, g, b in ch[0..2]), its
+    // report that it switched between a light and a dark theme, and a mouse button other than the
+    // wheel's, which does nothing.
     TUI_KEY_BG_REPORT,
     TUI_KEY_THEME_CHANGED,
+    TUI_KEY_MOUSE,
     TUI_KEY_UNKNOWN
 } tui_keytype_t;
 
+// The mouse wheel comes as Up and Down with wheel set, at row and col of the screen (from 1).
 typedef struct {
     tui_keytype_t type;
     char ch[UTF8_CHAR_MAX + 1];
     int ch_len;
+    int wheel, row, col;
 } tui_key_t;
 
 size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out);
+
+// How many bytes at the end of buf are an escape sequence the read cut off, to keep for the next
+// read, at most TUI_KEY_CUT_MAX.
+#define TUI_KEY_CUT_MAX 32
+size_t tui_key_cut(const uint8_t *buf, size_t len);
+
+// The terminal reports the mouse's buttons, so the wheel scrolls whichever pane it's over. Plain
+// clicks no longer reach the terminal: selecting text takes Shift in most terminals.
+#define TUI_MOUSE_ON "\x1b[?1000h\x1b[?1006h"
+#define TUI_MOUSE_OFF "\x1b[?1006l\x1b[?1000l"
 
 // Asks the terminal for its background colour (answered with TUI_KEY_BG_REPORT), and to report
 // when its theme changes (TUI_KEY_THEME_CHANGED). TUI_THEME_UNWATCH stops the theme reports.
@@ -251,7 +265,7 @@ typedef enum { TUI_TONE_INSERT = 0, TUI_TONE_NORMAL, TUI_TONE_COMMAND, TUI_TONE_
 // The chat screen. title is the session's name, drawn in the chat pane's border followed by its
 // state and subtitle. Without one the pane shows the welcome card. empty is the text the pane shows
 // while the session has no messages (lines split by '\n'), and scroll is how many of the newest are
-// hidden below.
+// hidden below (console_scroll the console's).
 typedef struct {
     int sidebar, console, chat;
     const char *title;
@@ -275,6 +289,7 @@ typedef struct {
     // for no row.
     const tui_progress_t *(*progress)(const void *ctx, int file);
     const char *build_label;   // a test build's, right of the console's title
+    int console_scroll;
 } tui_view_t;
 
 // A line in a dialog's console, styled by kind: a detail faint, then plain, good green, bad red.
@@ -346,6 +361,11 @@ void tui_render(int rows, int cols,
 // box needs a different height from the last full frame, or a dialog is open, so the whole frame
 // has to be drawn again.
 int tui_render_bar(int rows, int cols, const tui_view_t *view, const tui_bar_t *bar, int color_enabled);
+
+// Whether row and col (from 1) are on the console in the last chat frame drawn, and how far back
+// it could scroll there: until its oldest line is at the top.
+int tui_over_console(int row, int col);
+int tui_console_most(void);
 
 // A frame that's the same as the last one isn't sent again. After anything that may have changed
 // the screen without chat knowing (a resize), this forces the next one to be sent.

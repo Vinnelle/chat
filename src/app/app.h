@@ -72,6 +72,7 @@ typedef struct {
     unsigned new_at;
     int initialising;
     int scroll;   // the newest messages hidden below the chat after scrolling back
+    int console_scroll;   // and the newest lines below the console
     char name[MAX_SESSION_NAME + 1];
     // While its history is kept: the lines so far (HISTORY_LINE's), in locked memory, the save they're
     // kept in, and whether they've changed since they were written there.
@@ -304,6 +305,7 @@ typedef struct {
     int input_dirty;
 
     tui_scrollback_t log;
+    int log_scroll;
     tui_input_t input;
     tui_input_t saved_input;
     browser_t browser;

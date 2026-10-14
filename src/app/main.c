@@ -28,7 +28,8 @@ static const char *USAGE =
     "  Ctrl+J     join an existing session (asks for its id, then its password), or a kept one\n"
     "  Tab        next session       Shift+Tab   previous session (j/k in NORMAL too)\n"
     "  PgUp/PgDn  scroll the chat back and forward (Ctrl+U/Ctrl+D in NORMAL, G the newest)\n"
-    "  Up/Down    scroll the chat by a message, as the mouse wheel does\n"
+    "  Up/Down    scroll the chat by a message. The mouse wheel scrolls it too, or the console\n"
+    "             when it's over it (hold Shift to select text with the mouse)\n"
     "  Ctrl+B     hide/show the sidebar   Ctrl+O   hide/show the console\n"
     "  Ctrl+T     hide/show the chat (hide two of the three and the last one fills the screen)\n"
     "  Ctrl+S     settings: routing, identity, files, notifications (also :set)\n"
@@ -252,6 +253,12 @@ static void catch_quit_signals(void) {
 #endif
 }
 
+// When scrolled back, a console stays on the lines in view, as the chat does.
+static void push_console(tui_scrollback_t *sb, int *scroll, const char *hhmm, const char *text, const uint8_t *rgb) {
+    tui_scrollback_push(sb, hhmm, text, rgb, 0, 0);
+    if (*scroll > 0 && *scroll < sb->count - 1) (*scroll)++;
+}
+
 // App level notes go wherever the user is looking: the selected session's console, otherwise the startup log.
 int g_plain;   // --simple (or no terminal): app notes go to stdout
 
@@ -260,7 +267,8 @@ void push_log(const char *fmt, ...) {
     va_list ap; va_start(ap, fmt); vsnprintf(msg, sizeof msg, fmt, ap); va_end(ap);
     char hhmm[HHMM_LEN]; current_hhmm(hhmm);
     if (g_plain) { printf("[%s] %s\n", hhmm, msg); fflush(stdout); return; }
-    tui_scrollback_push(g_app.selected ? &g_app.selected->console : &g_app.log, hhmm, msg, NULL, 0, 0);
+    session_slot_t *s = g_app.selected;
+    push_console(s ? &s->console : &g_app.log, s ? &s->console_scroll : &g_app.log_scroll, hhmm, msg, NULL);
     g_app.dirty = 1;
 }
 
@@ -294,7 +302,7 @@ void session_print(void *ui, const char *hhmm, const char *text, const uint8_t *
         // When scrolled back, the chat stays on the messages in view.
         if (s->scroll > 0 && s->scroll < s->sb.count - 1) s->scroll++;
     } else {
-        tui_scrollback_push(&s->console, hhmm, text, rgb, 0, 0);
+        push_console(&s->console, &s->console_scroll, hhmm, text, rgb);
     }
     g_app.dirty = 1;
 }
@@ -563,7 +571,7 @@ void console_note(session_slot_t *s, const char *fmt, ...) {
     char msg[300];
     va_list ap; va_start(ap, fmt); vsnprintf(msg, sizeof msg, fmt, ap); va_end(ap);
     char hhmm[HHMM_LEN]; current_hhmm(hhmm);
-    tui_scrollback_push(&s->console, hhmm, msg, NULL, 0, 0);
+    push_console(&s->console, &s->console_scroll, hhmm, msg, NULL);
     g_app.dirty = 1;
 }
 
@@ -631,11 +639,12 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
 
 // The longest the main loops wait for a socket or a key before doing their timed work.
 #define WAIT_MS 200
-// The full-screen UI: the window's title saved and set to chat, the mouse wheel's setting saved and
-// set to send Up and Down (mode 1007), then the alternate screen, cleared. Leaving it undoes that.
-// The wheel's setting is restored rather than turned off, since many terminals have it on already.
-#define SCREEN_ENTER "\x1b[22;0t\x1b]0;chat\x07\x1b[?1007s\x1b[?1007h\x1b[?1049h\x1b[2J\x1b[H"
-#define SCREEN_LEAVE "\x1b[?7h\x1b[0 q\x1b[?25h\x1b[?1007r\x1b[?1049l\x1b[23;0t"
+// How long a sequence a read cut off waits for the rest.
+#define KEY_CUT_WAIT_MS 25
+// The full-screen UI: the window's title saved and set to chat, the mouse reported, then the
+// alternate screen, cleared. Leaving it undoes that.
+#define SCREEN_ENTER "\x1b[22;0t\x1b]0;chat\x07" TUI_MOUSE_ON "\x1b[?1049h\x1b[2J\x1b[H"
+#define SCREEN_LEAVE "\x1b[?7h\x1b[0 q\x1b[?25h" TUI_MOUSE_OFF "\x1b[?1049l\x1b[23;0t"
 #define CLEAR_SCREEN "\x1b[2J\x1b[H"
 #define CLEAR_SCROLLBACK "\x1b[3J"
 
@@ -766,6 +775,9 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
     // Once a second at least, for the clock.
     double next_ui_tick = now_seconds() + 1.0;
     lock_saw_key();
+    uint8_t cut[TUI_KEY_CUT_MAX];
+    size_t n_cut = 0;
+    double cut_at = 0;
 
     while (!g_interrupted) {
         sock_t socks[PLATFORM_WAIT_MAX];
@@ -780,7 +792,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
             for (int j = 0; j < ns && n < PLATFORM_WAIT_MAX; j++) { socks[n] = mine[j]; owner[n] = &g_app.sessions[i]; n++; }
         }
         int stdin_ready = 0;
-        platform_wait(socks, n, ready, &stdin_ready, WAIT_MS);
+        platform_wait(socks, n, ready, &stdin_ready, n_cut ? KEY_CUT_WAIT_MS : WAIT_MS);
 
         if (g_ctrl_c) {
             g_ctrl_c = 0;
@@ -794,20 +806,30 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
             else g_interrupted = 1;
         }
 
-        if (stdin_ready && !g_panic) {
+        // A read can stop partway through a sequence: Windows hands over input a few dozen characters
+        // at a time, and a burst of mouse wheel reports can fill buf. What's cut off waits for the
+        // rest, which comes straight after, rather than being typed as text. An Esc on its own waits
+        // too, then it's the key.
+        int cut_due = n_cut && now_seconds() - cut_at >= KEY_CUT_WAIT_MS / 1000.0;
+        if ((stdin_ready || cut_due) && !g_panic) {
             uint8_t buf[512];
-            long got = term_read_raw(buf, sizeof buf);
-            if (got > 0) {
-                size_t off = 0;
-                while ((size_t)got > off && !g_panic) {
+            memcpy(buf, cut, n_cut);
+            long got = stdin_ready ? term_read_raw(buf + n_cut, sizeof buf - n_cut) : 0;
+            if (got < 0) {
+                g_interrupted = 1;
+            } else if (got > 0 || cut_due) {
+                size_t len = n_cut + (size_t)got, off = 0;
+                n_cut = got > 0 ? tui_key_cut(buf, len) : 0;
+                len -= n_cut;
+                memcpy(cut, buf + len, n_cut);
+                cut_at = now_seconds();
+                while (len > off && !g_panic) {
                     tui_key_t key;
-                    size_t used = tui_decode_key(buf + off, (size_t)got - off, &key);
+                    size_t used = tui_decode_key(buf + off, len - off, &key);
                     if (used == 0) break;
                     off += used;
                     handle_key(&key);
                 }
-            } else if (got < 0) {
-                g_interrupted = 1;
             }
         }
         if (g_panic) break;

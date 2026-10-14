@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- The mouse wheel scrolls the console when it's over it, a line at a time, and the chat anywhere
+  else. While it's scrolled back, the console's title says how many newer lines are below, and it
+  stays on the lines in view as new ones come. `G` in NORMAL goes back to the newest line as well
+  as the newest message.
+
+### Changed
+- chat has the terminal report the mouse (modes 1000 and 1006) instead of sending the wheel as Up
+  and Down (mode 1007), since that's the only way to know which pane the wheel is over. Plain
+  clicks don't reach the terminal any more: hold Shift to select text, as in other full-screen
+  programs. A key's sequence split between two reads (Windows passes input on a few dozen
+  characters at a time) waits for the rest instead of ending up as text.
+
 ## 0.5.1-beta.2
 
 ### Added

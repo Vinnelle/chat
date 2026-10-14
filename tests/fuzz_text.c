@@ -54,11 +54,13 @@ static void fuzz_editor(const uint8_t *data, size_t size) {
     in.modal = size > 0 && (data[0] & 1);
     in.suggest = size > 0 && (data[0] & 2) ? fuzz_suggest : NULL;
     in.is_command = size > 0 && (data[0] & 4) ? fuzz_command : NULL;
+    check(tui_key_cut(data, size) <= (size < TUI_KEY_CUT_MAX ? size : TUI_KEY_CUT_MAX));
     size_t off = 0;
     while (off < size) {
         tui_key_t key;
         size_t used = tui_decode_key(data + off, size - off, &key);
         check(used >= 1 && used <= size - off);
+        check(!key.wheel || key.type == TUI_KEY_UP || key.type == TUI_KEY_DOWN);
         off += used;
         if (key.type == TUI_KEY_CHAR) {
             size_t adv;
@@ -136,7 +138,7 @@ static void fuzz_render(const char *s, const uint8_t *data, size_t size) {
     tui_view_t view = { (flags & 4) != 0, (flags & 8) != 0, (flags & 16) != 0, (flags & 2) ? s : NULL, s,
                         (tui_session_state_t)(flags % 3), s, (flags & 4) ? s : NULL, flags % 5, fuzz_image, NULL,
                         (flags & 8) ? self : NULL, size > 10 ? data[10] % 4 : 0, flags % 7, flags & 1, fuzz_progress,
-                        (flags & 32) ? s : NULL };
+                        (flags & 32) ? s : NULL, flags % 6 };
     const tui_kv_t net[1] = { { s, s } };
     // A dialog over the screen, with the text as its title, paragraphs, field, status and note.
     tui_input_t field = in;

@@ -142,9 +142,55 @@ static int parse_bg_report(const uint8_t *s, size_t n, uint8_t rgb[3]) {
     return 0;
 }
 
+// A mouse report's button (64 and 65 for the wheel, plus 4, 8 and 16 with Shift, Alt and Ctrl),
+// column and row. Only the wheel does anything.
+static void mouse_key(unsigned b, int col, int row, tui_key_t *out) {
+    unsigned button = b & ~28u;
+    out->type = TUI_KEY_MOUSE;
+    if (button != 64 && button != 65) return;
+    out->type = button == 64 ? TUI_KEY_UP : TUI_KEY_DOWN;
+    out->wheel = 1;
+    out->col = col;
+    out->row = row;
+}
+
+// "b;col;row", a mouse report's numbers with mode 1006.
+#define MOUSE_NUM_MAX 99999
+
+static int mouse_numbers(const uint8_t *s, size_t n, unsigned v[3]) {
+    int i = 0;
+    v[0] = v[1] = v[2] = 0;
+    for (size_t k = 0; k < n; k++) {
+        if (s[k] == ';') {
+            if (++i > 2) return -1;
+            continue;
+        }
+        if (s[k] < '0' || s[k] > '9' || v[i] > MOUSE_NUM_MAX) return -1;
+        v[i] = v[i] * 10 + (unsigned)(s[k] - '0');
+    }
+    return i == 2 ? 0 : -1;
+}
+
+size_t tui_key_cut(const uint8_t *buf, size_t len) {
+    size_t low = len > TUI_KEY_CUT_MAX ? len - TUI_KEY_CUT_MAX : 0, p = len;
+    do {
+        if (p == low) return 0;
+        p--;
+    } while (buf[p] != ESC);
+    size_t n = len - p;
+    if (n == 1) return n;
+    if (buf[p + 1] == 'O') return n == 2 ? n : 0;
+    if (buf[p + 1] != '[') return 0;
+    if (n >= 3 && buf[p + 2] == 'M') return n < 6 ? n : 0;
+    size_t k = p + 2;
+    while (k < len && buf[k] >= ' ' && buf[k] <= '?') k++;
+    return k == len ? n : 0;
+}
+
 size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out) {
     out->type = TUI_KEY_NONE;
     out->ch_len = 0;
+    out->wheel = 0;
     if (len == 0) return 0;
     uint8_t b0 = buf[0];
 
@@ -178,6 +224,11 @@ size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out) {
                 case 'H': out->type = TUI_KEY_HOME;  return 3;
                 case 'F': out->type = TUI_KEY_END;   return 3;
                 case 'Z': out->type = TUI_KEY_BACKTAB; return 3;
+                case 'M':
+                    // A mouse report from a terminal without mode 1006: its numbers as bytes, each 32 over.
+                    if (len < 6) { out->type = TUI_KEY_MOUSE; return len; }
+                    mouse_key((unsigned)buf[3] - 32, buf[4] - 32, buf[5] - 32, out);
+                    return 6;
                 default: break;
             }
             if (len >= 4 && buf[3] == '~') {
@@ -202,6 +253,12 @@ size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out) {
                 static const char theme[] = "?997;";
                 if (buf[k] == 'n' && k - 2 >= sizeof theme - 1 && memcmp(buf + 2, theme, sizeof theme - 1) == 0)
                     out->type = TUI_KEY_THEME_CHANGED;
+                // "<b;col;row", then M for a press or m for a release: a mouse report.
+                unsigned v[3];
+                if ((buf[k] == 'M' || buf[k] == 'm') && buf[2] == '<' && mouse_numbers(buf + 3, k - 3, v) == 0) {
+                    if (buf[k] == 'M') mouse_key(v[0], (int)v[1], (int)v[2], out);
+                    else out->type = TUI_KEY_MOUSE;
+                }
                 return k + 1;
             }
             return 1;
@@ -1533,15 +1590,49 @@ static void chat_title(span_t *t, const tui_view_t *v, int sidebar_shown) {
 #define CHAT_ROWS_MIN 4
 #define CONSOLE_TITLE "console"
 
+// Where the console is in the last chat frame, its edges included, and how far back it can scroll
+// there, for the mouse wheel.
+static rect_t g_console_at;
+static int g_console_most;
+
+int tui_over_console(int row, int col) {
+    const rect_t *r = &g_console_at;
+    return row >= r->top && row < r->top + r->h && col >= r->left && col < r->left + r->w;
+}
+
+int tui_console_most(void) { return g_console_most; }
+
+// The console scrolls back until its oldest line is at the top, laid out as draw_lines() does.
+static int console_skip(const tui_scrollback_t *sb, int scroll, int w, int nrows) {
+    int pre = w >= TIME_MIN_W ? TIME_COLS : 0, rows = 0;
+    if (pre > w - 1) pre = w - 1 > 0 ? w - 1 : 0;
+    g_console_most = 0;
+    for (int k = sb->count - 1; k >= 0; k--) {
+        const char *body = SB_AT(sb, k)->text;
+        if (body[0] == '*' && body[1] == ' ') body += 2;
+        size_t off[WRAP_ROWS_MAX], len[WRAP_ROWS_MAX];
+        rows += wrap_rows(body, w - pre, w - pre, off, len, WRAP_ROWS_MAX);
+        if (rows > nrows) {
+            g_console_most = k + 1 < sb->count ? k + 1 : k;
+            break;
+        }
+    }
+    return scroll < g_console_most ? scroll : g_console_most;
+}
+
 // The console above the chat, sharing an edge, in one box. Either one fills it if shown alone.
 static void draw_main(wbuf_t *w, rect_t m, int boxed, int sidebar_shown, const tui_scrollback_t *sb,
                       const tui_scrollback_t *console, const tui_view_t *v) {
     int show_con = console && v->console, show_chat = v->chat;
+    g_console_at = (rect_t){ 0, 0, 0, 0 };
+    g_console_most = 0;
     if (!boxed) {
         grid_reset(&g_grid, m.h, m.w);
         if (show_chat) draw_chat_pane(&g_grid, 0, m.h, sb, v);
-        else if (show_con) draw_lines(&g_grid, 0, m.h, console, 0, 1, NULL);
-        else draw_center(&g_grid, 0, m.h, HIDDEN_HINT, NULL);
+        else if (show_con) {
+            draw_lines(&g_grid, 0, m.h, console, console_skip(console, v->console_scroll, m.w, m.h), 1, NULL);
+            g_console_at = m;
+        } else draw_center(&g_grid, 0, m.h, HIDDEN_HINT, NULL);
         grid_emit(w, &g_grid, m.top, m.left, 0);
         return;
     }
@@ -1555,6 +1646,7 @@ static void draw_main(wbuf_t *w, rect_t m, int boxed, int sidebar_shown, const t
         if (inner - con_h - 1 < CHAT_ROWS_MIN) con_h = inner - 1 - CHAT_ROWS_MIN;
         if (con_h < 1) show_con = 0;
     }
+    int kskip = show_con ? console_skip(console, v->console_scroll, m.w - 4, show_chat ? con_h : inner) : 0;
     span_t clock, ctitle, ktitle, kright;
     span_init(&clock, m.w);
     if (v->clock) ptext(&clock.p, S_FAINT, v->clock);
@@ -1570,6 +1662,12 @@ static void draw_main(wbuf_t *w, rect_t m, int boxed, int sidebar_shown, const t
     }
     span_init(&ktitle, title_room(m.w, kright.p.used));
     ptext(&ktitle.p, S_FAINT, CONSOLE_TITLE);
+    if (kskip > 0) {
+        char t[32];
+        snprintf(t, sizeof t, G_DOWN " %d newer", kskip);
+        ptext(&ktitle.p, S_FAINT, DOT_SEP);
+        ptext(&ktitle.p, S_ACCENT_BOLD, t);
+    }
     // Its bottom edge is the input box's top, which draw_input() draws.
     if (show_con) edge(w, m.top, m.left, m.w, top_left(m), G_TR, bs, &ktitle, &kright);
     else edge(w, m.top, m.left, m.w, top_left(m), G_TR, bs, &ctitle, &clock);
@@ -1578,9 +1676,10 @@ static void draw_main(wbuf_t *w, rect_t m, int boxed, int sidebar_shown, const t
     int row = m.top + 1;
     if (show_con) {
         grid_reset(&g_grid, show_chat ? con_h : inner, m.w - 4);
-        draw_lines(&g_grid, 0, g_grid.rows, console, 0, 1, NULL);
+        draw_lines(&g_grid, 0, g_grid.rows, console, kskip, 1, NULL);
         grid_emit(w, &g_grid, row, m.left + 1, 1);
         row += g_grid.rows;
+        g_console_at = (rect_t){ m.top, m.left, row - m.top, m.w };
         if (show_chat) edge(w, row++, m.left, m.w, G_LT, G_RT, bs, &ctitle, &clock);
     }
     if (show_chat || !show_con) {
