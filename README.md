@@ -541,7 +541,8 @@ compare with what your shell would get.
 To keep a copy, prebuilt Linux and Windows x86_64 binaries are on the
 [releases page](https://github.com/Vinnelle/chat/releases), with a `SHA256SUMS` file and its
 [minisign](https://jedisct1.github.io/minisign/) signature. Check the signature against
-[`minisign.pub`](minisign.pub), then the hashes:
+[`minisign.pub`](minisign.pub) (or `minisign-backup.pub`, if the release notes say the backup key
+signed it, see [Releases](#releases)), then the hashes:
 
 ```sh
 minisign -Vm SHA256SUMS -p minisign.pub
@@ -1096,6 +1097,16 @@ Then it signs `SHA256SUMS` of the published binaries, list included, for downloa
 Releases are signed offline with the release key, never in CI, so even if someone takes over
 the GitHub account they can't publish an update chat will install. `just keygen` makes the key.
 Commit `minisign.pub`, and keep the secret key backed up and off GitHub.
+
+`just keygen backup` makes a second key, the backup, in `minisign-backup.pub` and
+`~/.minisign/chat-release-backup.key` (or `CHAT_BACKUP_SIGNING_KEY`). Builds made with it take a
+release signed by either key, so updates don't end with a lost or stolen release key. Keep its
+secret key apart from the other one's, so one lost drive or one break-in can't take both, and only
+use it once the release key is gone: sign the next release with it
+(`CHAT_SIGNING_KEY=~/.minisign/chat-release-backup.key just release`), and in that release make
+the backup the release key (`minisign-backup.pub` becomes `minisign.pub`) and make a new backup.
+Builds from then on no longer take the old key. Builds from before still do until they update, which
+is why a stolen key means releasing straight away.
 
 ## Usage
 

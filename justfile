@@ -180,16 +180,33 @@ fuzz target="engine" seconds="300":
 
 # minisign.pub gets committed; the password-protected secret key stays offline and backed up,
 # never in the repo. Set CHAT_SIGNING_KEY to keep it somewhere other than ~/.minisign.
-# Make the release signing key
+# `just keygen backup` makes the backup key, minisign-backup.pub and CHAT_BACKUP_SIGNING_KEY's
+# file: builds from then on take a release it signed too, for when the first is lost or stolen.
+# Its secret key goes somewhere apart from the first's, so one mishap can't take both.
+# Make the release signing key, or with backup its backup
 [group('release')]
-keygen:
+keygen which="":
     #!/bin/sh
     set -eu
-    key="${CHAT_SIGNING_KEY:-$HOME/.minisign/chat-release.key}"
-    if [ -e minisign.pub ] || [ -e "$key" ]; then echo "minisign.pub or $key already exists" >&2; exit 1; fi
+    case "${1:-}" in
+        "") pub=minisign.pub; key="${CHAT_SIGNING_KEY:-$HOME/.minisign/chat-release.key}" ;;
+        backup) pub=minisign-backup.pub; key="${CHAT_BACKUP_SIGNING_KEY:-$HOME/.minisign/chat-release-backup.key}" ;;
+        *) echo "just keygen takes nothing, or backup" >&2; exit 1 ;;
+    esac
+    if [ -e "$pub" ] || [ -e "$key" ]; then echo "$pub or $key already exists" >&2; exit 1; fi
     mkdir -p "$(dirname "$key")"
-    minisign -G -p minisign.pub -s "$key"
-    echo "commit minisign.pub; back up $key somewhere safe"
+    minisign -G -p "$pub" -s "$key"
+    echo "commit $pub; back up $key somewhere safe${1:+, apart from the release key}"
+
+# Which public key signed file (minisign.pub, or minisign-backup.pub), or fails if neither did
+_signed-by file:
+    #!/bin/sh
+    set -eu
+    for pub in minisign.pub minisign-backup.pub; do
+        if [ -e "$pub" ] && minisign -Vq -p "$pub" -m "$1" >/dev/null 2>&1; then echo "$pub"; exit 0; fi
+    done
+    echo "$1 isn't signed with minisign.pub's key or minisign-backup.pub's" >&2
+    exit 1
 
 # Put standalone release binaries and SHA256SUMS in dist/
 [group('release')]
@@ -431,16 +448,16 @@ _publish version:
     # Each binary gets the signed list of this release's binaries, which peers check builds with.
     # SHA256SUMS then covers the binaries as published, list included. Two signatures: two prompts.
     minisign -S -s "$key" -m dist/BUILDS -t "chat builds v$v"
-    minisign -V -p minisign.pub -m dist/BUILDS
+    "$just" _signed-by dist/BUILDS >/dev/null
     "$just" _append-list dist
     (cd dist && sha256sum chat-linux-x86_64 chat-windows-x86_64.exe > SHA256SUMS)
     minisign -S -s "$key" -m dist/SHA256SUMS -t "chat v$v"
-    minisign -V -p minisign.pub -m dist/SHA256SUMS
+    pub=$("$just" _signed-by dist/SHA256SUMS)
     awk -v v="$v" '$0 == "## " v { on = 1; next } on && /^## / { exit } on { print }' CHANGELOG.md > dist/notes.md
     grep -q '[^[:space:]]' dist/notes.md || { echo "CHANGELOG.md has no section for $v" >&2; exit 1; }
     {
         echo
-        echo 'Check a download with `minisign -Vm SHA256SUMS -p minisign.pub`, then `sha256sum -c --ignore-missing SHA256SUMS`.'
+        echo 'Check a download with `minisign -Vm SHA256SUMS -p '"$pub"'`, then `sha256sum -c --ignore-missing SHA256SUMS`.'
         echo
         echo '```'
         cat dist/SHA256SUMS

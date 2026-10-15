@@ -1180,7 +1180,10 @@ static int signed_list(const chat_t *c, const char *version, const char *list, c
         if (!end) break;
         item = end + 1;
     }
-    if (n == 0 || minisign_verify(c->release_key, content, pos, sig, strlen(sig), NULL) != 0) return -1;
+    if (n == 0) return -1;
+    if (!(c->has_release_key && minisign_verify(c->release_key, content, pos, sig, strlen(sig), NULL) == 0)
+        && !(c->has_backup_key && minisign_verify(c->backup_key, content, pos, sig, strlen(sig), NULL) == 0))
+        return -1;
     return n;
 }
 
@@ -1200,7 +1203,7 @@ static void check_build(chat_t *c, peer_t *p, const char *version, const uint8_t
     // "v" comes with every k, so a verdict already given isn't repeated.
     int again = p->build_state == BUILD_MODIFIED && strcmp(p->build_version, version) == 0;
     copy_str(p->build_version, version, sizeof p->build_version);
-    if (!c->has_release_key) { p->build_state = BUILD_UNCHECKED; return; }
+    if (!c->has_release_key && !c->has_backup_key) { p->build_state = BUILD_UNCHECKED; return; }
     uint8_t hashes[BUILD_LIST_MAX][BUILD_HASH_LEN];
     int n = -1;
     if (list) {
@@ -4640,6 +4643,7 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
         || strspn(c->build.list_sig, BASE64_CHARS "=") != strlen(c->build.list_sig))
         c->build.list[0] = c->build.list_sig[0] = '\0';
     c->has_release_key = minisign_pubkey(o->release_key, c->release_key) == 0;
+    c->has_backup_key = minisign_pubkey(o->release_backup_key, c->backup_key) == 0;
 
     gen_random(c->my_id, ID_LEN);
     gen_keypair(&c->keys);

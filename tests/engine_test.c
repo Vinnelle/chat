@@ -935,6 +935,20 @@ static void test_builds(double *t) {
     resend_carol(t);
     ac = peer_named(&A, "carol");
     CHECK(ac && ac->build_state == BUILD_OFFICIAL, "a peer lying with an official hash wasn't taken at its word");
+
+    // A list signed with the backup key passes too: alice's main key is now another, with another id.
+    memcpy(A.backup_key, A.release_key, MINISIGN_KEY_LEN);
+    A.has_backup_key = 1;
+    gen_random(A.release_key + MINISIGN_ALG_LEN, MINISIGN_ID_LEN);
+    resend_carol(t);
+    ac = peer_named(&A, "carol");
+    CHECK(ac && ac->build_state == BUILD_OFFICIAL, "a list signed with the backup key didn't pass");
+    A.has_backup_key = 0;
+    resend_carol(t);
+    ac = peer_named(&A, "carol");
+    CHECK(ac && ac->build_state == BUILD_MODIFIED, "a list signed with another key passed");
+    memcpy(A.release_key, A.backup_key, MINISIGN_KEY_LEN);
+    resend_carol(t);
 }
 
 // What comes from relays, routers and Tor, taken apart without a network.

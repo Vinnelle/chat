@@ -540,6 +540,7 @@ void app_session_opts(chat_opts_t *o) {
     if (g_app.identity_source != IDENT_NONE) o->identity = g_app.identity;
     o->build = g_self_build;
     copy_str(o->release_key, update_release_key(), sizeof o->release_key);
+    copy_str(o->release_backup_key, update_release_backup_key(), sizeof o->release_backup_key);
 }
 
 // move: the room :move made or was asked to, which gets a port of its own while the room being left

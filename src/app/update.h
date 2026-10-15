@@ -63,6 +63,8 @@ int update_helper(int link);
 
 // The release key (minisign, base64) built in from minisign.pub, or "" if there was none.
 const char *update_release_key(void);
+// Its backup, or "" if this build has none.
+const char *update_release_backup_key(void);
 
 // This build as reported to peers: the SHA-256 of the running executable, minus the signed list
 // of release binaries that a release appends, and that list. Returns -1 if it can't be read.

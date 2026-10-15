@@ -315,13 +315,18 @@ static const char RELEASE_PUBKEY[] = CHAT_RELEASE_PUBKEY;
 #else
 static const char RELEASE_PUBKEY[] = "";
 #endif
+#ifdef CHAT_RELEASE_BACKUP_PUBKEY
+static const char RELEASE_BACKUP_PUBKEY[] = CHAT_RELEASE_BACKUP_PUBKEY;
+#else
+static const char RELEASE_BACKUP_PUBKEY[] = "";
+#endif
 
-// Checks a minisign signature (the SHA256SUMS.minisig next to SHA256SUMS) against the release key
-// built in from minisign.pub. The trusted comment must be "chat <tag>", so a signed SHA256SUMS from
-// an older release can't be passed off as a newer one.
-static int minisign_ok(const char *msg, size_t msg_len, const char *sig_text, const char *tag) {
+// Checks a minisign signature (the SHA256SUMS.minisig next to SHA256SUMS) against one release key.
+// The trusted comment must be "chat <tag>", so a signed SHA256SUMS from an older release can't be
+// passed off as a newer one.
+static int signed_by(const char *key, const char *msg, size_t msg_len, const char *sig_text, const char *tag) {
     uint8_t pk[MINISIGN_KEY_LEN];
-    if (minisign_pubkey(RELEASE_PUBKEY, pk) != 0) return -1;
+    if (minisign_pubkey(key, pk) != 0) return -1;
 
     enum { L_UNTRUSTED, L_SIGNATURE, L_TRUSTED, L_GLOBAL, LINES };
     const char *lines[LINES]; size_t lens[LINES];
@@ -351,6 +356,12 @@ static int minisign_ok(const char *msg, size_t msg_len, const char *sig_text, co
     memcpy(signed_comment + crypto_sign_BYTES, comment, comment_len);
     return crypto_sign_verify_detached(global, signed_comment, crypto_sign_BYTES + comment_len, pk + MINISIGN_BODY) == 0
          ? 0 : -1;
+}
+
+// The key built in from minisign.pub, or its backup from minisign-backup.pub.
+static int minisign_ok(const char *msg, size_t msg_len, const char *sig_text, const char *tag) {
+    if (signed_by(RELEASE_PUBKEY, msg, msg_len, sig_text, tag) == 0) return 0;
+    return RELEASE_BACKUP_PUBKEY[0] ? signed_by(RELEASE_BACKUP_PUBKEY, msg, msg_len, sig_text, tag) : -1;
 }
 
 // SHA-256 of the next len bytes of f, or of all the rest if len is negative. Returns how many
@@ -642,6 +653,7 @@ int update_helper(int link) {
 // ---- this build, as reported to peers ----
 
 const char *update_release_key(void) { return RELEASE_PUBKEY; }
+const char *update_release_backup_key(void) { return RELEASE_BACKUP_PUBKEY; }
 
 // What `just release` appends to each binary: the signed list ("chat vVERSION", each binary's
 // hash, then the signature line), and a footer of the list's length in LIST_LEN_DIGITS digits and this.

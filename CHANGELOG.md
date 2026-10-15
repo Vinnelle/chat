@@ -20,6 +20,11 @@
   every session too, kept in the open save as verified keys are. The sidebar marks them `i`, and
   `:peers` says so.
 
+- A backup release key. A build made with `minisign-backup.pub` (`just keygen backup`) takes an
+  update, and a peer's list of release builds, signed by either the release key or the backup,
+  which is kept offline apart from it. If the release key is lost or stolen, the backup signs the
+  next release, and that release can stop taking the old key.
+
 ### Changed
 - On Linux, a picture shown is decoded in a child process that seccomp lets do nothing but allocate
   memory, write the thumbnail back and exit, so a bug in chat's picture readers can't reach a file,

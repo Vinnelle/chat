@@ -615,8 +615,8 @@ typedef struct chat_s {
     notify_preview_t notify_preview;
 
     chat_build_t build;
-    int has_release_key;
-    uint8_t release_key[MINISIGN_KEY_LEN];
+    int has_release_key, has_backup_key;
+    uint8_t release_key[MINISIGN_KEY_LEN], backup_key[MINISIGN_KEY_LEN];
 
     int once, once_used;
 
@@ -742,9 +742,10 @@ typedef struct {
     int fast_files, picture_noise;
 
     // What peers are told about this build, and the release key (minisign, base64) used to check
-    // their builds' lists. "" leaves them unchecked.
+    // their builds' lists, and its backup. "" leaves them unchecked.
     chat_build_t build;
     char release_key[64];
+    char release_backup_key[64];
 
     // The session moved here from another room (:move), and moved_key signs our sessions here.
     int moved;

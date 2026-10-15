@@ -139,6 +139,11 @@ session id and password, whether they were invited or the password leaked.
   signed comment has to name the release being installed, so an older release's signature can't be
   passed off as a newer one's.
 - **Over Tor.** In Tor mode, the update check and the download go through Tor.
+- **A backup key.** A build made with `minisign-backup.pub` also takes a release signed by the backup
+  key, kept offline apart from the release key. If the release key is lost, the backup signs the
+  next release; if it's stolen, that release also stops taking the stolen key. Builds older than
+  that release still take a stolen key until they update, and a thief who has both keys has
+  everything.
 
 ### Out of scope
 
