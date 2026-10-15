@@ -2937,6 +2937,55 @@ int chat_contact_room(const identity_keypair_t *mine, const uint8_t their_pub[ID
 
 uint64_t chat_contact_day(void) { return (uint64_t)time(NULL) / DAY_SECONDS; }
 
+int chat_invite(const char *id, const char *password, char *out, size_t cap) {
+    if (!id[0] || strchr(id, ':') || strlen(id) > MAX_SESSION_NAME || strlen(password) > MAX_PASSWORD) return -1;
+    uint8_t check[INVITE_CHECK_LEN];
+    char hex[INVITE_CHECK_LEN * 2 + 1];
+    invite_check(id, password, check);
+    hex_encode(check, sizeof check, hex);
+    int n = snprintf(out, cap, INVITE_PREFIX "%s:%s:%s", id, password, hex);
+    if (n < 0 || (size_t)n >= cap) { crypto_wipe(out, cap); return -1; }
+    return 0;
+}
+
+// Pasted from somewhere, so spaces round it don't count, and nor does the prefix's case.
+int chat_is_invite(const char *text) {
+    static const char prefix[] = INVITE_PREFIX;
+    while (*text == ' ') text++;
+    for (size_t i = 0; i < sizeof prefix - 1; i++)
+        if (tolower((unsigned char)text[i]) != prefix[i]) return 0;
+    return 1;
+}
+
+int chat_invite_parse(const char *text, char id[MAX_SESSION_NAME + 1], char password[MAX_PASSWORD + 1]) {
+    if (!chat_is_invite(text)) return 0;
+    while (*text == ' ') text++;
+    const char *body = text + sizeof INVITE_PREFIX - 1, *end = body + strlen(body);
+    while (end > body && end[-1] == ' ') end--;
+    const char *first = memchr(body, ':', (size_t)(end - body)), *last = end;
+    while (last > body && last[-1] != ':') last--;
+    size_t id_len = first ? (size_t)(first - body) : 0;
+    if (!first || last - 1 <= first || end - last != INVITE_CHECK_LEN * 2 || id_len == 0 || id_len > MAX_SESSION_NAME
+        || (size_t)(last - 1 - (first + 1)) > MAX_PASSWORD)
+        return -1;
+    uint8_t check[INVITE_CHECK_LEN], want[INVITE_CHECK_LEN];
+    char hex[INVITE_CHECK_LEN * 2 + 1];
+    for (int i = 0; i < INVITE_CHECK_LEN * 2; i++) hex[i] = (char)tolower((unsigned char)last[i]);
+    hex[INVITE_CHECK_LEN * 2] = '\0';
+    if (hex_decode(hex, INVITE_CHECK_LEN * 2, check) != 0) return -1;
+    memcpy(id, body, id_len);
+    id[id_len] = '\0';
+    size_t pw_len = (size_t)(last - 1 - (first + 1));
+    memcpy(password, first + 1, pw_len);
+    password[pw_len] = '\0';
+    invite_check(id, password, want);
+    if (memcmp(check, want, sizeof check) != 0) {
+        crypto_wipe(password, MAX_PASSWORD + 1);
+        return -1;
+    }
+    return 1;
+}
+
 int chat_move_begin(chat_t *c, chat_move_to_t *to) {
     chat_move_plan_t plan;
     chat_move_plan(c, &plan);

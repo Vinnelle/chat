@@ -31,7 +31,11 @@ The session **id + password** key both the encryption and the DHT lookup, so you
 find the room or read it. The id is often passed around in the open, so the password does the work:
 the NEW SESSION box (`Ctrl+N`) starts with a random one, eight words (64 bits), shown so you can pass
 it on. Type to use your own instead. A blank password still encrypts, but then the id alone gets
-anyone in.
+anyone in. `:invite` copies the id and password together as one invite (`chat:ID:PASSWORD:CHECK`),
+which the JOIN box (`Ctrl+J`) takes in place of the id. Its check catches an invite that was
+mistyped or cut off, which otherwise leaves you alone in a room nobody else is in, since a wrong
+password can't be told from an empty room. chat never shows an invite, since it holds the password:
+it only copies it.
 
 **Compare verify codes.** The id and password only prove someone is in the room. Any member
 could sit between two others and read what they say. When a peer joins, chat shows a verify
@@ -1122,7 +1126,7 @@ saved your settings, it starts on your sessions, and `Ctrl+S` opens the page.
 | Key | Action |
 | --- | --- |
 | `Ctrl+N` | create a new session, with a random password filled in (type to use your own) |
-| `Ctrl+J` | join an existing session (id, then password), or with rooms kept, pick one of them |
+| `Ctrl+J` | join an existing session (id, then password, or an invite from `:invite`), or with rooms kept, pick one of them |
 | `Tab` / `Shift+Tab` | next / previous session (`j` / `k` in NORMAL too) |
 | `PgUp` / `PgDn` | scroll the chat back / forward (`Ctrl+U` / `Ctrl+D` in NORMAL, `G` the newest) |
 | `Up` / `Down` | scroll the chat by a message (they move through lists elsewhere) |
@@ -1185,6 +1189,7 @@ puts it on the command line.
 | `:net` | network report and diagnosis |
 | `:port [N]` | show or change this session's UDP port (`0` picks a free one) |
 | `:copyid` | copy the session id to the clipboard |
+| `:invite` | copy the session's id and password to the clipboard as one invite, which `Ctrl+J` takes in place of the id (see [Security](#security)) |
 | `:newtor` | new Tor circuits and a new onion address for every session in Tor mode (see [Routing](#routing)) |
 | `:update` | install the latest release |
 | `:install [NAME]` | save your settings and signing key on this computer, after telling you what that leaves on disk; a new save asks for its name (blank picks a random one), and with NAME it's a save of that name (see [Installing](#installing)) |

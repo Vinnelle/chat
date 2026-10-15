@@ -612,10 +612,10 @@ static session_slot_t *open_session(const char *session_name, const char *passwo
                      move->from, s->engine.nick, idhex, created ? "the peers asked along come once they say yes"
                                                                  : "chat opens once someone here answers");
         // Nobody typed them, and nothing else shows them.
-        console_note(s, "this room's id is %s and its password \"%s\" - this is the only time they're shown, so keep them "
-                        "if you want to come back or invite someone", s->engine.session_name, move->password);
+        console_note(s, "this room's id is %s and its password \"%s\" - this is the only time they're shown: :invite "
+                        "copies them, to pass on, and :keep keeps the room", s->engine.session_name, move->password);
     } else if (created) {
-        console_note(s, "new session '%s' - share the id and password to invite others. you are %s (peer %s)",
+        console_note(s, "new session '%s' - :invite copies its id and password, to pass on. you are %s (peer %s)",
                      s->engine.session_name, s->engine.nick, idhex);
     } else {
         console_note(s, "joining '%s' as %s (peer %s) - chat opens once someone answers",
@@ -1080,6 +1080,12 @@ cmd_result_t app_quitall(void *ctx, const char *arg) {
 cmd_result_t app_copyid(void *ctx, const char *arg) {
     (void)ctx; (void)arg;
     copy_session_id(g_app.selected);
+    return CMD_OK;
+}
+
+cmd_result_t app_invite(void *ctx, const char *arg) {
+    (void)ctx; (void)arg;
+    copy_invite(g_app.selected);
     return CMD_OK;
 }
 

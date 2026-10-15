@@ -1797,6 +1797,34 @@ static void test_contact_room(double *t) {
     sodium_memzero(x, sizeof x);
 }
 
+static void test_invite(double *t) {
+    (void)t;
+    char inv[INVITE_MAX], id[MAX_SESSION_NAME + 1], pw[MAX_PASSWORD + 1];
+    CHECK(chat_invite("K7M2Q9XRT4", "plum orbit: lantern", inv, sizeof inv) == 0
+          && strncmp(inv, "chat:K7M2Q9XRT4:plum orbit: lantern:", 36) == 0 && strlen(inv) == 36 + INVITE_CHECK_LEN * 2,
+          "an invite isn't chat:ID:PASSWORD:CHECK: %s", inv);
+    CHECK(chat_invite_parse(inv, id, pw) == 1 && strcmp(id, "K7M2Q9XRT4") == 0 && strcmp(pw, "plum orbit: lantern") == 0,
+          "an invite didn't give back its id and password");
+    char spaced[INVITE_MAX + 4];
+    snprintf(spaced, sizeof spaced, "  CHAT%s ", inv + 4);
+    CHECK(chat_invite_parse(spaced, id, pw) == 1 && strcmp(pw, "plum orbit: lantern") == 0,
+          "an invite with spaces round it, or the prefix in capitals, wasn't taken");
+    char bad[INVITE_MAX];
+    copy_str(bad, inv, sizeof bad);
+    bad[16] = bad[16] == 'p' ? 'q' : 'p';
+    CHECK(chat_invite_parse(bad, id, pw) == -1, "a mistyped invite was taken");
+    copy_str(bad, inv, sizeof bad);
+    bad[strlen(bad) - 1] = '\0';
+    CHECK(chat_invite_parse(bad, id, pw) == -1, "a cut off invite was taken");
+    CHECK(chat_invite_parse("chat:K7M2Q9XRT4", id, pw) == -1 && chat_invite_parse("chat:", id, pw) == -1,
+          "an invite with no password or check was taken");
+    CHECK(chat_invite_parse("K7M2Q9XRT4", id, pw) == 0, "a plain id was taken for an invite");
+    CHECK(chat_invite("K7M2Q9XRT4", "", inv, sizeof inv) == 0 && chat_invite_parse(inv, id, pw) == 1 && pw[0] == '\0',
+          "an invite with a blank password didn't round trip");
+    CHECK(chat_invite("room:2", "pw", inv, sizeof inv) != 0, "an id with ':' in it got an invite");
+    CHECK(chat_invite("K7M2Q9XRT4", "pw", inv, 12) != 0, "an invite was cut to fit");
+}
+
 static void test_identity_keys(double *t) {
     (void)t;
     // An identity file age-keygen wrote, and the recipient it gave for it.
@@ -3031,7 +3059,7 @@ int main(int argc, char **argv) {
         { "timer", test_timer },
         { "candidates settle", test_candidates_settle }, { "builds", test_builds },
         { "parsers", test_parsers }, { "toml", test_toml }, { "dht keys", test_dht_keys }, { "dht", test_dht }, { "read file", test_read_file },
-        { "identity keys", test_identity_keys }, { "call room", test_contact_room },
+        { "identity keys", test_identity_keys }, { "call room", test_contact_room }, { "invite", test_invite },
         { "passphrase seal", test_passphrase_seal }, { "device lock", test_device_lock },
         { "factor locks", test_factor_locks }, { "totp", test_totp }, { "bytewords", test_bytewords }, { "qr", test_qr }, { "save factors", test_save_factors }, { "duress", test_duress }, { "lock screen", test_lock_screen }, { "sandbox", test_sandbox }, { "history", test_history }, { "tor state", test_tor_state }, { "rooms", test_rooms }, { "images", test_images }, { "file names", test_file_names }, { "clean", test_clean }, { "files", test_files }, { "clean offer", test_clean_offer },
         { "verified keys", test_trust }, { "move", test_move }, { "went offline", test_offline },

@@ -377,6 +377,7 @@ static const command_t APP_COMMANDS[] = {
     { "lock",    NULL,                  NULL,     "lock the screen until the save's passphrase, or a PIN, unlocks it", app_lock },
     { "set",     NULL,        "[NAME [VALUE]]",   "change a setting; alone, opens them all (Ctrl+S)", app_set },
     { "copyid",  NULL,                  NULL,     "copy this session's id to the clipboard",         app_copyid },
+    { "invite",  NULL,                  NULL,     "copy this session's id and password as one invite, which Ctrl+J takes", app_invite },
     { "move",    NULL,                  NULL,     "move to a new room with the peers whose codes you compared, leaving the rest behind", app_move },
     { "newtor",  NULL,                  NULL,     "new Tor circuits and onion addresses for every session that goes through Tor", app_newtor },
     { "update",  NULL,                  NULL,     "install the latest release from GitHub",          app_update },
@@ -950,13 +951,26 @@ static void submit_prompt(void) {
             crypto_wipe(pw, sizeof pw);
             break;
         }
-        case MODE_JOIN_ID:
+        case MODE_JOIN_ID: {
             if (input->len == 0) break;
+            char session_id[MAX_SESSION_NAME + 1], pw[MAX_PASSWORD + 1];
+            int invite = chat_invite_parse(input->buf, session_id, pw);
+            if (invite < 0) {
+                note("that invite is mistyped or cut off: its check doesn't match - copy it again, or type the id");
+                break;
+            }
+            if (invite > 0) {
+                end_prompt();
+                start_session(session_id, pw, 0, 0, NULL, 0);
+                crypto_wipe(pw, sizeof pw);
+                break;
+            }
             copy_str(g_app.pending_session_id, input->buf, sizeof g_app.pending_session_id);
             tui_input_clear(input);
             g_app.mode = MODE_JOIN_PASSWORD;
             g_app.dirty = 1;
             break;
+        }
         case MODE_JOIN_PASSWORD: {
             char session_id[MAX_SESSION_NAME + 1], pw[sizeof input->buf];
             copy_str(session_id, g_app.pending_session_id, sizeof session_id);
@@ -1268,7 +1282,7 @@ static const char *session_empty_text(const session_slot_t *s) {
                  "Finding them can take a minute%s.", s->name, e->route.mode == ROUTE_TOR ? " over Tor" : "");
     else if (chat_online_count(e) == 0)
         snprintf(text, sizeof text, "No one else is here yet\nTo invite peers, share the session id and its "
-                 "password.\n\n%s\n/copyid copies the id", s->name);
+                 "password.\n\n%s\n/invite copies both, as one invite", s->name);
     else
         copy_str(text, "No messages yet\nSay hello - it's end-to-end encrypted.", sizeof text);
     return text;

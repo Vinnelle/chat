@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added
+- `:invite` copies the session's id and password to the clipboard as one invite,
+  `chat:ID:PASSWORD:CHECK`, and the JOIN box (`Ctrl+J`) takes one in place of the id. The check
+  catches an invite that was mistyped or cut off, which used to leave you alone in a room nobody
+  else was in. An invite is never shown, only copied, since it holds the password. A call has none,
+  and nor does a session whose id has a `:` in it.
+
 ### Changed
 - The NEW SESSION box (`Ctrl+N`) starts with a random password, eight words (64 bits), shown so you
   can pass it on. The first key you type replaces it with a password of your own, and `Ctrl+U` clears

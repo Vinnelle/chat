@@ -785,3 +785,17 @@ int contact_secret(const identity_keypair_t *mine, const uint8_t their_pub[ID_SI
     sodium_memzero(shared, sizeof shared);
     return rc;
 }
+
+// The id goes in with its NUL, which no id holds, so the id and password can't trade characters.
+void invite_check(const char *id, const char *password, uint8_t check[INVITE_CHECK_LEN]) {
+    uint8_t full[crypto_generichash_BYTES_MIN];
+    crypto_generichash_state st;
+    crypto_generichash_init(&st, NULL, 0, sizeof full);
+    hash_str(&st, INVITE_LABEL);
+    crypto_generichash_update(&st, (const unsigned char *)id, strlen(id) + 1);
+    hash_str(&st, password);
+    crypto_generichash_final(&st, full, sizeof full);
+    memcpy(check, full, INVITE_CHECK_LEN);
+    sodium_memzero(&st, sizeof st);
+    sodium_memzero(full, sizeof full);
+}

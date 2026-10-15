@@ -458,6 +458,7 @@ void console_note(session_slot_t *s, const char *fmt, ...);
 void note(const char *fmt, ...);
 void osc52_copy(const char *text);
 void copy_session_id(session_slot_t *s);
+void copy_invite(session_slot_t *s);
 const char *route_label(void);
 void reapply_options(void);
 // Why the main loop is ending at once, with no frame after: the panic key (or SIGQUIT), or on the lock
@@ -554,6 +555,7 @@ int session_kept(const session_slot_t *s);
 cmd_result_t app_quit(void *ctx, const char *arg);
 cmd_result_t app_quitall(void *ctx, const char *arg);
 cmd_result_t app_copyid(void *ctx, const char *arg);
+cmd_result_t app_invite(void *ctx, const char *arg);
 cmd_result_t app_newtor(void *ctx, const char *arg);
 cmd_result_t app_update(void *ctx, const char *arg);
 void update_key(const tui_key_t *key);

@@ -842,6 +842,19 @@ int chat_contact_room(const identity_keypair_t *mine, const uint8_t their_pub[ID
                       char id[SESSION_ID_LEN + 1], char password[CONTACT_PASSWORD_LEN + 1]);
 uint64_t chat_contact_day(void);
 
+// An invite (:invite): a room's id and password as one string, "chat:ID:PASSWORD:CHECK", CHECK being
+// invite_check in hex. The password can hold ':', since the id ends at the first and the check
+// starts after the last, but an id with ':' in it can't have one. chat_invite: 0, or -1 if the id
+// can't go in one or it doesn't fit in cap (INVITE_MAX does).
+#define INVITE_PREFIX "chat:"
+#define INVITE_MAX (sizeof INVITE_PREFIX + MAX_SESSION_NAME + MAX_PASSWORD + INVITE_CHECK_LEN * 2 + 2)
+int chat_invite(const char *id, const char *password, char *out, size_t cap);
+// Whether text starts as an invite does, and chat_invite_parse takes it apart: 1 for an invite, with
+// its id and password; 0 if text isn't one; -1 if it is, but it's mistyped or cut off, so its check
+// doesn't match.
+int chat_is_invite(const char *text);
+int chat_invite_parse(const char *text, char id[MAX_SESSION_NAME + 1], char password[MAX_PASSWORD + 1]);
+
 // :move. Who it would take along: peers whose code was compared, whose builds can move.
 void chat_move_plan(chat_t *c, chat_move_plan_t *plan);
 // The one moving the room: a new id and password into to. 0, or -1 after saying why (nobody can come).

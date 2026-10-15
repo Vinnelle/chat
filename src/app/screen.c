@@ -530,9 +530,11 @@ static const tui_dialog_t *current_dialog(void) {
             break;
         case MODE_JOIN_ID:
             d.title = "JOIN SESSION";
-            d.mask = 0;
-            d.placeholder = "session id";
-            d.note = "The id you were given. Its password comes next.";
+            // An invite holds the password.
+            d.mask = chat_is_invite(g_app.input.buf);
+            d.placeholder = "session id, or an invite";
+            d.note = "The id you were given, and its password comes next. Or a whole invite (chat:...), which "
+                     "has the password in it.";
             d.keys = "enter next" DOT_SEP "esc cancel";
             break;
         case MODE_JOIN_PASSWORD:

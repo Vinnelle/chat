@@ -318,4 +318,10 @@ int move_verify(const uint8_t pub[ID_SIGN_PUB_LEN], const uint8_t sig[ID_SIGN_LE
 int contact_secret(const identity_keypair_t *mine, const uint8_t their_pub[ID_SIGN_PUB_LEN], uint64_t day,
                    uint8_t out[CONTACT_SECRET_LEN]);
 
+// The check that ends an invite (:invite): BLAKE2b over a label, the id and the password. It only
+// catches mistakes in copying one, so it's short.
+#define INVITE_CHECK_LEN 4
+#define INVITE_LABEL "chat-invite-v1"
+void invite_check(const char *id, const char *password, uint8_t check[INVITE_CHECK_LEN]);
+
 #endif

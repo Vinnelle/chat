@@ -25,7 +25,7 @@ static const char *USAGE =
     "settings, chat starts on your sessions instead.\n"
     "\n"
     "  Ctrl+N     create a new session: a random password is filled in, or type your own\n"
-    "  Ctrl+J     join an existing session (asks for its id, then its password), or a kept one\n"
+    "  Ctrl+J     join a session: its id, then its password, or an invite (:invite); or a kept one\n"
     "  Tab        next session       Shift+Tab   previous session (j/k in NORMAL too)\n"
     "  PgUp/PgDn  scroll the chat back and forward (Ctrl+U/Ctrl+D in NORMAL, G the newest)\n"
     "  Up/Down    scroll the chat by a message. The mouse wheel scrolls what it's over: the\n"
@@ -64,8 +64,8 @@ static const char *USAGE =
     "\n"
     "Commands run from the command line (/ on an empty line, or : in NORMAL). Anything else\n"
     "you type is sent:\n"
-    "  :new :join :quit (:q) :quitall (:qa) :copyid :update :peers :verify NICK [ok|no] :net\n"
-    "  :verified [forget NICK] :port [N] :set [NAME [VALUE]] :install :uninstall :help\n"
+    "  :new :join :quit (:q) :quitall (:qa) :copyid :invite :update :peers :verify NICK [ok|no]\n"
+    "  :net :verified [forget NICK] :port [N] :set [NAME [VALUE]] :install :uninstall :help\n"
     "  :send [PATH] :files :download [N] :show N :hide N :cancel N :keep [LABEL|forget]\n"
     "  :call NICK (a room only you and a verified key can work out)\n"
     "  (:help opens a page of keys and commands)\n"
@@ -603,6 +603,21 @@ void copy_session_id(session_slot_t *s) {
     const char *sid = s->engine.session_name;
     osc52_copy(sid);
     note("session id copied to the clipboard (OSC 52): %s", sid);
+}
+
+// It holds the password, so it's never shown: only copied.
+void copy_invite(session_slot_t *s) {
+    if (!s) { note("no session selected - nothing to copy"); return; }
+    if (s->contact) { note("a call is only for you and the key you called - nobody else can join it"); return; }
+    char invite[INVITE_MAX];
+    if (chat_invite(s->engine.session_name, s->password, invite, sizeof invite) != 0) {
+        note("this session's id has a ':' in it, so it can't go in an invite - :copyid copies the id, and the "
+             "password goes separately");
+        return;
+    }
+    osc52_copy(invite);
+    crypto_wipe(invite, sizeof invite);
+    note("invite copied to the clipboard (OSC 52) - it holds the password, so only pass it to whoever you're inviting");
 }
 
 // ---- routing: asked at the start of --simple; the full-screen UI opens on the settings page ----

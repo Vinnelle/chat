@@ -66,6 +66,19 @@ password = hex(k[32:64])
 (§1), and nothing on the wire says it's a call. A call nobody else is in moves to the new day's
 room as the day changes.
 
+### 1.2 Invites
+
+An invite is a room's id and password as one string, to pass on by hand. It never goes on the wire.
+
+```
+invite = "chat:" ‖ id ‖ ":" ‖ password ‖ ":" ‖ hex(check)
+check  = BLAKE2b("chat-invite-v1" ‖ id ‖ 0x00 ‖ password)[0:4]     unkeyed, 16-byte output
+```
+
+The id ends at the first `:` and the check starts after the last, so the password can hold `:`. An
+id with a `:` in it has no invite. A reader ignores spaces before and after the invite, and the
+case of `chat:`. The check only catches an invite that was mistyped or cut off: anyone can make one.
+
 ## 2. A member's own keys
 
 Each time chat joins a session, it makes these:

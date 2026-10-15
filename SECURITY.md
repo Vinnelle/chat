@@ -54,7 +54,8 @@ session id and password, whether they were invited or the password leaked.
 ### Things that are easy to get wrong
 
 - **The id and password are the only way in.** With a blank password, the session id alone is
-  enough to join. A notification never names the session for that reason.
+  enough to join. A notification never names the session for that reason. An invite (`:invite`)
+  holds both, so it's as secret as the password: chat only copies it, and never shows it.
 - **A weak password can be guessed offline.** Anyone who has captured a single datagram, DHT
   lookup key or relay tag, and knows or guesses the session id, can test passwords against it. Each
   guess costs one Argon2id run (512 MiB). The session id is the salt, so the work for one id
