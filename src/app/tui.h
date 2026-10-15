@@ -148,23 +148,31 @@ typedef enum {
     TUI_KEY_F9,
     TUI_KEY_F12,
     // Not keys: the terminal's reply to a background colour query (r, g, b in ch[0..2]), its
-    // report that it switched between a light and a dark theme, and a mouse button other than the
-    // wheel's, which does nothing.
+    // report that it switched between a light and a dark theme, a mouse button other than the
+    // wheel's, which does nothing, and where a paste starts and ends (TUI_PASTE_ON).
     TUI_KEY_BG_REPORT,
     TUI_KEY_THEME_CHANGED,
     TUI_KEY_MOUSE,
+    TUI_KEY_PASTE_START,
+    TUI_KEY_PASTE_END,
     TUI_KEY_UNKNOWN
 } tui_keytype_t;
 
 // The mouse wheel comes as Up and Down with wheel set, at row and col of the screen (from 1).
+// pasted: it came inside a paste, as text.
 typedef struct {
     tui_keytype_t type;
     char ch[UTF8_CHAR_MAX + 1];
     int ch_len;
     int wheel, row, col;
+    int pasted;
 } tui_key_t;
 
 size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out);
+
+// A key that came inside a paste, as the text it is: a character, or a line's end as Enter, with Tab
+// as a space. 0 for anything else (a control key, an arrow, Esc), which a paste can't press.
+int tui_key_paste(tui_key_t *key);
 
 // How many bytes at the end of buf are an escape sequence the read cut off, to keep for the next
 // read, at most TUI_KEY_CUT_MAX.
@@ -175,6 +183,11 @@ size_t tui_key_cut(const uint8_t *buf, size_t len);
 // clicks no longer reach the terminal: selecting text takes Shift in most terminals.
 #define TUI_MOUSE_ON "\x1b[?1000h\x1b[?1006h"
 #define TUI_MOUSE_OFF "\x1b[?1006l\x1b[?1000l"
+
+// The terminal marks where a paste starts and ends (bracketed paste), so a paste is only text: its
+// lines don't send, and nothing in it can run a command or answer a question.
+#define TUI_PASTE_ON "\x1b[?2004h"
+#define TUI_PASTE_OFF "\x1b[?2004l"
 
 // Asks the terminal for its background colour (answered with TUI_KEY_BG_REPORT), and to report
 // when its theme changes (TUI_KEY_THEME_CHANGED). TUI_THEME_UNWATCH stops the theme reports.
@@ -237,6 +250,9 @@ typedef struct {
 void tui_input_clear(tui_input_t *in);
 
 int tui_input_feed(tui_input_t *in, const tui_key_t *key);
+// A pasted key (tui_key_paste) into the line: it goes in as text whatever the mode, NORMAL turning to
+// INSERT, and a line's end is a space. 0 if it didn't fit.
+int tui_input_paste(tui_input_t *in, const tui_key_t *key);
 
 // Leaves the COMMAND line for the mode it was opened from.
 void tui_input_end_command(tui_input_t *in);

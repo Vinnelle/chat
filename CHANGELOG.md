@@ -15,6 +15,11 @@
   takes off anything copied since.
 
 ### Changed
+- A paste is only text. chat turns on bracketed paste, so the terminal marks where a paste starts
+  and ends: it goes into the input box, from NORMAL too, with its lines run together, and waits for
+  `Enter`. Before, each line of a paste was sent as it came, a line starting with `/` ran as a
+  command, a paste in NORMAL ran its letters as keys, and one could answer a y/n box. In a box a
+  paste only goes into the field, and anywhere else it's ignored.
 - The NEW SESSION box (`Ctrl+N`) starts with a random password, eight words (64 bits), shown so you
   can pass it on. The first key you type replaces it with a password of your own, and `Ctrl+U` clears
   it to none. The id is often passed around in the open, so the password is what stands in the way of

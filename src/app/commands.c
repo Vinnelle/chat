@@ -1091,6 +1091,43 @@ static void scroll_console(int dir) {
     g_app.dirty = 1;
 }
 
+// The boxes that take text, where a paste can go.
+static int field_mode(app_mode_t m) {
+    switch (m) {
+        case MODE_SIGN_PASSWORD: case MODE_SIGN_PATH: case MODE_SETTINGS_EDIT: case MODE_NEW_PASSWORD:
+        case MODE_JOIN_ID: case MODE_JOIN_PASSWORD: case MODE_INSTALL_PASS: case MODE_INSTALL_PASS2:
+        case MODE_INSTALL_UNLOCK: case MODE_INSTALL_NAME: case MODE_UNLOCK: case MODE_KEY_PIN:
+        case MODE_UNLOCK_CODE: case MODE_SHADOW_PASS: case MODE_SHADOW_PASS2: case MODE_CODE_SETUP:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+// A paste only goes where text is typed. Anywhere else, its letters would be keys: a y answering a
+// question, or q closing a page. A line's end in it only goes to the chat's input, as a space, and to
+// the key being pasted, so a paste never presses Enter.
+static int paste_wanted(const tui_key_t *key) {
+    if (g_app.screen_locked || g_app.pin_step) return key->type == TUI_KEY_CHAR;
+    if (g_app.asking_quit) return 0;
+    if (g_app.mode == MODE_SIGN_PASTE || g_app.mode == MODE_CHAT) return 1;
+    if (key->type == TUI_KEY_ENTER) return g_app.mode == MODE_SETTINGS_EDIT && setting_edit_separator();
+    return key->type == TUI_KEY_CHAR && field_mode(g_app.mode);
+}
+
+// Bridge lines come one to a line, and stay apart in the field.
+static void paste_separator(void) {
+    tui_input_t *in = &g_app.input;
+    const char *sep = setting_edit_separator();
+    if (!sep || in->cursor == 0 || in->buf[in->cursor - 1] == ' ' || in->buf[in->cursor - 1] == ';') return;
+    tui_key_t k = { .type = TUI_KEY_CHAR, .ch_len = 1, .pasted = 1 };
+    for (; *sep; sep++) {
+        k.ch[0] = *sep;
+        if (!tui_input_paste(in, &k)) g_app.paste_cut = 1;
+    }
+    g_app.dirty = 1;
+}
+
 void handle_key(const tui_key_t *key) {
     tui_input_t *input = &g_app.input;
 
@@ -1106,6 +1143,12 @@ void handle_key(const tui_key_t *key) {
         return;
     }
     if (key->type == TUI_KEY_MOUSE) return;
+    if (key->type == TUI_KEY_PASTE_START) { g_app.paste_cut = 0; return; }
+    if (key->type == TUI_KEY_PASTE_END) {
+        if (g_app.paste_cut) note("the rest of the paste didn't fit");
+        return;
+    }
+    if (key->pasted && !paste_wanted(key)) return;
 
     // A message is the result of the previous key, so this key resets the bar.
     if (g_app.message[0]) { g_app.message[0] = '\0'; g_app.dirty = 1; }
@@ -1117,6 +1160,8 @@ void handle_key(const tui_key_t *key) {
     if (key->type == TUI_KEY_CTRL_C && !g_app.asking_quit) { g_app.asking_quit = 1; g_app.dirty = 1; return; }
     if (g_app.asking_quit) { quit_key(key); return; }
     if (g_app.pin_step) { pin_key(key); return; }
+
+    if (key->pasted && key->type == TUI_KEY_ENTER && g_app.mode == MODE_SETTINGS_EDIT) { paste_separator(); return; }
 
     // The pages draw their fields in their rows, so a key there redraws the page.
     switch (g_app.mode) {
@@ -1180,6 +1225,12 @@ void handle_key(const tui_key_t *key) {
     }
 
     tui_input_mode_t was = input->mode;
+    if (key->pasted) {
+        if (!tui_input_paste(input, key)) g_app.paste_cut = 1;
+        if (was == TUI_IMODE_COMMAND || input->mode == TUI_IMODE_COMMAND || was != input->mode) g_app.dirty = 1;
+        else g_app.input_dirty = 1;
+        return;
+    }
     if (tui_input_feed(input, key)) {
         // The menu above the COMMAND line covers part of the chat, so it needs a full frame.
         if (was == TUI_IMODE_COMMAND || input->mode == TUI_IMODE_COMMAND) g_app.dirty = 1;

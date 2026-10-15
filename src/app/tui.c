@@ -192,6 +192,7 @@ size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out) {
     out->type = TUI_KEY_NONE;
     out->ch_len = 0;
     out->wheel = 0;
+    out->pasted = 0;
     if (len == 0) return 0;
     uint8_t b0 = buf[0];
 
@@ -241,6 +242,10 @@ size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out) {
                     case '6':           out->type = TUI_KEY_PAGE_DOWN; return 4;
                     default: break;
                 }
+            }
+            if (len >= 6 && buf[2] == '2' && buf[3] == '0' && (buf[4] == '0' || buf[4] == '1') && buf[5] == '~') {
+                out->type = buf[4] == '0' ? TUI_KEY_PASTE_START : TUI_KEY_PASTE_END;
+                return 6;
             }
             if (len >= 5 && buf[2] == '1' && buf[3] == '1' && buf[4] == '~') { out->type = TUI_KEY_HELP; return 5; }
             if (len >= 5 && buf[2] == '2' && buf[3] == '0' && buf[4] == '~') { out->type = TUI_KEY_F9; return 5; }
@@ -315,6 +320,21 @@ size_t tui_decode_key(const uint8_t *buf, size_t len, tui_key_t *out) {
     out->ch_len = (int)seqlen;
     out->type = TUI_KEY_CHAR;
     return seqlen;
+}
+
+int tui_key_paste(tui_key_t *key) {
+    key->pasted = 1;
+    switch (key->type) {
+        case TUI_KEY_CHAR: return 1;
+        case TUI_KEY_ENTER: case TUI_KEY_JOIN_SESSION: key->type = TUI_KEY_ENTER; return 1;
+        case TUI_KEY_TAB:
+            key->type = TUI_KEY_CHAR;
+            key->ch[0] = ' ';
+            key->ch[1] = '\0';
+            key->ch_len = 1;
+            return 1;
+        default: return 0;
+    }
 }
 
 void tui_input_clear(tui_input_t *in) {
@@ -611,6 +631,34 @@ static int command_feed(tui_input_t *in, const tui_key_t *key) {
         default:
             return 1;
     }
+}
+
+// A paste's lines run together, one space between them, and never send or open the command line.
+int tui_input_paste(tui_input_t *in, const tui_key_t *key) {
+    if (in->mode == TUI_IMODE_NORMAL) in->mode = TUI_IMODE_INSERT;
+    const char *s = key->ch;
+    int n = key->ch_len;
+    if (key->type == TUI_KEY_ENTER) {
+        const char *at = in->mode == TUI_IMODE_COMMAND ? in->cmd : in->buf;
+        int pos = in->mode == TUI_IMODE_COMMAND ? in->cmd_len : in->cursor;
+        if (pos == 0 || at[pos - 1] == ' ') return 1;
+        s = " ";
+        n = 1;
+    } else if (key->type != TUI_KEY_CHAR) {
+        return 1;
+    }
+    if (in->mode == TUI_IMODE_COMMAND) {
+        if (in->cmd_len + n >= (int)sizeof in->cmd) return 0;
+        memcpy(in->cmd + in->cmd_len, s, (size_t)n);
+        in->cmd_len += n;
+        in->cmd[in->cmd_len] = '\0';
+        in->menu_sel = 0;
+        if (in->cmd_as_text && !could_be_command(in)) tui_input_command_to_text(in);
+        return 1;
+    }
+    if (in->len + n >= (int)sizeof in->buf) return 0;
+    insert_bytes(in, s, n);
+    return 1;
 }
 
 int tui_input_feed(tui_input_t *in, const tui_key_t *key) {

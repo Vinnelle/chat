@@ -1165,6 +1165,13 @@ your draft comes back after. Yes/no questions take `y` or `n`.
 
 Typing `@` and the start of a nick shows the rest of the name dimmed, and `Tab` completes it.
 
+**Pasting.** chat asks the terminal to mark where a paste starts and ends (bracketed paste), so a
+paste is only ever text. It goes into the input box, from NORMAL too, its lines run together with a
+space between them, and nothing is sent until you press `Enter`. Nothing in a paste can run a
+command, answer a y/n question or press a key: in a box it only goes into the field, without its
+line ends (bridge lines pasted into **Bridges** are kept apart with `;`), and anywhere else it's
+ignored. A terminal without bracketed paste sends a paste as if it were typed, line ends and all.
+
 `/` on an empty line, in INSERT or NORMAL (or `:` in NORMAL), opens the command line, with a
 menu of matching commands. After `set ` it lists the settings and their current values, and
 after `set NAME ` the values that setting takes. After a command that takes a nick (`verify `)

@@ -58,6 +58,7 @@ static const char *USAGE =
     "  :        NORMAL -> COMMAND: type a command, Tab completes, Up/Down pick from the\n"
     "           menu, Enter runs, Esc cancels. After :verify it lists the online peers\n"
     "           whose nick starts with what's typed, like @ does in INSERT\n"
+    "A paste goes into the input as text, its lines run together, and waits for Enter.\n"
     "Prompts (a password, a session id, a setting's new value, a question) open in a box\n"
     "over the screen. Enter confirms, Esc cancels, a question takes y or n, and whatever you\n"
     "were typing comes back afterwards.\n"
@@ -691,10 +692,13 @@ static int run_plain(const char *session_name, const char *password, uint16_t po
 #define WAIT_MS 200
 // How long a sequence a read cut off waits for the rest.
 #define KEY_CUT_WAIT_MS 25
+// A paste comes all at once. One whose end hasn't come after this long without input never will, so
+// keys are keys again.
+#define PASTE_GAP_MAX 2.0
 // The full-screen UI: the window's title saved and set to chat, the mouse reported, then the
 // alternate screen, cleared. Leaving it undoes that.
-#define SCREEN_ENTER "\x1b[22;0t\x1b]0;chat\x07" TUI_MOUSE_ON "\x1b[?1049h\x1b[2J\x1b[H"
-#define SCREEN_LEAVE "\x1b[?7h\x1b[0 q\x1b[?25h" TUI_MOUSE_OFF "\x1b[?1049l\x1b[23;0t"
+#define SCREEN_ENTER "\x1b[22;0t\x1b]0;chat\x07" TUI_MOUSE_ON TUI_PASTE_ON "\x1b[?1049h\x1b[2J\x1b[H"
+#define SCREEN_LEAVE "\x1b[?7h\x1b[0 q\x1b[?25h" TUI_MOUSE_OFF TUI_PASTE_OFF "\x1b[?1049l\x1b[23;0t"
 #define CLEAR_SCREEN "\x1b[2J\x1b[H"
 #define CLEAR_SCROLLBACK "\x1b[3J"
 
@@ -829,6 +833,8 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
     uint8_t cut[TUI_KEY_CUT_MAX];
     size_t n_cut = 0;
     double cut_at = 0;
+    int pasting = 0;
+    double paste_at = 0;
 
     while (!g_interrupted) {
         sock_t socks[PLATFORM_WAIT_MAX];
@@ -874,15 +880,23 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
                 len -= n_cut;
                 memcpy(cut, buf + len, n_cut);
                 cut_at = now_seconds();
+                if (pasting) paste_at = now_seconds();
                 while (len > off && !g_panic) {
                     tui_key_t key;
                     size_t used = tui_decode_key(buf + off, len - off, &key);
                     if (used == 0) break;
                     off += used;
+                    if (key.type == TUI_KEY_PASTE_START || key.type == TUI_KEY_PASTE_END) {
+                        pasting = key.type == TUI_KEY_PASTE_START;
+                        paste_at = now_seconds();
+                    } else if (pasting && !tui_key_paste(&key)) {
+                        continue;
+                    }
                     handle_key(&key);
                 }
             }
         }
+        if (pasting && now_seconds() - paste_at > PASTE_GAP_MAX) pasting = 0;
         if (g_panic) break;
         double now = now_seconds();
         for (int i = 0; i < n; i++)

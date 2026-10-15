@@ -322,6 +322,7 @@ typedef struct {
     char paste_buf[16384];
     size_t paste_len;
     char paste_status[80];
+    int paste_cut;   // some of the paste coming in didn't fit in the input line
 
     char pending_auto_session[MAX_SESSION_NAME + 1];
     char pending_auto_password[MAX_PASSWORD + 1];
@@ -614,6 +615,8 @@ void end_setting_edit(void);
 int valid_host_port(const char *s);
 void setting_apply_text(setting_id_t id, const char *typed);
 void commit_setting_edit(void);
+// What goes between the items of the list being edited (bridges, relays), or NULL for a single value.
+const char *setting_edit_separator(void);
 int settings_sections(const char **out, int cap);
 int settings_section_index(setting_id_t id);
 int section_begin(int s);

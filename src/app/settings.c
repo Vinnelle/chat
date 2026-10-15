@@ -896,6 +896,10 @@ void setting_apply_text(setting_id_t id, const char *typed) {
     }
 }
 
+const char *setting_edit_separator(void) {
+    return g_edit_id == SET_BRIDGES ? "; " : g_edit_id == SET_RELAYS ? " " : NULL;
+}
+
 void commit_setting_edit(void) {
     char text[sizeof g_app.input.buf];
     copy_str(text, g_app.input.buf, sizeof text);
