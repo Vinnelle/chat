@@ -133,7 +133,9 @@ session id and password, whether they were invited or the password leaked.
 ### Updates and releases
 
 - **Releases.** The release binaries are built from the tagged commit with zig, against
-  dependencies pinned by hash. `SHA256SUMS` is signed with minisign, offline, so someone who takes
+  dependencies pinned by hash, and are meant to come out the same wherever they're built: GitHub
+  Actions builds each release again and compares it with what was published, and `just reproduce`
+  does the same for anyone. `SHA256SUMS` is signed with minisign, offline, so someone who takes
   over the GitHub account can't publish an update that chat installs.
 - **Updates.** `chat --update` checks that signature against the release key built into chat. The
   signed comment has to name the release being installed, so an older release's signature can't be

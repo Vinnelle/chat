@@ -1070,6 +1070,7 @@ just release            # the same, as the version in CMakeLists.txt (the betas'
 just release 1.0.0      # the same, as any other version
 just release beta       # release the Unreleased section as the next beta of that version, e.g. v0.5.1-beta.2
 just release beta minor # the same, as a beta of the next minor, e.g. v0.6.0-beta.1 (patch, major or a version too)
+just reproduce 0.5.1    # build release 0.5.1 again from its tag (checked out) and compare it with what GitHub has
 ```
 
 Changes go under `## Unreleased` at the top of [CHANGELOG.md](CHANGELOG.md). `just release`
@@ -1097,6 +1098,14 @@ Then it signs `SHA256SUMS` of the published binaries, list included, for downloa
 Releases are signed offline with the release key, never in CI, so even if someone takes over
 the GitHub account they can't publish an update chat will install. `just keygen` makes the key.
 Commit `minisign.pub`, and keep the secret key backed up and off GitHub.
+
+**Reproducible builds.** `just dist` stamps a release with the time of its commit, not when it was
+built (`SOURCE_DATE_EPOCH`), and its binaries don't name the folders they were built in, so the same
+tag built with the same zig (0.16.0) should give the same bytes on any computer. When a release is
+published, GitHub Actions builds it again from the tag and compares its binaries with the published
+ones, leaving out the list of builds each one ends with. `just reproduce VERSION`, with the tag
+checked out, does the same on your own computer, so you can check that what you download is what the
+source builds without trusting the computer it was built on, or GitHub.
 
 `just keygen backup` makes a second key, the backup, in `minisign-backup.pub` and
 `~/.minisign/chat-release-backup.key` (or `CHAT_BACKUP_SIGNING_KEY`). Builds made with it take a

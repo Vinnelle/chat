@@ -208,17 +208,61 @@ _signed-by file:
     echo "$1 isn't signed with minisign.pub's key or minisign-backup.pub's" >&2
     exit 1
 
+# The build stamp says when the commit was made, not when it was built (SOURCE_DATE_EPOCH), so
+# building the same commit again, anywhere, with the same zig, gives the same binaries.
 # Put standalone release binaries and SHA256SUMS in dist/
 [group('release')]
-dist: (build "linux") (build "windows")
+dist:
+    #!/bin/sh
+    set -eu
+    just={{quote(just_executable())}}
+    SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+    export SOURCE_DATE_EPOCH
+    "$just" build linux
+    "$just" build windows
     rm -rf dist
     mkdir dist
     cp build-static/chat dist/chat-linux-x86_64
     cp build-win/chat.exe dist/chat-windows-x86_64.exe
     strip dist/chat-linux-x86_64
-    cd dist && sha256sum chat-linux-x86_64 chat-windows-x86_64.exe > SHA256SUMS
-    cd dist && { echo "chat v{{version}}"; sha256sum chat-linux-x86_64 chat-windows-x86_64.exe | cut -c1-64; } > BUILDS
-    @echo "dist/ ready for v{{version}}"
+    (cd dist && sha256sum chat-linux-x86_64 chat-windows-x86_64.exe > SHA256SUMS)
+    (cd dist && { echo "chat v{{version}}"; sha256sum chat-linux-x86_64 chat-windows-x86_64.exe | cut -c1-64; } > BUILDS)
+    echo "dist/ ready for v{{version}}"
+
+# A published binary's SHA-256 without the list of builds `just release` appended to it, which is
+# the hash `just dist` gives for the same commit
+_core-hash file:
+    #!/bin/sh
+    set -eu
+    size=$(wc -c < "$1")
+    if [ "$(tail -c 8 "$1")" = CHATBLD1 ]; then
+        len=$(tail -c 16 "$1" | head -c 8 | sed 's/^0*//')
+        size=$((size - 16 - ${len:-0}))
+    fi
+    head -c "$size" "$1" | sha256sum | cut -c1-64
+
+# Check out vVERSION first. The binaries GitHub has should be the ones built here, apart from the
+# list appended to them, or someone changed them, or the build isn't reproducible yet.
+# Build release VERSION again from its tag and compare it with the published binaries (needs zig, curl)
+[group('release')]
+reproduce version:
+    #!/bin/sh
+    set -eu
+    v="${1#v}"
+    just={{quote(just_executable())}}
+    test "$(git rev-parse HEAD)" = "$(git rev-parse "v$v^{commit}")" || { echo "HEAD isn't v$v - git checkout v$v first" >&2; exit 1; }
+    test -z "$(git status --porcelain)" || { echo "working tree not clean" >&2; exit 1; }
+    "$just" dist
+    dir=$(mktemp -d)
+    trap 'rm -rf "$dir"' EXIT
+    same=1
+    for f in chat-linux-x86_64 chat-windows-x86_64.exe; do
+        curl -fsSL -o "$dir/$f" "https://github.com/Vinnelle/chat/releases/download/v$v/$f"
+        mine=$(sha256sum < "dist/$f" | cut -c1-64)
+        theirs=$("$just" _core-hash "$dir/$f")
+        if [ "$mine" = "$theirs" ]; then echo "$f: the same ($mine)"; else echo "$f: DIFFERENT - built here $mine, published $theirs"; same=0; fi
+    done
+    test "$same" = 1
 
 # Peers send each other this list to check each other's builds with (README.md, "Modified
 # clients"), so it may name 3 binaries at most. Chat reads it from its own end: the list, its

@@ -29,9 +29,11 @@ endif()
 include(ExternalProject)
 
 # Each function and object in a section of its own, so --gc-sections drops what chat never calls.
+# And the folder the source is in, which a dependency's asserts name, written as ".", so a release
+# built somewhere else is the same, byte for byte.
 set(DEP_SECTION_FLAGS "")
 if(NOT MSVC)
-    set(DEP_SECTION_FLAGS "-ffunction-sections -fdata-sections")
+    set(DEP_SECTION_FLAGS "-ffunction-sections -fdata-sections -ffile-prefix-map=${CMAKE_SOURCE_DIR}=.")
 endif()
 
 set(DEP_CC_ARGS "")
@@ -346,12 +348,15 @@ if(NOT MSVC)
     chat_try_compile_flag(-fno-delete-null-pointer-checks)
     # Stack variables start zeroed, so a missed initialisation can't leak an earlier call's key bytes.
     chat_try_compile_flag(-ftrivial-auto-var-init=zero)
+    chat_try_compile_flag(-ffile-prefix-map=${CMAKE_SOURCE_DIR}=.)
 endif()
 
 if(WIN32)
     chat_try_link_flag(-Wl,--dynamicbase)
     chat_try_link_flag(-Wl,--nxcompat)
     chat_try_link_flag(-Wl,--high-entropy-va)
+    # No link time in the header, so a release links to the same bytes wherever it's built.
+    chat_try_link_flag(-Wl,--no-insert-timestamp)
 elseif(NOT MSVC)
     chat_try_compile_flag(-fPIE)
     chat_try_link_flag(-pie)

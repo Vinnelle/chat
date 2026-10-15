@@ -26,6 +26,11 @@
   next release, and that release can stop taking the old key.
 
 ### Changed
+- Releases are meant to be reproducible. `just dist` stamps the binaries with their commit's time,
+  not when they were built, so a release's `--version` says when its commit was made, and they no
+  longer name the folders they were built in, nor (on Windows) when they were linked. When a release
+  is published, GitHub Actions builds it again and compares it with the published binaries, and
+  `just reproduce VERSION` does the same on any computer with zig.
 - On Linux, a picture shown is decoded in a child process that seccomp lets do nothing but allocate
   memory, write the thumbnail back and exit, so a bug in chat's picture readers can't reach a file,
   the network or chat's keys. chat checks the thumbnail it gets back, and a child that takes more

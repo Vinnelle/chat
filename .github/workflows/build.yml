@@ -1,8 +1,9 @@
 name: build
 
 # Builds each newly published release, as a check that the tagged source builds on a clean
-# machine. The release itself comes from `just release`, which signs SHA256SUMS offline with the
-# release key, so the key never touches GitHub.
+# machine, and to the same bytes as the binaries published: the release itself comes from `just
+# release`, which builds and signs it offline, so the key never touches GitHub. A difference means
+# the build isn't reproducible, or what was published isn't what the tag builds.
 
 on:
   release:
@@ -28,7 +29,10 @@ jobs:
             cmake_args: -DCMAKE_TOOLCHAIN_FILE=cmake/zig-windows.cmake
     runs-on: ubuntu-24.04
     steps:
+      # With the tags, so the build stamp names the release as `just dist` does (git describe).
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Set up zig
         env:
@@ -49,6 +53,10 @@ jobs:
           test -n "$v"
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
+      # The commit's time, not the build's, as `just dist` stamps it.
+      - name: Stamp with the commit's time
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
       - name: Configure
         run: cmake -B ${{ matrix.dir }} ${{ matrix.cmake_args }}
 
@@ -66,4 +74,23 @@ jobs:
           name: ${{ matrix.asset }}-${{ steps.version.outputs.version }}
           path: dist/${{ matrix.asset }}
           if-no-files-found: error
+
+      # The published binary ends with the signed list of the release's builds, which this one
+      # doesn't have: its length in 8 digits and CHATBLD1 come last (`just _core-hash`).
+      - name: Compare with the published binary
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          curl -fsSL -o published "https://github.com/${{ github.repository }}/releases/download/$TAG/${{ matrix.asset }}"
+          size=$(wc -c < published)
+          if [ "$(tail -c 8 published)" = CHATBLD1 ]; then
+            len=$(tail -c 16 published | head -c 8 | sed 's/^0*//')
+            size=$((size - 16 - ${len:-0}))
+          fi
+          theirs=$(head -c "$size" published | sha256sum | cut -c1-64)
+          mine=$(sha256sum < dist/${{ matrix.asset }} | cut -c1-64)
+          echo "built here: $mine"
+          echo "published:  $theirs"
+          test "$mine" = "$theirs" || { echo "::error::${{ matrix.asset }} built from $TAG isn't the one published"; exit 1; }
 
