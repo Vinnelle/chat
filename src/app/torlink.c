@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
 #include "app/app.h"
+#include "common/bytewords.h"
 
 const char *const TOR_LAUNCH_NAMES[] = { "auto", "always", "never" };
 
@@ -772,18 +773,31 @@ void begin_prompt(app_mode_t mode) {
     g_app.dirty = 1;
 }
 
+// The id is often passed around in the open, so the password carries the weight against guessing: the
+// field starts with a random one, unmasked since it has to be passed on.
+void begin_new_session(void) {
+    begin_prompt(MODE_NEW_PASSWORD);
+    uint8_t pw[MOVE_PASSWORD_BYTES];
+    gen_random(pw, sizeof pw);
+    bytewords_plain(pw, sizeof pw, g_app.input.buf);
+    crypto_wipe(pw, sizeof pw);
+    g_app.input.len = g_app.input.cursor = (int)strlen(g_app.input.buf);
+    g_app.pw_suggested = 1;
+}
+
 void end_prompt(void) {
     crypto_wipe(g_app.input.buf, sizeof g_app.input.buf);
     crypto_wipe(g_app.pending_session_id, sizeof g_app.pending_session_id);
     g_app.input = g_app.saved_input;
     crypto_wipe(&g_app.saved_input, sizeof g_app.saved_input);
+    g_app.pw_suggested = 0;
     g_app.mode = MODE_CHAT;
     g_app.dirty = 1;
 }
 
 cmd_result_t app_new(void *ctx, const char *arg) {
     (void)ctx; (void)arg;
-    begin_prompt(MODE_NEW_PASSWORD);
+    begin_new_session();
     return CMD_OK;
 }
 

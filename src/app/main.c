@@ -24,7 +24,7 @@ static const char *USAGE =
     "looked for or started, and no --peer name is looked up. Once :install has saved your\n"
     "settings, chat starts on your sessions instead.\n"
     "\n"
-    "  Ctrl+N     create a new session (asks for a password; blank still encrypts)\n"
+    "  Ctrl+N     create a new session: a random password is filled in, or type your own\n"
     "  Ctrl+J     join an existing session (asks for its id, then its password), or a kept one\n"
     "  Tab        next session       Shift+Tab   previous session (j/k in NORMAL too)\n"
     "  PgUp/PgDn  scroll the chat back and forward (Ctrl+U/Ctrl+D in NORMAL, G the newest)\n"

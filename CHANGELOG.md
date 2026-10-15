@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- The NEW SESSION box (`Ctrl+N`) starts with a random password, eight words (64 bits), shown so you
+  can pass it on. The first key you type replaces it with a password of your own, and `Ctrl+U` clears
+  it to none. The id is often passed around in the open, so the password is what stands in the way of
+  guessing, and the box used to start empty.
+
 ## 0.5.1-beta.3
 
 ### Added

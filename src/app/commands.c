@@ -971,6 +971,28 @@ static void submit_prompt(void) {
     }
 }
 
+// The random password goes as a whole: a key that edits it clears it first, so what's typed is a
+// password of your own, and moving the cursor keeps it to edit.
+static void new_password_key(const tui_key_t *key) {
+    if (g_app.pw_suggested) {
+        switch (key->type) {
+            case TUI_KEY_CHAR: case TUI_KEY_BACKSPACE: case TUI_KEY_DELETE: case TUI_KEY_DELETE_WORD: case TUI_KEY_CTRL_U:
+                crypto_wipe(g_app.input.buf, sizeof g_app.input.buf);
+                g_app.input.len = g_app.input.cursor = 0;
+                g_app.pw_suggested = 0;
+                g_app.dirty = 1;
+                if (key->type != TUI_KEY_CHAR) return;
+                break;
+            case TUI_KEY_LEFT: case TUI_KEY_RIGHT: case TUI_KEY_HOME: case TUI_KEY_END:
+                g_app.pw_suggested = 0;
+                break;
+            default:
+                break;
+        }
+    }
+    field_key(key, submit_prompt, end_prompt);
+}
+
 static void submit_chat_line(void) {
     tui_input_t *input = &g_app.input;
     g_app.dirty = 1;
@@ -1098,7 +1120,7 @@ void handle_key(const tui_key_t *key) {
         case MODE_SIGN_PASSWORD:  field_key(key, commit_sign_password, end_sign_password); return;
         case MODE_SIGN_PATH:      field_key(key, commit_key_path, end_key_path); return;
         case MODE_SETTINGS_EDIT:  field_key(key, commit_setting_edit, end_setting_edit); return;
-        case MODE_NEW_PASSWORD:
+        case MODE_NEW_PASSWORD:   new_password_key(key); return;
         case MODE_JOIN_ID:
         case MODE_JOIN_PASSWORD:  field_key(key, submit_prompt, end_prompt); return;
         case MODE_INSTALL:        confirm_key(key, install_confirmed, cancel_install); return;
@@ -1172,7 +1194,7 @@ void handle_key(const tui_key_t *key) {
     switch (key->type) {
         case TUI_KEY_TAB:            select_step(1); break;
         case TUI_KEY_BACKTAB:        select_step(-1); break;
-        case TUI_KEY_NEW_SESSION:    begin_prompt(MODE_NEW_PASSWORD); break;
+        case TUI_KEY_NEW_SESSION:    begin_new_session(); break;
         case TUI_KEY_JOIN_SESSION:   begin_rooms(); break;
         case TUI_KEY_TOGGLE_SIDEBAR: g_app.show_sidebar = !g_app.show_sidebar; g_app.dirty = 1; break;
         case TUI_KEY_TOGGLE_CONSOLE: g_app.show_console = !g_app.show_console; g_app.dirty = 1; break;

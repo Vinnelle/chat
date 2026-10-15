@@ -58,7 +58,9 @@ session id and password, whether they were invited or the password leaked.
 - **A weak password can be guessed offline.** Anyone who has captured a single datagram, DHT
   lookup key or relay tag, and knows or guesses the session id, can test passwords against it. Each
   guess costs one Argon2id run (512 MiB). The session id is the salt, so the work for one id
-  doesn't help with another.
+  doesn't help with another. The NEW SESSION box starts with a random password of eight words (64
+  bits), which is far out of reach at that cost. One you type instead is only as strong as you make
+  it.
 - **Compare verify codes.** Being in the room only proves someone knows the password. Without a
   compared code, or a verified signing key, any member could be in the middle. **Compare verify
   codes** (`:set verify required`) holds back everything you send until you have.

@@ -300,6 +300,7 @@ typedef struct {
     int pin_step, pin_then;
     double move_shown;   // when a request to move came up by itself, for the keys typed just before
     char pending_session_id[MAX_SESSION_NAME + 1];
+    int pw_suggested;   // NEW SESSION's field still holds the random password it opened with
     int show_sidebar, show_console, show_chat;
     int dirty;
     int input_dirty;
@@ -536,6 +537,7 @@ int browser_load(browser_t *b, const char *path);
 void browser_select(browser_t *b, const char *name);
 void browser_entry_path(const browser_t *b, const dir_entry_t *e, char *out, size_t cap);
 void begin_prompt(app_mode_t mode);
+void begin_new_session(void);
 void end_prompt(void);
 cmd_result_t app_new(void *ctx, const char *arg);
 cmd_result_t app_join(void *ctx, const char *arg);

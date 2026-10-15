@@ -28,7 +28,10 @@ Messages use a hybrid post-quantum setup:
 - a **ratchet per message** for forward secrecy
 
 The session **id + password** key both the encryption and the DHT lookup, so you need both to
-find the room or read it. A blank password still encrypts.
+find the room or read it. The id is often passed around in the open, so the password does the work:
+the NEW SESSION box (`Ctrl+N`) starts with a random one, eight words (64 bits), shown so you can pass
+it on. Type to use your own instead. A blank password still encrypts, but then the id alone gets
+anyone in.
 
 **Compare verify codes.** The id and password only prove someone is in the room. Any member
 could sit between two others and read what they say. When a peer joins, chat shows a verify
@@ -1118,7 +1121,7 @@ saved your settings, it starts on your sessions, and `Ctrl+S` opens the page.
 
 | Key | Action |
 | --- | --- |
-| `Ctrl+N` | create a new session (asks for a password) |
+| `Ctrl+N` | create a new session, with a random password filled in (type to use your own) |
 | `Ctrl+J` | join an existing session (id, then password), or with rooms kept, pick one of them |
 | `Tab` / `Shift+Tab` | next / previous session (`j` / `k` in NORMAL too) |
 | `PgUp` / `PgDn` | scroll the chat back / forward (`Ctrl+U` / `Ctrl+D` in NORMAL, `G` the newest) |

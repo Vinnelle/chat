@@ -519,8 +519,13 @@ static const tui_dialog_t *current_dialog(void) {
     switch (g_app.mode) {
         case MODE_NEW_PASSWORD:
             d.title = "NEW SESSION";
+            d.mask = 0;
             d.placeholder = "password";
-            d.note = "Blank is fine: it still encrypts. Whoever you invite needs the password and the session's id.";
+            d.note = g_app.pw_suggested
+                ? "A random password, filled in for you. Type to use your own instead. Blank still encrypts, but "
+                  "then the session's id alone lets anyone in."
+                : "Whoever you invite needs the password and the session's id. Blank still encrypts, but then the "
+                  "id alone lets anyone in.";
             d.keys = "enter create" DOT_SEP "esc cancel";
             break;
         case MODE_JOIN_ID:
