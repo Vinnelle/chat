@@ -1051,11 +1051,16 @@ anything at all. GitHub Actions runs the engine test, as built and again under A
 and UndefinedBehaviorSanitizer, and each fuzz target for a minute, on every push and pull request.
 It also runs the engine test on Windows and on macOS (Apple silicon), cross-built with zig as
 releases are, and starts chat on each to open a session and quit, so their start-up runs there.
+And it checks each push against the latest release and the newest beta: `tests/interop.sh` runs
+the build and an older one as two peers in one room on the same computer, and checks what
+[PROTOCOL.md](PROTOCOL.md) says an older version gets: messages both ways, a long one, a reply, a
+direct message (or that it's refused), a file each way and a leave.
 
 ```sh
 just test               # build and run the engine test
 just test -v            # the same, printing every session line and every check before the summary
 just test-sanitized     # the engine test under AddressSanitizer and UndefinedBehaviorSanitizer (needs clang)
+just interop OLD        # this build against OLD, an older chat executable, as two peers in one room
 just fuzz engine 600    # fuzz one target (bencode, json, pgp, text, engine, image, toml, save, ctap2, tpm2) for 600 seconds
 ```
 

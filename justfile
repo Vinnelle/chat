@@ -159,6 +159,14 @@ test *flags:
     cmake --build build-test -j {{num_cpus()}} --target engine_test
     ./build-test/tests/engine_test "$@"
 
+# This build and OLD, another chat executable (an older release, say), as two peers in one room on
+# this computer, through what PROTOCOL.md promises older versions. CI runs it against the latest
+# release and beta.
+# Build, then check it against an older chat binary (tests/interop.sh)
+[group('test')]
+interop old: (build "native")
+    tests/interop.sh build/chat "$1"
+
 # Build and run the engine test under AddressSanitizer and UndefinedBehaviorSanitizer (needs clang)
 [group('test')]
 test-sanitized *flags:

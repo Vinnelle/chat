@@ -28,6 +28,33 @@ jobs:
       - name: Engine test
         run: ./build-test/tests/engine_test
 
+      # The latest release, and the newest beta if there's one, each checked against the release
+      # key (or its backup) as `chat --update` would.
+      - name: Fetch the releases to test against
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q minisign
+          repo=${{ github.repository }}
+          latest=$(gh release view --repo "$repo" --json tagName -q .tagName)
+          beta=$(gh release list --repo "$repo" --limit 20 --json tagName,isPrerelease -q '[.[] | select(.isPrerelease)][0].tagName // ""')
+          for tag in $latest $beta; do
+            mkdir -p "old/$tag"
+            gh release download "$tag" --repo "$repo" --dir "old/$tag" --pattern chat-linux-x86_64 --pattern 'SHA256SUMS*'
+            (cd "old/$tag"
+             minisign -Vqm SHA256SUMS -p "$GITHUB_WORKSPACE/minisign.pub" \
+               || { test -e "$GITHUB_WORKSPACE/minisign-backup.pub" && minisign -Vqm SHA256SUMS -p "$GITHUB_WORKSPACE/minisign-backup.pub"; }
+             sha256sum -c --ignore-missing SHA256SUMS
+             chmod +x chat-linux-x86_64)
+          done
+
+      - name: This build against older releases
+        run: |
+          for dir in old/*/; do
+            echo "== against $(basename "$dir")"
+            tests/interop.sh build-test/chat "$dir/chat-linux-x86_64"
+          done
+
   engine-sanitized:
     runs-on: ubuntu-24.04
     steps:

@@ -25,6 +25,11 @@
   which is kept offline apart from it. If the release key is lost or stolen, the backup signs the
   next release, and that release can stop taking the old key.
 
+- `tests/interop.sh` (`just interop OLD`) runs this build and an older one as two peers in one room,
+  and checks what an older version is promised: messages both ways, a long one, a reply, a direct
+  message or its refusal, a file each way and a leave. GitHub Actions runs it on every push against
+  the latest release and the newest beta.
+
 ### Changed
 - Releases are meant to be reproducible. `just dist` stamps the binaries with their commit's time,
   not when they were built, so a release's `--version` says when its commit was made, and they no
