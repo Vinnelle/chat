@@ -236,6 +236,15 @@ int platform_link_send(int link, const void *msg, size_t len);
 // Waits for the next message. -1 once the other end has gone, or if the message isn't len bytes.
 int platform_link_recv(int link, void *msg, size_t len);
 void platform_link_close(int link);
+
+// Runs fn(arg, fd) in a child process (Linux) that can only allocate memory, write to fd and exit:
+// seccomp kills it for anything else, so a bug fn runs into can't reach a file, a socket or the keys
+// the child has a copy of. It reads what fn writes to fd, up to cap bytes, for at most timeout_ms,
+// then kills the child. The number of bytes, -1 if fn can't be run that way here (run it in this
+// process instead), or -2 if the child failed: it was killed, crashed or ran out of time.
+long platform_isolated(void (*fn)(void *arg, int fd), void *arg, void *out, size_t cap, int timeout_ms);
+// In fn, writes all of data to fd. 0, or -1.
+int platform_isolated_put(int fd, const void *data, size_t len);
 long platform_pid(void);
 void platform_sleep_ms(int ms);
 

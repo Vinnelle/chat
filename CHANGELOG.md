@@ -21,6 +21,10 @@
   `:peers` says so.
 
 ### Changed
+- On Linux, a picture shown is decoded in a child process that seccomp lets do nothing but allocate
+  memory, write the thumbnail back and exit, so a bug in chat's picture readers can't reach a file,
+  the network or chat's keys. chat checks the thumbnail it gets back, and a child that takes more
+  than 10 seconds is killed.
 - A paste is only text. chat turns on bracketed paste, so the terminal marks where a paste starts
   and ends: it goes into the input box, from NORMAL too, with its lines run together, and waits for
   `Enter`. Before, each line of a paste was sent as it came, a line starting with `/` ran as a

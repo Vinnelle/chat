@@ -465,6 +465,9 @@ void copy_secret(const char *text);
 void clipboard_clear_now(void);
 void clipboard_tick(double now);
 void copy_session_id(session_slot_t *s);
+// image_thumbnail, in a child process of its own where the platform can do that.
+int thumb_decode(const uint8_t *data, size_t len, int max_w, int max_h, const uint8_t bg[3], image_thumb_t *out,
+                 char *why, size_t why_cap);
 void copy_invite(session_slot_t *s);
 const char *route_label(void);
 void reapply_options(void);

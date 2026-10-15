@@ -452,6 +452,74 @@ static pic_t *pic_slot(session_slot_t *s, int num) {
     return p;
 }
 
+// Pictures come from peers, and chat's own readers decode them, so a bug there is the easiest way in.
+// On Linux each is decoded in a child process that can only write the thumbnail back (see
+// platform_isolated), which is checked before it's used.
+#define PICTURE_DECODE_MS 10000
+
+typedef struct {
+    const uint8_t *data;
+    size_t len;
+    int max_w, max_h;
+    uint8_t bg[3];
+} thumb_job_t;
+
+typedef struct {
+    int32_t rc, w, h, src_w, src_h;
+    char why[160];
+} thumb_head_t;
+
+static void thumb_child(void *arg, int fd) {
+    const thumb_job_t *j = arg;
+    thumb_head_t h;
+    image_thumb_t th;
+    memset(&h, 0, sizeof h);
+    h.rc = image_thumbnail(j->data, j->len, j->max_w, j->max_h, j->bg, &th, h.why, sizeof h.why);
+    if (h.rc == 0) { h.w = th.w; h.h = th.h; h.src_w = th.src_w; h.src_h = th.src_h; }
+    if (platform_isolated_put(fd, &h, sizeof h) == 0 && h.rc == 0)
+        platform_isolated_put(fd, th.rgb, (size_t)th.w * (size_t)th.h * 3);
+}
+
+int thumb_decode(const uint8_t *data, size_t len, int max_w, int max_h, const uint8_t bg[3], image_thumb_t *out,
+                 char *why, size_t why_cap) {
+    thumb_job_t j = { data, len, max_w, max_h, { bg[0], bg[1], bg[2] } };
+    size_t cap = sizeof(thumb_head_t) + (size_t)max_w * (size_t)max_h * 3;
+    uint8_t *buf = max_w > 0 && max_h > 0 ? malloc(cap) : NULL;
+    if (!buf) return image_thumbnail(data, len, max_w, max_h, bg, out, why, why_cap);
+    long n = platform_isolated(thumb_child, &j, buf, cap, PICTURE_DECODE_MS);
+    if (n == -1) {
+        free(buf);
+        return image_thumbnail(data, len, max_w, max_h, bg, out, why, why_cap);
+    }
+    thumb_head_t h;
+    int rc = -1;
+    if (n < (long)sizeof h) {
+        copy_str(why, n == -2 ? "chat's picture reader stopped on it: it took too long, or tried something it isn't "
+                                "allowed to, so it may be damaged, or made to break the reader"
+                              : "chat's picture reader stopped on it", why_cap);
+    } else {
+        memcpy(&h, buf, sizeof h);
+        h.why[sizeof h.why - 1] = '\0';
+        size_t px = h.rc == 0 && h.w > 0 && h.h > 0 && h.w <= max_w && h.h <= max_h ? (size_t)h.w * (size_t)h.h * 3 : 0;
+        if (h.rc != 0) {
+            // From the child, so no more trusted than the picture: no control characters reach the screen.
+            if (!why_cap || !clean_text(h.why, why, why_cap - 1)) copy_str(why, "chat's picture reader couldn't read it", why_cap);
+        } else if (!px || (size_t)n != sizeof h + px || h.src_w <= 0 || h.src_h <= 0 || h.src_w > IMAGE_MAX_SIDE
+                   || h.src_h > IMAGE_MAX_SIDE || !(out->rgb = malloc(px))) {
+            copy_str(why, "chat's picture reader gave back something that isn't a picture", why_cap);
+        } else {
+            memcpy(out->rgb, buf + sizeof h, px);
+            out->w = h.w;
+            out->h = h.h;
+            out->src_w = h.src_w;
+            out->src_h = h.src_h;
+            rc = 0;
+        }
+    }
+    free(buf);
+    return rc;
+}
+
 // A picture fetched to show has arrived. It's decoded into a thumbnail here, then the bytes are discarded.
 void session_file_view(void *ui, int num, const char *name, const uint8_t *data, size_t len) {
     session_slot_t *s = ui;
@@ -459,7 +527,7 @@ void session_file_view(void *ui, int num, const char *name, const uint8_t *data,
     static const uint8_t bg[3] = { 0, 0, 0 };
     image_thumb_t th;
     char why[160];
-    if (image_thumbnail(data, len, TUI_IMAGE_MAX_W, TUI_IMAGE_MAX_H, bg, &th, why, sizeof why) != 0) {
+    if (thumb_decode(data, len, TUI_IMAGE_MAX_W, TUI_IMAGE_MAX_H, bg, &th, why, sizeof why) != 0) {
         const file_entry_t *f = chat_file(&s->engine, num);
         copy_str(pic_slot(s, num)->why, why, sizeof s->pics[0].why);
         if (f && f->mine) console_note(s, "* can't show file %d: %s", num, why);
@@ -983,7 +1051,7 @@ static void plain_file_view(void *ui, int num, const char *name, const uint8_t *
         if (!(f && f->mine)) printf("* file %d came, but showing a picture needs a terminal with colour - :download %d saves it\n", num, num);
         return;
     }
-    if (image_thumbnail(data, len, TUI_IMAGE_MAX_W, TUI_IMAGE_MAX_H, bg, &th, why, sizeof why) != 0) {
+    if (thumb_decode(data, len, TUI_IMAGE_MAX_W, TUI_IMAGE_MAX_H, bg, &th, why, sizeof why) != 0) {
         printf("* can't show file %d: %s - :download %d saves it\n", num, why, num);
         return;
     }

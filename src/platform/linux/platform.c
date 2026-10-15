@@ -39,6 +39,7 @@
 #include <sys/time.h>
 #include <sys/un.h>
 #ifdef __linux__
+#include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <elf.h>
@@ -1626,6 +1627,124 @@ int platform_link_recv(int link, void *msg, size_t len) {
 }
 
 void platform_link_close(int link) { close(link); }
+
+#ifndef SECCOMP_RET_KILL_PROCESS
+#define SECCOMP_RET_KILL_PROCESS 0x80000000u
+#endif
+// The child's own exit code when it couldn't put its filter up.
+#define ISOLATE_NO_FILTER 3
+
+#ifdef SB_AUDIT_ARCH
+// What the child may call: the memory calls malloc makes, never for executable memory, write to its
+// pipe alone, and exit. Anything else kills it.
+static const unsigned ISOLATE_ALLOW[] = {
+    __NR_brk, __NR_munmap, __NR_mremap, __NR_madvise, __NR_exit, __NR_exit_group, __NR_rt_sigreturn, __NR_futex,
+#ifdef __NR_getrandom
+    __NR_getrandom,
+#endif
+#ifdef __NR_sigreturn
+    __NR_sigreturn,
+#endif
+};
+
+static int isolate_filter(int fd) {
+    enum { N = (int)COUNT_OF(ISOLATE_ALLOW) };
+    struct sock_filter f[N + 24];
+    int n = 0;
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch));
+    f[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SB_AUDIT_ARCH, 1, 0);
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr));
+    f[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_write, 0, 4);
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0]));
+    f[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (unsigned)fd, 0, 1);
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
+#ifdef __NR_mmap2
+    f[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mmap2, 2, 0);
+#else
+    f[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mmap, 2, 0);
+#endif
+    f[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mmap, 1, 0);
+    f[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mprotect, 0, 4);
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[2]));
+    f[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, PROT_EXEC, 1, 0);
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
+    for (int i = 0; i < N; i++)
+        f[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, ISOLATE_ALLOW[i], (unsigned char)(N - i), 0);
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+    struct sock_fprog prog = { (unsigned short)n, f };
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) return -1;
+    return prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog, 0, 0) == 0 ? 0 : -1;
+}
+
+static double mono_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
+}
+
+// A fork, not a new process: the data is already in the copy, so nothing has to be sent to it. The
+// copy has the keys too, which is why the filter only lets it write to the pipe, whose other end
+// only takes as much as the caller expects.
+long platform_isolated(void (*fn)(void *arg, int fd), void *arg, void *out, size_t cap, int timeout_ms) {
+    int pp[2];
+    if (pipe2(pp, O_CLOEXEC) != 0) return -1;
+    pid_t pid = fork();
+    if (pid < 0) { close(pp[0]); close(pp[1]); return -1; }
+    if (pid == 0) {
+        close(pp[0]);
+        if (isolate_filter(pp[1]) != 0) _exit(ISOLATE_NO_FILTER);
+        fn(arg, pp[1]);
+        _exit(0);
+    }
+    close(pp[1]);
+    size_t got = 0;
+    int timed_out = 0;
+    double end = mono_ms() + timeout_ms;
+    while (got < cap) {
+        int left = (int)(end - mono_ms());
+        if (left <= 0) { timed_out = 1; break; }
+        struct pollfd pf = { pp[0], POLLIN, 0 };
+        int r = poll(&pf, 1, left);
+        if (r < 0 && errno == EINTR) continue;
+        if (r == 0) { timed_out = 1; break; }
+        if (r < 0) break;
+        ssize_t k = read(pp[0], (char *)out + got, cap - got);
+        if (k < 0 && errno == EINTR) continue;
+        if (k <= 0) break;
+        got += (size_t)k;
+    }
+    close(pp[0]);
+    // One that wrote all it may still runs until its write returns, and gets SIGPIPE if there's more.
+    if (timed_out || got == cap) kill(pid, SIGKILL);
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    if (timed_out) return -2;
+    if (WIFEXITED(status) && WEXITSTATUS(status) == ISOLATE_NO_FILTER) return -1;
+    if (got == cap && got > 0) return (long)got;
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? (long)got : -2;
+}
+#else
+long platform_isolated(void (*fn)(void *arg, int fd), void *arg, void *out, size_t cap, int timeout_ms) {
+    (void)fn; (void)arg; (void)out; (void)cap; (void)timeout_ms;
+    return -1;
+}
+#endif
+
+int platform_isolated_put(int fd, const void *data, size_t len) {
+    const char *p = data;
+    while (len) {
+        ssize_t k = write(fd, p, len);
+        if (k < 0 && errno == EINTR) continue;
+        if (k <= 0) return -1;
+        p += k;
+        len -= (size_t)k;
+    }
+    return 0;
+}
 #else
 unsigned platform_sandbox(const char *const run[], int n_run, const char *write_only, char *why, size_t cap) {
     (void)run; (void)n_run; (void)write_only;
@@ -1644,4 +1763,9 @@ void platform_set_name(const char *name) { (void)name; }
 int platform_link_send(int link, const void *msg, size_t len) { (void)link; (void)msg; (void)len; return -1; }
 int platform_link_recv(int link, void *msg, size_t len) { (void)link; (void)msg; (void)len; return -1; }
 void platform_link_close(int link) { (void)link; }
+long platform_isolated(void (*fn)(void *arg, int fd), void *arg, void *out, size_t cap, int timeout_ms) {
+    (void)fn; (void)arg; (void)out; (void)cap; (void)timeout_ms;
+    return -1;
+}
+int platform_isolated_put(int fd, const void *data, size_t len) { (void)fd; (void)data; (void)len; return -1; }
 #endif

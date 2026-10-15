@@ -1305,7 +1305,7 @@ static void view_update(session_slot_t *s, const file_entry_t *f, int w, int h) 
     g_view.h = h;
     const uint8_t *b = f->dl == DL_ACTIVE || f->dl == DL_QUEUED ? NULL : chat_file_bytes(&s->engine, f->num);
     static const uint8_t bg[3] = { 0, 0, 0 };
-    if (b && image_thumbnail(b, (size_t)f->size, w, h, bg, &g_view.th, g_view.why, sizeof g_view.why) == 0)
+    if (b && thumb_decode(b, (size_t)f->size, w, h, bg, &g_view.th, g_view.why, sizeof g_view.why) == 0)
         g_view.ti = (tui_image_t){ g_view.th.w, g_view.th.h, g_view.th.rgb };
     g_view.sig = view_sig(f);
 }

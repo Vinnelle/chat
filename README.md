@@ -229,7 +229,15 @@ chat never makes (`ptrace`, `mount`, `bpf`, `io_uring` and the like). A bug
 can't plant anything that runs later: not in `.bashrc`, `~/.config/autostart`, `~/.ssh` or
 `~/.local/bin`. It still runs as you, though, so it can read what you can and send it out. It's
 Landlock (Linux 5.13 or later) and seccomp, with no root needed, and without Landlock chat carries on
-with seccomp alone. While it's up, saving a file anywhere else fails. Until `:install` has made
+with seccomp alone.
+
+Pictures from peers get a sandbox of their own on Linux, since they're what a room member can most
+easily send chat's own code. Each one shown is decoded in a child process, a copy of chat made for
+that picture, which seccomp lets do nothing but allocate memory, write the thumbnail back to chat
+and exit: no files, no network, no other process, and nothing it can run. It has a copy of chat's
+memory, keys included, but no way to send any of it anywhere but back to chat, which only takes a
+thumbnail of the size it asked for. One that tries anything else is killed, and so is one that takes
+more than 10 seconds, and the picture isn't shown. That's whether the sandbox is on or not. While it's up, saving a file anywhere else fails. Until `:install` has made
 chat's own folder, the folder it goes in (`~/.config`) stays writable. `:set sandbox off` (from the
 next start) or `--nosandbox` (for one run) leave it down.
 
@@ -504,7 +512,8 @@ fetching it and who it has gone to in full. The reply to `:download`, `:show`, `
 - **Names.** A name from a peer can't be a path, a hidden file, a Windows device (`CON`, `NUL`)
   or anything the terminal acts on. Folders, control and right-to-left characters, and
   `/ \ : * ? " < > |` are stripped. Nothing chat saves is executable.
-- **Pictures.** Decoded by chat's own PNG, JPEG and GIF readers. They check every length,
+- **Pictures.** Decoded by chat's own PNG, JPEG and GIF readers, on Linux in a child process that
+  can't do anything but hand the thumbnail back (see [Sandbox](#security)). They check every length,
   table and dimension, inflate a PNG to exactly what its header says and no more, and never
   hold the full size image: each pixel goes straight into the thumbnail. A JPEG can be baseline
   or progressive, and an animated GIF shows its first frame, still. WebP, HEIC, lossless and

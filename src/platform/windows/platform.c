@@ -1152,6 +1152,12 @@ platform_proc_t *platform_spawn_self(const char *name, const char *arg, int *lin
 int platform_parent_link(void) { return -1; }
 void platform_set_name(const char *name) { (void)name; }
 int platform_link_send(int link, const void *msg, size_t len) { (void)link; (void)msg; (void)len; return -1; }
+
+long platform_isolated(void (*fn)(void *arg, int fd), void *arg, void *out, size_t cap, int timeout_ms) {
+    (void)fn; (void)arg; (void)out; (void)cap; (void)timeout_ms;
+    return -1;
+}
+int platform_isolated_put(int fd, const void *data, size_t len) { (void)fd; (void)data; (void)len; return -1; }
 int platform_link_recv(int link, void *msg, size_t len) { (void)link; (void)msg; (void)len; return -1; }
 void platform_link_close(int link) { (void)link; }
 
