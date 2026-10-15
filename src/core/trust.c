@@ -119,6 +119,67 @@ int trust_load(const char *text) {
     return bad;
 }
 
+static trust_entry_t g_ignored[IGNORE_MAX];
+static int g_n_ignored;
+static void (*g_ignore_changed)(void);
+
+int ignore_count(void) { return g_n_ignored; }
+
+const trust_entry_t *ignore_at(int i) { return i >= 0 && i < g_n_ignored ? &g_ignored[i] : NULL; }
+
+const trust_entry_t *ignore_by_key(const uint8_t pub[ID_SIGN_PUB_LEN]) {
+    for (int i = 0; i < g_n_ignored; i++) if (memcmp(g_ignored[i].pub, pub, ID_SIGN_PUB_LEN) == 0) return &g_ignored[i];
+    return NULL;
+}
+
+int ignore_find_nick(const char *skel) {
+    for (int i = 0; i < g_n_ignored; i++) if (strcmp(g_ignored[i].nick_skel, skel) == 0) return i;
+    return -1;
+}
+
+int ignore_add(identity_source_t source, const uint8_t pub[ID_SIGN_PUB_LEN], const char *nick) {
+    char clean[MAX_NICK + 1];
+    chat_clean_nick(nick, clean);
+    trust_entry_t *e = (trust_entry_t *)ignore_by_key(pub);
+    if (e && strcmp(e->nick, clean) == 0 && e->source == source) return 0;
+    if (!e) {
+        if (g_n_ignored == IGNORE_MAX) {
+            memmove(&g_ignored[0], &g_ignored[1], (IGNORE_MAX - 1) * sizeof g_ignored[0]);
+            g_n_ignored--;
+        }
+        e = &g_ignored[g_n_ignored++];
+        memset(e, 0, sizeof *e);
+        memcpy(e->pub, pub, ID_SIGN_PUB_LEN);
+    }
+    set_nick(e, source, clean);
+    if (g_ignore_changed) g_ignore_changed();
+    return 1;
+}
+
+void ignore_remove(int i) {
+    if (i < 0 || i >= g_n_ignored) return;
+    memmove(&g_ignored[i], &g_ignored[i + 1], (size_t)(g_n_ignored - i - 1) * sizeof g_ignored[0]);
+    g_n_ignored--;
+    memset(&g_ignored[g_n_ignored], 0, sizeof g_ignored[0]);
+    if (g_ignore_changed) g_ignore_changed();
+}
+
+void ignore_clear(void) {
+    memset(g_ignored, 0, sizeof g_ignored);
+    g_n_ignored = 0;
+}
+
+const char *trust_source_name(identity_source_t source) {
+    return SOURCE_NAMES[source >= IDENT_NONE && source <= IDENT_PGP ? (int)source : 0];
+}
+
+int trust_source_from(const char *name) {
+    for (int k = IDENT_NATIVE; k <= IDENT_PGP; k++) if (strcmp(name, SOURCE_NAMES[k]) == 0) return k;
+    return -1;
+}
+
+void ignore_on_change(void (*fn)(void)) { g_ignore_changed = fn; }
+
 void trust_on_change(void (*fn)(void)) { g_changed = fn; }
 void trust_set_saved(int saved) { g_saved = saved; }
 int trust_saved(void) { return g_saved; }

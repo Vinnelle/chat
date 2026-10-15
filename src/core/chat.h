@@ -463,6 +463,8 @@ typedef struct {
 #define SEEN_MIDS 2048
 // Peers that dropped whose verify codes are remembered.
 #define GONE_MAX 16
+// Members ignored in a session, the oldest forgotten past this.
+#define IGNORED_MAX 64
 
 // "m\t" MID "\t" ORIGIN "\t" NICK "\t" TEXT, with room to spare.
 #define MSG_LINE_LEN (16 + ID_LEN * 2 + MAX_NICK + MAX_TEXT + 16)
@@ -672,6 +674,10 @@ typedef struct chat_s {
     struct { int used; uint8_t id[ID_LEN]; uint8_t vfy[VERIFY_LEN]; } gone[GONE_MAX];
     int gone_head;
 
+    // Members ignored here (:ignore), by id, so what others pass on from them is hidden too.
+    uint8_t ignored[IGNORED_MAX][ID_LEN];
+    int n_ignored;
+
     // Token buckets for: hellos to candidates, which come unchecked from the DHT and other peers;
     // cookie challenges; and session frames tried against every peer (see CK_RATE, ROAM_RATE).
     double probe_tokens, probe_at;
@@ -841,6 +847,10 @@ void chat_history_id(const chat_t *c, uint8_t out[CHAT_HISTORY_ID_LEN]);
 int chat_contact_room(const identity_keypair_t *mine, const uint8_t their_pub[ID_SIGN_PUB_LEN], uint64_t day,
                       char id[SESSION_ID_LEN + 1], char password[CONTACT_PASSWORD_LEN + 1]);
 uint64_t chat_contact_day(void);
+
+// Whether the member with this id is ignored here (:ignore): what it says, sends directly and offers
+// isn't shown, though what it says is still passed on to others.
+int chat_ignored(const chat_t *c, const uint8_t id[ID_LEN]);
 
 // An invite (:invite): a room's id and password as one string, "chat:ID:PASSWORD:CHECK", CHECK being
 // invite_check in hex. The password can hold ':', since the id ends at the first and the check

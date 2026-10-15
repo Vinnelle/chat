@@ -823,6 +823,27 @@ static void test_reply(double *t) {
     RUN_FOR(t, 4);
 }
 
+// Alice ignores bob: what he says and sends her directly doesn't show for her, but still reaches
+// carol. Then she stops, and what he says shows again.
+static void test_ignore(double *t) {
+    chat_run_command(&A, "ignore bob");
+    peer_t *ab = peer_named(&A, "bob");
+    CHECK(ab && chat_ignored(&A, ab->id), "bob isn't ignored after :ignore bob");
+    if (!ab) return;
+    chat_send_text(&B, "said while ignored", *t);
+    chat_run_command(&B, "msg alice sent while ignored");
+    RUN_UNTIL(t, 10, log_count(&log_c, "said while ignored") == 1);
+    RUN_FOR(t, 4);
+    CHECK(log_count(&log_a, "said while ignored") == 0 && log_count(&log_a, "sent while ignored") == 0,
+          "alice shows what bob said or sent her while she ignores him");
+    chat_run_command(&A, "ignore bob off");
+    CHECK(!chat_ignored(&A, ab->id) && !(ab->identity_state == VERIFY_VERIFIED && ignore_by_key(ab->identity_pub)),
+          "bob is still ignored after :ignore bob off");
+    chat_send_text(&B, "said once seen again", *t);
+    RUN_UNTIL(t, 10, log_count(&log_a, "said once seen again") == 1);
+    CHECK(log_count(&log_a, "said once seen again") == 1, "alice doesn't show bob's message once she stops ignoring him");
+}
+
 // Alice asks for a message timer: bob is told, keeps to it, and his recent messages from before it go.
 // Then she stops asking. And what :timer takes.
 static void test_timer(double *t) {
@@ -3055,7 +3076,7 @@ int main(int argc, char **argv) {
         { "rekey", test_rekey }, { "rekey mid-message", test_message_across_rekey }, { "cookie rate", test_cookie_rate },
         { "udp masked", test_udp_masked },
         { "junk", test_junk }, { "lookalike nick", test_lookalike_nick }, { "delivered", test_delivered },
-        { "third peer", test_third_peer }, { "direct message", test_direct_message }, { "reply", test_reply },
+        { "third peer", test_third_peer }, { "direct message", test_direct_message }, { "reply", test_reply }, { "ignore", test_ignore },
         { "timer", test_timer },
         { "candidates settle", test_candidates_settle }, { "builds", test_builds },
         { "parsers", test_parsers }, { "toml", test_toml }, { "dht keys", test_dht_keys }, { "dht", test_dht }, { "read file", test_read_file },

@@ -603,6 +603,7 @@ enum { A_NICK = 1, A_WORD, A_FILE, A_PATH, A_FOLDER, A_SAVE, A_TRUSTED, A_CONTAC
 
 static const struct { const char *cmd; int args[4]; } COMMAND_ARGS[] = {
     { "verify",    { A_NICK, A_WORD | A_TYPED } },
+    { "ignore",    { A_NICK, A_WORD | A_TYPED } },
     { "msg",       { A_NICK, A_WORD | A_TYPED } },
     { "reply",     { A_NICK, A_WORD | A_TYPED } },
     { "verified",  { A_WORD | A_TYPED, A_TRUSTED | A_PICK } },
@@ -622,6 +623,7 @@ static const struct { const char *cmd, *word, *help; } ARG_WORDS[] = {
     { "verify",   "ok",     "their code is the same - what you send reaches them" },
     { "verify",   "no",     "their code differs - nothing you send reaches them" },
     { "verified", "forget", "remove a verified key" },
+    { "ignore",   "off",    "show what they say again" },
     { "send",     "asis",   "as it is: a picture keeps what it holds about where, when and with what it was made" },
     { "show",     "anyway", "even if it's over your file size limit" },
     { "saveto",   "anyway", "even if it's over your file size limit" },

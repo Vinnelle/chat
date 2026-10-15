@@ -490,6 +490,42 @@ static size_t put_row_value(int i, const char *v, char *out, size_t p, size_t ca
     return put_text(out, p, cap, "]");
 }
 
+// The signing keys ignored (core/trust.h), as the [ignored] table: ["SOURCE", "KEY", "NICK"].
+static size_t ignored_text(char *out, size_t p, size_t cap) {
+    if (!ignore_count()) return p;
+    p = put_text(out, p, cap, p ? "\n[ignored]\n" : "[ignored]\n");
+    for (int i = 0; i < ignore_count(); i++) {
+        const trust_entry_t *e = ignore_at(i);
+        char key[16], hex[ID_SIGN_PUB_LEN * 2 + 1];
+        snprintf(key, sizeof key, "%d = [", i + 1);
+        hex_encode(e->pub, ID_SIGN_PUB_LEN, hex);
+        p = put_text(out, p, cap, key);
+        p = toml_put_str(out, p, cap, trust_source_name(e->source));
+        p = put_text(out, p, cap, ", ");
+        p = toml_put_str(out, p, cap, hex);
+        p = put_text(out, p, cap, ", ");
+        p = toml_put_str(out, p, cap, e->nick);
+        p = put_text(out, p, cap, "]\n");
+    }
+    return p;
+}
+
+int ignored_load(const toml_value *v) {
+    uint8_t pub[ID_SIGN_PUB_LEN];
+    int source;
+    if (v->type != TOML_ARRAY || v->n != 3 || (source = trust_source_from(v->items[0])) < 0
+        || strlen(v->items[1]) != ID_SIGN_PUB_LEN * 2 || hex_decode(v->items[1], ID_SIGN_PUB_LEN * 2, pub) != 0)
+        return -1;
+    ignore_add((identity_source_t)source, pub, v->items[2]);
+    return 0;
+}
+
+// Saved as the verified keys are: as they change with autosave on, or by :save.
+void save_ignored(void) {
+    if (g_loading_settings || !trust_saved() || !g_app.installed || g_app.locked) return;
+    if (settings_write() != 0) push_log("* couldn't save the ignored keys - they last until chat exits");
+}
+
 // -1 if it doesn't fit.
 int settings_text(char *out, size_t cap) {
     size_t p = 0;
@@ -512,6 +548,7 @@ int settings_text(char *out, size_t cap) {
     }
     p = rooms_text(out, p, cap);
     p = reopen_text(out, p, cap);
+    p = ignored_text(out, p, cap);
     return p < cap ? 0 : -1;
 }
 

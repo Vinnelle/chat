@@ -604,6 +604,9 @@ const char *setting_table(setting_id_t id);
 size_t put_text(char *out, size_t p, size_t cap, const char *s);
 int settings_text(char *out, size_t cap);
 int settings_write(void);
+// One entry of the [ignored] table. 0, or -1 if it isn't one.
+int ignored_load(const toml_value *v);
+void save_ignored(void);
 void keep_settings_saved(void);
 void settings_to_sessions(void);
 void device_check(void);

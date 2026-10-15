@@ -83,6 +83,15 @@ reads direct messages: an older one is refused rather than sent it. With **Compa
 required, it waits until you've compared codes, like any message. Both sides show who it's between
 (`bob (→ you)`, `alice (→ bob)`), it counts as a mention, and a history keeps it like any message.
 
+**Ignoring someone.** `:ignore NICK` hides what a peer says, sends you directly or offers: none of it
+shows or notifies you, and a history doesn't keep it. It's only on your screen. Nothing is sent, so
+they can't tell, and what they say still goes on to peers who only reach them through you, so
+ignoring someone changes nothing for anyone else. If they sign with an identity, their signing key
+is ignored too, in every session they turn up in, and kept in the open save like a verified key
+(saved straight away with autosave on, or by `:save`). Without one, it lasts for that session.
+`:ignore NICK off` shows what they say again, from then on, and `:ignore` lists who's ignored. The
+sidebar marks them `i`. It doesn't keep them out: `:move` does that.
+
 **Calls.** Once you and a peer have verified each other's signing keys, you don't need to swap an
 id and password again: `:call NICK` (a nick `:verified` lists) opens a room only your two keys can
 work out, and they `:call` you to open the same one. It shows as `@NICK` in the session list. Its
@@ -605,7 +614,7 @@ not the key's public half, so neither file can be linked to the fingerprint peer
   are strings, written the way `:set` takes them. A key chat can't use is skipped, and the console
   says so. `[rooms]` holds the rooms you `:keep`: each one's label, id and password, and `"start"`
   for one joined as chat starts. `[open]` holds the sessions open with `:set reopen on`: each
-  one's id and password. The file is padded with zeros to a multiple of 4 KB, so its size says
+  one's id and password. `[ignored]` holds the signing keys you `:ignore`, with the nick each had. The file is padded with zeros to a multiple of 4 KB, so its size says
   little about how many rooms it keeps.
 - `~/.config/chat/saves/NAME/key`: your signing key, what kind it is and where it came from.
 
@@ -1100,8 +1109,8 @@ box at the bottom.
 
 In the chat, a symbol after a name stands for what chat adds to it: `◆` you, `✓` code
 compared, `?` code not compared, `✗` codes differ. Under each peer, the sidebar spells out the
-symbols that apply to them, with `h` for a peer keeping a history and `!` for a modified
-client. When the sidebar is too short for that, the symbols go next to each name instead. With
+symbols that apply to them, with `h` for a peer keeping a history, `!` for a modified
+client and `i` for one you ignore. When the sidebar is too short for that, the symbols go next to each name instead. With
 more sessions or peers than fit, those lists scroll with the mouse wheel, a row says how many more
 are above or below, and the sessions keep the selected one in view as you switch.
 
@@ -1196,6 +1205,7 @@ puts it on the command line.
 | `:verified [forget NICK\|all]` | list the signing keys you verified, with nicks and fingerprints, or remove them |
 | `:timer [off\|10m\|2h\|1d]` | messages in this session go off every screen that keeps to it after that long; alone, says which timer is kept to (see [Message timer](#message-timer)) |
 | `:reply NICK TEXT` (`:re`) | answer NICK's last message in the room, quoting the start of it (faint, after `↪`) |
+| `:ignore [NICK [off]]` | hide what a peer says, here and wherever they sign with the same key, on your screen only; `off` shows it again, and alone it lists who's ignored (see [Ignoring someone](#security)) |
 | `:msg NICK TEXT` (`:dm`) | a direct message to one peer you're connected to: nobody else gets it, and it's never passed on (see [Direct messages](#security)) |
 | `:move` | move to a new room with the peers whose verify codes you compared, leaving the rest behind; each is asked first (see [Moving a room](#security)). With a request to move waiting, shows it again |
 | `:peers` | who's online, with verify codes and builds |

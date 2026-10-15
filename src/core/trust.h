@@ -50,4 +50,22 @@ void trust_on_change(void (*fn)(void));
 void trust_set_saved(int saved);
 int trust_saved(void);
 
+// Signing keys of peers the user ignores (:ignore NICK), with the nick they had. What a peer signing
+// with one says isn't shown, in any session. Saved with what :install saved too, in its settings, as
+// trust_saved says; the app does that from ignore_on_change.
+#define IGNORE_MAX 64
+int ignore_count(void);
+const trust_entry_t *ignore_at(int i);
+const trust_entry_t *ignore_by_key(const uint8_t pub[ID_SIGN_PUB_LEN]);
+// The first entry whose nick looks the same as this skeleton, or -1.
+int ignore_find_nick(const char *skel);
+// Adds the key, or updates its nick. When full, the oldest entry is dropped. 1 if the list changed.
+int ignore_add(identity_source_t source, const uint8_t pub[ID_SIGN_PUB_LEN], const char *nick);
+void ignore_remove(int i);
+void ignore_clear(void);
+// "age", "pgp" or "key" for an entry's source, and back (-1 if it isn't one).
+const char *trust_source_name(identity_source_t source);
+int trust_source_from(const char *name);
+void ignore_on_change(void (*fn)(void));
+
 #endif

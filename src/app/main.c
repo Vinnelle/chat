@@ -69,6 +69,7 @@ static const char *USAGE =
     "  :net :verified [forget NICK] :port [N] :set [NAME [VALUE]] :install :uninstall :help\n"
     "  :send [PATH] :files :download [N] :show N :hide N :cancel N :keep [LABEL|forget]\n"
     "  :call NICK (a room only you and a verified key can work out)\n"
+    "  :ignore NICK [off] (hide what a peer says, on your screen only)\n"
     "  (:help opens a page of keys and commands)\n"
     "\n"
     "Anyone with a session's id and password can sit between two other members. When a peer\n"
@@ -950,6 +951,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
     crypto_wipe(g_app.install_pass, sizeof g_app.install_pass);
     lock_forget();
     rooms_clear();
+    ignore_clear();
     install_forget();
     tui_scrollback_clear(&g_app.log);
 
@@ -1368,6 +1370,7 @@ int main(int argc, char **argv) {
     g_app.picture_noise = 1;
     note_setting_defaults();
     trust_on_change(save_verified);
+    ignore_on_change(save_ignored);
     int exit_code = read_options(g_argc, g_argv, &g_opts);
     if (exit_code >= 0) return exit_code;
     const options_t *o = &g_opts;

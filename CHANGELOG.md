@@ -14,6 +14,12 @@
   alone if something else was copied since. Elsewhere the terminal clears it (OSC 52), and that also
   takes off anything copied since.
 
+- `:ignore NICK` hides what a peer says, sends you directly or offers, without notifying you, and
+  `:ignore NICK off` shows it again. It's only on your screen: nothing is sent, and what they say
+  still goes on to peers who only reach them through you. A peer that signs has its key ignored in
+  every session too, kept in the open save as verified keys are. The sidebar marks them `i`, and
+  `:peers` says so.
+
 ### Changed
 - A paste is only text. chat turns on bracketed paste, so the terminal marks where a paste starts
   and ends: it goes into the input box, from NORMAL too, with its lines run together, and waits for

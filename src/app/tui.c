@@ -1171,7 +1171,7 @@ static int split_chat_line(const tui_line_t *l, char *name, size_t cap, const ch
 // sidebar, in words that fit the narrowest sidebar. The engine ends a chat line's name with one in
 // brackets ("ida (code compared)"), which the chat shows as the symbol.
 enum { MK_YOU, MK_DIFFERS, MK_KEY_CHANGED, MK_INVALID, MK_TO_COMPARE, MK_COMPARED, MK_VERIFIED, MK_UNVERIFIED,
-       MK_HISTORY, MK_MODIFIED };
+       MK_HISTORY, MK_MODIFIED, MK_IGNORED };
 static const struct { const char *glyph, *word, *chat; style_t st; } MARKS[] = {
     [MK_YOU]         = { G_DIAMOND, "you",             "(you)",               S_FAINT },
     [MK_DIFFERS]     = { G_CROSS,   "codes differ",    "(codes differ)",      S_RED_BOLD },
@@ -1183,6 +1183,7 @@ static const struct { const char *glyph, *word, *chat; style_t st; } MARKS[] = {
     [MK_UNVERIFIED]  = { "?",       "unverified",      NULL,                  S_FAINT },
     [MK_HISTORY]     = { "h",       "keeps history",   NULL,                  S_YELLOW_BOLD },
     [MK_MODIFIED]    = { "!",       "modified client", NULL,                  S_RED_BOLD },
+    [MK_IGNORED]     = { "i",       "ignored",         NULL,                  S_FAINT },
 };
 
 // A mark's symbol after a name, in the column the chat keeps for them.
@@ -1840,8 +1841,8 @@ static void session_line(pen_t *p, const tui_session_row_t *s, int sel) {
 
 // What applies to a peer: who it is or its verify state, most urgent first (codes that differ, a
 // key that isn't the one verified for the nick, a bad signature, a code still to compare), then a
-// history kept and a modified client.
-#define PEER_MARKS_MAX 3
+// history kept, a modified client and an ignored one.
+#define PEER_MARKS_MAX 4
 
 static int peer_marks(const tui_peer_row_t *pr, int mk[PEER_MARKS_MAX]) {
     int n = 0;
@@ -1855,6 +1856,7 @@ static int peer_marks(const tui_peer_row_t *pr, int mk[PEER_MARKS_MAX]) {
     else mk[n++] = MK_UNVERIFIED;
     if (pr->history) mk[n++] = MK_HISTORY;
     if (pr->modified) mk[n++] = MK_MODIFIED;
+    if (pr->ignored) mk[n++] = MK_IGNORED;
     return n;
 }
 

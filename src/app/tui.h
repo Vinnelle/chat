@@ -101,6 +101,7 @@ typedef struct {
     tui_code_t code;
     int modified;      // runs a modified client
     int history;       // keeps a history of the session
+    int ignored;       // :ignore
 } tui_peer_row_t;
 
 // A label and its value, as the sidebar's network section lists them.

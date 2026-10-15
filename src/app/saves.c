@@ -77,6 +77,10 @@ static void load_setting(void *ctx, const char *table, const char *key, const to
         if (reopen_load(tv) != 0) saved_note("* %s: session to reopen %.10s can't be read - left out", l->where, key);
         return;
     }
+    if (strcmp(table, "ignored") == 0) {
+        if (ignored_load(tv) != 0) saved_note("* %s: ignored key %.10s can't be read - left out", l->where, key);
+        return;
+    }
     const setting_def_t *d = setting_by_key(key);
     char value[ROW_TEXT_MAX], before[ROW_TEXT_MAX], now[ROW_TEXT_MAX];
     if (!d || strcmp(setting_table(d->id), table) != 0 || !setting_text(d->id, before, sizeof before)) {

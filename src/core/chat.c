@@ -273,6 +273,28 @@ static void seen_add(chat_t *c, const char *mid) {
     if (c->seen_count < SEEN_MIDS) c->seen_count++;
 }
 
+int chat_ignored(const chat_t *c, const uint8_t id[ID_LEN]) {
+    for (int i = 0; i < c->n_ignored; i++) if (memcmp(c->ignored[i], id, ID_LEN) == 0) return 1;
+    return 0;
+}
+
+static void set_ignored(chat_t *c, const uint8_t id[ID_LEN], int on) {
+    for (int i = 0; i < c->n_ignored; i++) {
+        if (memcmp(c->ignored[i], id, ID_LEN) != 0) continue;
+        if (!on) {
+            memmove(c->ignored[i], c->ignored[i + 1], (size_t)(c->n_ignored - i - 1) * ID_LEN);
+            c->n_ignored--;
+        }
+        return;
+    }
+    if (!on) return;
+    if (c->n_ignored == IGNORED_MAX) {
+        memmove(c->ignored[0], c->ignored[1], (IGNORED_MAX - 1) * ID_LEN);
+        c->n_ignored--;
+    }
+    memcpy(c->ignored[c->n_ignored++], id, ID_LEN);
+}
+
 // ---- recent messages, for replies ----
 
 #define REPLY_ARROW "\xe2\x86\xaa"
@@ -1651,25 +1673,28 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         else chat_clean_nick(f[3], nick);
         clean_text(f[4], text, MAX_TEXT);
         if (reply) reply_prefix(c, reply, prefix, sizeof prefix);
-        // A reply to us counts as a mention.
-        const recent_msg_t *answered = reply ? recent_find(c, reply) : NULL;
-        int mentioned = has_mention(text, c->nick) || (answered && memcmp(answered->origin, c->my_id, ID_LEN) == 0);
-        char shown[MAX_NICK + CHAT_NAME_LEN + 48];
-        chat_peer_name(c, p, via);
-        // A relayed nick is only the relayer's claim, so it always includes the origin's id. Nicks can't
-        // contain brackets, so what's added in brackets can't be faked.
-        const char *mark = code_mark(c, p);
-        if (direct) snprintf(shown, sizeof shown, "%s%s", via, mark);
-        else snprintf(shown, sizeof shown, "%s#%.*s (via %s%s)", nick, SHORT_ID_HEX, f[2], via, mark);
-        snprintf(line, sizeof line, "%s%s", prefix, text);
-        c->line_quote = (int)strlen(prefix);
-        ui_chat(c, direct ? p->color : NULL, mentioned, shown, line);
-        c->line_quote = 0;
-        recent_add(c, f[1], origin, nick, text, now);
-        // Only as much as the preview setting allows, since desktops keep what a notification shows.
-        if (c->notify && (c->notify_mode == NOTIFY_ALL || (c->notify_mode == NOTIFY_MENTIONS && mentioned)))
-            c->notify(c->ui, c->notify_preview >= PREVIEW_NICK ? shown : NULL,
-                      c->notify_preview == PREVIEW_MESSAGE ? text : NULL, mentioned);
+        // An ignored member's message is still passed on, so ignoring it changes nothing for anyone else.
+        if (!chat_ignored(c, origin)) {
+            // A reply to us counts as a mention.
+            const recent_msg_t *answered = reply ? recent_find(c, reply) : NULL;
+            int mentioned = has_mention(text, c->nick) || (answered && memcmp(answered->origin, c->my_id, ID_LEN) == 0);
+            char shown[MAX_NICK + CHAT_NAME_LEN + 48];
+            chat_peer_name(c, p, via);
+            // A relayed nick is only the relayer's claim, so it always includes the origin's id. Nicks can't
+            // contain brackets, so what's added in brackets can't be faked.
+            const char *mark = code_mark(c, p);
+            if (direct) snprintf(shown, sizeof shown, "%s%s", via, mark);
+            else snprintf(shown, sizeof shown, "%s#%.*s (via %s%s)", nick, SHORT_ID_HEX, f[2], via, mark);
+            snprintf(line, sizeof line, "%s%s", prefix, text);
+            c->line_quote = (int)strlen(prefix);
+            ui_chat(c, direct ? p->color : NULL, mentioned, shown, line);
+            c->line_quote = 0;
+            recent_add(c, f[1], origin, nick, text, now);
+            // Only as much as the preview setting allows, since desktops keep what a notification shows.
+            if (c->notify && (c->notify_mode == NOTIFY_ALL || (c->notify_mode == NOTIFY_MENTIONS && mentioned)))
+                c->notify(c->ui, c->notify_preview >= PREVIEW_NICK ? shown : NULL,
+                          c->notify_preview == PREVIEW_MESSAGE ? text : NULL, mentioned);
+        }
         for (int i = 0; i < c->peer_hi; i++) {
             peer_t *q = &c->peers[i];
             if (!q->used || !q->ok || q == p || memcmp(q->id, origin, ID_LEN) == 0) continue;
@@ -1682,6 +1707,7 @@ static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
         // Meant for us alone, so never passed on. Only p itself sends one.
         if (!ack_record(c, p, f[1]) || seen_has(c, f[1])) return;
         seen_add(c, f[1]);
+        if (chat_ignored(c, p->id)) return;
         char text[MAX_TEXT + 1], via[CHAT_NAME_LEN], shown[CHAT_NAME_LEN + 48];
         clean_text(f[2], text, MAX_TEXT);
         chat_peer_name(c, p, via);
@@ -1943,6 +1969,11 @@ static int peer_try_unseal(peer_t *p, const uint8_t *data, size_t len, uint32_t 
 // it warned.
 static int check_trust(chat_t *c, peer_t *p) {
     char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
+    // A peer that signs with a key you ignore is ignored wherever it turns up.
+    if (p->identity_state == VERIFY_VERIFIED && ignore_by_key(p->identity_pub) && !chat_ignored(c, p->id)) {
+        set_ignored(c, p->id, 1);
+        ui_print(c, "* %s signs with a key you ignore - what they say isn't shown (:ignore %s off shows it)", name, name);
+    }
     const trust_entry_t *t = p->identity_state == VERIFY_VERIFIED ? trust_by_key(p->identity_pub) : NULL;
     if (t) {
         char was[MAX_NICK + 1]; copy_str(was, t->nick, sizeof was);
@@ -2642,8 +2673,9 @@ static cmd_result_t cmd_peers(void *ctx, const char *arg) {
         char vfyhex[HEX_GROUPS_LEN(VERIFY_LEN)]; hex_groups(p->vfy, VERIFY_LEN, vfyhex);
         char build[64]; chat_build_label(p, build, sizeof build);
         static const char *const CODE[] = { "", ", code not compared", ", code compared", ", CODES DIFFER", ", KEY CHANGED" };
-        ui_print(c, "*   %s#%s (verify %s%s, %s, %s%s)", p->nick, idhex, vfyhex, CODE[chat_code_state(c, p)],
-                 chat_verify_label(p->identity_state), build, p->persists ? ", keeps history" : "");
+        ui_print(c, "*   %s#%s (verify %s%s, %s, %s%s%s)", p->nick, idhex, vfyhex, CODE[chat_code_state(c, p)],
+                 chat_verify_label(p->identity_state), build, p->persists ? ", keeps history" : "",
+                 chat_ignored(c, p->id) ? ", ignored" : "");
     }
     if (n == 0) ui_print(c, "* nobody else yet");
     return CMD_OK;
@@ -2668,6 +2700,83 @@ static peer_t *peer_by_name(chat_t *c, const char *arg, int *ambiguous) {
         found = p;
     }
     return found;
+}
+
+// :ignore, :ignore NICK, :ignore NICK off. Only on this screen: nothing is sent, so nobody can tell.
+static cmd_result_t cmd_ignore(void *ctx, const char *arg) {
+    chat_t *c = ctx;
+    char who[MAX_TEXT + 1];
+    copy_str(who, arg, sizeof who);
+    char *sp = strrchr(who, ' ');
+    int off = sp && strcmp(sp + 1, "off") == 0;
+    if (off) {
+        while (sp > who && sp[-1] == ' ') sp--;
+        *sp = '\0';
+    }
+    if (!who[0]) {
+        char names[MAX_PEERS * (CHAT_NAME_LEN + 2) + 1] = "";
+        size_t at = 0;
+        for (int i = 0; i < c->peer_hi; i++) {
+            peer_t *p = &c->peers[i];
+            if (!p->used || !p->ok || !chat_ignored(c, p->id)) continue;
+            char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
+            int n = snprintf(names + at, sizeof names - at, "%s%s", at ? ", " : "", name);
+            if (n > 0 && (size_t)n < sizeof names - at) at += (size_t)n;
+        }
+        if (at) ui_print(c, "* ignored here: %s", names);
+        else ui_print(c, "* nobody online here is ignored - :ignore NICK hides what someone says");
+        if (ignore_count()) {
+            names[0] = '\0';
+            at = 0;
+            for (int i = 0; i < ignore_count(); i++) {
+                int n = snprintf(names + at, sizeof names - at, "%s%s", at ? ", " : "", ignore_at(i)->nick);
+                if (n > 0 && (size_t)n < sizeof names - at) at += (size_t)n;
+            }
+            ui_print(c, "* signing keys ignored in every session: %s", names);
+        }
+        return CMD_OK;
+    }
+    int ambiguous;
+    peer_t *p = peer_by_name(c, who, &ambiguous);
+    if (!p && ambiguous) {
+        ui_print(c, "* more than one peer is called %s - add the #id :peers shows (:ignore %s#1a2b...)", who, who);
+        return CMD_OK;
+    }
+    if (!p) {
+        char skel[NICK_SKEL_LEN];
+        chat_nick_skeleton(who, skel, sizeof skel);
+        int i = off ? ignore_find_nick(skel) : -1;
+        if (i >= 0) {
+            ui_print(c, "* the signing key ignored as %s isn't ignored any more", ignore_at(i)->nick);
+            ignore_remove(i);
+        } else {
+            ui_print(c, "* no online peer named '%s'", who);
+        }
+        return CMD_OK;
+    }
+    char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
+    int signs = p->identity_state == VERIFY_VERIFIED;
+    if (off) {
+        int was = chat_ignored(c, p->id);
+        set_ignored(c, p->id, 0);
+        const trust_entry_t *k = signs ? ignore_by_key(p->identity_pub) : NULL;
+        if (k) ignore_remove((int)(k - ignore_at(0)));
+        if (was || k) ui_print(c, "* %s isn't ignored any more - what they say shows from now on, not what they said meanwhile", name);
+        else ui_print(c, "* %s isn't ignored", name);
+        return CMD_OK;
+    }
+    if (chat_ignored(c, p->id)) {
+        ui_print(c, "* %s is ignored already - :ignore %s off shows what they say again", name, name);
+        return CMD_OK;
+    }
+    set_ignored(c, p->id, 1);
+    if (signs) ignore_add(p->identity_source, p->identity_pub, p->nick);
+    ui_print(c, "* %s is ignored: what they say, send you directly or offer doesn't show, and doesn't notify you. "
+                "Nothing tells them, and what they say still goes on to everyone else. %s", name,
+             !signs ? "They have no valid signing key, so this lasts for this session only"
+             : trust_saved() ? "Their signing key is ignored in every session too, and kept in the save"
+             : "Their signing key is ignored in every session too, until chat exits; :install keeps it");
+    return CMD_OK;
 }
 
 // Adds p's signing key to the verified keys. If p was warned about for having the nick of another
@@ -4116,6 +4225,7 @@ static void file_on_record(chat_t *c, peer_t *p, char **f, int n, double now) {
             || parse_u64(f[3], &size) != 0 || strlen(f[4]) != SHA256_LEN * 2 || hex_decode(f[4], SHA256_LEN * 2, sha) != 0) return;
         char ack[16]; snprintf(ack, sizeof ack, "a\t%s", f[1]);
         send_peer(c, p, ack);
+        if (chat_ignored(c, p->id)) return;
         if (size > FILE_HARD_MAX || (strcmp(f[5], "image") != 0 && strcmp(f[5], "file") != 0)) return;
         if (file_by_fid(c, p->id, fid)) return;   // a retry of one we have
         file_entry_t *e = file_new(c, p->id);
@@ -4276,6 +4386,7 @@ const command_t CHAT_COMMANDS[] = {
     { "peers",      NULL,     NULL,              "who is online, with verify codes and builds",     cmd_peers },
     { "verify",     NULL,     "NICK [ok|no]",    "compare a peer's verify code; ok once it matches", cmd_verify },
     { "verified",   NULL,     "[forget NICK]",   "list the signing keys you verified, or remove one", cmd_verified },
+    { "ignore",     NULL,     "[NICK [off]]",    "hide what a peer says, here and wherever they sign with that key; off shows it again", cmd_ignore },
     { "msg",        "dm",     "NICK TEXT",       "a direct message to one peer you're connected to; nobody else gets it", cmd_msg },
     { "reply",      "re",     "NICK TEXT",       "answer NICK's last message, quoting the start of it", cmd_reply },
     { "timer",      NULL,     "[off|10m|2h|1d]", "messages here go from every screen that keeps to it after this long; alone, says which", cmd_timer },

@@ -1158,6 +1158,7 @@ void render(void) {
             r->code = (tui_code_t)chat_code_state(e, p);
             r->modified = p->build_state == BUILD_MODIFIED;
             r->history = p->persists;
+            r->ignored = chat_ignored(e, p->id);
         }
     }
 
