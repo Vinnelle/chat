@@ -288,6 +288,59 @@ void platform_notify_shutdown(void) {
     g_notify_state = -1;
 }
 
+// The clipboard's sequence number once chat put text there, or 0.
+static DWORD g_clip_seq;
+
+static HGLOBAL global_copy(const void *data, size_t len) {
+    HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, len);
+    void *p = h ? GlobalLock(h) : NULL;
+    if (!p) { if (h) GlobalFree(h); return NULL; }
+    memcpy(p, data, len);
+    GlobalUnlock(h);
+    return h;
+}
+
+// A clipboard format that tells Windows what to do with the rest: once it's set, the clipboard owns h.
+static void clipboard_flag(const wchar_t *name, DWORD value) {
+    UINT fmt = RegisterClipboardFormatW(name);
+    HGLOBAL h = fmt ? global_copy(&value, sizeof value) : NULL;
+    if (h && !SetClipboardData(fmt, h)) GlobalFree(h);
+}
+
+// Clipboard history (Win+V) and cloud clipboard keep what's copied, and clipboard managers read it:
+// these formats keep the text out of all three.
+int platform_clipboard_set(const char *text) {
+    int wn = MultiByteToWideChar(CP_UTF8, 0, text, -1, NULL, 0);
+    if (wn <= 0) return -1;
+    wchar_t *w = malloc((size_t)wn * sizeof *w);
+    if (!w) return -1;
+    MultiByteToWideChar(CP_UTF8, 0, text, -1, w, wn);
+    HGLOBAL h = global_copy(w, (size_t)wn * sizeof *w);
+    crypto_wipe(w, (size_t)wn * sizeof *w);
+    free(w);
+    if (!h) return -1;
+    if (!OpenClipboard(NULL)) { GlobalFree(h); return -1; }
+    EmptyClipboard();
+    if (!SetClipboardData(CF_UNICODETEXT, h)) { CloseClipboard(); GlobalFree(h); return -1; }
+    clipboard_flag(L"ExcludeClipboardContentFromMonitorProcessing", 0);
+    clipboard_flag(L"CanIncludeInClipboardHistory", 0);
+    clipboard_flag(L"CanUploadToCloudClipboard", 0);
+    CloseClipboard();
+    g_clip_seq = GetClipboardSequenceNumber();
+    return 0;
+}
+
+int platform_clipboard_clear(void) {
+    if (!g_clip_seq) return -1;
+    DWORD seq = g_clip_seq;
+    g_clip_seq = 0;
+    if (GetClipboardSequenceNumber() != seq) return 0;
+    if (!OpenClipboard(NULL)) return -1;
+    EmptyClipboard();
+    CloseClipboard();
+    return 1;
+}
+
 static int g_vt_out = -1;
 static DWORD g_out_orig, g_in_orig;
 static UINT g_cp_out_orig;

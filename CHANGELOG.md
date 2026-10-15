@@ -8,6 +8,11 @@
   catches an invite that was mistyped or cut off, which used to leave you alone in a room nobody
   else was in. An invite is never shown, only copied, since it holds the password. A call has none,
   and nor does a session whose id has a `:` in it.
+- A session id or an invite you copy comes off the clipboard again after 30 seconds, or as soon as
+  chat quits, locks its screen or panics. On Windows chat sets the clipboard itself for these,
+  marked to stay out of clipboard history, the cloud clipboard and clipboard managers, and leaves it
+  alone if something else was copied since. Elsewhere the terminal clears it (OSC 52), and that also
+  takes off anything copied since.
 
 ### Changed
 - The NEW SESSION box (`Ctrl+N`) starts with a random password, eight words (64 bits), shown so you

@@ -444,6 +444,10 @@ void platform_notify_shutdown(void) {
     if (g_bus >= 0) { close(g_bus); g_bus = -1; }
 }
 
+// The clipboard belongs to the desktop, which chat doesn't talk to, so the terminal sets it.
+int platform_clipboard_set(const char *text) { (void)text; return -1; }
+int platform_clipboard_clear(void) { return -1; }
+
 int term_ansi_ok(void) {
     return isatty(STDOUT_FILENO);
 }

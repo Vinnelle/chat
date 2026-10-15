@@ -456,7 +456,13 @@ void close_session(session_slot_t *s);
 void select_step(int dir);
 void console_note(session_slot_t *s, const char *fmt, ...);
 void note(const char *fmt, ...);
+// Public text goes on the clipboard with osc52_copy. A secret goes with copy_secret, and comes off
+// again after CLIPBOARD_CLEAR_SECONDS, or as soon as chat quits, locks or panics.
+#define CLIPBOARD_CLEAR_SECONDS 30
 void osc52_copy(const char *text);
+void copy_secret(const char *text);
+void clipboard_clear_now(void);
+void clipboard_tick(double now);
 void copy_session_id(session_slot_t *s);
 void copy_invite(session_slot_t *s);
 const char *route_label(void);

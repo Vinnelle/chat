@@ -43,6 +43,13 @@ void platform_notify(const char *title, const char *body);
 
 void platform_notify_shutdown(void);
 
+// Puts text on the clipboard where chat can do that itself (Windows), and keeps it out of the
+// clipboard's history and cloud sync, and returns 0. -1 where the terminal has to (OSC 52).
+int platform_clipboard_set(const char *text);
+// Empties the clipboard if it still holds what platform_clipboard_set put there: 1 if it did, 0 if
+// something was copied since, so it's left alone, -1 if it couldn't.
+int platform_clipboard_clear(void);
+
 int term_read_line(const char *prompt, char *out, size_t outlen);
 
 int term_read_password(const char *prompt, char *out, size_t outlen);

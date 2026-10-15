@@ -202,6 +202,12 @@ can keep them out:
 - chat's own tor only lets chat log in to its control port (see [Routing](#routing)).
 - On Linux, notifications go to the desktop over D-Bus from chat itself. notify-send would have
   started a process with their text on its command line, which every user can read.
+- A session id or an invite you copy comes off the clipboard again after 30 seconds, or as soon as
+  chat quits, locks its screen or panics: clipboard managers keep what they see, and it's easy to
+  paste by accident. On Windows chat puts it there itself, marked so clipboard history (`Win+V`), the
+  cloud clipboard and clipboard managers leave it alone, and only takes it off if nothing was copied
+  since. Elsewhere the terminal puts it there (OSC 52), and chat can't tell whether you copied
+  something else since, so that comes off too.
 - Reading a save doesn't change its access time (Linux).
 
 **Sandbox (Linux).** chat reads a lot of untrusted input with its own code: pictures from peers, the
@@ -1188,8 +1194,8 @@ puts it on the command line.
 | `:peers` | who's online, with verify codes and builds |
 | `:net` | network report and diagnosis |
 | `:port [N]` | show or change this session's UDP port (`0` picks a free one) |
-| `:copyid` | copy the session id to the clipboard |
-| `:invite` | copy the session's id and password to the clipboard as one invite, which `Ctrl+J` takes in place of the id (see [Security](#security)) |
+| `:copyid` | copy the session id to the clipboard, which it comes off again after 30 seconds |
+| `:invite` | copy the session's id and password to the clipboard as one invite, which `Ctrl+J` takes in place of the id (see [Security](#security)); it comes off after 30 seconds |
 | `:newtor` | new Tor circuits and a new onion address for every session in Tor mode (see [Routing](#routing)) |
 | `:update` | install the latest release |
 | `:install [NAME]` | save your settings and signing key on this computer, after telling you what that leaves on disk; a new save asks for its name (blank picks a random one), and with NAME it's a save of that name (see [Installing](#installing)) |

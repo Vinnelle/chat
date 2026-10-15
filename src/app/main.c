@@ -588,7 +588,7 @@ void note(const char *fmt, ...) {
 // Asks the terminal to put text (up to OSC52_MAX bytes) on the clipboard. A terminal that doesn't allow OSC 52 ignores it.
 #define OSC52_MAX 1024   // a PGP public key fits
 
-void osc52_copy(const char *text) {
+static void osc52_put(const char *text) {
     size_t n = strlen(text);
     if (n > OSC52_MAX) n = OSC52_MAX;
     char b64[BASE64_LEN(OSC52_MAX) + 1];
@@ -596,13 +596,46 @@ void osc52_copy(const char *text) {
     char osc[sizeof b64 + 16];
     snprintf(osc, sizeof osc, "\x1b]52;c;%s\x07", b64);
     platform_write_stdout(osc, strlen(osc));
+    crypto_wipe(b64, sizeof b64);
+    crypto_wipe(osc, sizeof osc);
+}
+
+// When the secret copied last comes off the clipboard (0: none is due to), and whether chat put it
+// there itself rather than the terminal.
+static double g_clip_clear_at;
+static int g_clip_native;
+
+void osc52_copy(const char *text) {
+    g_clip_clear_at = 0;
+    osc52_put(text);
+}
+
+void copy_secret(const char *text) {
+    g_clip_native = platform_clipboard_set(text) == 0;
+    if (!g_clip_native) osc52_put(text);
+    g_clip_clear_at = now_seconds() + CLIPBOARD_CLEAR_SECONDS;
+}
+
+// The terminal can't say what's on the clipboard now (reading it is usually off), so this can also
+// clear something copied since.
+void clipboard_clear_now(void) {
+    if (!g_clip_clear_at) return;
+    g_clip_clear_at = 0;
+    if (g_clip_native) { platform_clipboard_clear(); return; }
+    // xterm empties it on a payload that isn't base64, others on an empty one.
+    static const char clear[] = "\x1b]52;c;!\x07\x1b]52;c;\x07";
+    platform_write_stdout(clear, sizeof clear - 1);
+}
+
+void clipboard_tick(double now) {
+    if (g_clip_clear_at && now >= g_clip_clear_at) clipboard_clear_now();
 }
 
 void copy_session_id(session_slot_t *s) {
     if (!s) { note("no session selected - nothing to copy"); return; }
     const char *sid = s->engine.session_name;
-    osc52_copy(sid);
-    note("session id copied to the clipboard (OSC 52): %s", sid);
+    copy_secret(sid);
+    note("session id copied to the clipboard: %s - it comes off in %d s", sid, CLIPBOARD_CLEAR_SECONDS);
 }
 
 // It holds the password, so it's never shown: only copied.
@@ -615,9 +648,10 @@ void copy_invite(session_slot_t *s) {
              "password goes separately");
         return;
     }
-    osc52_copy(invite);
+    copy_secret(invite);
     crypto_wipe(invite, sizeof invite);
-    note("invite copied to the clipboard (OSC 52) - it holds the password, so only pass it to whoever you're inviting");
+    note("invite copied to the clipboard, and it comes off in %d s - it holds the password, so only pass it to "
+         "whoever you're inviting", CLIPBOARD_CLEAR_SECONDS);
 }
 
 // ---- routing: asked at the start of --simple; the full-screen UI opens on the settings page ----
@@ -687,6 +721,7 @@ void panic(panic_t why) {
         if (term_stdout_is_tty() && term_ansi_ok()) platform_write_stdout(clear, sizeof clear - 1);
         return;
     }
+    clipboard_clear_now();
     static const char out[] = CLEAR_SCREEN TUI_THEME_UNWATCH SCREEN_LEAVE CLEAR_SCREEN;
     platform_write_stdout(out, sizeof out - 1);
     term_raw_disable();
@@ -859,6 +894,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
         reopen_tick();
         timers_tick(now_seconds());
         lock_tick();
+        clipboard_tick(now_seconds());
         history_sync(now);
 
         if (!g_app.onboarding) {
@@ -906,6 +942,8 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
     // Back to the main screen with the cursor visible, its default shape and autowrap on, however
     // the last frame left them. A panic has done that already.
     if (!g_panic) {
+        fflush(stdout);
+        clipboard_clear_now();
         fputs(TUI_THEME_UNWATCH SCREEN_LEAVE, stdout);
         term_raw_disable();
     }

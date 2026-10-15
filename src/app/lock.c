@@ -68,6 +68,7 @@ void lock_screen(void) {
     if (g_plain || g_app.screen_locked || g_app.pin_step) return;
     if (!lock_possible()) { begin_pin(-1); return; }
     field_clear();
+    clipboard_clear_now();
     g_app.screen_locked = 1;
     g_lock_note[0] = '\0';
     g_app.dirty = 1;
