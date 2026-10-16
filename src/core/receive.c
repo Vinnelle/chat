@@ -14,233 +14,260 @@ static int recheck_trust(chat_t *c, peer_t *p) {
 
 #define PX_READ_MAX 12
 
-static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
-    char *f[MAX_FIELDS];
-    int n = split_tabs(plain, f, MAX_FIELDS);
-    if (n == 7 && strcmp(f[0], "k") == 0) {
-        p->k_seen = 1;
-        set_peer_nick(p, f[1]);
-        identity_source_t had_source = p->identity_source;
-        verify_state_t had_state = p->identity_state;
-        uint8_t had_pub[ID_SIGN_PUB_LEN];
-        memcpy(had_pub, p->identity_pub, ID_SIGN_PUB_LEN);
-        uint8_t rgb[3];
-        if (parse_color(f[2], rgb) == 0) memcpy(p->color, rgb, 3);
-        // f[3] is the history flag, then capability letters older builds ignore: "r" = sends rk,
-        // "b" = reads records joined by newlines, "l" = reads messages up to MAX_TEXT, "m" = moves rooms,
-        // "p" = reads direct messages, "q" = reads replies ("mr"), "o" = reads "off", "t" = keeps to message
-        // timers, then the seconds of the one it asks for.
-        int had_history = p->persists;
-        p->persists = (f[3][0] == '1');
-        if (p->announced && had_history != p->persists) {
-            char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
-            if (p->persists) ui_warn(c, "* %s keeps a history of this chat now", name);
-            else ui_print(c, "* %s stopped keeping a history of this chat", name);
-        }
-        p->announces_rekey = strchr(f[3], 'r') != NULL;
-        p->batches = strchr(f[3], 'b') != NULL;
-        p->long_text = strchr(f[3], 'l') != NULL;
-        p->can_move = strchr(f[3], 'm') != NULL;
-        p->can_pm = strchr(f[3], 'p') != NULL;
-        p->can_reply = strchr(f[3], 'q') != NULL;
-        p->can_offline = strchr(f[3], 'o') != NULL;
-        const char *tp = strchr(f[3], 't');
-        unsigned long asked = tp ? strtoul(tp + 1, NULL, 10) : 0;
-        unsigned had_timer = p->timer;
-        p->can_timer = tp != NULL;
-        p->timer = asked >= TIMER_MIN && asked <= TIMER_MAX ? (unsigned)asked : 0;
-        if (had_timer != p->timer) {
-            char name[CHAT_NAME_LEN], d[16];
-            chat_peer_name(c, p, name);
-            chat_format_timer(p->timer, d, sizeof d);
-            if (p->timer && !peer_trusted(c, p))
-                ui_print(c, "* %s asks for messages here to go after %s - kept to once you've compared codes", name, d);
-            else if (p->timer)
-                ui_print(c, "* %s asks for messages here to go after %s: chat takes them off the screen and out of "
-                            "memory then (a modified chat, or a screenshot, can keep anything)", name, d);
-            else ui_print(c, "* %s stopped asking for messages here to go", name);
-        }
-        int idtype = atoi(f[4]);
-        size_t idpub_len = strlen(f[5]), sig_len = strlen(f[6]);
-        if (idtype > IDENT_NONE && idtype <= IDENT_PGP && idpub_len == ID_SIGN_PUB_LEN * 2 && sig_len == ID_SIGN_LEN * 2) {
-            uint8_t idpub[ID_SIGN_PUB_LEN], sig[ID_SIGN_LEN];
-            if (hex_decode(f[5], idpub_len, idpub) == 0 && hex_decode(f[6], sig_len, sig) == 0) {
-                p->identity_source = (identity_source_t)idtype;
-                memcpy(p->identity_pub, idpub, ID_SIGN_PUB_LEN);
-                identity_fingerprint(idpub, p->identity_fp);
-                p->identity_state = check_session_sig(c, p, identity_verify, idpub, sig) == 0
-                                     ? VERIFY_VERIFIED : VERIFY_FAILED;
-            } else {
-                p->identity_source = IDENT_NONE; p->identity_state = VERIFY_UNVERIFIED;
-            }
+// "k": who p is, and what its build can do, sent again with each handshake.
+static void on_k(chat_t *c, peer_t *p, char **f) {
+    p->k_seen = 1;
+    set_peer_nick(p, f[1]);
+    identity_source_t had_source = p->identity_source;
+    verify_state_t had_state = p->identity_state;
+    uint8_t had_pub[ID_SIGN_PUB_LEN];
+    memcpy(had_pub, p->identity_pub, ID_SIGN_PUB_LEN);
+    uint8_t rgb[3];
+    if (parse_color(f[2], rgb) == 0) memcpy(p->color, rgb, 3);
+    // f[3] is the history flag, then capability letters older builds ignore: "r" = sends rk,
+    // "b" = reads records joined by newlines, "l" = reads messages up to MAX_TEXT, "m" = moves rooms,
+    // "p" = reads direct messages, "q" = reads replies ("mr"), "o" = reads "off", "t" = keeps to message
+    // timers, then the seconds of the one it asks for.
+    int had_history = p->persists;
+    p->persists = (f[3][0] == '1');
+    if (p->announced && had_history != p->persists) {
+        char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
+        if (p->persists) ui_warn(c, "* %s keeps a history of this chat now", name);
+        else ui_print(c, "* %s stopped keeping a history of this chat", name);
+    }
+    p->announces_rekey = strchr(f[3], 'r') != NULL;
+    p->batches = strchr(f[3], 'b') != NULL;
+    p->long_text = strchr(f[3], 'l') != NULL;
+    p->can_move = strchr(f[3], 'm') != NULL;
+    p->can_pm = strchr(f[3], 'p') != NULL;
+    p->can_reply = strchr(f[3], 'q') != NULL;
+    p->can_offline = strchr(f[3], 'o') != NULL;
+    const char *tp = strchr(f[3], 't');
+    unsigned long asked = tp ? strtoul(tp + 1, NULL, 10) : 0;
+    unsigned had_timer = p->timer;
+    p->can_timer = tp != NULL;
+    p->timer = asked >= TIMER_MIN && asked <= TIMER_MAX ? (unsigned)asked : 0;
+    if (had_timer != p->timer) {
+        char name[CHAT_NAME_LEN], d[16];
+        chat_peer_name(c, p, name);
+        chat_format_timer(p->timer, d, sizeof d);
+        if (p->timer && !peer_trusted(c, p))
+            ui_print(c, "* %s asks for messages here to go after %s - kept to once you've compared codes", name, d);
+        else if (p->timer)
+            ui_print(c, "* %s asks for messages here to go after %s: chat takes them off the screen and out of "
+                        "memory then (a modified chat, or a screenshot, can keep anything)", name, d);
+        else ui_print(c, "* %s stopped asking for messages here to go", name);
+    }
+    int idtype = atoi(f[4]);
+    size_t idpub_len = strlen(f[5]), sig_len = strlen(f[6]);
+    if (idtype > IDENT_NONE && idtype <= IDENT_PGP && idpub_len == ID_SIGN_PUB_LEN * 2 && sig_len == ID_SIGN_LEN * 2) {
+        uint8_t idpub[ID_SIGN_PUB_LEN], sig[ID_SIGN_LEN];
+        if (hex_decode(f[5], idpub_len, idpub) == 0 && hex_decode(f[6], sig_len, sig) == 0) {
+            p->identity_source = (identity_source_t)idtype;
+            memcpy(p->identity_pub, idpub, ID_SIGN_PUB_LEN);
+            identity_fingerprint(idpub, p->identity_fp);
+            p->identity_state = check_session_sig(c, p, identity_verify, idpub, sig) == 0
+                                 ? VERIFY_VERIFIED : VERIFY_FAILED;
         } else {
             p->identity_source = IDENT_NONE; p->identity_state = VERIFY_UNVERIFIED;
         }
-        // A peer that joined before its k came is checked now, and one whose nick or key changed again.
-        int warned = p->announced ? recheck_trust(c, p) : 0;
-        // A re-handshake (rekey, rejoin) sends k again. Say so if the identity behind it changes.
-        if (had_source != IDENT_NONE && !warned) {
-            char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
-            if (p->identity_source == IDENT_NONE) {
-                ui_print(c, "* warning: %s no longer presents a signing identity", name);
-            } else if (memcmp(had_pub, p->identity_pub, ID_SIGN_PUB_LEN) != 0) {
-                char fphex[HEX_GROUPS_LEN(ID_FP_LEN)]; hex_groups(p->identity_fp, ID_FP_LEN, fphex);
-                ui_print(c, "* warning: %s now presents a different signing identity (fingerprint %s) - :verify it again",
-                         name, fphex);
-            } else if (p->identity_state == VERIFY_FAILED && had_state != VERIFY_FAILED) {
-                ui_print(c, "* warning: %s's identity signature is now invalid", name);
-            }
-        }
-    } else if (n == 2 && strcmp(f[0], "rk") == 0) {
-        // The key this peer will re-handshake with next, sent over the session we already trust.
-        uint8_t next[PUB_LEN];
-        if (hex_decode(f[1], PUB_LEN * 2, next) == 0) {
-            memcpy(p->next_pub, next, PUB_LEN);
-            p->next_pub_set = 1;
-            p->rk_refused_since = 0.0;
-        }
-    } else if (n == 2 && strcmp(f[0], "c") == 0) {
-        uint8_t rgb[3];
-        if (parse_color(f[1], rgb) == 0) memcpy(p->color, rgb, 3);
-    } else if (n == 2 && strcmp(f[0], "n") == 0) {
-        set_peer_nick(p, f[1]);
-        if (p->announced) {
-            if (p->trust == TRUST_OTHER_KEY) p->trust = TRUST_UNKNOWN;
-            recheck_trust(c, p);
-        }
-    } else if (n == 2 && strcmp(f[0], "px") == 0) {
-        char *item = f[1];
-        for (int cnt = 0; item && *item && cnt < PX_READ_MAX; cnt++) {
-            char *comma = strchr(item, ',');
-            if (comma) *comma = '\0';
-            addr_t a;
-            size_t il = strlen(item);
-            if (il == TOR_ADDR_LEN + sizeof ".onion" - 1 && strcmp(item + TOR_ADDR_LEN, ".onion") == 0) {
-                // Only Tor mode uses onion addresses. Nothing else may ever look them up.
-                item[TOR_ADDR_LEN] = '\0';
-                if (c->tor && tor_target(c->tor, item, &a) == 0) add_candidate(c, a);
-            } else if (c->route.mode == ROUTE_UDP && addr_parse_ip_port(item, &a) == 0) {
-                // Numeric only. A hostname here would make us resolve any name a peer sends.
-                add_candidate(c, a);
-            }
-            item = comma ? comma + 1 : NULL;
-        }
-    } else if (n == 2 && strcmp(f[0], "ta") == 0) {
-        if (onion_valid(f[1])) copy_str(p->onion, f[1], sizeof p->onion);
-    } else if ((n == 3 || n == 5) && strcmp(f[0], "v") == 0) {
-        uint8_t proof[BUILD_HASH_LEN];
-        if (!version_ok(f[1]) || strlen(f[2]) != BUILD_HASH_LEN * 2
-            || hex_decode(f[2], BUILD_HASH_LEN * 2, proof) != 0) return;
-        check_build(c, p, f[1], proof, n == 5 ? f[3] : NULL, n == 5 ? f[4] : NULL);
-    } else if ((n == 5 && strcmp(f[0], "m") == 0) || (n == 6 && strcmp(f[0], "mr") == 0)) {
-        // "mr" is a reply: the id of the message it answers comes after its own. Only p itself is
-        // authenticated here. The origin id and nick are whatever p says.
-        uint8_t mid_raw[MID_LEN], origin[ID_LEN], reply_raw[MID_LEN];
-        const char *reply = n == 6 ? f[2] : NULL;
-        if (reply) { f[2] = f[3]; f[3] = f[4]; f[4] = f[5]; }
-        if (hex_decode(f[1], MID_HEX, mid_raw) != 0 || hex_decode(f[2], ID_LEN * 2, origin) != 0
-            || (reply && (strlen(reply) != MID_HEX || hex_decode(reply, MID_HEX, reply_raw) != 0)))
-            return;
-        char ack[16]; snprintf(ack, sizeof ack, "a\t%s", f[1]);
-        send_peer(c, p, ack);
-        int direct = memcmp(origin, p->id, ID_LEN) == 0;
-        if (!direct) {
-            if (memcmp(origin, c->my_id, ID_LEN) == 0) return;
-            // The origin is connected to us, so its own copy will arrive. A relayed one could be forged.
-            peer_t *op = find_peer_by_id(c, origin);
-            if (op && op->ok) return;
-        }
-        if (seen_has(c, f[1])) return;
-        seen_add(c, f[1]);
-        // Its parts, should a peer that only takes short messages pass them on from the origin later.
-        if (strlen(f[4]) > OLD_MAX_TEXT)
-            for (int i = 0; i < MAX_TEXT_PARTS; i++) {
-                char pmid[MID_HEX + 1];
-                part_mid(f[1], i, pmid);
-                seen_add(c, pmid);
-            }
-        char nick[MAX_NICK + 1], text[MAX_TEXT + 1], via[CHAT_NAME_LEN], prefix[REPLY_PREFIX_MAX] = "";
-        char line[REPLY_PREFIX_MAX + MAX_TEXT + 1];
-        if (direct) copy_str(nick, p->nick, sizeof nick);
-        else chat_clean_nick(f[3], nick);
-        clean_text(f[4], text, MAX_TEXT);
-        if (reply) reply_prefix(c, reply, prefix, sizeof prefix);
-        // An ignored member's message is still passed on, so ignoring it changes nothing for anyone else.
-        if (!chat_ignored(c, origin)) {
-            // A reply to us counts as a mention.
-            const recent_msg_t *answered = reply ? recent_find(c, reply) : NULL;
-            int mentioned = has_mention(text, c->nick) || (answered && memcmp(answered->origin, c->my_id, ID_LEN) == 0);
-            char shown[MAX_NICK + CHAT_NAME_LEN + 48];
-            chat_peer_name(c, p, via);
-            // A relayed nick is only the relayer's claim, so it always includes the origin's id. Nicks can't
-            // contain brackets, so what's added in brackets can't be faked.
-            const char *mark = code_mark(c, p);
-            if (direct) snprintf(shown, sizeof shown, "%s%s", via, mark);
-            else snprintf(shown, sizeof shown, "%s#%.*s (via %s%s)", nick, SHORT_ID_HEX, f[2], via, mark);
-            snprintf(line, sizeof line, "%s%s", prefix, text);
-            c->line_quote = (int)strlen(prefix);
-            ui_chat(c, direct ? p->color : NULL, mentioned, shown, line);
-            c->line_quote = 0;
-            recent_add(c, f[1], origin, nick, text, now);
-            // Only as much as the preview setting allows, since desktops keep what a notification shows.
-            if (c->notify && (c->notify_mode == NOTIFY_ALL || (c->notify_mode == NOTIFY_MENTIONS && mentioned)))
-                c->notify(c->ui, c->notify_preview >= PREVIEW_NICK ? shown : NULL,
-                          c->notify_preview == PREVIEW_MESSAGE ? text : NULL, mentioned);
-        }
-        for (int i = 0; i < c->peer_hi; i++) {
-            peer_t *q = &c->peers[i];
-            if (!q->used || !q->ok || q == p || memcmp(q->id, origin, ID_LEN) == 0) continue;
-            // Only passed on to peers our own messages would go to.
-            if (!peer_trusted(c, q)) continue;
-            if (reply) send_reply(c, q, f[1], reply, f[2], nick, text, prefix, 0, now);
-            else send_message(c, q, f[1], f[2], nick, text, 0, now);
-        }
-    } else if (n == 3 && strcmp(f[0], "pm") == 0) {
-        // Meant for us alone, so never passed on. Only p itself sends one.
-        if (!ack_record(c, p, f[1]) || seen_has(c, f[1])) return;
-        seen_add(c, f[1]);
-        if (chat_ignored(c, p->id)) return;
-        char text[MAX_TEXT + 1], via[CHAT_NAME_LEN], shown[CHAT_NAME_LEN + 48];
-        clean_text(f[2], text, MAX_TEXT);
-        chat_peer_name(c, p, via);
-        snprintf(shown, sizeof shown, "%s (" DM_ARROW " you)%s", via, code_mark(c, p));
-        ui_direct(c, p->color, 1, shown, text);
-        // It's for us, so it counts as a mention.
-        if (c->notify && c->notify_mode != NOTIFY_NONE)
-            c->notify(c->ui, c->notify_preview >= PREVIEW_NICK ? shown : NULL,
-                      c->notify_preview == PREVIEW_MESSAGE ? text : NULL, 1);
-    } else if (n == 2 && strcmp(f[0], "a") == 0) {
-        for (int i = 0; i < MAX_PENDING_MSGS; i++) {
-            pending_msg_t *pm = &c->pending[i];
-            if (!pm->used || pm->peer_slot != peer_slot(c, p) || strcmp(pm->mid, f[1]) != 0) continue;
-            unsigned own = pm->own;
-            pending_clear(pm);
-            own_settled(c, own);
-        }
-    } else if (n == 6 && strcmp(f[0], "mv") == 0) {
-        on_move(c, p, f, now);
-    } else if (n == 3 && strcmp(f[0], "mk") == 0) {
-        // Its key for the move, which the room we moved to checks its "mp" against.
-        uint8_t key[ID_SIGN_PUB_LEN];
-        if (!ack_record(c, p, f[1]) || strlen(f[2]) != ID_SIGN_PUB_LEN * 2 || hex_decode(f[2], ID_SIGN_PUB_LEN * 2, key) != 0) return;
-        if (!p->move_pub_set || memcmp(p->move_pub, key, ID_SIGN_PUB_LEN) != 0) {
-            memcpy(p->move_pub, key, ID_SIGN_PUB_LEN);
-            p->move_pub_set = 1;
-            p->move_passed = 0;
-        }
-    } else if (n == 2 && strcmp(f[0], "mp") == 0) {
-        uint8_t sig[ID_SIGN_LEN];
-        if (strlen(f[1]) != ID_SIGN_LEN * 2 || hex_decode(f[1], ID_SIGN_LEN * 2, sig) != 0) return;
-        memcpy(p->move_sig, sig, ID_SIGN_LEN);
-        p->move_sig_set = 1;
-        check_came_with(c, p);
-    } else if (f[0][0] == 'f' && f[0][1] && !f[0][2]) {
-        file_on_record(c, p, f, n, now);
-    } else if (n == 1 && strcmp(f[0], "bye") == 0) {
-        drop_peer(c, p, "left");
-    } else if (n == 1 && strcmp(f[0], "off") == 0) {
-        drop_peer(c, p, "went offline");
+    } else {
+        p->identity_source = IDENT_NONE; p->identity_state = VERIFY_UNVERIFIED;
     }
+    // A peer that joined before its k came is checked now, and one whose nick or key changed again.
+    int warned = p->announced ? recheck_trust(c, p) : 0;
+    // A re-handshake (rekey, rejoin) sends k again. Say so if the identity behind it changes.
+    if (had_source != IDENT_NONE && !warned) {
+        char name[CHAT_NAME_LEN]; chat_peer_name(c, p, name);
+        if (p->identity_source == IDENT_NONE) {
+            ui_print(c, "* warning: %s no longer presents a signing identity", name);
+        } else if (memcmp(had_pub, p->identity_pub, ID_SIGN_PUB_LEN) != 0) {
+            char fphex[HEX_GROUPS_LEN(ID_FP_LEN)]; hex_groups(p->identity_fp, ID_FP_LEN, fphex);
+            ui_print(c, "* warning: %s now presents a different signing identity (fingerprint %s) - :verify it again",
+                     name, fphex);
+        } else if (p->identity_state == VERIFY_FAILED && had_state != VERIFY_FAILED) {
+            ui_print(c, "* warning: %s's identity signature is now invalid", name);
+        }
+    }
+}
+
+// "rk": the key this peer will re-handshake with next, sent over the session we already trust.
+static void on_rk(peer_t *p, char **f) {
+    uint8_t next[PUB_LEN];
+    if (hex_decode(f[1], PUB_LEN * 2, next) == 0) {
+        memcpy(p->next_pub, next, PUB_LEN);
+        p->next_pub_set = 1;
+        p->rk_refused_since = 0.0;
+    }
+}
+
+static void on_nick(chat_t *c, peer_t *p, char **f) {
+    set_peer_nick(p, f[1]);
+    if (p->announced) {
+        if (p->trust == TRUST_OTHER_KEY) p->trust = TRUST_UNKNOWN;
+        recheck_trust(c, p);
+    }
+}
+
+// "px": other members' addresses to try.
+static void on_px(chat_t *c, char **f) {
+    char *item = f[1];
+    for (int cnt = 0; item && *item && cnt < PX_READ_MAX; cnt++) {
+        char *comma = strchr(item, ',');
+        if (comma) *comma = '\0';
+        addr_t a;
+        size_t il = strlen(item);
+        if (il == TOR_ADDR_LEN + sizeof ".onion" - 1 && strcmp(item + TOR_ADDR_LEN, ".onion") == 0) {
+            // Only Tor mode uses onion addresses. Nothing else may ever look them up.
+            item[TOR_ADDR_LEN] = '\0';
+            if (c->tor && tor_target(c->tor, item, &a) == 0) add_candidate(c, a);
+        } else if (c->route.mode == ROUTE_UDP && addr_parse_ip_port(item, &a) == 0) {
+            // Numeric only. A hostname here would make us resolve any name a peer sends.
+            add_candidate(c, a);
+        }
+        item = comma ? comma + 1 : NULL;
+    }
+}
+
+static void on_build(chat_t *c, peer_t *p, char **f, int n) {
+    uint8_t proof[BUILD_HASH_LEN];
+    if (!version_ok(f[1]) || strlen(f[2]) != BUILD_HASH_LEN * 2
+        || hex_decode(f[2], BUILD_HASH_LEN * 2, proof) != 0) return;
+    check_build(c, p, f[1], proof, n == 5 ? f[3] : NULL, n == 5 ? f[4] : NULL);
+}
+
+// "m", and "mr", a reply: the id of the message it answers comes after its own. Only p itself is
+// authenticated here. The origin id and nick are whatever p says.
+static void on_message(chat_t *c, peer_t *p, char **f, int n, double now) {
+    uint8_t mid_raw[MID_LEN], origin[ID_LEN], reply_raw[MID_LEN];
+    const char *reply = n == 6 ? f[2] : NULL;
+    if (reply) { f[2] = f[3]; f[3] = f[4]; f[4] = f[5]; }
+    if (hex_decode(f[1], MID_HEX, mid_raw) != 0 || hex_decode(f[2], ID_LEN * 2, origin) != 0
+        || (reply && (strlen(reply) != MID_HEX || hex_decode(reply, MID_HEX, reply_raw) != 0)))
+        return;
+    char ack[16]; snprintf(ack, sizeof ack, "a\t%s", f[1]);
+    send_peer(c, p, ack);
+    int direct = memcmp(origin, p->id, ID_LEN) == 0;
+    if (!direct) {
+        if (memcmp(origin, c->my_id, ID_LEN) == 0) return;
+        // The origin is connected to us, so its own copy will arrive. A relayed one could be forged.
+        peer_t *op = find_peer_by_id(c, origin);
+        if (op && op->ok) return;
+    }
+    if (seen_has(c, f[1])) return;
+    seen_add(c, f[1]);
+    // Its parts, should a peer that only takes short messages pass them on from the origin later.
+    if (strlen(f[4]) > OLD_MAX_TEXT)
+        for (int i = 0; i < MAX_TEXT_PARTS; i++) {
+            char pmid[MID_HEX + 1];
+            part_mid(f[1], i, pmid);
+            seen_add(c, pmid);
+        }
+    char nick[MAX_NICK + 1], text[MAX_TEXT + 1], via[CHAT_NAME_LEN], prefix[REPLY_PREFIX_MAX] = "";
+    char line[REPLY_PREFIX_MAX + MAX_TEXT + 1];
+    if (direct) copy_str(nick, p->nick, sizeof nick);
+    else chat_clean_nick(f[3], nick);
+    clean_text(f[4], text, MAX_TEXT);
+    if (reply) reply_prefix(c, reply, prefix, sizeof prefix);
+    // An ignored member's message is still passed on, so ignoring it changes nothing for anyone else.
+    if (!chat_ignored(c, origin)) {
+        // A reply to us counts as a mention.
+        const recent_msg_t *answered = reply ? recent_find(c, reply) : NULL;
+        int mentioned = has_mention(text, c->nick) || (answered && memcmp(answered->origin, c->my_id, ID_LEN) == 0);
+        char shown[MAX_NICK + CHAT_NAME_LEN + 48];
+        chat_peer_name(c, p, via);
+        // A relayed nick is only the relayer's claim, so it always includes the origin's id. Nicks can't
+        // contain brackets, so what's added in brackets can't be faked.
+        const char *mark = code_mark(c, p);
+        if (direct) snprintf(shown, sizeof shown, "%s%s", via, mark);
+        else snprintf(shown, sizeof shown, "%s#%.*s (via %s%s)", nick, SHORT_ID_HEX, f[2], via, mark);
+        snprintf(line, sizeof line, "%s%s", prefix, text);
+        c->line_quote = (int)strlen(prefix);
+        ui_chat(c, direct ? p->color : NULL, mentioned, shown, line);
+        c->line_quote = 0;
+        recent_add(c, f[1], origin, nick, text, now);
+        // Only as much as the preview setting allows, since desktops keep what a notification shows.
+        if (c->notify && (c->notify_mode == NOTIFY_ALL || (c->notify_mode == NOTIFY_MENTIONS && mentioned)))
+            c->notify(c->ui, c->notify_preview >= PREVIEW_NICK ? shown : NULL,
+                      c->notify_preview == PREVIEW_MESSAGE ? text : NULL, mentioned);
+    }
+    for (int i = 0; i < c->peer_hi; i++) {
+        peer_t *q = &c->peers[i];
+        if (!q->used || !q->ok || q == p || memcmp(q->id, origin, ID_LEN) == 0) continue;
+        // Only passed on to peers our own messages would go to.
+        if (!peer_trusted(c, q)) continue;
+        if (reply) send_reply(c, q, f[1], reply, f[2], nick, text, prefix, 0, now);
+        else send_message(c, q, f[1], f[2], nick, text, 0, now);
+    }
+}
+
+// "pm": meant for us alone, so never passed on. Only p itself sends one.
+static void on_direct(chat_t *c, peer_t *p, char **f) {
+    if (!ack_record(c, p, f[1]) || seen_has(c, f[1])) return;
+    seen_add(c, f[1]);
+    if (chat_ignored(c, p->id)) return;
+    char text[MAX_TEXT + 1], via[CHAT_NAME_LEN], shown[CHAT_NAME_LEN + 48];
+    clean_text(f[2], text, MAX_TEXT);
+    chat_peer_name(c, p, via);
+    snprintf(shown, sizeof shown, "%s (" DM_ARROW " you)%s", via, code_mark(c, p));
+    ui_direct(c, p->color, 1, shown, text);
+    // It's for us, so it counts as a mention.
+    if (c->notify && c->notify_mode != NOTIFY_NONE)
+        c->notify(c->ui, c->notify_preview >= PREVIEW_NICK ? shown : NULL,
+                  c->notify_preview == PREVIEW_MESSAGE ? text : NULL, 1);
+}
+
+static void on_ack(chat_t *c, peer_t *p, char **f) {
+    for (int i = 0; i < MAX_PENDING_MSGS; i++) {
+        pending_msg_t *pm = &c->pending[i];
+        if (!pm->used || pm->peer_slot != peer_slot(c, p) || strcmp(pm->mid, f[1]) != 0) continue;
+        unsigned own = pm->own;
+        pending_clear(pm);
+        own_settled(c, own);
+    }
+}
+
+// "mk": its key for the move, which the room we moved to checks its "mp" against.
+static void on_move_key(chat_t *c, peer_t *p, char **f) {
+    uint8_t key[ID_SIGN_PUB_LEN];
+    if (!ack_record(c, p, f[1]) || strlen(f[2]) != ID_SIGN_PUB_LEN * 2 || hex_decode(f[2], ID_SIGN_PUB_LEN * 2, key) != 0) return;
+    if (!p->move_pub_set || memcmp(p->move_pub, key, ID_SIGN_PUB_LEN) != 0) {
+        memcpy(p->move_pub, key, ID_SIGN_PUB_LEN);
+        p->move_pub_set = 1;
+        p->move_passed = 0;
+    }
+}
+
+static void on_move_proof(chat_t *c, peer_t *p, char **f) {
+    uint8_t sig[ID_SIGN_LEN];
+    if (strlen(f[1]) != ID_SIGN_LEN * 2 || hex_decode(f[1], ID_SIGN_LEN * 2, sig) != 0) return;
+    memcpy(p->move_sig, sig, ID_SIGN_LEN);
+    p->move_sig_set = 1;
+    check_came_with(c, p);
+}
+
+// A record over p's session, by its kind and how many fields it has. Anything else is ignored, so
+// a record a newer build sends does no harm.
+static void on_session(chat_t *c, peer_t *p, char *plain, double now) {
+    char *f[MAX_FIELDS];
+    int n = split_tabs(plain, f, MAX_FIELDS);
+    uint8_t rgb[3];
+    if (n == 7 && strcmp(f[0], "k") == 0) on_k(c, p, f);
+    else if (n == 2 && strcmp(f[0], "rk") == 0) on_rk(p, f);
+    else if (n == 2 && strcmp(f[0], "c") == 0) { if (parse_color(f[1], rgb) == 0) memcpy(p->color, rgb, 3); }
+    else if (n == 2 && strcmp(f[0], "n") == 0) on_nick(c, p, f);
+    else if (n == 2 && strcmp(f[0], "px") == 0) on_px(c, f);
+    else if (n == 2 && strcmp(f[0], "ta") == 0) { if (onion_valid(f[1])) copy_str(p->onion, f[1], sizeof p->onion); }
+    else if ((n == 3 || n == 5) && strcmp(f[0], "v") == 0) on_build(c, p, f, n);
+    else if ((n == 5 && strcmp(f[0], "m") == 0) || (n == 6 && strcmp(f[0], "mr") == 0)) on_message(c, p, f, n, now);
+    else if (n == 3 && strcmp(f[0], "pm") == 0) on_direct(c, p, f);
+    else if (n == 2 && strcmp(f[0], "a") == 0) on_ack(c, p, f);
+    else if (n == 6 && strcmp(f[0], "mv") == 0) on_move(c, p, f, now);
+    else if (n == 3 && strcmp(f[0], "mk") == 0) on_move_key(c, p, f);
+    else if (n == 2 && strcmp(f[0], "mp") == 0) on_move_proof(c, p, f);
+    else if (f[0][0] == 'f' && f[0][1] && !f[0][2]) file_on_record(c, p, f, n, now);
+    else if (n == 1 && strcmp(f[0], "bye") == 0) drop_peer(c, p, "left");
+    else if (n == 1 && strcmp(f[0], "off") == 0) drop_peer(c, p, "went offline");
 }
 
 static void note_source(chat_t *c, addr_t a) {
