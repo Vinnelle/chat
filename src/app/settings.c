@@ -282,27 +282,27 @@ int setting_options(setting_id_t id, const char *const **names, int *n) {
         case SET_REOPEN:     return g_app.reopen != 0;
         case SET_BETAS:      return g_app.betas != 0;
         case SET_AUTOSAVE:   return g_app.autosave != 0;
-        case SET_DEVICE_LOCK: return g_app.device_lock != 0;
-        case SET_SECURITY_KEY: return g_app.key_factor != 0;
-        case SET_AUTHENTICATOR: return g_app.code_factor != 0;
+        case SET_DEVICE_LOCK: return g_app.device.lock != 0;
+        case SET_SECURITY_KEY: return g_app.factor.key != 0;
+        case SET_AUTHENTICATOR: return g_app.factor.code != 0;
         case SET_DESTROY: {
             *names = DESTROY_NAMES; *n = 4;
-            for (int i = 0; i < 4; i++) if (DESTROY_VALS[i] == g_app.destroy_limit) return i;
+            for (int i = 0; i < 4; i++) if (DESTROY_VALS[i] == g_app.install.destroy_limit) return i;
             return 0;
         }
         case SET_LOCK: {
             *names = LOCK_AFTER_NAMES; *n = N_LOCK_AFTER;
-            for (int i = 0; i < N_LOCK_AFTER; i++) if (LOCK_AFTER_SECONDS[i] == g_app.lock_after) return i;
+            for (int i = 0; i < N_LOCK_AFTER; i++) if (LOCK_AFTER_SECONDS[i] == g_app.lock.after) return i;
             return 0;
         }
-        case SET_LOCK_KEY:   *names = LOCK_KEY_NAMES; *n = N_LOCK_KEYS; return g_app.lock_key;
-        case SET_PANIC_KEY:  *names = PANIC_KEY_NAMES; *n = N_PANIC_KEYS; return g_app.panic_key;
-        case SET_PANIC_WIPE: return g_app.panic_wipe != 0;
-        case SET_PANIC_HISTORY: return g_app.panic_history != 0;
+        case SET_LOCK_KEY:   *names = LOCK_KEY_NAMES; *n = N_LOCK_KEYS; return g_app.lock.key;
+        case SET_PANIC_KEY:  *names = PANIC_KEY_NAMES; *n = N_PANIC_KEYS; return g_app.panic.key;
+        case SET_PANIC_WIPE: return g_app.panic.wipe != 0;
+        case SET_PANIC_HISTORY: return g_app.panic.history != 0;
         case SET_SANDBOX:    return g_app.sandbox != 0;
         case SET_UPDATER:    return g_app.updater != 0;
-        case SET_TOR_STATE:  return g_app.tor_state != 0;
-        case SET_TOR_LAUNCH: *names = TOR_LAUNCH_NAMES; *n = 3; return g_app.tor_launch;
+        case SET_TOR_STATE:  return g_app.tor.keep_state != 0;
+        case SET_TOR_LAUNCH: *names = TOR_LAUNCH_NAMES; *n = 3; return g_app.tor.launch;
         case SET_NOTIFY:     *names = NOTIFY_NAMES; *n = 3; return (int)g_app.notify_mode;
         case SET_PREVIEW:    *names = PREVIEW_NAMES; *n = 3; return (int)g_app.notify_preview;
         case SET_NET:        *names = NET_LOG_NAMES; *n = 3; return g_app.net_log;
@@ -350,14 +350,14 @@ void setting_value(setting_id_t id, char *out, size_t cap) {
         }
         case SET_TOR_PATH: {
             char found[TOR_PATH_MAX];
-            if (g_app.tor_path[0]) snprintf(out, cap, "%s", g_app.tor_path);
+            if (g_app.tor.path[0]) snprintf(out, cap, "%s", g_app.tor.path);
             else if (platform_find_program("tor", NULL, found, sizeof found) == 0) snprintf(out, cap, "found %s", found);
             else snprintf(out, cap, "not installed");
             break;
         }
         case SET_BRIDGES: {
             char kinds[80];
-            int n = bridge_count(g_app.bridges, kinds, sizeof kinds);
+            int n = bridge_count(g_app.tor.bridges, kinds, sizeof kinds);
             if (n) snprintf(out, cap, "%d (%s)", n, kinds);
             else snprintf(out, cap, "none");
             break;
@@ -379,7 +379,7 @@ void setting_value(setting_id_t id, char *out, size_t cap) {
             uint8_t fp[ID_FP_LEN]; identity_fingerprint(g_app.identity.pub, fp);
             char fphex[HEX_GROUPS_LEN(ID_FP_LEN)]; hex_groups(fp, ID_FP_LEN, fphex);
             snprintf(out, cap, "%s%s, fingerprint %s", g_app.identity_source == IDENT_AGE ? "age" : "pgp",
-                     g_app.key_origin == KEY_DERIVED ? " from password" : "", fphex);
+                     g_app.key.origin == KEY_DERIVED ? " from password" : "", fphex);
             break;
         }
         case SET_AGE_RECIPIENT: {
@@ -427,9 +427,9 @@ int setting_text(setting_id_t id, char *out, size_t cap) {
             break;
         }
         case SET_PORT:     snprintf(out, cap, "%u", (unsigned)g_app.default_port); break;
-        case SET_TOR_PATH: copy_str(out, g_app.tor_path, cap); break;
-        case SET_BRIDGES:  copy_str(out, g_app.bridges, cap); break;
-        case SET_TRANSPORTS: copy_str(out, g_app.pt_dir, cap); break;
+        case SET_TOR_PATH: copy_str(out, g_app.tor.path, cap); break;
+        case SET_BRIDGES:  copy_str(out, g_app.tor.bridges, cap); break;
+        case SET_TRANSPORTS: copy_str(out, g_app.tor.pt_dir, cap); break;
         case SET_FILE_LIMIT: file_format_size_exact(file_cap(), out, cap); break;
         default: setting_value(id, out, cap); break;
     }
@@ -644,9 +644,9 @@ static void set_colour_all(void) {
 
 // Security keys too.
 void device_check(void) {
-    g_app.device_why[0] = g_app.seckey_why[0] = '\0';
-    g_app.device_kind = platform_device_kind(g_app.device_why, sizeof g_app.device_why);
-    g_app.seckey_ok = platform_seckey_usable(g_app.seckey_why, sizeof g_app.seckey_why) == 0;
+    g_app.device.why[0] = g_app.factor.seckey_why[0] = '\0';
+    g_app.device.kind = platform_device_kind(g_app.device.why, sizeof g_app.device.why);
+    g_app.factor.seckey_ok = platform_seckey_usable(g_app.factor.seckey_why, sizeof g_app.factor.seckey_why) == 0;
 }
 
 const char DEVICE_REMINDER[] =
@@ -659,9 +659,9 @@ const char KEY_REMINDER[] =
 
 // Turning the lock off never needs the device, so a save locked to it, or a lock already chosen,
 // stays usable. The same for a security key.
-static int device_lock_greyed(void) { return g_app.device_kind == DEVICE_NONE && !g_app.device_lock; }
+static int device_lock_greyed(void) { return g_app.device.kind == DEVICE_NONE && !g_app.device.lock; }
 
-static int security_key_greyed(void) { return !g_app.seckey_ok && !g_app.key_factor; }
+static int security_key_greyed(void) { return !g_app.factor.seckey_ok && !g_app.factor.key; }
 
 int row_greyed(setting_id_t id) {
     return (id == SET_DEVICE_LOCK && device_lock_greyed()) || (id == SET_SECURITY_KEY && security_key_greyed());
@@ -707,7 +707,7 @@ void setting_choose(setting_id_t id, int i) {
                 if (takes_settings(s)) g_app.sessions[s].engine.verify_required = !i;
             break;
         case SET_TOR_LAUNCH:
-            g_app.tor_launch = i;
+            g_app.tor.launch = i;
             note("Start chat's own tor: %s - for the next tor chat looks for; a tor already in use stays",
                  TOR_LAUNCH_NAMES[i]);
             return;
@@ -750,13 +750,13 @@ void setting_choose(setting_id_t id, int i) {
         case SET_HISTORY: history_choose(i); return;
         case SET_REOPEN: reopen_choose(i); return;
         case SET_LOCK: lock_after_choose(i); return;
-        case SET_LOCK_KEY: g_app.lock_key = i; break;
-        case SET_PANIC_KEY: g_app.panic_key = i; break;
+        case SET_LOCK_KEY: g_app.lock.key = i; break;
+        case SET_PANIC_KEY: g_app.panic.key = i; break;
         case SET_PANIC_WIPE:
-            g_app.panic_wipe = i;
+            g_app.panic.wipe = i;
             if (i) { note("Panic deletes the save: on - the panic key deletes the open save too, without asking"); return; }
             break;
-        case SET_PANIC_HISTORY: g_app.panic_history = i; break;
+        case SET_PANIC_HISTORY: g_app.panic.history = i; break;
         case SET_TOR_STATE: tor_state_choose(i); return;
         case SET_SANDBOX:
             g_app.sandbox = i;
@@ -849,14 +849,14 @@ void setting_apply_text(setting_id_t id, const char *typed) {
             return;
         }
         case SET_BRIDGES: {
-            char lines[sizeof g_app.bridges], why[200], kinds[80];
+            char lines[sizeof g_app.tor.bridges], why[200], kinds[80];
             int rc = bridges_parse(text, lines, sizeof lines, why, sizeof why);
             crypto_wipe(text, sizeof text);
             if (rc != 0) { note("Bridges: %s", why); return; }
-            int changed = strcmp(lines, g_app.bridges) != 0;
-            copy_str(g_app.bridges, lines, sizeof g_app.bridges);
+            int changed = strcmp(lines, g_app.tor.bridges) != 0;
+            copy_str(g_app.tor.bridges, lines, sizeof g_app.tor.bridges);
             crypto_wipe(lines, sizeof lines);
-            int n = bridge_count(g_app.bridges, kinds, sizeof kinds);
+            int n = bridge_count(g_app.tor.bridges, kinds, sizeof kinds);
             if (n) note("Bridges: %d (%s) - chat's own tor reaches the Tor network only through them", n, kinds);
             else note("Bridges: none");
             if (changed) tor_link_restart();
@@ -866,12 +866,12 @@ void setting_apply_text(setting_id_t id, const char *typed) {
             char full[TOR_PATH_MAX], line[TOR_PATH_MAX + 80];
             if (text[0] && platform_full_path(text, full, sizeof full) != 0) { note("that path is too long"); return; }
             if (text[0] && strchr(full, ' ')) { note("tor can't run a program from a path with spaces in it"); return; }
-            copy_str(g_app.pt_dir, text[0] ? full : "", sizeof g_app.pt_dir);
+            copy_str(g_app.tor.pt_dir, text[0] ? full : "", sizeof g_app.tor.pt_dir);
             transport_line(line, sizeof line);
             // The sandbox only lets chat, and tor, run what was found as it went up.
             note("Transport programs: %s%s", line, g_app.sandboxed & PLATFORM_SANDBOX_FILES
                  ? " - with the sandbox up, programs it didn't find as it went up run from the next start" : "");
-            if (g_app.bridges[0]) tor_link_restart();
+            if (g_app.tor.bridges[0]) tor_link_restart();
             return;
         }
         case SET_TOR_SOCKS:
@@ -886,8 +886,8 @@ void setting_apply_text(setting_id_t id, const char *typed) {
                 note("can't use %.100s - it has to be a full path to a program only root or you can change", text);
                 return;
             }
-            copy_str(g_app.tor_path, text[0] ? found : "", sizeof g_app.tor_path);
-            note("Tor program: %s", g_app.tor_path[0] ? g_app.tor_path : "search PATH and the usual folders");
+            copy_str(g_app.tor.path, text[0] ? found : "", sizeof g_app.tor.path);
+            note("Tor program: %s", g_app.tor.path[0] ? g_app.tor.path : "search PATH and the usual folders");
             return;
         }
         case SET_FILE_LIMIT: {
@@ -984,23 +984,23 @@ int settings_n_sections(void) {
 }
 
 void settings_select(int sel) {
-    g_app.settings_sel = sel;
+    g_app.settings.sel = sel;
     if (sel >= N_SETTINGS) return;
-    g_app.settings_page = settings_section_index(SETTINGS[sel].id);
-    g_app.settings_rows[g_app.settings_page] = sel;
+    g_app.settings.page = settings_section_index(SETTINGS[sel].id);
+    g_app.settings.rows[g_app.settings.page] = sel;
 }
 
 // Section s, on the row selected there last if it's still listed, otherwise its first.
 void settings_go_section(int s) {
-    int i = g_app.settings_rows[s];
+    int i = g_app.settings.rows[s];
     if (i < section_begin(s) || i >= section_begin(s + 1) || !setting_shown(SETTINGS[i].id)) i = section_row(s, 1);
-    g_app.settings_page = s;
+    g_app.settings.page = s;
     settings_select(i);
 }
 
 // j/k go through the sections in turn, each one's listed rows and then its Done button.
 void settings_step(int dir) {
-    int sel = g_app.settings_sel, s = g_app.settings_page;
+    int sel = g_app.settings.sel, s = g_app.settings.page;
     int a = section_begin(s), b = section_begin(s + 1);
     if (sel == SETTINGS_DONE) {
         if (dir < 0) settings_select(section_row(s, -1));
@@ -1010,14 +1010,14 @@ void settings_step(int dir) {
     for (int i = sel + dir; i >= a && i < b; i += dir)
         if (setting_shown(SETTINGS[i].id)) { settings_select(i); return; }
     if (dir < 0 && s == 0) return;
-    if (dir < 0) g_app.settings_page = s - 1;
-    g_app.settings_sel = SETTINGS_DONE;
+    if (dir < 0) g_app.settings.page = s - 1;
+    g_app.settings.sel = SETTINGS_DONE;
 }
 
 // Moves the selection off a row that stopped being listed, to the next one up in its section, or
 // down.
 void settings_fix_sel(void) {
-    int sel = g_app.settings_sel;
+    int sel = g_app.settings.sel;
     if (sel >= N_SETTINGS || setting_shown(SETTINGS[sel].id)) return;
     int s = settings_section_index(SETTINGS[sel].id), a = section_begin(s), b = section_begin(s + 1), i = sel - 1;
     while (i >= a && !setting_shown(SETTINGS[i].id)) i--;
@@ -1028,14 +1028,14 @@ void settings_fix_sel(void) {
 // Tab and Shift+Tab: the next or previous section, round from the last to the first.
 void settings_section_step(int dir) {
     int n = settings_n_sections();
-    settings_go_section((g_app.settings_page + dir + n) % n);
+    settings_go_section((g_app.settings.page + dir + n) % n);
 }
 
 void begin_settings(void) {
     if (g_app.mode != MODE_CHAT) return;
     device_check();
     g_app.mode = MODE_SETTINGS;
-    if (g_app.settings_sel == SETTINGS_DONE) settings_go_section(g_app.settings_page);
+    if (g_app.settings.sel == SETTINGS_DONE) settings_go_section(g_app.settings.page);
     settings_fix_sel();
     g_app.dirty = 1;
 }
@@ -1064,7 +1064,7 @@ void settings_done(void) {
 
 // What the keys do on the selected row, with the main action first.
 const char *settings_hint(void) {
-    const setting_def_t *d = g_app.settings_sel < N_SETTINGS ? &SETTINGS[g_app.settings_sel] : NULL;
+    const setting_def_t *d = g_app.settings.sel < N_SETTINGS ? &SETTINGS[g_app.settings.sel] : NULL;
     const char *act;
     if (!d) act = g_app.onboarding ? "enter start" : "enter done";
     else if (d->id == SET_COLOUR) act = "h/l step" DOT_SEP "enter type one";
@@ -1145,7 +1145,7 @@ const char SIGN_PASSWORD_HELP[] =
 int sign_row_in_use(void) {
     int age = g_app.identity_source == IDENT_AGE;
     if (!age && g_app.identity_source != IDENT_PGP) return PICK_OFF;
-    switch (g_app.key_origin) {
+    switch (g_app.key.origin) {
         case KEY_FILE:   return age ? PICK_AGE_FILE : PICK_PGP_FILE;
         case KEY_PASTED: return age ? PICK_AGE_PASTE : PICK_PGP_PASTE;
         default:         return age ? PICK_AGE_MADE : PICK_PGP_MADE;
@@ -1154,7 +1154,7 @@ int sign_row_in_use(void) {
 
 // Opens the picker from the Signing identity row, on the choice in use.
 void begin_sign(void) {
-    g_app.sign_sel = sign_row_in_use();
+    g_app.key.sel = sign_row_in_use();
     g_app.mode = MODE_SIGN_CHOICE;
     g_app.dirty = 1;
 }
@@ -1177,7 +1177,7 @@ void identity_chosen(void) {
 void say_key_saved_state(void) {
     if (g_app.installed && g_app.identity_source != IDENT_NONE && !key_in_use_saved())
         push_log("* this signing key isn't saved: :save %s with your settings' passphrase%s",
-                 g_app.key_origin == KEY_FILE && g_app.key_path[0] ? "saves its file's path, sealed" : "seals it",
+                 g_app.key.origin == KEY_FILE && g_app.key.path[0] ? "saves its file's path, sealed" : "seals it",
                  install_has_key(install_current()) ? ", in place of the saved one" : "");
     else if (g_app.installed && g_app.identity_source == IDENT_NONE && install_has_key(install_current()))
         push_log("* the saved signing key stays saved, and signs again the next time chat starts");
@@ -1189,16 +1189,16 @@ void say_key_saved_state(void) {
 const char *make_identity(identity_source_t kind, const char *password) {
     if (!password[0]) {
         gen_identity_keypair(&g_app.identity);
-        g_app.key_origin = KEY_MADE;
-        g_app.pgp_created = (uint32_t)time(NULL);
+        g_app.key.origin = KEY_MADE;
+        g_app.key.pgp_created = (uint32_t)time(NULL);
     } else {
         char device[128];
         if (platform_machine_id(device, sizeof device) != 0)
             return "this system has no machine id to make the key with - leave the password blank for a new key";
         if (identity_from_password(password, device, &g_app.identity) != 0)
             return "couldn't make the key - it needs 512 MiB of free memory for a moment";
-        g_app.key_origin = KEY_DERIVED;
-        g_app.pgp_created = DERIVED_PGP_CREATED;
+        g_app.key.origin = KEY_DERIVED;
+        g_app.key.pgp_created = DERIVED_PGP_CREATED;
     }
     g_app.identity_source = kind;
     return NULL;
@@ -1206,7 +1206,7 @@ const char *make_identity(identity_source_t kind, const char *password) {
 
 // The password a native key is made from, typed on the bottom bar with the picker still up.
 static void begin_sign_password(identity_source_t kind) {
-    g_app.load_kind = kind;
+    g_app.key.load_kind = kind;
     g_app.saved_input = g_app.input;
     tui_input_clear(&g_app.input);
     g_app.input.modal = 0;
@@ -1231,7 +1231,7 @@ void commit_sign_password(void) {
         note("making your key from the password...");
         render();
     }
-    const char *why = make_identity(g_app.load_kind, pw);
+    const char *why = make_identity(g_app.key.load_kind, pw);
     crypto_wipe(pw, sizeof pw);
     if (why) { note("%s", why); return; }
     identity_chosen();
@@ -1273,8 +1273,8 @@ int load_key_file(identity_source_t kind, const char *path) {
     if (rc == 0) {
         g_app.identity = kp;
         g_app.identity_source = kind;
-        g_app.key_origin = KEY_FILE;
-        copy_str(g_app.key_path, full, sizeof g_app.key_path);
+        g_app.key.origin = KEY_FILE;
+        copy_str(g_app.key.path, full, sizeof g_app.key.path);
     }
     crypto_wipe(&kp, sizeof kp);
     return rc;
@@ -1282,17 +1282,17 @@ int load_key_file(identity_source_t kind, const char *path) {
 
 // The key file in use, if it's kind's, for the browser and the path field to start at.
 static const char *key_path_of(identity_source_t kind) {
-    return g_app.key_origin == KEY_FILE && g_app.identity_source == kind && g_app.key_path[0] ? g_app.key_path : NULL;
+    return g_app.key.origin == KEY_FILE && g_app.identity_source == kind && g_app.key.path[0] ? g_app.key.path : NULL;
 }
 
 // Opens in the folder of the key file in use, if there is one, otherwise the home folder.
 static void begin_key_browse(identity_source_t kind) {
-    g_app.load_kind = kind;
+    g_app.key.load_kind = kind;
     const char *home = platform_home_dir();
     char dir[KEY_PATH_MAX] = "", name[200] = "";
     if (key_path_of(kind)) {
-        copy_str(dir, g_app.key_path, sizeof dir);
-        const char *slash = strrchr(g_app.key_path, '/');
+        copy_str(dir, g_app.key.path, sizeof dir);
+        const char *slash = strrchr(g_app.key.path, '/');
         if (slash) copy_str(name, slash + 1, sizeof name);
         path_parent(dir);
     }
@@ -1304,8 +1304,8 @@ static void begin_key_browse(identity_source_t kind) {
 
 // The field for a key file's path, on the picker or the browser, starting with start (or empty).
 void begin_key_path(identity_source_t kind, const char *start, int from_browser) {
-    g_app.load_kind = kind;
-    g_app.path_from_browser = from_browser;
+    g_app.key.load_kind = kind;
+    g_app.key.path_from_browser = from_browser;
     g_app.saved_input = g_app.input;
     tui_input_clear(&g_app.input);
     g_app.input.modal = 0;
@@ -1322,7 +1322,7 @@ void begin_key_path(identity_source_t kind, const char *start, int from_browser)
 void end_key_path(void) {
     g_app.input = g_app.saved_input;
     crypto_wipe(&g_app.saved_input, sizeof g_app.saved_input);
-    g_app.mode = g_app.path_from_browser ? MODE_SIGN_BROWSE : MODE_SIGN_CHOICE;
+    g_app.mode = g_app.key.path_from_browser ? MODE_SIGN_BROWSE : MODE_SIGN_CHOICE;
     g_app.dirty = 1;
 }
 
@@ -1331,8 +1331,8 @@ void commit_key_path(void) {
     char path[sizeof g_app.input.buf];
     copy_str(path, g_app.input.buf, sizeof path);
     if (!path[0]) { note("type the key file's path - or Esc to go back"); return; }
-    if (load_key_file(g_app.load_kind, path) != 0) {
-        if (g_app.load_kind == IDENT_AGE) note("%.80s can't be read, or holds no AGE secret key", path);
+    if (load_key_file(g_app.key.load_kind, path) != 0) {
+        if (g_app.key.load_kind == IDENT_AGE) note("%.80s can't be read, or holds no AGE secret key", path);
         else note("%.80s can't be read, or isn't an unencrypted EdDSA/Ed25519 secret key", path);
         return;
     }
@@ -1342,13 +1342,13 @@ void commit_key_path(void) {
 }
 
 void paste_clear(void) {
-    crypto_wipe(g_app.paste_buf, sizeof g_app.paste_buf);
-    g_app.paste_len = 0;
-    copy_str(g_app.paste_status, "waiting for the paste", sizeof g_app.paste_status);
+    crypto_wipe(g_app.paste.buf, sizeof g_app.paste.buf);
+    g_app.paste.len = 0;
+    copy_str(g_app.paste.status, "waiting for the paste", sizeof g_app.paste.status);
 }
 
 static void begin_key_paste(identity_source_t kind) {
-    g_app.load_kind = kind;
+    g_app.key.load_kind = kind;
     paste_clear();
     g_app.mode = MODE_SIGN_PASTE;
     g_app.dirty = 1;
@@ -1358,8 +1358,8 @@ static void begin_key_paste(identity_source_t kind) {
 int try_load_key_from_browser(void) {
     const dir_entry_t *sel = &g_app.browser.items[g_app.browser.selected];
     char full[1200]; browser_entry_path(&g_app.browser, sel, full, sizeof full);
-    if (load_key_file(g_app.load_kind, full) != 0) {
-        if (g_app.load_kind == IDENT_AGE) note("%.80s can't be read, or holds no AGE secret key", sel->name);
+    if (load_key_file(g_app.key.load_kind, full) != 0) {
+        if (g_app.key.load_kind == IDENT_AGE) note("%.80s can't be read, or holds no AGE secret key", sel->name);
         else note("%.80s can't be read, or isn't an unencrypted EdDSA/Ed25519 secret key", sel->name);
         return -1;
     }
@@ -1405,12 +1405,12 @@ void copy_pgp_public_key(void) {
 }
 
 int pgp_key_made_here(void) {
-    return g_app.identity_source == IDENT_PGP && (g_app.key_origin == KEY_MADE || g_app.key_origin == KEY_DERIVED);
+    return g_app.identity_source == IDENT_PGP && (g_app.key.origin == KEY_MADE || g_app.key.origin == KEY_DERIVED);
 }
 
 // The PGP key made here, armored, with the nick as it is now in its user id.
 void pgp_public_key(char armor[PGP_ARMOR_MAX], uint8_t fp[PGP_FP_LEN]) {
-    pgp_export_public_key(&g_app.identity, g_app.nick[0] ? g_app.nick : "chat", g_app.pgp_created,
+    pgp_export_public_key(&g_app.identity, g_app.nick[0] ? g_app.nick : "chat", g_app.key.pgp_created,
                           armor, PGP_ARMOR_MAX, fp);
 }
 
@@ -1441,22 +1441,22 @@ void show_identity_result(void) {
 void finish_onboarding(void) {
     g_app.mode = MODE_CHAT;
 
-    if (g_app.pending_auto_session[0]) {
+    if (g_app.autostart.session[0]) {
         addr_t peers[MAX_PEER_ARGS];
         int n_peers = 0;
-        if (g_app.pending_auto_n_peers > 0 && g_app.route.mode == ROUTE_TOR) {
+        if (g_app.autostart.n_peers > 0 && g_app.route.mode == ROUTE_TOR) {
             // Looking a name up here would go around Tor.
             push_log("* --peer left out: Tor mode never reaches peers over UDP, so their addresses aren't looked up");
         } else {
-            for (int i = 0; i < g_app.pending_auto_n_peers; i++) {
-                if (addr_parse_hostport(g_app.pending_auto_peer_args[i], &peers[n_peers]) == 0) n_peers++;
-                else push_log("* --peer %s left out: can't find that address", g_app.pending_auto_peer_args[i]);
+            for (int i = 0; i < g_app.autostart.n_peers; i++) {
+                if (addr_parse_hostport(g_app.autostart.peer_args[i], &peers[n_peers]) == 0) n_peers++;
+                else push_log("* --peer %s left out: can't find that address", g_app.autostart.peer_args[i]);
             }
         }
-        start_session(g_app.pending_auto_session, g_app.pending_auto_password, 0,
-                      g_app.pending_auto_port, peers, n_peers);
-        crypto_wipe(g_app.pending_auto_password, sizeof g_app.pending_auto_password);
-        g_app.pending_auto_session[0] = '\0';
+        start_session(g_app.autostart.session, g_app.autostart.password, 0,
+                      g_app.autostart.port, peers, n_peers);
+        crypto_wipe(g_app.autostart.password, sizeof g_app.autostart.password);
+        g_app.autostart.session[0] = '\0';
     }
     rooms_join_at_start();
     g_app.dirty = 1;

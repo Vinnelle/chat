@@ -133,7 +133,7 @@ static cmd_result_t app_set(void *ctx, const char *arg) {
         begin_sign();
         if (pick < 0) { note("sign takes off, age, pgp, age:PATH or pgp:PATH - a pasted key is chosen here"); return CMD_OK; }
         // The password is typed on the page, where it's hidden.
-        g_app.sign_sel = pick;
+        g_app.key.sel = pick;
         sign_pick(pick);
         return CMD_OK;
     }
@@ -153,9 +153,9 @@ static int pick_save_target(const char *arg) {
         note("a save's name is 1 to %d letters, digits, - and _", INSTALL_NAME_MAX);
         return -1;
     }
-    copy_str(g_app.save_target, name[0] ? name : install_current(), sizeof g_app.save_target);
-    if (strcmp(g_app.save_target, "default") == 0) g_app.save_target[0] = '\0';
-    g_app.save_named = name[0] != '\0';
+    copy_str(g_app.install.target, name[0] ? name : install_current(), sizeof g_app.install.target);
+    if (strcmp(g_app.install.target, "default") == 0) g_app.install.target[0] = '\0';
+    g_app.install.named = name[0] != '\0';
     return 0;
 }
 
@@ -164,36 +164,36 @@ int begin_install(const char *arg) {
     if (pick_save_target(arg) != 0) return -1;
     device_check();
     char where[APP_PATH_MAX];
-    if (install_where(g_app.save_target, where, sizeof where) != 0) { note("there's nowhere to install to - no home folder"); return -1; }
-    g_app.n_saves = install_list(g_app.saves, INSTALL_SAVES_MAX);
-    const char *t = g_app.save_target;
-    int named = g_app.save_named || g_opts.save[0];
+    if (install_where(g_app.install.target, where, sizeof where) != 0) { note("there's nowhere to install to - no home folder"); return -1; }
+    g_app.install.n_saves = install_list(g_app.install.saves, INSTALL_SAVES_MAX);
+    const char *t = g_app.install.target;
+    int named = g_app.install.named || g_opts.save[0];
     app_mode_t mode = MODE_INSTALL;
     if (g_app.installed) {
         // The open save is saved to after the usual question. Another one that's there needs its
         // passphrase to be saved over.
         if (!is_current_save(t) && save_exists(t)) mode = MODE_INSTALL_OVERWRITE;
-    } else if (save_exists(t) || (!named && g_app.n_saves > 0)) {
+    } else if (save_exists(t) || (!named && g_app.install.n_saves > 0)) {
         // Nothing is open: the saves there are offered before a new one is made. Without a NAME or
         // --save, the only save is offered, or one is picked from a list.
-        if (!named && g_app.n_saves == 1) copy_str(g_app.save_target, g_app.saves[0].name, sizeof g_app.save_target);
-        g_app.install_pick = !named && g_app.n_saves > 1;
-        g_app.save_sel = 0;
-        for (int i = 0; i < g_app.n_saves; i++)
-            if (strcmp(g_app.saves[i].name, t) == 0) g_app.save_sel = i;
+        if (!named && g_app.install.n_saves == 1) copy_str(g_app.install.target, g_app.install.saves[0].name, sizeof g_app.install.target);
+        g_app.install.pick = !named && g_app.install.n_saves > 1;
+        g_app.install.sel = 0;
+        for (int i = 0; i < g_app.install.n_saves; i++)
+            if (strcmp(g_app.install.saves[i].name, t) == 0) g_app.install.sel = i;
         mode = MODE_INSTALL_EXISTING;
     } else if (!named) {
         pick_random_save_name();
         mode = MODE_INSTALL_NAME;
     }
-    g_app.install_back = g_app.mode == MODE_SETTINGS ? MODE_SETTINGS : MODE_CHAT;
+    g_app.install.back = g_app.mode == MODE_SETTINGS ? MODE_SETTINGS : MODE_CHAT;
     begin_prompt(mode);
     return 0;
 }
 
 static cmd_result_t app_install(void *ctx, const char *arg) {
     (void)ctx;
-    g_app.install_for = 0;
+    g_app.install.for_factor = 0;
     begin_install(arg);
     return CMD_OK;
 }
@@ -207,8 +207,8 @@ static cmd_result_t app_save(void *ctx, const char *arg) {
 static cmd_result_t app_uninstall(void *ctx, const char *arg) {
     (void)ctx;
     if (pick_save_target(arg) != 0) return CMD_OK;
-    if (!save_exists(g_app.save_target)) {
-        if (arg && arg[0]) note("nothing to uninstall - there's no save called %s", install_shown_name(g_app.save_target));
+    if (!save_exists(g_app.install.target)) {
+        if (arg && arg[0]) note("nothing to uninstall - there's no save called %s", install_shown_name(g_app.install.target));
         else note("nothing to uninstall - chat has saved nothing here");
         return CMD_OK;
     }
@@ -357,7 +357,7 @@ void move_tick(double now) {
     }
     session_slot_t *s = g_app.selected;
     const chat_move_ask_t *a = s && !s->initialising ? chat_move_asked(&s->engine) : NULL;
-    if (a && g_app.mode == MODE_CHAT && !g_app.asking_quit && !g_app.screen_locked && !g_app.pin_step
+    if (a && g_app.mode == MODE_CHAT && !g_app.asking_quit && !g_app.lock.on && !g_app.lock.pin_step
         && s->move_later != a->seq) {
         g_app.mode = MODE_MOVE_ASK;
         g_app.move_shown = now;
@@ -463,8 +463,8 @@ cmd_result_t app_hide(void *ctx, const char *arg) {
 static int help_rows(tui_row_t *rows, const command_t **cmds) {
     static char labels[MAX_HELP_COMMANDS][CMD_WORD_MAX + 24];
     int n = 0, k = 0;
-    copy_str(g_lock_keys, LOCK_KEY_NAMES[g_app.lock_key], sizeof g_lock_keys);
-    copy_str(g_panic_keys, PANIC_KEY_NAMES[g_app.panic_key], sizeof g_panic_keys);
+    copy_str(g_lock_keys, LOCK_KEY_NAMES[g_app.lock.key], sizeof g_lock_keys);
+    copy_str(g_panic_keys, PANIC_KEY_NAMES[g_app.panic.key], sizeof g_panic_keys);
     for (int i = 0; i < N_HELP_KEYS; i++) {
         rows[n] = (tui_row_t){ HELP_KEYS[i].section, HELP_KEYS[i].keys, HELP_KEYS[i].what, TUI_V_TEXT, NULL, NULL, 0, 0 };
         cmds[n++] = NULL;
@@ -1164,7 +1164,7 @@ static int field_mode(app_mode_t m) { return MODE_KEYS[m].field; }
 // question, or q closing a page. A line's end in it only goes to the chat's input, as a space, and to
 // the key being pasted, so a paste never presses Enter.
 static int paste_wanted(const tui_key_t *key) {
-    if (g_app.screen_locked || g_app.pin_step) return key->type == TUI_KEY_CHAR;
+    if (g_app.lock.on || g_app.lock.pin_step) return key->type == TUI_KEY_CHAR;
     if (g_app.asking_quit) return 0;
     if (g_app.mode == MODE_SIGN_PASTE || g_app.mode == MODE_CHAT) return 1;
     if (key->type == TUI_KEY_ENTER) return g_app.mode == MODE_SETTINGS_EDIT && setting_edit_separator();
@@ -1179,7 +1179,7 @@ static void paste_separator(void) {
     tui_key_t k = { .type = TUI_KEY_CHAR, .ch_len = 1, .pasted = 1 };
     for (; *sep; sep++) {
         k.ch[0] = *sep;
-        if (!tui_input_paste(in, &k)) g_app.paste_cut = 1;
+        if (!tui_input_paste(in, &k)) g_app.paste.cut = 1;
     }
     g_app.dirty = 1;
 }
@@ -1199,9 +1199,9 @@ void handle_key(const tui_key_t *key) {
         return;
     }
     if (key->type == TUI_KEY_MOUSE) return;
-    if (key->type == TUI_KEY_PASTE_START) { g_app.paste_cut = 0; return; }
+    if (key->type == TUI_KEY_PASTE_START) { g_app.paste.cut = 0; return; }
     if (key->type == TUI_KEY_PASTE_END) {
-        if (g_app.paste_cut) note("the rest of the paste didn't fit");
+        if (g_app.paste.cut) note("the rest of the paste didn't fit");
         return;
     }
     if (key->pasted && !paste_wanted(key)) return;
@@ -1211,11 +1211,11 @@ void handle_key(const tui_key_t *key) {
     lock_saw_key();
 
     if (panic_key_is(key)) { panic(PANIC_KEY); return; }
-    if (g_app.screen_locked) { locked_key(key); return; }
-    if (!g_app.pin_step && lock_key_is(key)) { lock_screen(); return; }
+    if (g_app.lock.on) { locked_key(key); return; }
+    if (!g_app.lock.pin_step && lock_key_is(key)) { lock_screen(); return; }
     if (key->type == TUI_KEY_CTRL_C && !g_app.asking_quit) { g_app.asking_quit = 1; g_app.dirty = 1; return; }
     if (g_app.asking_quit) { quit_key(key); return; }
-    if (g_app.pin_step) { pin_key(key); return; }
+    if (g_app.lock.pin_step) { pin_key(key); return; }
 
     if (key->pasted && key->type == TUI_KEY_ENTER && g_app.mode == MODE_SETTINGS_EDIT) { paste_separator(); return; }
 
@@ -1244,7 +1244,7 @@ void handle_key(const tui_key_t *key) {
 
     tui_input_mode_t was = input->mode;
     if (key->pasted) {
-        if (!tui_input_paste(input, key)) g_app.paste_cut = 1;
+        if (!tui_input_paste(input, key)) g_app.paste.cut = 1;
         if (was == TUI_IMODE_COMMAND || input->mode == TUI_IMODE_COMMAND || was != input->mode) g_app.dirty = 1;
         else g_app.input_dirty = 1;
         return;
@@ -1266,9 +1266,9 @@ void handle_key(const tui_key_t *key) {
             case 'G': scroll_chat(0, 0); scroll_console(0); break;
             case '?': begin_help(); break;
             case 'f': begin_files(); break;
-            case 'c': g_app.show_console = !g_app.show_console; g_app.dirty = 1; break;
-            case 'C': g_app.show_chat = !g_app.show_chat; g_app.dirty = 1; break;
-            case 's': g_app.show_sidebar = !g_app.show_sidebar; g_app.dirty = 1; break;
+            case 'c': g_app.show.console = !g_app.show.console; g_app.dirty = 1; break;
+            case 'C': g_app.show.chat = !g_app.show.chat; g_app.dirty = 1; break;
+            case 's': g_app.show.sidebar = !g_app.show.sidebar; g_app.dirty = 1; break;
             default: break;
         }
         return;
@@ -1279,9 +1279,9 @@ void handle_key(const tui_key_t *key) {
         case TUI_KEY_BACKTAB:        select_step(-1); break;
         case TUI_KEY_NEW_SESSION:    begin_new_session(); break;
         case TUI_KEY_JOIN_SESSION:   begin_rooms(); break;
-        case TUI_KEY_TOGGLE_SIDEBAR: g_app.show_sidebar = !g_app.show_sidebar; g_app.dirty = 1; break;
-        case TUI_KEY_TOGGLE_CONSOLE: g_app.show_console = !g_app.show_console; g_app.dirty = 1; break;
-        case TUI_KEY_TOGGLE_CHAT:    g_app.show_chat = !g_app.show_chat; g_app.dirty = 1; break;
+        case TUI_KEY_TOGGLE_SIDEBAR: g_app.show.sidebar = !g_app.show.sidebar; g_app.dirty = 1; break;
+        case TUI_KEY_TOGGLE_CONSOLE: g_app.show.console = !g_app.show.console; g_app.dirty = 1; break;
+        case TUI_KEY_TOGGLE_CHAT:    g_app.show.chat = !g_app.show.chat; g_app.dirty = 1; break;
         case TUI_KEY_SETTINGS:       begin_settings(); break;
         case TUI_KEY_HELP:           begin_help(); break;
         case TUI_KEY_FILES:          begin_files(); break;
@@ -1296,7 +1296,7 @@ void handle_key(const tui_key_t *key) {
     }
 }
 
-// :install's own boxes, over the page install_back says.
+// :install's own boxes, over the page install.back says.
 int install_mode(app_mode_t m) {
     switch (m) {
         case MODE_INSTALL: case MODE_INSTALL_PASS: case MODE_INSTALL_PASS2: case MODE_INSTALL_UNLOCK:
@@ -1304,7 +1304,7 @@ int install_mode(app_mode_t m) {
         case MODE_INSTALL_FIRST:
             return 1;
         case MODE_UNLOCK_CODE:
-            return g_app.key_purpose == KP_INSTALL_UNLOCK;
+            return g_app.factor.key_purpose == KP_INSTALL_UNLOCK;
         default:
             return 0;
     }
@@ -1314,7 +1314,7 @@ int install_mode(app_mode_t m) {
 static app_mode_t back_to(app_mode_t back) { return back == MODE_SETTINGS ? MODE_SETTINGS : MODE_CHAT; }
 
 app_mode_t page_of(app_mode_t m) {
-    if (install_mode(m)) return back_to(g_app.install_back);
+    if (install_mode(m)) return back_to(g_app.install.back);
     switch (m) {
         case MODE_HELP: case MODE_CHANGELOG: case MODE_SETTINGS: case MODE_SIGN_CHOICE: case MODE_SIGN_BROWSE:
         case MODE_SEND_BROWSE: case MODE_SAVE_BROWSE: case MODE_FILES: case MODE_FILE_VIEW:
@@ -1324,16 +1324,16 @@ app_mode_t page_of(app_mode_t m) {
         case MODE_SIGN_PASTE: case MODE_SIGN_PASSWORD:
             return MODE_SIGN_CHOICE;
         case MODE_SIGN_PATH:
-            return g_app.path_from_browser ? MODE_SIGN_BROWSE : MODE_SIGN_CHOICE;
+            return g_app.key.path_from_browser ? MODE_SIGN_BROWSE : MODE_SIGN_CHOICE;
         case MODE_FILE_ASK:
-            return g_app.file_back == MODE_FILE_VIEW ? MODE_FILE_VIEW : MODE_FILES;
+            return g_app.files.back == MODE_FILE_VIEW ? MODE_FILE_VIEW : MODE_FILES;
         case MODE_DEVICE_LOCK:
-            return back_to(g_app.device_back);
+            return back_to(g_app.device.back);
         case MODE_TOR_STATE:
-            return back_to(g_app.tor_state_back);
+            return back_to(g_app.tor.back);
         case MODE_FACTOR: case MODE_CODE_SETUP: case MODE_KEY_WAIT: case MODE_KEY_PIN:
         case MODE_SHADOW_PASS: case MODE_SHADOW_PASS2:
-            return back_to(g_app.factor_back);
+            return back_to(g_app.factor.back);
         default:
             return MODE_CHAT;
     }
@@ -1372,7 +1372,7 @@ static const char *session_empty_text(const session_slot_t *s) {
 // The chat pane: the selected session's name, how it's connected, what to show while it's empty,
 // where the messages that arrived while it was away start, and unread counts for other sessions.
 tui_view_t current_view(char *sub, size_t cap) {
-    tui_view_t v = { g_app.show_sidebar, g_app.show_console, g_app.show_chat, NULL, NULL, TUI_SESSION_LIVE,
+    tui_view_t v = { g_app.show.sidebar, g_app.show.console, g_app.show.chat, NULL, NULL, TUI_SESSION_LIVE,
                      NULL, NULL, 0, NULL, NULL, NULL, 0, 0, 0, NULL, TEST_BUILD ? TEST_LABEL : NULL, 0 };
     for (int i = 0; i < MAX_SESSIONS; i++) {
         const session_slot_t *o = &g_app.sessions[i];

@@ -174,12 +174,12 @@ static int transport_find(const char *name, char *out, size_t cap) {
     static const char *const NEAR_TOR[] = { "", "pluggable_transports/", "PluggableTransports/",
                                             "../pluggable_transports/" };
     char dir[TOR_PATH_MAX], path[TOR_PATH_MAX + 64];
-    if (g_app.pt_dir[0]) {
-        snprintf(path, sizeof path, "%s/%s" EXE, g_app.pt_dir, name);
+    if (g_app.tor.pt_dir[0]) {
+        snprintf(path, sizeof path, "%s/%s" EXE, g_app.tor.pt_dir, name);
         return platform_find_program(name, path, out, cap);
     }
     char *sep;
-    if (platform_find_program("tor", g_app.tor_path, dir, sizeof dir) == 0 && (sep = last_sep(dir)) != NULL) {
+    if (platform_find_program("tor", g_app.tor.path, dir, sizeof dir) == 0 && (sep = last_sep(dir)) != NULL) {
         sep[1] = '\0';
         for (size_t i = 0; i < COUNT_OF(NEAR_TOR); i++) {
             snprintf(path, sizeof path, "%s%s%s" EXE, dir, NEAR_TOR[i], name);
@@ -201,7 +201,7 @@ void transport_line(char *out, size_t cap) {
     int old = !lyre && transport_find(PT_PROGRAMS[PT_OBFS4PROXY], path, sizeof path) == 0;
     int snow = transport_find(PT_PROGRAMS[PT_SNOWFLAKE], path, sizeof path) == 0;
     const char *lyre_name = old ? "obfs4proxy" : "lyrebird";
-    snprintf(out, cap, "%s: %s%s%s%s", g_app.pt_dir[0] ? g_app.pt_dir : "next to tor or on PATH",
+    snprintf(out, cap, "%s: %s%s%s%s", g_app.tor.pt_dir[0] ? g_app.tor.pt_dir : "next to tor or on PATH",
              lyre || old ? lyre_name : "", (lyre || old) && snow ? " and " : "", snow ? "snowflake-client" : "",
              lyre || old || snow ? " found" : "neither lyrebird nor snowflake-client found");
 }
@@ -223,7 +223,7 @@ static int bridges_conf(char *out, size_t cap, char *why, size_t why_cap) {
     char line[TUI_LINE_MAX], word[32], program[TOR_PATH_MAX], plugin[TOR_PATH_MAX + 128];
     int need[N_PT] = { 0 }, webtunnel = 0;
     size_t at = 0, p = put_text(out, 0, cap, "UseBridges=1");
-    while (next_bridge(g_app.bridges, &at, line, sizeof line)) {
+    while (next_bridge(g_app.tor.bridges, &at, line, sizeof line)) {
         int k = bridge_kind(line, word, sizeof word);
         if (k >= 0 && k != PLAIN) need[TRANSPORTS[k].program] = 1;
         webtunnel |= k >= 0 && k != PLAIN && strcmp(TRANSPORTS[k].name, "webtunnel") == 0;
@@ -271,14 +271,14 @@ static int bridges_conf(char *out, size_t cap, char *why, size_t why_cap) {
 
 // Kept from a tor that's stopping, and given to the next one.
 static int keep_tor_state(void) {
-    return g_app.tor_state && g_app.installed && !g_app.locked && !g_panic;
+    return g_app.tor.keep_state && g_app.installed && !g_app.locked && !g_panic;
 }
 
 static void tor_link_start_own(double now) {
     char program[1024], err[160];
-    if (platform_find_program("tor", g_app.tor_path, program, sizeof program) != 0) {
-        if (g_app.tor_path[0])
-            push_log("* tor: can't use %s as tor - it has to be a program only root or you can change", g_app.tor_path);
+    if (platform_find_program("tor", g_app.tor.path, program, sizeof program) != 0) {
+        if (g_app.tor.path[0])
+            push_log("* tor: can't use %s as tor - it has to be a program only root or you can change", g_app.tor.path);
         else
             push_log("* tor: tor isn't installed. Install it (Arch: sudo pacman -S tor, Debian/Ubuntu: sudo apt install tor, "
                      "Windows: the Tor Expert Bundle), set where it is with :set torpath, or start Tor Browser");
@@ -286,7 +286,7 @@ static void tor_link_start_own(double now) {
         return;
     }
     torproc_opts_t o = { 0 };
-    if (g_app.bridges[0]) {
+    if (g_app.tor.bridges[0]) {
         static char conf[BRIDGES_CONF_MAX];
         char why[200];
         int rc = bridges_conf(conf, sizeof conf, why, sizeof why);
@@ -325,7 +325,7 @@ void tor_link_ensure(double now) {
     if (g_tor.state == TL_FAILED && now >= g_tor.retry_at) g_tor.state = TL_OFF;
     if (g_tor.state != TL_OFF) return;
     // A tor that's running may not use the bridges.
-    if (g_app.tor_launch == TOR_LAUNCH_ALWAYS || (g_app.tor_launch == TOR_LAUNCH_AUTO && g_app.bridges[0])) {
+    if (g_app.tor.launch == TOR_LAUNCH_ALWAYS || (g_app.tor.launch == TOR_LAUNCH_AUTO && g_app.tor.bridges[0])) {
         tor_link_start_own(now);
         return;
     }
@@ -347,10 +347,10 @@ void tor_link_step(double now) {
                 g_tor.state = TL_READY;
                 if (g_app.net_log != NET_LOG_OFF)
                     push_log("* tor: using the tor that's already running (control port %s) - it keeps its entry "
-                             "guards and any bridges it's set up with%s", g_tor.control, g_app.bridges[0]
+                             "guards and any bridges it's set up with%s", g_tor.control, g_app.tor.bridges[0]
                              ? ". Your bridges are only for chat's own tor, which torlaunch never doesn't start" : "");
                 tor_link_apply();
-            } else if (g_app.tor_launch == TOR_LAUNCH_NEVER) {
+            } else if (g_app.tor.launch == TOR_LAUNCH_NEVER) {
                 if (r == -2) push_log("* tor: the running tor won't let chat in: %s", why);
                 else push_log("* tor: no tor is running at %s or Tor Browser's ports - start one, or let chat start its "
                               "own (:set torlaunch auto)", g_app.route.tor.control);
@@ -442,7 +442,7 @@ void tor_link_stop(void) {
 // there's no tor yet or chat still waits to reach the network.
 void tor_link_restart(void) {
     if (g_app.route.mode != ROUTE_TOR || g_tor.state == TL_OFF || g_app.onboarding) return;
-    if (!g_tor.proc && g_tor.state != TL_FAILED && !(g_app.bridges[0] && g_app.tor_launch == TOR_LAUNCH_AUTO)) return;
+    if (!g_tor.proc && g_tor.state != TL_FAILED && !(g_app.tor.bridges[0] && g_app.tor.launch == TOR_LAUNCH_AUTO)) return;
     tor_link_stop();
     g_tor.starts = 0;
     tor_link_ensure(now_seconds());
@@ -467,28 +467,28 @@ cmd_result_t app_newtor(void *ctx, const char *arg) {
 
 void tor_state_choose(int on) {
     if (g_loading_settings || !on) {
-        g_app.tor_state = on;
+        g_app.tor.keep_state = on;
         if (g_loading_settings) return;
         if (g_app.installed && !g_app.locked) install_forget_tor();
         note("Keep tor's guards: off%s", g_app.installed ? " - deleted from the save" : "");
         return;
     }
     if (!g_app.installed) { note("Keep tor's guards: it needs a save to keep them in - :install makes one"); return; }
-    if (g_app.tor_state) { note("Keep tor's guards: on already"); return; }
-    g_app.tor_state_back = g_app.mode == MODE_SETTINGS ? MODE_SETTINGS : MODE_CHAT;
-    if (g_app.tor_state_back == MODE_CHAT) begin_prompt(MODE_TOR_STATE);
+    if (g_app.tor.keep_state) { note("Keep tor's guards: on already"); return; }
+    g_app.tor.back = g_app.mode == MODE_SETTINGS ? MODE_SETTINGS : MODE_CHAT;
+    if (g_app.tor.back == MODE_CHAT) begin_prompt(MODE_TOR_STATE);
     else { g_app.mode = MODE_TOR_STATE; g_app.dirty = 1; }
 }
 
 static void tor_state_back(void) {
-    if (g_app.tor_state_back == MODE_CHAT) { end_prompt(); return; }
-    g_app.mode = g_app.tor_state_back;
+    if (g_app.tor.back == MODE_CHAT) { end_prompt(); return; }
+    g_app.mode = g_app.tor.back;
     g_app.dirty = 1;
 }
 
 void tor_state_yes(void) {
     tor_state_back();
-    g_app.tor_state = 1;
+    g_app.tor.keep_state = 1;
     note("Keep tor's guards: on - kept in the save once chat's own tor has connected, from when it stops");
 }
 

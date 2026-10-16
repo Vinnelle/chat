@@ -142,7 +142,7 @@ enum { KEY_FORMAT_KEY = 1, KEY_FORMAT_PATH = 2 };
 _Static_assert(KEY_BLOB_MAX <= INSTALL_KEY_MAX, "a sealed key has room for the signing key or its path");
 
 int key_saved_as_path(void) {
-    return g_app.key_origin == KEY_FILE && g_app.key_path[0];
+    return g_app.key.origin == KEY_FILE && g_app.key.path[0];
 }
 
 // Returns the length.
@@ -150,16 +150,16 @@ static size_t identity_pack(uint8_t out[KEY_BLOB_MAX]) {
     int path = key_saved_as_path();
     out[KB_FORMAT_AT] = path ? KEY_FORMAT_PATH : KEY_FORMAT_KEY;
     out[KB_SOURCE_AT] = (uint8_t)g_app.identity_source;
-    out[KB_ORIGIN_AT] = (uint8_t)g_app.key_origin;
+    out[KB_ORIGIN_AT] = (uint8_t)g_app.key.origin;
     out[KB_SCALAR_AT] = (uint8_t)(g_app.identity.scalar != 0);
-    store_be32(out + KB_CREATED_AT, g_app.pgp_created);
+    store_be32(out + KB_CREATED_AT, g_app.key.pgp_created);
     memcpy(out + KB_PUB_AT, g_app.identity.pub, ID_SIGN_PUB_LEN);
     if (!path) {
         memcpy(out + KEY_BLOB_HEAD, g_app.identity.priv, ID_SIGN_PRIV_LEN);
         return KEY_BLOB_LEN;
     }
-    size_t n = strlen(g_app.key_path);
-    memcpy(out + KEY_BLOB_HEAD, g_app.key_path, n);
+    size_t n = strlen(g_app.key.path);
+    memcpy(out + KEY_BLOB_HEAD, g_app.key.path, n);
     return KEY_BLOB_HEAD + n;
 }
 
@@ -178,9 +178,9 @@ static int identity_unpack(const uint8_t *in, size_t len, int use) {
         saved_path[len - KEY_BLOB_HEAD] = '\0';
         if (strlen(saved_path) != len - KEY_BLOB_HEAD) return -1;
     }
-    memcpy(g_app.saved_key_pub, in + KB_PUB_AT, ID_SIGN_PUB_LEN);
-    copy_str(g_app.saved_key_path, saved_path, sizeof g_app.saved_key_path);
-    g_app.saved_key_known = 1;
+    memcpy(g_app.install.key_pub, in + KB_PUB_AT, ID_SIGN_PUB_LEN);
+    copy_str(g_app.install.key_path, saved_path, sizeof g_app.install.key_path);
+    g_app.install.key_known = 1;
     if (!use) return 0;
     identity_source_t kind = (identity_source_t)in[KB_SOURCE_AT];
     identity_keypair_t kp;
@@ -194,7 +194,7 @@ static int identity_unpack(const uint8_t *in, size_t len, int use) {
             crypto_wipe(&kp, sizeof kp);
             return 0;
         }
-        if (crypto_equal(kp.pub, g_app.saved_key_pub, ID_SIGN_PUB_LEN) != 0)
+        if (crypto_equal(kp.pub, g_app.install.key_pub, ID_SIGN_PUB_LEN) != 0)
             saved_note("* %.200s holds a different key from the one :install saved - chat signs with it, and "
                        ":install records it", shown);
     } else {
@@ -205,10 +205,10 @@ static int identity_unpack(const uint8_t *in, size_t len, int use) {
     g_app.identity = kp;
     crypto_wipe(&kp, sizeof kp);
     g_app.identity_source = kind;
-    g_app.key_origin = (key_origin_t)in[KB_ORIGIN_AT];
-    g_app.pgp_created = load_be32(in + KB_CREATED_AT);
+    g_app.key.origin = (key_origin_t)in[KB_ORIGIN_AT];
+    g_app.key.pgp_created = load_be32(in + KB_CREATED_AT);
     // A key file saved as the key itself, before :install saved paths, has no path to show.
-    copy_str(g_app.key_path, saved_path, sizeof g_app.key_path);
+    copy_str(g_app.key.path, saved_path, sizeof g_app.key.path);
     return 0;
 }
 
@@ -293,14 +293,14 @@ static int load_saved_verified(void) {
 // The factors the open save needs, as its rows show them.
 static void factors_in_use(void) {
     unsigned f = install_open_factors();
-    g_app.device_lock = (f & INSTALL_FACTOR_DEVICE) != 0;
-    g_app.key_factor = (f & INSTALL_FACTOR_KEY) != 0;
-    g_app.code_factor = (f & INSTALL_FACTOR_CODE) != 0;
+    g_app.device.lock = (f & INSTALL_FACTOR_DEVICE) != 0;
+    g_app.factor.key = (f & INSTALL_FACTOR_KEY) != 0;
+    g_app.factor.code = (f & INSTALL_FACTOR_CODE) != 0;
 }
 
 static int *factor_flag(unsigned factor) {
-    return factor == INSTALL_FACTOR_DEVICE ? &g_app.device_lock
-         : factor == INSTALL_FACTOR_KEY ? &g_app.key_factor : &g_app.code_factor;
+    return factor == INSTALL_FACTOR_DEVICE ? &g_app.device.lock
+         : factor == INSTALL_FACTOR_KEY ? &g_app.factor.key : &g_app.factor.code;
 }
 
 static const char *factor_label(unsigned factor) {
@@ -350,7 +350,7 @@ static void use_opened_save(char (*loaded)[ROW_TEXT_MAX]) {
     g_app.installed = 1;
     g_app.locked = 0;
     factors_in_use();
-    g_app.destroy_limit = install_destroy_limit(install_current());
+    g_app.install.destroy_limit = install_destroy_limit(install_current());
     char needs[96];
     factors_text(install_open_factors(), needs, sizeof needs);
     if (install_relocked() > 0)
@@ -370,8 +370,8 @@ static void use_opened_save(char (*loaded)[ROW_TEXT_MAX]) {
     verified_saving(load_saved_verified() == 0);
     reapply_options();
     note_settings_seen();
-    g_app.saved_key_known = 0;
-    g_app.saved_key_path[0] = '\0';
+    g_app.install.key_known = 0;
+    g_app.install.key_path[0] = '\0';
     int rc = open_saved_key(!g_opts.identity[0]);
     if (rc != 0 && rc != INSTALL_NO_FILE)
         saved_note("* your saved signing key is damaged, or isn't sealed with this passphrase - it's left out");
@@ -444,17 +444,17 @@ void save_detail(const install_save_t *sv, char *out, size_t cap) {
 }
 
 // With more than one save and no --save, one is picked from a list before its passphrase is asked for.
-int save_to_pick(void) { return g_app.n_saves > 1 && !g_opts.save[0]; }
+int save_to_pick(void) { return g_app.install.n_saves > 1 && !g_opts.save[0]; }
 
 // The saves, numbered, then a number or name typed in. 0 once one is in use, -1 for none.
 static int pick_save_in_terminal(void) {
-    printf("chat: :install made %d saves here, each sealed with its own passphrase:\n", g_app.n_saves);
-    for (int i = 0; i < g_app.n_saves; i++) {
+    printf("chat: :install made %d saves here, each sealed with its own passphrase:\n", g_app.install.n_saves);
+    for (int i = 0; i < g_app.install.n_saves; i++) {
         char detail[112];
-        save_detail(&g_app.saves[i], detail, sizeof detail);
+        save_detail(&g_app.install.saves[i], detail, sizeof detail);
         enum { NAME_COLS = 16 };
         printf("  %2d  %-*s  %s\n", i + 1, INSTALL_NAME_MAX < NAME_COLS ? INSTALL_NAME_MAX : NAME_COLS,
-               install_shown_name(g_app.saves[i].name), detail);
+               install_shown_name(g_app.install.saves[i].name), detail);
     }
     for (int tries = 0; tries < PICK_TRIES; tries++) {
         char line[64] = "";
@@ -464,9 +464,9 @@ static int pick_save_in_terminal(void) {
         if (!line[0]) return -1;
         char *end;
         long num = strtol(line, &end, 10);
-        for (int i = 0; i < g_app.n_saves; i++) {
-            if ((!*end && num == i + 1) || strcmp(line, install_shown_name(g_app.saves[i].name)) == 0) {
-                install_use(g_app.saves[i].name);
+        for (int i = 0; i < g_app.install.n_saves; i++) {
+            if ((!*end && num == i + 1) || strcmp(line, install_shown_name(g_app.install.saves[i].name)) == 0) {
+                install_use(g_app.install.saves[i].name);
                 return 0;
             }
         }
@@ -485,18 +485,18 @@ void unlock_at_start(int in_box) {
     int from_env = platform_env_take("CHAT_INSTALL_PASSWORD", pw, sizeof pw) == 0;
     const unsigned more = INSTALL_FACTOR_KEY | INSTALL_FACTOR_CODE;
     if (from_env && in_box && !save_to_pick() && (install_factors(install_current()) & more)) {
-        copy_str(g_app.install_pass, pw, sizeof g_app.install_pass);
+        copy_str(g_app.install.pass, pw, sizeof g_app.install.pass);
         crypto_wipe(pw, sizeof pw);
-        g_app.unlock_env = g_app.unlock_at_start = 1;
+        g_app.install.unlock_env = g_app.install.unlock_at_start = 1;
         return;
     }
     if (from_env) {
         int rc = PASS_WRONG, elsewhere = 0;
         if (!save_to_pick()) rc = open_saved(install_current(), pw, 0);
-        else for (int i = 0; i < g_app.n_saves && (rc == PASS_WRONG || rc == INSTALL_DEVICE); i++) {
-            if (g_app.saves[i].factors & more) continue;
+        else for (int i = 0; i < g_app.install.n_saves && (rc == PASS_WRONG || rc == INSTALL_DEVICE); i++) {
+            if (g_app.install.saves[i].factors & more) continue;
             // Saves it doesn't fit aren't counted towards self-destruct, and no decoy opens.
-            rc = open_saved(g_app.saves[i].name, pw, 1);
+            rc = open_saved(g_app.install.saves[i].name, pw, 1);
             elsewhere |= rc == INSTALL_DEVICE;
         }
         crypto_wipe(pw, sizeof pw);
@@ -506,13 +506,13 @@ void unlock_at_start(int in_box) {
                                 : "that passphrase doesn't open any of the saves :install made")
                    : open_error(rc));
     }
-    if (in_box) { g_app.unlock_at_start = 1; return; }
+    if (in_box) { g_app.install.unlock_at_start = 1; return; }
     int picked = !save_to_pick() || (term_is_tty() && pick_save_in_terminal() == 0);
     for (int tries = 0; tries < PASS_TRIES && picked && term_is_tty(); tries++) {
         char prompt[96];
         snprintf(prompt, sizeof prompt, "passphrase for %s%s (blank: start without it): ",
-                 g_app.n_saves > 1 ? "the save " : "what :install saved",
-                 g_app.n_saves > 1 ? install_shown_name(install_current()) : "");
+                 g_app.install.n_saves > 1 ? "the save " : "what :install saved",
+                 g_app.install.n_saves > 1 ? install_shown_name(install_current()) : "");
         if (term_read_password(prompt, pw, sizeof pw) != 0 || !pw[0]) break;
         int rc = open_saved(install_current(), pw, 0);
         crypto_wipe(pw, sizeof pw);
@@ -528,9 +528,9 @@ void unlock_at_start(int in_box) {
 // The same key, saved the same way: by its file's path for a key file, otherwise as the key. A key
 // file saved as the key, before :install saved paths, counts as saved until it's picked again.
 int key_in_use_saved(void) {
-    return g_app.identity_source != IDENT_NONE && g_app.saved_key_known
-        && crypto_equal(g_app.saved_key_pub, g_app.identity.pub, ID_SIGN_PUB_LEN) == 0
-        && strcmp(g_app.saved_key_path, key_saved_as_path() ? g_app.key_path : "") == 0;
+    return g_app.identity_source != IDENT_NONE && g_app.install.key_known
+        && crypto_equal(g_app.install.key_pub, g_app.identity.pub, ID_SIGN_PUB_LEN) == 0
+        && strcmp(g_app.install.key_path, key_saved_as_path() ? g_app.key.path : "") == 0;
 }
 
 // The verified keys in use when the open save was uninstalled. They last until chat exits, or until
@@ -543,18 +543,18 @@ static int g_n_uninstalled_keys;
 // memory. Then the settings, which are always there, then a key not saved yet, sealed under the
 // same passphrase.
 static void finish_install(const char *passphrase) {
-    int resave = !passphrase && g_app.installed && is_current_save(g_app.save_target);
+    int resave = !passphrase && g_app.installed && is_current_save(g_app.install.target);
     char where[APP_PATH_MAX] = "";
-    install_where(g_app.save_target, where, sizeof where);
+    install_where(g_app.install.target, where, sizeof where);
     if (passphrase) {
-        note(g_app.device_lock ? "sealing, and locking it to this device..." : "sealing...");
+        note(g_app.device.lock ? "sealing, and locking it to this device..." : "sealing...");
         render();
         // With the device lock on, a save that can't be locked isn't made at all, and likewise for the
         // security key and the code set up for it.
-        unsigned factors = (g_app.device_lock ? INSTALL_FACTOR_DEVICE : 0) | (g_app.key_factor ? INSTALL_FACTOR_KEY : 0)
-                         | (g_app.code_factor ? INSTALL_FACTOR_CODE : 0);
+        unsigned factors = (g_app.device.lock ? INSTALL_FACTOR_DEVICE : 0) | (g_app.factor.key ? INSTALL_FACTOR_KEY : 0)
+                         | (g_app.factor.code ? INSTALL_FACTOR_CODE : 0);
         histories_write();
-        int rc = install_lock_new(g_app.save_target, passphrase, factors);
+        int rc = install_lock_new(g_app.install.target, passphrase, factors);
         if (rc == INSTALL_DEVICE) {
             push_log("* not installed: it can't be locked to this device - %s", install_why());
             note("not installed: it can't be locked to this device - %s", install_why());
@@ -572,8 +572,8 @@ static void finish_install(const char *passphrase) {
             return;
         }
         // A new save has no key in it yet.
-        g_app.saved_key_known = 0;
-        g_app.saved_key_path[0] = '\0';
+        g_app.install.key_known = 0;
+        g_app.install.key_path[0] = '\0';
         // chat's folder is there now, if it wasn't.
         platform_sandbox_narrow();
     }
@@ -583,7 +583,7 @@ static void finish_install(const char *passphrase) {
     if (settings_write() != 0) {
         if (passphrase) {
             // A new save leaves nothing behind, not even its device or security key files.
-            if (install_open_factors()) install_remove(g_app.save_target);
+            if (install_open_factors()) install_remove(g_app.install.target);
             install_forget();
             g_app.installed = 0;
         }
@@ -593,7 +593,7 @@ static void finish_install(const char *passphrase) {
     g_app.installed = 1;
     g_app.locked = 0;
     factors_in_use();
-    install_arm_destroy(g_app.save_target, (unsigned)g_app.destroy_limit);
+    install_arm_destroy(g_app.install.target, (unsigned)g_app.install.destroy_limit);
     // A new save, or one saved over, gets every key in use.
     g_n_uninstalled_keys = 0;
     static char vtext[TRUST_TEXT_MAX];
@@ -608,9 +608,9 @@ static void finish_install(const char *passphrase) {
         int rc = install_write_key(blob, len);
         crypto_wipe(blob, sizeof blob);
         if (rc != 0) { note("your settings are saved, but your signing key couldn't be written to %s", where); return; }
-        memcpy(g_app.saved_key_pub, g_app.identity.pub, ID_SIGN_PUB_LEN);
-        copy_str(g_app.saved_key_path, path ? g_app.key_path : "", sizeof g_app.saved_key_path);
-        g_app.saved_key_known = 1;
+        memcpy(g_app.install.key_pub, g_app.identity.pub, ID_SIGN_PUB_LEN);
+        copy_str(g_app.install.key_path, path ? g_app.key.path : "", sizeof g_app.install.key_path);
+        g_app.install.key_known = 1;
     }
     char needs[96], also[120] = "";
     factors_text(install_open_factors(), needs, sizeof needs);
@@ -618,8 +618,8 @@ static void finish_install(const char *passphrase) {
     push_log("* %s: your settings%s are in %s, sealed%s, for next time. :uninstall deletes them",
              resave ? "saved" : "installed", path ? " and your signing key's path" : key ? " and signing key" : "", where,
              also);
-    if (passphrase && g_app.device_lock) push_log("%s", DEVICE_REMINDER);
-    if (passphrase && g_app.key_factor) push_log("%s", KEY_REMINDER);
+    if (passphrase && g_app.device.lock) push_log("%s", DEVICE_REMINDER);
+    if (passphrase && g_app.factor.key) push_log("%s", KEY_REMINDER);
     note("%s in %s", resave ? "saved" : "installed", where);
 }
 
@@ -633,20 +633,20 @@ int is_current_save(const char *name) {
 int save_exists(const char *name) { return install_has_settings(name) || install_has_key(name); }
 
 void pick_random_save_name(void) {
-    do random_nickname(g_app.save_random, sizeof g_app.save_random);
-    while (save_exists(g_app.save_random));
+    do random_nickname(g_app.install.random_name, sizeof g_app.install.random_name);
+    while (save_exists(g_app.install.random_name));
 }
 
 // :install for the save that's open and installed already only saves what's in use to it.
-int install_resaves(void) { return g_app.installed && is_current_save(g_app.save_target); }
+int install_resaves(void) { return g_app.installed && is_current_save(g_app.install.target); }
 
 // :install is over, whether or not it made or opened a save, and its boxes go. A new save has the
 // factor it was for set up already; a save it opened is asked about it now; with nothing open, the
 // row is off again.
 static void install_ended(void) {
-    unsigned f = g_app.install_for;
-    g_app.install_for = 0;
-    if (g_app.install_back == MODE_SETTINGS && g_app.mode == MODE_CHAT) g_app.mode = MODE_SETTINGS;
+    unsigned f = g_app.install.for_factor;
+    g_app.install.for_factor = 0;
+    if (g_app.install.back == MODE_SETTINGS && g_app.mode == MODE_CHAT) g_app.mode = MODE_SETTINGS;
     if (!f) return;
     if (!g_app.installed) *factor_flag(f) = 0;
     else if (install_open_factors() & f) return;
@@ -655,7 +655,7 @@ static void install_ended(void) {
 }
 
 void cancel_install(void) {
-    crypto_wipe(g_app.install_pass, sizeof g_app.install_pass);
+    crypto_wipe(g_app.install.pass, sizeof g_app.install.pass);
     install_setup_forget();
     end_prompt();
     note(install_resaves() ? "not saved - nothing was written" : "not installed - nothing was written");
@@ -682,38 +682,38 @@ static void not_installed(const char *fmt, const char *why) {
 enum { STEP_START, STEP_DEVICE, STEP_KEY, STEP_CODE };
 
 static void install_step(int after) {
-    if (after < STEP_DEVICE && g_app.device_lock) {
+    if (after < STEP_DEVICE && g_app.device.lock) {
         device_check();
-        if (g_app.device_kind == DEVICE_NONE) {
-            not_installed("not installed: it can't be locked to this device - %s", g_app.device_why);
+        if (g_app.device.kind == DEVICE_NONE) {
+            not_installed("not installed: it can't be locked to this device - %s", g_app.device.why);
             return;
         }
-        g_app.device_want = g_app.device_new = 1;
-        g_app.device_back = g_app.install_back;
+        g_app.device.want = g_app.device.new_save = 1;
+        g_app.device.back = g_app.install.back;
         g_app.mode = MODE_DEVICE_LOCK;
         g_app.dirty = 1;
         return;
     }
-    g_app.factor_want = g_app.factor_new = 1;
-    g_app.factor_back = g_app.install_back;
-    if (after < STEP_KEY && g_app.key_factor) {
+    g_app.factor.want = g_app.factor.new_save = 1;
+    g_app.factor.back = g_app.install.back;
+    if (after < STEP_KEY && g_app.factor.key) {
         device_check();
-        if (!g_app.seckey_ok) {
-            not_installed("not installed: a security key can't be used here - %s", g_app.seckey_why);
+        if (!g_app.factor.seckey_ok) {
+            not_installed("not installed: a security key can't be used here - %s", g_app.factor.seckey_why);
             return;
         }
-        g_app.factor = INSTALL_FACTOR_KEY;
+        g_app.factor.which = INSTALL_FACTOR_KEY;
         to_install_mode(MODE_FACTOR);
         return;
     }
-    if (after < STEP_CODE && g_app.code_factor) {
-        g_app.factor = INSTALL_FACTOR_CODE;
-        install_code_new(g_app.save_target, g_app.code_b32, sizeof g_app.code_b32, g_app.code_uri, sizeof g_app.code_uri);
-        g_app.code_qr = 0;
+    if (after < STEP_CODE && g_app.factor.code) {
+        g_app.factor.which = INSTALL_FACTOR_CODE;
+        install_code_new(g_app.install.target, g_app.factor.code_b32, sizeof g_app.factor.code_b32, g_app.factor.code_uri, sizeof g_app.factor.code_uri);
+        g_app.factor.code_qr = 0;
         to_install_mode(MODE_CODE_SETUP);
         return;
     }
-    g_app.factor_new = 0;
+    g_app.factor.new_save = 0;
     to_install_mode(MODE_INSTALL_PASS);
 }
 
@@ -729,8 +729,8 @@ void install_confirmed(void) {
 
 // No save is open and there are saves: use one, which needs its passphrase, or make a new save.
 void install_use_existing(void) {
-    g_app.install_overwrite = 0;
-    to_install_mode(g_app.install_pick ? MODE_INSTALL_PICK : MODE_INSTALL_UNLOCK);
+    g_app.install.overwrite = 0;
+    to_install_mode(g_app.install.pick ? MODE_INSTALL_PICK : MODE_INSTALL_UNLOCK);
 }
 
 void install_new_save(void) {
@@ -742,7 +742,7 @@ static void back_to_existing(void) { to_install_mode(MODE_INSTALL_EXISTING); }
 
 // With no saves there, the name was the first box: there's nothing to go back to.
 void back_from_install_name(void) {
-    if (g_app.n_saves > 0) back_to_existing();
+    if (g_app.install.n_saves > 0) back_to_existing();
     else cancel_install();
 }
 
@@ -751,14 +751,14 @@ void install_pick_key(const tui_key_t *key) {
     switch (k) {
         case LIST_CHOOSE:
         case LIST_RIGHT:
-            copy_str(g_app.save_target, g_app.saves[g_app.save_sel].name, sizeof g_app.save_target);
+            copy_str(g_app.install.target, g_app.install.saves[g_app.install.sel].name, sizeof g_app.install.target);
             to_install_mode(MODE_INSTALL_UNLOCK);
             break;
         case LIST_LEFT:
         case LIST_BACK:  back_to_existing(); break;
         case LIST_CLOSE: cancel_install(); break;
         default:
-            list_move(k, &g_app.save_sel, g_app.n_saves);
+            list_move(k, &g_app.install.sel, g_app.install.n_saves);
             g_app.dirty = 1;
             break;
     }
@@ -766,13 +766,13 @@ void install_pick_key(const tui_key_t *key) {
 
 // While a save is open, saving over another one needs that save's passphrase.
 void install_overwrite_yes(void) {
-    g_app.install_overwrite = 1;
+    g_app.install.overwrite = 1;
     to_install_mode(MODE_INSTALL_UNLOCK);
 }
 
 void back_from_install_unlock(void) {
-    to_install_mode(g_app.install_overwrite ? MODE_INSTALL_OVERWRITE
-                    : g_app.install_pick ? MODE_INSTALL_PICK : MODE_INSTALL_EXISTING);
+    to_install_mode(g_app.install.overwrite ? MODE_INSTALL_OVERWRITE
+                    : g_app.install.pick ? MODE_INSTALL_PICK : MODE_INSTALL_EXISTING);
 }
 
 // y, n, or Esc and q.
@@ -790,17 +790,17 @@ void commit_install_name(void) {
     while (n > 0 && name[n - 1] == ' ') name[--n] = '\0';
     const char *p = name;
     while (*p == ' ') p++;
-    if (!*p) p = g_app.save_random;
+    if (!*p) p = g_app.install.random_name;
     if (install_name_ok(p) != 0) { note("a save's name is 1 to %d letters, digits, - and _", INSTALL_NAME_MAX); return; }
     if (save_exists(p)) { note("there's a save called %s already - pick another name", install_shown_name(p)); return; }
-    copy_str(g_app.save_target, strcmp(p, "default") == 0 ? "" : p, sizeof g_app.save_target);
+    copy_str(g_app.install.target, strcmp(p, "default") == 0 ? "" : p, sizeof g_app.install.target);
     // What it leaves on disk, then its passphrase.
     to_install_mode(MODE_INSTALL);
 }
 
 void commit_install_pass(void) {
     if (!g_app.input.buf[0]) { note("what's saved needs a passphrase - or Esc to cancel"); return; }
-    copy_str(g_app.install_pass, g_app.input.buf, sizeof g_app.install_pass);
+    copy_str(g_app.install.pass, g_app.input.buf, sizeof g_app.install.pass);
     crypto_wipe(g_app.input.buf, sizeof g_app.input.buf);
     tui_input_clear(&g_app.input);
     g_app.mode = MODE_INSTALL_PASS2;
@@ -808,18 +808,18 @@ void commit_install_pass(void) {
 }
 
 void commit_install_pass2(void) {
-    int same = strcmp(g_app.input.buf, g_app.install_pass) == 0;
+    int same = strcmp(g_app.input.buf, g_app.install.pass) == 0;
     crypto_wipe(g_app.input.buf, sizeof g_app.input.buf);
     tui_input_clear(&g_app.input);
     if (!same) {
-        crypto_wipe(g_app.install_pass, sizeof g_app.install_pass);
+        crypto_wipe(g_app.install.pass, sizeof g_app.install.pass);
         g_app.mode = MODE_INSTALL_PASS;
         note("they weren't the same - type the passphrase again");
         return;
     }
-    char pw[sizeof g_app.install_pass];
-    copy_str(pw, g_app.install_pass, sizeof pw);
-    crypto_wipe(g_app.install_pass, sizeof g_app.install_pass);
+    char pw[sizeof g_app.install.pass];
+    copy_str(pw, g_app.install.pass, sizeof pw);
+    crypto_wipe(g_app.install.pass, sizeof g_app.install.pass);
     end_prompt();
     finish_install(pw);
     crypto_wipe(pw, sizeof pw);
@@ -920,14 +920,14 @@ static void use_save_now(void) {
 static void install_unlock_done(int rc) {
     end_prompt();
     if (rc != 0) {
-        if (rc == INSTALL_NO_FILE && is_current_save(g_app.save_target)) g_app.locked = 0;
-        note("%s: %s", g_app.install_overwrite ? "not installed" : "not opened", open_error(rc));
+        if (rc == INSTALL_NO_FILE && is_current_save(g_app.install.target)) g_app.locked = 0;
+        note("%s: %s", g_app.install.overwrite ? "not installed" : "not opened", open_error(rc));
         install_ended();
         return;
     }
-    if (!g_app.install_overwrite) { use_save_now(); install_ended(); return; }
-    g_app.saved_key_known = 0;
-    g_app.saved_key_path[0] = '\0';
+    if (!g_app.install.overwrite) { use_save_now(); install_ended(); return; }
+    g_app.install.key_known = 0;
+    g_app.install.key_path[0] = '\0';
     open_saved_key(0);
     // The keys verified in an earlier run are kept, with the ones verified in this one added.
     load_saved_verified();
@@ -936,13 +936,13 @@ static void install_unlock_done(int rc) {
     install_ended();
 }
 
-// The passphrase is in install_pass, and the save's security key has given its secret, if it needs one.
+// The passphrase is in install.pass, and the save's security key has given its secret, if it needs one.
 static void install_unlock_result(int rc) {
     g_app.mode = MODE_INSTALL_UNLOCK;
-    if (rc == PASS_WRONG) { note("that passphrase doesn't open the save %s", install_shown_name(g_app.save_target)); return; }
+    if (rc == PASS_WRONG) { note("that passphrase doesn't open the save %s", install_shown_name(g_app.install.target)); return; }
     if (rc == PASS_NOMEM) { note("%s", open_error(rc)); return; }
     if (rc == 0 && install_code_pending()) {
-        g_app.key_purpose = KP_INSTALL_UNLOCK;
+        g_app.factor.key_purpose = KP_INSTALL_UNLOCK;
         g_app.message[0] = '\0';
         to_install_mode(MODE_UNLOCK_CODE);
         return;
@@ -953,7 +953,7 @@ static void install_unlock_result(int rc) {
 // What's in use stays in use. The passphrase only opens what's saved, so it can be overwritten.
 void commit_install_unlock(void) {
     if (!g_app.input.buf[0]) { note("type its passphrase - or Esc to go back"); return; }
-    copy_str(g_app.install_pass, g_app.input.buf, sizeof g_app.install_pass);
+    copy_str(g_app.install.pass, g_app.input.buf, sizeof g_app.install.pass);
     crypto_wipe(g_app.input.buf, sizeof g_app.input.buf);
     tui_input_clear(&g_app.input);
     unlock_go(KP_INSTALL_UNLOCK);
@@ -962,11 +962,11 @@ void commit_install_unlock(void) {
 void uninstall_confirmed(void) {
     end_prompt();
     char where[APP_PATH_MAX] = "";
-    install_where(g_app.save_target, where, sizeof where);
-    if (install_remove(g_app.save_target) != 0) { note("couldn't delete everything chat saved in %s", where); return; }
-    if (!is_current_save(g_app.save_target)) {
-        push_log("* uninstalled: the save %s in %s is deleted", install_shown_name(g_app.save_target), where);
-        note("uninstalled %s", install_shown_name(g_app.save_target));
+    install_where(g_app.install.target, where, sizeof where);
+    if (install_remove(g_app.install.target) != 0) { note("couldn't delete everything chat saved in %s", where); return; }
+    if (!is_current_save(g_app.install.target)) {
+        push_log("* uninstalled: the save %s in %s is deleted", install_shown_name(g_app.install.target), where);
+        note("uninstalled %s", install_shown_name(g_app.install.target));
         return;
     }
     g_app.installed = g_app.locked = 0;
@@ -976,8 +976,8 @@ void uninstall_confirmed(void) {
     g_n_uninstalled_keys = 0;
     for (int i = 0; i < trust_count(); i++)
         memcpy(g_uninstalled_keys[g_n_uninstalled_keys++], trust_at(i)->pub, ID_SIGN_PUB_LEN);
-    g_app.saved_key_known = 0;
-    g_app.saved_key_path[0] = '\0';
+    g_app.install.key_known = 0;
+    g_app.install.key_path[0] = '\0';
     push_log("* uninstalled: chat's files in %s are deleted. What's in use now lasts until chat exits", where);
     note("uninstalled");
 }
@@ -1015,7 +1015,7 @@ static void unlock_result(int rc) {
     g_app.mode = MODE_UNLOCK;
     if (rc == PASS_WRONG || rc == PASS_NOMEM || rc == INSTALL_DEVICE || rc == INSTALL_KEY) { note("%s", open_error(rc)); return; }
     if (rc == 0 && install_code_pending()) {
-        g_app.key_purpose = KP_UNLOCK;
+        g_app.factor.key_purpose = KP_UNLOCK;
         g_app.message[0] = '\0';
         to_install_mode(MODE_UNLOCK_CODE);
         return;
@@ -1025,7 +1025,7 @@ static void unlock_result(int rc) {
 
 void commit_unlock(void) {
     if (!g_app.input.buf[0]) { note("type its passphrase - or Esc to start without it"); return; }
-    copy_str(g_app.install_pass, g_app.input.buf, sizeof g_app.install_pass);
+    copy_str(g_app.install.pass, g_app.input.buf, sizeof g_app.install.pass);
     crypto_wipe(g_app.input.buf, sizeof g_app.input.buf);
     tui_input_clear(&g_app.input);
     unlock_go(KP_UNLOCK);
@@ -1050,14 +1050,14 @@ void saves_key(const tui_key_t *key) {
     switch (k) {
         case LIST_CHOOSE:
         case LIST_RIGHT:
-            install_use(g_app.saves[g_app.save_sel].name);
+            install_use(g_app.install.saves[g_app.install.sel].name);
             g_app.mode = MODE_UNLOCK;
             break;
         case LIST_BACK:
             skip_unlock();
             break;
         default:
-            list_move(k, &g_app.save_sel, g_app.n_saves);
+            list_move(k, &g_app.install.sel, g_app.install.n_saves);
             break;
     }
     g_app.dirty = 1;
@@ -1074,21 +1074,21 @@ void cancel_uninstall(void) {
 // which sets it up before the passphrase, and install_ended sets it up for a save :install opens.
 
 static void install_first(unsigned factor) {
-    g_app.install_for = factor;
-    g_app.install_back = g_app.mode == MODE_SETTINGS ? MODE_SETTINGS : MODE_CHAT;
-    g_app.n_saves = install_list(g_app.saves, INSTALL_SAVES_MAX);
+    g_app.install.for_factor = factor;
+    g_app.install.back = g_app.mode == MODE_SETTINGS ? MODE_SETTINGS : MODE_CHAT;
+    g_app.install.n_saves = install_list(g_app.install.saves, INSTALL_SAVES_MAX);
     begin_prompt(MODE_INSTALL_FIRST);
 }
 
 void install_first_yes(void) {
     end_prompt();
-    if (g_app.install_back == MODE_SETTINGS) g_app.mode = MODE_SETTINGS;
-    *factor_flag(g_app.install_for) = 1;
+    if (g_app.install.back == MODE_SETTINGS) g_app.mode = MODE_SETTINGS;
+    *factor_flag(g_app.install.for_factor) = 1;
     if (begin_install(NULL) != 0) install_ended();
 }
 
 void install_first_no(void) {
-    const char *label = factor_label(g_app.install_for);
+    const char *label = factor_label(g_app.install.for_factor);
     end_prompt();
     install_ended();
     note("%s: off - nothing was installed", label);
@@ -1097,39 +1097,39 @@ void install_first_no(void) {
 // The open save is sealed again, after a box asks.
 void device_lock_choose(int on) {
     device_check();
-    if (on && g_app.device_kind == DEVICE_NONE) { note("Device lock: can't be used here - %s", g_app.device_why); return; }
+    if (on && g_app.device.kind == DEVICE_NONE) { note("Device lock: can't be used here - %s", g_app.device.why); return; }
     if (!g_app.installed && on) { install_first(INSTALL_FACTOR_DEVICE); return; }
     if (!g_app.installed) {
-        g_app.device_lock = 0;
+        g_app.device.lock = 0;
         note("Device lock: off");
         return;
     }
-    if (!on == !g_app.device_lock) {
+    if (!on == !g_app.device.lock) {
         // This also finishes one a failed write left half done.
         if (install_set_factor(INSTALL_FACTOR_DEVICE, on) == 0) note("Device lock: %s already", on ? "on" : "off");
         else note("Device lock: %s - %s", on ? "on" : "off", install_why());
         return;
     }
-    g_app.device_want = on;
-    g_app.device_new = 0;
-    g_app.device_back = g_app.mode == MODE_SETTINGS ? MODE_SETTINGS : MODE_CHAT;
-    if (g_app.device_back == MODE_CHAT) begin_prompt(MODE_DEVICE_LOCK);
+    g_app.device.want = on;
+    g_app.device.new_save = 0;
+    g_app.device.back = g_app.mode == MODE_SETTINGS ? MODE_SETTINGS : MODE_CHAT;
+    if (g_app.device.back == MODE_CHAT) begin_prompt(MODE_DEVICE_LOCK);
     else { g_app.mode = MODE_DEVICE_LOCK; g_app.dirty = 1; }
 }
 
 static void device_lock_back(void) {
-    if (g_app.device_back == MODE_CHAT) { end_prompt(); return; }
-    g_app.mode = g_app.device_back;
+    if (g_app.device.back == MODE_CHAT) { end_prompt(); return; }
+    g_app.mode = g_app.device.back;
     g_app.dirty = 1;
 }
 
 void device_lock_yes(void) {
-    if (g_app.device_new) {
-        g_app.device_new = 0;
+    if (g_app.device.new_save) {
+        g_app.device.new_save = 0;
         install_step(STEP_DEVICE);
         return;
     }
-    int on = g_app.device_want;
+    int on = g_app.device.want;
     device_lock_back();
     const char *shown = install_shown_name(install_current());
     char where[APP_PATH_MAX] = "";
@@ -1139,11 +1139,11 @@ void device_lock_yes(void) {
     render();
     int rc = install_set_factor(INSTALL_FACTOR_DEVICE, on);
     device_kind_t kind = install_device_lock();
-    g_app.device_lock = kind != DEVICE_NONE;
+    g_app.device.lock = kind != DEVICE_NONE;
     const char *also = install_why();
     if (rc != 0) {
-        push_log("* device lock: %s for the save %s - %s", g_app.device_lock ? "on" : "off", shown, also);
-        note("Device lock: %s - %s", g_app.device_lock ? "on" : "off", also);
+        push_log("* device lock: %s for the save %s - %s", g_app.device.lock ? "on" : "off", shown, also);
+        note("Device lock: %s - %s", g_app.device.lock ? "on" : "off", also);
         return;
     }
     factors_in_use();
@@ -1162,8 +1162,8 @@ void device_lock_yes(void) {
 }
 
 void device_lock_no(void) {
-    if (g_app.device_new) {
-        g_app.device_new = 0;
+    if (g_app.device.new_save) {
+        g_app.device.new_save = 0;
         cancel_install();
         return;
     }
@@ -1183,7 +1183,7 @@ static void key_ended(install_key_state_t st);
 // The factor boxes open over the settings page or the chat, and their fields take the input line,
 // saved meanwhile.
 static void factor_close(void) {
-    app_mode_t back = g_app.factor_back;
+    app_mode_t back = g_app.factor.back;
     end_prompt();
     if (back == MODE_SETTINGS) g_app.mode = MODE_SETTINGS;
 }
@@ -1192,8 +1192,8 @@ void factor_choose(unsigned factor, int on) {
     const char *label = factor_label(factor);
     int *flag = factor_flag(factor);
     device_check();
-    if (on && factor == INSTALL_FACTOR_KEY && !g_app.seckey_ok) {
-        note("Security key: can't be used here - %s", g_app.seckey_why);
+    if (on && factor == INSTALL_FACTOR_KEY && !g_app.factor.seckey_ok) {
+        note("Security key: can't be used here - %s", g_app.factor.seckey_why);
         return;
     }
     if (!g_app.installed && on) { install_first(factor); return; }
@@ -1209,13 +1209,13 @@ void factor_choose(unsigned factor, int on) {
         factors_in_use();
         return;
     }
-    g_app.factor = factor;
-    g_app.factor_want = on;
-    g_app.factor_new = 0;
-    g_app.factor_back = g_app.mode == MODE_SETTINGS ? MODE_SETTINGS : MODE_CHAT;
+    g_app.factor.which = factor;
+    g_app.factor.want = on;
+    g_app.factor.new_save = 0;
+    g_app.factor.back = g_app.mode == MODE_SETTINGS ? MODE_SETTINGS : MODE_CHAT;
     if (factor == INSTALL_FACTOR_CODE && on) {
-        install_code_new(install_current(), g_app.code_b32, sizeof g_app.code_b32, g_app.code_uri, sizeof g_app.code_uri);
-        g_app.code_qr = 0;
+        install_code_new(install_current(), g_app.factor.code_b32, sizeof g_app.factor.code_b32, g_app.factor.code_uri, sizeof g_app.factor.code_uri);
+        g_app.factor.code_qr = 0;
         begin_prompt(MODE_CODE_SETUP);
     } else {
         begin_prompt(MODE_FACTOR);
@@ -1225,8 +1225,8 @@ void factor_choose(unsigned factor, int on) {
 // Seals the open save again with the factor box's change, once a security key or an authenticator
 // app has been set up for turning it on.
 static void factor_apply(void) {
-    unsigned factor = g_app.factor;
-    int on = g_app.factor_want, key = factor == INSTALL_FACTOR_KEY;
+    unsigned factor = g_app.factor.which;
+    int on = g_app.factor.want, key = factor == INSTALL_FACTOR_KEY;
     const char *shown = install_shown_name(install_current());
     factor_close();
     note("sealing %s again...", shown);
@@ -1261,15 +1261,15 @@ static void factor_apply(void) {
 
 void factor_yes(void) {
     // Registering takes two touches: one for the credential, one for its secret.
-    if (g_app.factor == INSTALL_FACTOR_KEY && g_app.factor_want) {
-        key_start(g_app.factor_new ? KP_NEW_SAVE : KP_FACTOR);
+    if (g_app.factor.which == INSTALL_FACTOR_KEY && g_app.factor.want) {
+        key_start(g_app.factor.new_save ? KP_NEW_SAVE : KP_FACTOR);
         return;
     }
     factor_apply();
 }
 
 void factor_no(void) {
-    if (g_app.factor_new) { cancel_install(); return; }
+    if (g_app.factor.new_save) { cancel_install(); return; }
     factor_close();
     note("nothing was changed");
 }
@@ -1287,13 +1287,13 @@ static void commit_code_setup(void) {
              "the phone");
         return;
     }
-    if (g_app.factor_new) { install_step(STEP_CODE); return; }
+    if (g_app.factor.new_save) { install_step(STEP_CODE); return; }
     factor_apply();
 }
 
 static void cancel_code_setup(void) {
     install_setup_forget();
-    if (g_app.factor_new) { cancel_install(); return; }
+    if (g_app.factor.new_save) { cancel_install(); return; }
     factor_close();
     note("Authenticator app: not changed - delete the entry you added to your app, if you did");
 }
@@ -1301,7 +1301,7 @@ static void cancel_code_setup(void) {
 // ---- self-destruct, and the shadow passphrase ----
 
 void destroy_choose(int limit) {
-    g_app.destroy_limit = limit;
+    g_app.install.destroy_limit = limit;
     const char *shown = install_shown_name(install_current());
     if (!g_app.installed) {
         if (limit) note("Self-destruct: on - the save :install makes next deletes itself after %d wrong passphrases", limit);
@@ -1309,7 +1309,7 @@ void destroy_choose(int limit) {
         return;
     }
     if (install_arm_destroy(install_current(), (unsigned)limit) != 0) {
-        g_app.destroy_limit = install_destroy_limit(install_current());
+        g_app.install.destroy_limit = install_destroy_limit(install_current());
         note("Self-destruct: couldn't write the save's tries file");
         return;
     }
@@ -1326,8 +1326,8 @@ void destroy_choose(int limit) {
 // The decoy is a clean save with no signing key or verified peers: it looks like a fresh install.
 static void shadow_set_decoy(void) {
     const char *shown = install_shown_name(install_current());
-    int rc = install_shadow_set(g_app.shadow_pass);
-    crypto_wipe(g_app.shadow_pass, sizeof g_app.shadow_pass);
+    int rc = install_shadow_set(g_app.install.shadow_pass);
+    crypto_wipe(g_app.install.shadow_pass, sizeof g_app.install.shadow_pass);
     factor_close();
     if (rc == PASS_NOMEM) { note("Shadow password: setting it up needs 512 MiB of free memory for a moment"); return; }
     if (rc != 0) { note("Shadow password: couldn't set it - %s", install_why()); return; }
@@ -1354,14 +1354,14 @@ void begin_shadow(void) {
         shadow_off();
         return;
     }
-    crypto_wipe(g_app.shadow_pass, sizeof g_app.shadow_pass);
-    g_app.factor_back = g_app.mode == MODE_SETTINGS ? MODE_SETTINGS : MODE_CHAT;
+    crypto_wipe(g_app.install.shadow_pass, sizeof g_app.install.shadow_pass);
+    g_app.factor.back = g_app.mode == MODE_SETTINGS ? MODE_SETTINGS : MODE_CHAT;
     begin_prompt(MODE_SHADOW_PASS);
 }
 
 void commit_shadow_pass(void) {
     if (!g_app.input.buf[0]) { note("type the shadow passphrase - or Esc to cancel"); return; }
-    copy_str(g_app.shadow_pass, g_app.input.buf, sizeof g_app.shadow_pass);
+    copy_str(g_app.install.shadow_pass, g_app.input.buf, sizeof g_app.install.shadow_pass);
     crypto_wipe(g_app.input.buf, sizeof g_app.input.buf);
     tui_input_clear(&g_app.input);
     g_app.mode = MODE_SHADOW_PASS2;
@@ -1369,11 +1369,11 @@ void commit_shadow_pass(void) {
 }
 
 void commit_shadow_pass2(void) {
-    int same = strcmp(g_app.input.buf, g_app.shadow_pass) == 0;
+    int same = strcmp(g_app.input.buf, g_app.install.shadow_pass) == 0;
     crypto_wipe(g_app.input.buf, sizeof g_app.input.buf);
     tui_input_clear(&g_app.input);
     if (!same) {
-        crypto_wipe(g_app.shadow_pass, sizeof g_app.shadow_pass);
+        crypto_wipe(g_app.install.shadow_pass, sizeof g_app.install.shadow_pass);
         g_app.mode = MODE_SHADOW_PASS;
         note("they weren't the same - type the shadow passphrase again");
         return;
@@ -1384,29 +1384,29 @@ void commit_shadow_pass2(void) {
 }
 
 void cancel_shadow_pass(void) {
-    crypto_wipe(g_app.shadow_pass, sizeof g_app.shadow_pass);
+    crypto_wipe(g_app.install.shadow_pass, sizeof g_app.install.shadow_pass);
     factor_close();
     note("Shadow password: not changed");
 }
 
 // The security key's thread starts, and its box shows what it's waiting for until it's done.
 static void key_start(key_purpose_t why) {
-    const char *pin = g_app.key_pin[0] ? g_app.key_pin : NULL;
-    g_app.key_purpose = why;
-    if (why != KP_FACTOR) g_app.factor_back = why == KP_UNLOCK ? MODE_CHAT : g_app.install_back;
+    const char *pin = g_app.factor.key_pin[0] ? g_app.factor.key_pin : NULL;
+    g_app.factor.key_purpose = why;
+    if (why != KP_FACTOR) g_app.factor.back = why == KP_UNLOCK ? MODE_CHAT : g_app.install.back;
     int rc = why == KP_FACTOR || why == KP_NEW_SAVE
         ? install_key_make(pin)
-        : install_key_open(why == KP_INSTALL_UNLOCK ? g_app.save_target : install_current(), pin);
-    crypto_wipe(g_app.key_pin, sizeof g_app.key_pin);
-    g_app.key_stage = SECKEY_BUSY;
-    g_app.key_touches = 0;
+        : install_key_open(why == KP_INSTALL_UNLOCK ? g_app.install.target : install_current(), pin);
+    crypto_wipe(g_app.factor.key_pin, sizeof g_app.factor.key_pin);
+    g_app.factor.key_stage = SECKEY_BUSY;
+    g_app.factor.key_touches = 0;
     to_install_mode(MODE_KEY_WAIT);
     if (rc != 0) key_ended(INSTALL_KEY_FAILED);
 }
 
 // Where what the security key's thread came to leads, for what it was touched for.
 static void key_ended(install_key_state_t st) {
-    key_purpose_t why = g_app.key_purpose;
+    key_purpose_t why = g_app.factor.key_purpose;
     if (st == INSTALL_KEY_PIN) {
         to_install_mode(MODE_KEY_PIN);
         note("%s", install_key_why());
@@ -1429,7 +1429,7 @@ static void key_ended(install_key_state_t st) {
             note("Security key: not changed - %s", what);
             return;
         default:
-            crypto_wipe(g_app.install_pass, sizeof g_app.install_pass);
+            crypto_wipe(g_app.install.pass, sizeof g_app.install.pass);
             to_install_mode(why == KP_INSTALL_UNLOCK ? MODE_INSTALL_UNLOCK : MODE_UNLOCK);
             note("not opened - security key: %s", what);
             return;
@@ -1438,10 +1438,10 @@ static void key_ended(install_key_state_t st) {
 
 void commit_key_pin(void) {
     if (!g_app.input.buf[0]) { note("type the security key's PIN - or Esc to cancel"); return; }
-    copy_str(g_app.key_pin, g_app.input.buf, sizeof g_app.key_pin);
+    copy_str(g_app.factor.key_pin, g_app.input.buf, sizeof g_app.factor.key_pin);
     crypto_wipe(g_app.input.buf, sizeof g_app.input.buf);
     tui_input_clear(&g_app.input);
-    key_start(g_app.key_purpose);
+    key_start(g_app.factor.key_purpose);
 }
 
 void cancel_key_pin(void) { key_ended(INSTALL_KEY_CANCELLED); }
@@ -1458,20 +1458,20 @@ void key_wait_tick(void) {
     int s, t;
     install_key_state_t st = install_key_poll(&s, &t);
     if (st == INSTALL_KEY_RUNNING) {
-        if (s != g_app.key_stage || t != g_app.key_touches) g_app.dirty = 1;
-        g_app.key_stage = s;
-        g_app.key_touches = t;
+        if (s != g_app.factor.key_stage || t != g_app.factor.key_touches) g_app.dirty = 1;
+        g_app.factor.key_stage = s;
+        g_app.factor.key_touches = t;
         return;
     }
-    g_app.key_stage = SECKEY_LOOKING;
-    g_app.key_touches = 0;
+    g_app.factor.key_stage = SECKEY_LOOKING;
+    g_app.factor.key_touches = 0;
     if (st != INSTALL_KEY_IDLE) key_ended(st);
 }
 
-// Opening a save: its security key's secret first, then the passphrase in install_pass, then a code
+// Opening a save: its security key's secret first, then the passphrase in install.pass, then a code
 // it needs.
 void unlock_go(key_purpose_t why) {
-    const char *name = why == KP_INSTALL_UNLOCK ? g_app.save_target : install_current();
+    const char *name = why == KP_INSTALL_UNLOCK ? g_app.install.target : install_current();
     if ((install_factors(name) & INSTALL_FACTOR_KEY) && !install_key_ready(name)) {
         key_start(why);
         return;
@@ -1481,8 +1481,8 @@ void unlock_go(key_purpose_t why) {
     else note("opening what :install saved...");
     render();
     histories_write();
-    int rc = install_unlock(name, g_app.install_pass);
-    crypto_wipe(g_app.install_pass, sizeof g_app.install_pass);
+    int rc = install_unlock(name, g_app.install.pass);
+    crypto_wipe(g_app.install.pass, sizeof g_app.install.pass);
     if (why == KP_INSTALL_UNLOCK) install_unlock_result(rc);
     else unlock_result(rc);
 }
@@ -1502,13 +1502,13 @@ void commit_unlock_code(void) {
         note("that isn't the code your authenticator app shows for it - check the clocks of this computer and the phone");
         return;
     }
-    if (g_app.key_purpose == KP_INSTALL_UNLOCK) install_unlock_done(0);
+    if (g_app.factor.key_purpose == KP_INSTALL_UNLOCK) install_unlock_done(0);
     else unlock_done(0);
 }
 
 void back_from_unlock_code(void) {
     install_code_cancel();
-    to_install_mode(g_app.key_purpose == KP_INSTALL_UNLOCK ? MODE_INSTALL_UNLOCK : MODE_UNLOCK);
+    to_install_mode(g_app.factor.key_purpose == KP_INSTALL_UNLOCK ? MODE_INSTALL_UNLOCK : MODE_UNLOCK);
     note("not opened: it needs its passphrase, then the code");
 }
 
@@ -1535,6 +1535,6 @@ void field_key(const tui_key_t *key, void (*enter)(void), void (*esc)(void)) {
 
 // Tab is only offered when the text and the QR code don't fit together, and then picks between them.
 void code_setup_key(const tui_key_t *key) {
-    if (key->type == TUI_KEY_TAB) { g_app.code_qr = !g_app.code_qr; g_app.dirty = 1; }
+    if (key->type == TUI_KEY_TAB) { g_app.factor.code_qr = !g_app.factor.code_qr; g_app.dirty = 1; }
     else field_key(key, commit_code_setup, cancel_code_setup);
 }

@@ -181,30 +181,36 @@ typedef struct {
     int verify_optional;
     int net_log;   // NET_LOG_NORMAL, _VERBOSE or _OFF
     uint16_t default_port;
-    int settings_sel;
-    int settings_page;   // the section shown: settings_sel's, or the one whose Done button it is
-    int settings_rows[8];   // each section's row selected last, which Tab goes back to
+    struct {
+        int sel;
+        int page;      // the section shown: sel's, or the one whose Done button it is
+        int rows[8];   // each section's row selected last, which Tab goes back to
+    } settings;
     int help_sel;
-    int changelog_scroll, changelog_most;
+    struct { int scroll, most; } changelog;
     char message[200];   // the bottom bar's result of the last action, until the next key
     int onboarding;   // the settings page chat opens on: its Done button starts chat
-    int sign_sel;
-    key_origin_t key_origin;       // where the identity in use came from
-    uint32_t pgp_created;          // a PGP key made here: its creation time, which its fingerprint covers
-    identity_source_t load_kind;   // AGE or PGP: what the key file browser, the path field or the paste page takes
-    char key_path[KEY_PATH_MAX];   // a key from a file (KEY_FILE): the file's full path, or "" if it isn't known
-    int path_from_browser;         // the path field was opened from the browser, so Esc goes back there
-    int tor_launch;
-    char tor_path[TOR_PATH_MAX];
-    // Bridge lines for chat's own tor, separated by ';', and the folder with the programs they need
-    // ("": next to tor, then PATH). tor_state: its guards and directory are kept in the save, once the
-    // box MODE_TOR_STATE shows over tor_state_back says what that means.
-    char bridges[TUI_LINE_MAX];
-    char pt_dir[TOR_PATH_MAX];
-    int tor_state;
-    app_mode_t tor_state_back;
+    struct {
+        int sel;
+        key_origin_t origin;           // where the identity in use came from
+        uint32_t pgp_created;          // a PGP key made here: its creation time, which its fingerprint covers
+        identity_source_t load_kind;   // AGE or PGP: what the key file browser, the path field or the paste page takes
+        char path[KEY_PATH_MAX];       // a key from a file (KEY_FILE): the file's full path, or "" if it isn't known
+        int path_from_browser;         // the path field was opened from the browser, so Esc goes back there
+    } key;
+    struct {
+        int launch;
+        char path[TOR_PATH_MAX];
+        // Bridge lines for chat's own tor, separated by ';', and the folder with the programs they need
+        // ("": next to tor, then PATH). keep_state: its guards and directory are kept in the save, once
+        // the box MODE_TOR_STATE shows over back says what that means.
+        char bridges[TUI_LINE_MAX];
+        char pt_dir[TOR_PATH_MAX];
+        int keep_state;
+        app_mode_t back;
+    } tor;
     // The kept rooms' list (Ctrl+J): the row selected, and whether it asks to forget that one.
-    int rooms_sel, rooms_forgetting;
+    struct { int sel, forgetting; } rooms;
     uint64_t file_cap;   // 0: the default
     int fast_files;
     int picture_noise;   // a JPEG sent gets noise nobody can see (common/clean.h)
@@ -214,94 +220,103 @@ typedef struct {
     // opened, and its sessions haven't been. quit_leaving: :quitall, which leaves them for good.
     int reopen, reopen_due, quit_leaving;
     int autosave;   // what's changed is saved as it changes, while installed
-    // Seconds without a key before the screen locks itself (0 never), and the keys that lock it and
-    // panic, by their place in LOCK_KEY_NAMES and PANIC_KEY_NAMES (0: no key). A panic deletes the
-    // open save with panic_wipe, and writes the histories kept with panic_history.
-    int lock_after, lock_key, panic_key, panic_wipe, panic_history;
+    // The key that panics, by its place in PANIC_KEY_NAMES (0: no key). A panic deletes the open save
+    // with wipe, and writes the histories kept with history.
+    struct { int key, wipe, history; } panic;
     // Put the sandbox up once chat starts reaching the network (Linux), and what of it is up
     // (PLATFORM_SANDBOX_), and start the updater outside it just before.
     int sandbox;
     unsigned sandboxed;
     int updater;
-    // Locked to this device: the open save, or with none open, the new one :install is making for it
-    // (install_for). device_want is what the DEVICE LOCK box asks to change it to, and device_back
-    // where it goes back to.
-    // device_new: the box is for the new save :install is making, before its passphrase.
-    int device_lock, device_want, device_new;
-    app_mode_t device_back;
-    // What locking would use here. DEVICE_NONE: it can't, and device_why says why. Checked at the
-    // start, and again whenever something that shows it opens.
-    device_kind_t device_kind;
-    char device_why[200];
-    // A security key and an authenticator code, like the device lock. seckey_ok: security keys work
-    // here (seckey_why if not).
-    int key_factor, code_factor, seckey_ok;
-    char seckey_why[200];
-    // One of those turned on with no save open asks to :install first, and install_for is the factor
-    // (INSTALL_FACTOR_) that :install then sets up. install_back: the page :install's boxes are over
-    // and go back to, the chat or the settings page.
-    unsigned install_for;
-    app_mode_t install_back;
-    // The open save deletes itself after this many wrong passphrases (0 off); with none open, what
-    // the next save :install makes starts with. Mirrored to the save's unsealed tries file.
-    int destroy_limit;
-    char shadow_pass[INSTALL_PASS_MAX];   // the shadow passphrase while its box asks for it again to confirm
-    // The FACTOR box turns factor (INSTALL_FACTOR_) on (factor_want) or off, from the settings page or
-    // the chat (factor_back); factor_new: it's a step of :install making a new save. key_purpose: what
-    // the security key is touched for, and key_pin what to send it if it asks for its PIN.
-    unsigned factor;
-    int factor_want, factor_new;
-    app_mode_t factor_back;
-    key_purpose_t key_purpose;
-    char key_pin[64];
-    int key_stage, key_touches;   // what its thread waits for (seckey_stage_t), and the touches it's had
-    // The new authenticator secret, in base32 and as the link a QR code holds. code_qr: its box shows
-    // the QR code in place of its text (Tab).
-    char code_b32[40];
-    char code_uri[160];
-    int code_qr;
-    // The startup unlock's passphrase came from CHAT_INSTALL_PASSWORD, and waits in install_pass
-    // for the security key or the code the save needs.
-    int unlock_env;
+    struct {
+        // Locked to this device: the open save, or with none open, the new one :install is making for
+        // it (install.for_factor). want is what the DEVICE LOCK box asks to change it to, and back where
+        // it goes back to. new_save: the box is for the new save :install is making, before its passphrase.
+        int lock, want, new_save;
+        app_mode_t back;
+        // What locking would use here. DEVICE_NONE: it can't, and why says why. Checked at the start, and
+        // again whenever something that shows it opens.
+        device_kind_t kind;
+        char why[200];
+    } device;
+    struct {
+        // A security key and an authenticator code, like the device lock. seckey_ok: security keys work
+        // here (seckey_why if not).
+        int key, code, seckey_ok;
+        char seckey_why[200];
+        // The FACTOR box turns which (INSTALL_FACTOR_) on (want) or off, from the settings page or the
+        // chat (back); new_save: it's a step of :install making a new save. key_purpose: what the security
+        // key is touched for, and key_pin what to send it if it asks for its PIN.
+        unsigned which;
+        int want, new_save;
+        app_mode_t back;
+        key_purpose_t key_purpose;
+        char key_pin[64];
+        int key_stage, key_touches;   // what its thread waits for (seckey_stage_t), and the touches it's had
+        // The new authenticator secret, in base32 and as the link a QR code holds. code_qr: its box shows
+        // the QR code in place of its text (Tab).
+        char code_b32[40];
+        char code_uri[160];
+        int code_qr;
+    } factor;
+    struct {
+        // A factor turned on with no save open asks to :install first, and for_factor is the factor
+        // (INSTALL_FACTOR_) that :install then sets up. back: the page :install's boxes are over and go
+        // back to, the chat or the settings page.
+        unsigned for_factor;
+        app_mode_t back;
+        // The open save deletes itself after this many wrong passphrases (0 off); with none open, what
+        // the next save :install makes starts with. Mirrored to the save's unsealed tries file.
+        int destroy_limit;
+        char shadow_pass[INSTALL_PASS_MAX];   // the shadow passphrase while its box asks for it again to confirm
+        // The startup unlock's passphrase came from CHAT_INSTALL_PASSWORD, and waits in pass for the
+        // security key or the code the save needs.
+        int unlock_env;
+        int key_known;
+        uint8_t key_pub[ID_SIGN_PUB_LEN];
+        char key_path[KEY_PATH_MAX];   // what :install saved is the path to a key file: that path, else ""
+        char pass[INSTALL_PASS_MAX];   // the passphrase while it's typed the second time
+        int unlock_at_start;
+        // The saves :install made, to pick from at start when there's more than one, and the save
+        // :install or :uninstall acts on while its box is open.
+        install_save_t saves[INSTALL_SAVES_MAX];
+        int n_saves, sel;
+        char target[INSTALL_NAME_MAX + 1];
+        // :install for a save that's sealed: after its passphrase, save what's in use over it (1, only
+        // while another save is open), or use what's saved there (0). pick: the save to use is picked
+        // from the list of saves. named: :install or :uninstall was given a NAME. random_name: the name a
+        // new save gets if none is typed.
+        int overwrite, pick, named;
+        char random_name[INSTALL_NAME_MAX + 1];
+    } install;
     uint8_t color[3];
     identity_source_t identity_source;
     identity_keypair_t identity;
     // installed: what :install saved is open and kept up to date. locked: it exists but is still
-    // sealed. install_pass holds the passphrase while it's typed the second time.
+    // sealed.
     int installed, locked;
-    int saved_key_known;
-    uint8_t saved_key_pub[ID_SIGN_PUB_LEN];
-    char saved_key_path[KEY_PATH_MAX];   // what :install saved is the path to a key file: that path, else ""
-    char install_pass[INSTALL_PASS_MAX];
-    int unlock_at_start;
-    // The saves :install made, to pick from at start when there's more than one, and the save
-    // :install or :uninstall acts on while its box is open.
-    install_save_t saves[INSTALL_SAVES_MAX];
-    int n_saves, save_sel;
-    char save_target[INSTALL_NAME_MAX + 1];
-    // :install for a save that's sealed: after its passphrase, save what's in use over it (1, only
-    // while another save is open), or use what's saved there (0). install_pick: the save to use is
-    // picked from the list of saves. save_named: :install or :uninstall was given a NAME.
-    // save_random: the name a new save gets if none is typed.
-    int install_overwrite, install_pick, save_named;
-    char save_random[INSTALL_NAME_MAX + 1];
     app_mode_t mode;
     int asking_quit;   // Ctrl+C's QUIT box, over whatever mode is showing
-    // The lock screen, over whatever mode is showing: nothing is drawn but its box, and nothing but it
-    // and the panic key takes keys. lock_input is its field, apart from input, which a box under it
-    // may be using. lock_checking: what was typed there is being tried. last_key: when the last key
-    // came, for lock_after, in wall time (lock_saw_key).
-    int screen_locked, lock_checking;
-    double last_key;
-    tui_input_t lock_input;
-    // The LOCK SCREEN box asking for a PIN to unlock with while no save is open, over whatever mode is
-    // showing, in lock_input: pin_step 1, then 2 for it again. Then pin_then: lock (-1), or turn
-    // auto-lock on after that many seconds.
-    int pin_step, pin_then;
+    struct {
+        // Seconds without a key before the screen locks itself (0 never), and the key that locks it, by
+        // its place in LOCK_KEY_NAMES (0: no key).
+        int after, key;
+        // The lock screen (on), over whatever mode is showing: nothing is drawn but its box, and nothing
+        // but it and the panic key takes keys. input is its field, apart from g_app.input, which a box
+        // under it may be using. checking: what was typed there is being tried. last_key: when the last
+        // key came, for after, in wall time (lock_saw_key).
+        int on, checking;
+        double last_key;
+        tui_input_t input;
+        // The LOCK SCREEN box asking for a PIN to unlock with while no save is open, over whatever mode
+        // is showing, in input: pin_step 1, then 2 for it again. Then pin_then: lock (-1), or turn
+        // auto-lock on after that many seconds.
+        int pin_step, pin_then;
+    } lock;
     double move_shown;   // when a request to move came up by itself, for the keys typed just before
     char pending_session_id[MAX_SESSION_NAME + 1];
     int pw_suggested;   // NEW SESSION's field still holds the random password it opened with
-    int show_sidebar, show_console, show_chat;
+    struct { int sidebar, console, chat; } show;
     int dirty;
     int input_dirty;
 
@@ -310,26 +325,33 @@ typedef struct {
     tui_input_t input;
     tui_input_t saved_input;
     browser_t browser;
-    char send_dir[APP_PATH_MAX];   // the folder :send's browser last offered a file from
-    int send_asis;                 // and it sends a picture as it is (:send asis), not cleaned
-    char save_dir[APP_PATH_MAX];   // the folder :saveto's browser last saved a file in
-    int save_num, save_anyway;   // what :saveto's browser saves
-    app_mode_t browse_back;      // where :send's and :saveto's browsers go back to
-    // The files page's selected file, by its number. A y/n box over it or the picture asks file_ask
-    // about file file_ask_num, then goes back to file_back.
-    int file_num, file_ask, file_ask_num;
-    app_mode_t file_back;
-    char paste_buf[16384];
-    size_t paste_len;
-    char paste_status[80];
-    int paste_cut;   // some of the paste coming in didn't fit in the input line
+    struct {
+        char send_dir[APP_PATH_MAX];   // the folder :send's browser last offered a file from
+        int send_asis;                 // and it sends a picture as it is (:send asis), not cleaned
+        char save_dir[APP_PATH_MAX];   // the folder :saveto's browser last saved a file in
+        int save_num, save_anyway;     // what :saveto's browser saves
+        app_mode_t browse_back;        // where :send's and :saveto's browsers go back to
+        // The files page's selected file, by its number. A y/n box over it or the picture asks ask
+        // about file ask_num, then goes back to back.
+        int num, ask, ask_num;
+        app_mode_t back;
+    } files;
+    struct {
+        char buf[16384];
+        size_t len;
+        char status[80];
+        int cut;   // some of the paste coming in didn't fit in the input line
+    } paste;
 
-    char pending_auto_session[MAX_SESSION_NAME + 1];
-    char pending_auto_password[MAX_PASSWORD + 1];
-    uint16_t pending_auto_port;
-    // As given. A name in them is only looked up once the startup settings page is done.
-    char pending_auto_peer_args[MAX_PEER_ARGS][PEER_ARG_LEN];
-    int pending_auto_n_peers;
+    // The session given on the command line.
+    struct {
+        char session[MAX_SESSION_NAME + 1];
+        char password[MAX_PASSWORD + 1];
+        uint16_t port;
+        // As given. A name in them is only looked up once the startup settings page is done.
+        char peer_args[MAX_PEER_ARGS][PEER_ARG_LEN];
+        int n_peers;
+    } autostart;
 } app_t;
 
 // The command line, read again once what :install saved is open, so its options still override it.
@@ -404,7 +426,7 @@ typedef struct {
 #define ROW_TEXT_MAX TUI_LINE_MAX
 
 // The page shows one section at a time, its listed rows and then a Done button.
-#define SETTINGS_DONE N_SETTINGS   // settings_sel of the Done button, on g_app.settings_page
+#define SETTINGS_DONE N_SETTINGS   // g_app.settings.sel of the Done button, on g_app.settings.page
 
 // ---- the signing identity, chosen on a page under the settings ----
 

@@ -213,8 +213,8 @@ cmd_result_t app_keep(void *ctx, const char *arg) {
 // With rooms kept, Ctrl+J lists them, and "another room" under them asks for an id as before.
 void begin_rooms(void) {
     if (!rooms_count()) { begin_prompt(MODE_JOIN_ID); return; }
-    if (g_app.rooms_sel > rooms_count()) g_app.rooms_sel = 0;
-    g_app.rooms_forgetting = 0;
+    if (g_app.rooms.sel > rooms_count()) g_app.rooms.sel = 0;
+    g_app.rooms.forgetting = 0;
     begin_prompt(MODE_ROOMS);
 }
 
@@ -232,26 +232,26 @@ static void join_room(int i) {
 }
 
 void rooms_key(const tui_key_t *key) {
-    int n = rooms_count(), i = g_app.rooms_sel;
-    if (g_app.rooms_forgetting) {
+    int n = rooms_count(), i = g_app.rooms.sel;
+    if (g_app.rooms.forgetting) {
         int yes = key->type == TUI_KEY_CHAR && key->ch_len == 1 && (key->ch[0] == 'y' || key->ch[0] == 'Y');
         int no = key->type == TUI_KEY_ESCAPE
               || (key->type == TUI_KEY_CHAR && key->ch_len == 1 && strchr("nNq", key->ch[0]));
         if (!yes && !no) return;
-        g_app.rooms_forgetting = 0;
+        g_app.rooms.forgetting = 0;
         g_app.dirty = 1;
         if (no) return;
         char done[160];
         snprintf(done, sizeof done, "%s: no longer kept in the save %s", room_at(i)->label,
                  install_shown_name(install_current()));
         rooms_forget(i);
-        if (g_app.rooms_sel > 0 && g_app.rooms_sel >= rooms_count()) g_app.rooms_sel--;
+        if (g_app.rooms.sel > 0 && g_app.rooms.sel >= rooms_count()) g_app.rooms.sel--;
         if (!rooms_count()) end_prompt();
         rooms_saved(done);
         return;
     }
     if (key->type == TUI_KEY_CHAR && key->ch_len == 1 && i < n && (key->ch[0] == 'd' || key->ch[0] == 's')) {
-        if (key->ch[0] == 'd') { g_app.rooms_forgetting = 1; g_app.dirty = 1; return; }
+        if (key->ch[0] == 'd') { g_app.rooms.forgetting = 1; g_app.dirty = 1; return; }
         char done[160];
         rooms_set_start(i, !room_at(i)->at_start);
         snprintf(done, sizeof done, "%s: %s", room_at(i)->label,
@@ -274,7 +274,7 @@ void rooms_key(const tui_key_t *key) {
             end_prompt();
             return;
         default:
-            list_move(k, &g_app.rooms_sel, n + 1);
+            list_move(k, &g_app.rooms.sel, n + 1);
             g_app.dirty = 1;
             return;
     }
@@ -490,7 +490,7 @@ void timers_tick(double now) {
 void send_notification(const char *nick, const char *text, int mentioned) {
     char title[CHAT_NAME_LEN * 2 + 48], body[MAX_TEXT + CHAT_NAME_LEN * 2 + 48];
     // Locked, whatever preview says.
-    if (g_app.screen_locked) nick = text = NULL;
+    if (g_app.lock.on) nick = text = NULL;
     if (nick && text) {
         snprintf(title, sizeof title, mentioned ? "%s mentioned you" : "%s", nick);
         copy_str(body, text, sizeof body);

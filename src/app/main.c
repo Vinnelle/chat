@@ -319,14 +319,14 @@ static const tui_keytype_t PANIC_KEYS[N_PANIC_KEYS] = {
     TUI_KEY_NONE, TUI_KEY_CTRL_BACKSLASH, TUI_KEY_CTRL_Q, TUI_KEY_CTRL_X, TUI_KEY_F12
 };
 
-int panic_key_is(const tui_key_t *key) { return g_app.panic_key > 0 && key->type == PANIC_KEYS[g_app.panic_key]; }
+int panic_key_is(const tui_key_t *key) { return g_app.panic.key > 0 && key->type == PANIC_KEYS[g_app.panic.key]; }
 
 panic_t g_panic;
 
 // The screen goes first, before anything that can take time: cleared before it's left, so nothing of
 // it lingers, then the one it goes back to cleared too. --simple's lines are in the terminal's
 // scrollback, so that goes as well. The main loop ends without drawing another frame, and the rest is
-// in its ending: no question, and nothing saved but what panic_history keeps.
+// in its ending: no question, and nothing saved but what panic.history keeps.
 void panic(panic_t why) {
     if (g_panic) return;
     g_panic = why;
@@ -356,7 +356,7 @@ void sandbox_up(void) {
     // tor, and the transport programs its bridges can need, even with none set yet.
     char found[4][TOR_PATH_MAX], why[160];
     const char *run[4];
-    int tor = platform_find_program("tor", g_app.tor_path, found[0], sizeof found[0]) == 0;
+    int tor = platform_find_program("tor", g_app.tor.path, found[0], sizeof found[0]) == 0;
     int n = tor ? 1 + transport_paths(found + 1, 3) : 0;
     for (int i = 0; i < n; i++) run[i] = found[i];
     // Once the sandbox is up, nothing chat starts is outside it.
@@ -376,12 +376,12 @@ void sandbox_up(void) {
 #endif
 }
 
-// The open save goes first with panic_wipe, unless the shadow passphrase has put the decoy in its place.
-// The histories kept are dropped unwritten, unless panic_history keeps them.
+// The open save goes first with panic.wipe, unless the shadow passphrase has put the decoy in its place.
+// The histories kept are dropped unwritten, unless panic.history keeps them.
 void panic_saves(void) {
-    int wipe = g_panic == PANIC_KEY && g_app.panic_wipe && g_app.installed && !g_app.locked;
+    int wipe = g_panic == PANIC_KEY && g_app.panic.wipe && g_app.installed && !g_app.locked;
     if (wipe && install_remove(install_current()) == 0) g_app.installed = 0;
-    int keep = g_panic == PANIC_KEY && g_app.panic_history && !wipe;
+    int keep = g_panic == PANIC_KEY && g_app.panic.history && !wipe;
     for (int i = 0; i < MAX_SESSIONS; i++)
         if (g_app.used[i] && !keep) history_stop(&g_app.sessions[i], 0);
 }
@@ -404,12 +404,12 @@ static void open_tui(const char *explicit_session, char *explicit_password, uint
     g_app.dirty = 1;
 
     if (explicit_session) {
-        copy_str(g_app.pending_auto_session, explicit_session, sizeof g_app.pending_auto_session);
-        copy_str(g_app.pending_auto_password, explicit_password, sizeof g_app.pending_auto_password);
-        g_app.pending_auto_port = explicit_port;
+        copy_str(g_app.autostart.session, explicit_session, sizeof g_app.autostart.session);
+        copy_str(g_app.autostart.password, explicit_password, sizeof g_app.autostart.password);
+        g_app.autostart.port = explicit_port;
         for (int i = 0; i < n_peer_args && i < MAX_PEER_ARGS; i++)
-            copy_str(g_app.pending_auto_peer_args[i], peer_args[i], PEER_ARG_LEN);
-        g_app.pending_auto_n_peers = n_peer_args < MAX_PEER_ARGS ? n_peer_args : MAX_PEER_ARGS;
+            copy_str(g_app.autostart.peer_args[i], peer_args[i], PEER_ARG_LEN);
+        g_app.autostart.n_peers = n_peer_args < MAX_PEER_ARGS ? n_peer_args : MAX_PEER_ARGS;
         crypto_wipe(explicit_password, strlen(explicit_password));
     }
 
@@ -418,11 +418,11 @@ static void open_tui(const char *explicit_session, char *explicit_password, uint
     g_app.onboarding = 1;
     settings_select(0);
     g_app.mode = MODE_SETTINGS;
-    if (g_app.unlock_at_start) {
+    if (g_app.install.unlock_at_start) {
         begin_prompt(save_to_pick() ? MODE_SAVES : MODE_UNLOCK);
         // CHAT_INSTALL_PASSWORD's passphrase, for a save that needs its security key or a code too.
-        if (g_app.unlock_env) {
-            g_app.unlock_env = 0;
+        if (g_app.install.unlock_env) {
+            g_app.install.unlock_env = 0;
             unlock_go(KP_UNLOCK);
         }
     } else {
@@ -457,12 +457,12 @@ static void take_signals(void) {
     if (g_ctrl_c) {
         g_ctrl_c = 0;
         // A second one quits once the QUIT box shows, as a second Ctrl+C key does.
-        if (g_app.asking_quit && !g_app.screen_locked) g_interrupted = 1;
+        if (g_app.asking_quit && !g_app.lock.on) g_interrupted = 1;
         else { g_app.asking_quit = 1; g_app.dirty = 1; }
     }
     if (g_sigquit) {
         g_sigquit = 0;
-        if (g_app.panic_key) panic(PANIC_KEY);
+        if (g_app.panic.key) panic(PANIC_KEY);
         else g_interrupted = 1;
     }
 }
@@ -565,9 +565,9 @@ static _Noreturn void close_tui(void) {
     install_key_cancel();
     crypto_wipe(&g_app.input, sizeof g_app.input);
     crypto_wipe(&g_app.saved_input, sizeof g_app.saved_input);
-    crypto_wipe(g_app.paste_buf, sizeof g_app.paste_buf);
-    crypto_wipe(g_app.pending_auto_password, sizeof g_app.pending_auto_password);
-    crypto_wipe(g_app.install_pass, sizeof g_app.install_pass);
+    crypto_wipe(g_app.paste.buf, sizeof g_app.paste.buf);
+    crypto_wipe(g_app.autostart.password, sizeof g_app.autostart.password);
+    crypto_wipe(g_app.install.pass, sizeof g_app.install.pass);
     lock_forget();
     rooms_clear();
     ignore_clear();
@@ -594,7 +594,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
     term_watch_resize();
     if (term_raw_enable() != 0) {
         fprintf(stderr, "chat: this terminal can't do the full-screen UI, using --simple instead\n");
-        if (g_app.unlock_at_start) unlock_at_start(0);
+        if (g_app.install.unlock_at_start) unlock_at_start(0);
         if (!g_app.nick[0]) random_nickname(g_app.nick, sizeof g_app.nick);
         return run_plain(explicit_session, explicit_password, explicit_port, peer_args, n_peer_args);
     }
@@ -685,9 +685,9 @@ static int read_options(int argc, char **argv, options_t *o) {
             copy_str(g_app.route.relays[g_app.route.n_relays++], v, NOSTR_URL_MAX);
         } else if (strcmp(key, "tor-launch") == 0 && i + 1 < argc) {
             const char *v = argv[++i];
-            if (strcmp(v, "auto") == 0) g_app.tor_launch = TOR_LAUNCH_AUTO;
-            else if (strcmp(v, "always") == 0) g_app.tor_launch = TOR_LAUNCH_ALWAYS;
-            else if (strcmp(v, "never") == 0) g_app.tor_launch = TOR_LAUNCH_NEVER;
+            if (strcmp(v, "auto") == 0) g_app.tor.launch = TOR_LAUNCH_AUTO;
+            else if (strcmp(v, "always") == 0) g_app.tor.launch = TOR_LAUNCH_ALWAYS;
+            else if (strcmp(v, "never") == 0) g_app.tor.launch = TOR_LAUNCH_NEVER;
             else { fprintf(stderr, "chat: --tor-launch takes auto, always or never\n"); return 1; }
         } else if (strcmp(key, "tor-path") == 0 && i + 1 < argc) {
             char found[TOR_PATH_MAX];
@@ -695,7 +695,7 @@ static int read_options(int argc, char **argv, options_t *o) {
                 fprintf(stderr, "chat: can't use %s as tor - it has to be a full path to a program only root or you can change\n", argv[i]);
                 return 1;
             }
-            copy_str(g_app.tor_path, found, sizeof g_app.tor_path);
+            copy_str(g_app.tor.path, found, sizeof g_app.tor.path);
         } else if ((strcmp(key, "tor-socks") == 0 || strcmp(key, "tor-control") == 0) && i + 1 < argc) {
             const char *v = argv[++i];
             if (!valid_host_port(v)) { fprintf(stderr, "chat: bad --%s %s (want host:port)\n", key, v); return 1; }
@@ -743,8 +743,8 @@ static void app_defaults(void) {
     routing_defaults(&g_app.route);
     g_app.notify_mode = NOTIFY_MENTIONS;
     g_app.verify_optional = 1;
-    g_app.show_sidebar = g_app.show_console = g_app.show_chat = 1;
-    g_app.lock_key = g_app.panic_key = 1;
+    g_app.show.sidebar = g_app.show.console = g_app.show.chat = 1;
+    g_app.lock.key = g_app.panic.key = 1;
     g_app.sandbox = g_app.updater = 1;
     g_app.picture_noise = 1;
     note_setting_defaults();
@@ -756,20 +756,20 @@ static void lock_app_secrets(void) {
     // The signing key, a pasted key block and typed passwords pass through these for the whole run.
     // Best effort, as in chat_init.
     crypto_lock(&g_app.identity, sizeof g_app.identity);
-    crypto_lock(g_app.paste_buf, sizeof g_app.paste_buf);
+    crypto_lock(g_app.paste.buf, sizeof g_app.paste.buf);
     crypto_lock(&g_app.input, sizeof g_app.input);
     crypto_lock(&g_app.saved_input, sizeof g_app.saved_input);
-    crypto_lock(&g_app.lock_input, sizeof g_app.lock_input);
-    crypto_lock(g_app.pending_auto_password, sizeof g_app.pending_auto_password);
-    crypto_lock(g_app.install_pass, sizeof g_app.install_pass);
+    crypto_lock(&g_app.lock.input, sizeof g_app.lock.input);
+    crypto_lock(g_app.autostart.password, sizeof g_app.autostart.password);
+    crypto_lock(g_app.install.pass, sizeof g_app.install.pass);
 }
 
 static int pick_save(const options_t *o) {
     // The save to open: the one --save names, the only one there is, or one picked later.
-    g_app.n_saves = install_list(g_app.saves, INSTALL_SAVES_MAX);
+    g_app.install.n_saves = install_list(g_app.install.saves, INSTALL_SAVES_MAX);
     if (o->save[0]) install_use(o->save);
-    else if (g_app.n_saves == 1) install_use(g_app.saves[0].name);
-    int saved = o->save[0] ? save_exists(o->save) : g_app.n_saves > 0;
+    else if (g_app.install.n_saves == 1) install_use(g_app.install.saves[0].name);
+    int saved = o->save[0] ? save_exists(o->save) : g_app.install.n_saves > 0;
     if (o->save[0] && !saved && !o->update)
         saved_note("* there's no save called %s yet: chat starts from its defaults, and :install makes it",
                    install_shown_name(o->save));

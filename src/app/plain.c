@@ -278,7 +278,7 @@ int run_plain(const char *session_name, const char *password, uint16_t port,
         }
         if (g_sigquit) {
             g_sigquit = 0;
-            if (g_app.panic_key) panic(PANIC_KEY);
+            if (g_app.panic.key) panic(PANIC_KEY);
             break;
         }
         for (int i = 0; i < ns; i++) if (ready[i]) chat_on_socket_readable(i < nc ? c : left, socks[i], now);

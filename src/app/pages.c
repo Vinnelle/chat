@@ -55,7 +55,7 @@ void list_move(list_key_t k, int *sel, int n) {
 
 // Left/right on a row changes its value. On the Signing identity row, right opens the picker.
 void settings_key(const tui_key_t *key) {
-    const setting_def_t *d = g_app.settings_sel < N_SETTINGS ? &SETTINGS[g_app.settings_sel] : NULL;
+    const setting_def_t *d = g_app.settings.sel < N_SETTINGS ? &SETTINGS[g_app.settings.sel] : NULL;
     const char *const *names;
     int n;
     int steps = d && (setting_options(d->id, &names, &n) >= 0 || d->id == SET_COLOUR);
@@ -65,8 +65,8 @@ void settings_key(const tui_key_t *key) {
     switch (list_key(key)) {
         case LIST_UP:    settings_step(-1); break;
         case LIST_DOWN:  settings_step(1); break;
-        case LIST_FIRST: settings_select(section_row(g_app.settings_page, 1)); break;
-        case LIST_LAST:  g_app.settings_sel = SETTINGS_DONE; break;
+        case LIST_FIRST: settings_select(section_row(g_app.settings.page, 1)); break;
+        case LIST_LAST:  g_app.settings.sel = SETTINGS_DONE; break;
         case LIST_NEXT_SECTION: settings_section_step(1); break;
         case LIST_PREV_SECTION: settings_section_step(-1); break;
         case LIST_LEFT:  if (steps) setting_step(d->id, -1); break;
@@ -97,13 +97,13 @@ void sign_picker_key(const tui_key_t *key) {
     switch (k) {
         case LIST_CHOOSE:
         case LIST_RIGHT:
-            sign_pick(g_app.sign_sel);
+            sign_pick(g_app.key.sel);
             if (g_app.mode == MODE_SIGN_CHOICE) g_app.mode = MODE_SETTINGS;
             break;
         case LIST_LEFT:
         case LIST_BACK:  g_app.mode = MODE_SETTINGS; break;
         case LIST_CLOSE: settings_done(); break;
-        default: list_move(k, &g_app.sign_sel, N_PICKS); break;
+        default: list_move(k, &g_app.key.sel, N_PICKS); break;
     }
     g_app.dirty = 1;
 }
@@ -134,7 +134,7 @@ void browser_key(const tui_key_t *key) {
         char start[1200];
         if (b->n_items > 0 && !b->items[b->selected].is_dir) browser_entry_path(b, &b->items[b->selected], start, sizeof start);
         else path_join(start, sizeof start, b->path, "");
-        begin_key_path(g_app.load_kind, start, 1);
+        begin_key_path(g_app.key.load_kind, start, 1);
         return;
     }
     list_key_t k = list_key(key);
@@ -162,12 +162,12 @@ void browser_key(const tui_key_t *key) {
 // :send without a path: the file is picked here, starting where the last one came from.
 void begin_send_browse(int asis) {
     if (g_app.mode != MODE_CHAT && g_app.mode != MODE_FILES) return;
-    g_app.send_asis = asis;
+    g_app.files.send_asis = asis;
     const char *home = platform_home_dir();
-    if ((!g_app.send_dir[0] || browser_load(&g_app.browser, g_app.send_dir) != 0)
+    if ((!g_app.files.send_dir[0] || browser_load(&g_app.browser, g_app.files.send_dir) != 0)
         && (!home || browser_load(&g_app.browser, home) != 0))
         browser_load(&g_app.browser, "/");
-    g_app.browse_back = g_app.mode;
+    g_app.files.browse_back = g_app.mode;
     g_app.mode = MODE_SEND_BROWSE;
     g_app.dirty = 1;
 }
@@ -186,23 +186,23 @@ void send_browser_key(const tui_key_t *key) {
             if (sel->is_dir) {
                 browser_load(b, full);
             } else if (k == LIST_CHOOSE) {
-                g_app.mode = g_app.browse_back;
+                g_app.mode = g_app.files.browse_back;
                 if (!g_app.selected || g_app.selected->initialising) {
                     note("no session to send %.80s to", sel->name);
                     break;
                 }
-                copy_str(g_app.send_dir, b->path, sizeof g_app.send_dir);
+                copy_str(g_app.files.send_dir, b->path, sizeof g_app.files.send_dir);
                 chat_t *e = &g_app.selected->engine;
                 int was = e->file_seq;
                 g_echo = 1;
-                chat_send_file(e, full, g_app.send_asis);
+                chat_send_file(e, full, g_app.files.send_asis);
                 g_echo = 0;
-                if (e->file_seq != was) g_app.file_num = e->file_seq;
+                if (e->file_seq != was) g_app.files.num = e->file_seq;
             }
             break;
         }
         case LIST_BACK:
-        case LIST_CLOSE: g_app.mode = g_app.browse_back; break;
+        case LIST_CLOSE: g_app.mode = g_app.files.browse_back; break;
         default: list_move(k, &b->selected, b->n_items); break;
     }
     g_app.dirty = 1;
@@ -214,13 +214,13 @@ void begin_save_browse(int num, int anyway) {
     if (g_app.mode != MODE_CHAT && g_app.mode != MODE_FILES && g_app.mode != MODE_FILE_VIEW) return;
     char dl[600];
     const char *home = platform_home_dir();
-    if ((!g_app.save_dir[0] || browser_load(&g_app.browser, g_app.save_dir) != 0)
+    if ((!g_app.files.save_dir[0] || browser_load(&g_app.browser, g_app.files.save_dir) != 0)
         && (platform_downloads_dir(dl, sizeof dl) != 0 || browser_load(&g_app.browser, dl) != 0)
         && (!home || browser_load(&g_app.browser, home) != 0))
         browser_load(&g_app.browser, "/");
-    g_app.save_num = num;
-    g_app.save_anyway = anyway;
-    g_app.browse_back = g_app.mode;
+    g_app.files.save_num = num;
+    g_app.files.save_anyway = anyway;
+    g_app.files.browse_back = g_app.mode;
     g_app.mode = MODE_SAVE_BROWSE;
     g_app.dirty = 1;
 }
@@ -230,12 +230,12 @@ void save_browser_key(const tui_key_t *key) {
     browser_t *b = &g_app.browser;
     if (key->type == TUI_KEY_CHAR && key->ch_len == 1 && key->ch[0] == '~') { browser_home(); g_app.dirty = 1; return; }
     if (key->type == TUI_KEY_CHAR && key->ch_len == 1 && key->ch[0] == 's') {
-        g_app.mode = g_app.browse_back;
+        g_app.mode = g_app.files.browse_back;
         g_app.dirty = 1;
-        if (!g_app.selected || g_app.selected->initialising) { note("no session to save file %d from", g_app.save_num); return; }
-        copy_str(g_app.save_dir, b->path, sizeof g_app.save_dir);
+        if (!g_app.selected || g_app.selected->initialising) { note("no session to save file %d from", g_app.files.save_num); return; }
+        copy_str(g_app.files.save_dir, b->path, sizeof g_app.files.save_dir);
         g_echo = 1;
-        chat_file_fetch(&g_app.selected->engine, g_app.save_num, 0, g_app.save_anyway, b->path);
+        chat_file_fetch(&g_app.selected->engine, g_app.files.save_num, 0, g_app.files.save_anyway, b->path);
         g_echo = 0;
         return;
     }
@@ -252,7 +252,7 @@ void save_browser_key(const tui_key_t *key) {
             break;
         }
         case LIST_BACK:
-        case LIST_CLOSE: g_app.mode = g_app.browse_back; break;
+        case LIST_CLOSE: g_app.mode = g_app.files.browse_back; break;
         default: list_move(k, &b->selected, b->n_items); break;
     }
     g_app.dirty = 1;
@@ -266,37 +266,37 @@ void paste_key(const tui_key_t *key) {
         g_app.dirty = 1;
         return;
     }
-    size_t room = sizeof g_app.paste_buf - 1 - g_app.paste_len;
+    size_t room = sizeof g_app.paste.buf - 1 - g_app.paste.len;
     if (key->type == TUI_KEY_CHAR && room >= (size_t)key->ch_len) {
-        memcpy(g_app.paste_buf + g_app.paste_len, key->ch, (size_t)key->ch_len);
-        g_app.paste_len += (size_t)key->ch_len;
+        memcpy(g_app.paste.buf + g_app.paste.len, key->ch, (size_t)key->ch_len);
+        g_app.paste.len += (size_t)key->ch_len;
     } else if ((key->type == TUI_KEY_ENTER || key->type == TUI_KEY_JOIN_SESSION) && room >= 1) {
-        g_app.paste_buf[g_app.paste_len++] = '\n';
-    } else if (key->type == TUI_KEY_BACKSPACE && g_app.paste_len > 0) {
-        g_app.paste_len--;
+        g_app.paste.buf[g_app.paste.len++] = '\n';
+    } else if (key->type == TUI_KEY_BACKSPACE && g_app.paste.len > 0) {
+        g_app.paste.len--;
     } else {
         return;
     }
-    g_app.paste_buf[g_app.paste_len] = '\0';
-    snprintf(g_app.paste_status, sizeof g_app.paste_status, "%zu bytes so far", g_app.paste_len);
+    g_app.paste.buf[g_app.paste.len] = '\0';
+    snprintf(g_app.paste.status, sizeof g_app.paste.status, "%zu bytes so far", g_app.paste.len);
     g_app.dirty = 1;
-    int age = g_app.load_kind == IDENT_AGE;
+    int age = g_app.key.load_kind == IDENT_AGE;
     if (age) {
         // Read when the key's last line ends, so a pasted file's own newline doesn't end up on the settings page.
-        const char *at = strstr(g_app.paste_buf, AGE_SECRET_KEY_PREFIX);
-        if (!at || g_app.paste_buf[g_app.paste_len - 1] != '\n'
-            || g_app.paste_len - 1 - (size_t)(at - g_app.paste_buf) < AGE_SECRET_KEY_STRLEN) return;
+        const char *at = strstr(g_app.paste.buf, AGE_SECRET_KEY_PREFIX);
+        if (!at || g_app.paste.buf[g_app.paste.len - 1] != '\n'
+            || g_app.paste.len - 1 - (size_t)(at - g_app.paste.buf) < AGE_SECRET_KEY_STRLEN) return;
     } else {
         // Only look at the end, where the END line will be.
         size_t el = sizeof PGP_PRIVATE_END - 1;
-        if (g_app.paste_len < el || memcmp(g_app.paste_buf + g_app.paste_len - el, PGP_PRIVATE_END, el) != 0) return;
+        if (g_app.paste.len < el || memcmp(g_app.paste.buf + g_app.paste.len - el, PGP_PRIVATE_END, el) != 0) return;
     }
-    int rc = age ? age_import_secret_key_text(g_app.paste_buf, &g_app.identity)
-                 : pgp_import_secret_key_text(g_app.paste_buf, &g_app.identity);
+    int rc = age ? age_import_secret_key_text(g_app.paste.buf, &g_app.identity)
+                 : pgp_import_secret_key_text(g_app.paste.buf, &g_app.identity);
     paste_clear();
     if (rc == 0) {
-        g_app.identity_source = g_app.load_kind;
-        g_app.key_origin = KEY_PASTED;
+        g_app.identity_source = g_app.key.load_kind;
+        g_app.key.origin = KEY_PASTED;
         identity_chosen();
         g_app.mode = MODE_SETTINGS;
     } else if (age) {
@@ -322,13 +322,13 @@ static const char *page_label(const char *label, const char *group, char *out, s
 void render_settings(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar) {
     tui_row_t rows[N_SETTINGS];
     char values[N_SETTINGS][160], labels[N_SETTINGS][64];
-    int n_rows = 0, sel_row = -1, s = g_app.settings_page, end = section_begin(s + 1);
+    int n_rows = 0, sel_row = -1, s = g_app.settings.page, end = section_begin(s + 1);
     const char *group = NULL, *heading = NULL;
     for (int i = section_begin(s); i < end; i++) {
         const setting_def_t *d = &SETTINGS[i];
         if (d->group) group = heading = d->group;   // the heading goes on its group's first listed row
         if (!setting_shown(d->id)) continue;
-        if (i == g_app.settings_sel) sel_row = n_rows;
+        if (i == g_app.settings.sel) sel_row = n_rows;
         setting_value(d->id, values[n_rows], sizeof values[n_rows]);
         int greyed = row_greyed(d->id);
         if (greyed) copy_str(values[n_rows], "can't be used here", sizeof values[n_rows]);
@@ -338,8 +338,8 @@ void render_settings(int rows_n, int cols_n, const char *clock, const tui_bar_t 
         heading = NULL;
         n_rows++;
     }
-    if (g_app.settings_sel == SETTINGS_DONE) sel_row = n_rows;   // the Done button
-    const setting_def_t *d = g_app.settings_sel < N_SETTINGS ? &SETTINGS[g_app.settings_sel] : NULL;
+    if (g_app.settings.sel == SETTINGS_DONE) sel_row = n_rows;   // the Done button
+    const setting_def_t *d = g_app.settings.sel < N_SETTINGS ? &SETTINGS[g_app.settings.sel] : NULL;
     char help[600], usage[96] = "";
     if (!d) {
         if (g_app.onboarding)
@@ -363,13 +363,13 @@ void render_settings(int rows_n, int cols_n, const char *clock, const tui_bar_t 
         int greyed = row_greyed(d->id);
         if (greyed && d->id == SET_SECURITY_KEY)
             snprintf(help, sizeof help, "Can't be used here: %s. A security key's secret is only given after a touch, "
-                     "and chat needs a way to ask it for one.", g_app.seckey_why);
+                     "and chat needs a way to ask it for one.", g_app.factor.seckey_why);
         else if (greyed)
             snprintf(help, sizeof help, "Can't be used here: %s. The device lock makes the save unlock only on this "
                      "device, by sealing a secret with something the device keeps to itself: its TPM, on Linux "
                      "through systemd's credential service or /dev/tpmrm0. Without that, there's nothing to seal it "
                      "with.",
-                     g_app.device_why);
+                     g_app.device.why);
         else
             snprintf(help, sizeof help, "%s%s", recipient, d->help);
         if (d->values && !greyed) snprintf(usage, sizeof usage, ":set %s %s", d->key, d->values);
@@ -402,15 +402,15 @@ void render_sign_picker(int rows_n, int cols_n, const char *clock, const tui_bar
     }
     char help[600], usage[32] = "";
     char now[160]; setting_value(SET_SIGN, now, sizeof now);
-    snprintf(help, sizeof help, "%s Now: %s.", SIGN_PICKS[g_app.sign_sel].help, now);
+    snprintf(help, sizeof help, "%s Now: %s.", SIGN_PICKS[g_app.key.sel].help, now);
     static const char *const SET[N_PICKS] = { "off", "age", "age:PATH", "age:PATH", NULL, "pgp", "pgp:PATH", "pgp:PATH", NULL };
-    if (SET[g_app.sign_sel]) snprintf(usage, sizeof usage, ":set sign %s", SET[g_app.sign_sel]);
+    if (SET[g_app.key.sel]) snprintf(usage, sizeof usage, ":set sign %s", SET[g_app.key.sel]);
     const char *nav[8];
     tui_page_t page = {
         .title = "Settings" CRUMB "Profile" CRUMB "Signing identity",
         .clock = clock,
         .nav = nav, .n_nav = settings_sections(nav, 8), .nav_sel = settings_section_index(SET_SIGN),
-        .rows = rows, .n_rows = N_PICKS, .selected = g_app.sign_sel,
+        .rows = rows, .n_rows = N_PICKS, .selected = g_app.key.sel,
         .help = help, .usage = usage[0] ? usage : NULL,
     };
     tui_render_page(rows_n, cols_n, &page, bar, g_app.color_enabled);
@@ -683,9 +683,9 @@ static void browser_render(const browser_page_t *v, int rows_n, int cols_n, cons
 
 void render_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar) {
     const browser_t *b = &g_app.browser;
-    int age = g_app.load_kind == IDENT_AGE;
+    int age = g_app.key.load_kind == IDENT_AGE;
     static browser_page_t v;
-    browser_lay_out(&v, rows_n, cols_n, g_app.load_kind);
+    browser_lay_out(&v, rows_n, cols_n, g_app.key.load_kind);
     char help[700], usage[1100] = "";
     if (!browser_folder_help(b, help, sizeof help)) {
         char full[1200], shown[1200];
@@ -717,15 +717,15 @@ void render_save_browser(int rows_n, int cols_n, const char *clock, const tui_ba
     static browser_page_t v;
     browser_lay_out(&v, rows_n, cols_n, IDENT_NONE);
     char help[1400], title[160];
-    const file_entry_t *f = g_app.selected ? chat_file(&g_app.selected->engine, g_app.save_num) : NULL;
+    const file_entry_t *f = g_app.selected ? chat_file(&g_app.selected->engine, g_app.files.save_num) : NULL;
     char what[FILE_NAME_MAX + 48];
     if (f) {
         char sz[32]; file_format_size(f->size, sz, sizeof sz);
         snprintf(what, sizeof what, "%s (%s)", f->name, sz);
     } else {
-        snprintf(what, sizeof what, "file %d", g_app.save_num);
+        snprintf(what, sizeof what, "file %d", g_app.files.save_num);
     }
-    snprintf(title, sizeof title, "Save file %d", g_app.save_num);
+    snprintf(title, sizeof title, "Save file %d", g_app.files.save_num);
     char open_help[700] = "";
     if (b->n_items > 0 && b->items[b->selected].is_dir) browser_folder_help(b, open_help, sizeof open_help);
     snprintf(help, sizeof help, "s saves %s in %s.%s%s", what, b->path, open_help[0] ? " " : "", open_help);
@@ -776,7 +776,7 @@ static int files_list(const session_slot_t *s, const file_entry_t **l) {
 }
 
 static int files_sel(const file_entry_t *const *l, int n) {
-    for (int i = 0; i < n; i++) if (l[i]->num == g_app.file_num) return i;
+    for (int i = 0; i < n; i++) if (l[i]->num == g_app.files.num) return i;
     return 0;
 }
 
@@ -986,9 +986,9 @@ static void file_help(const session_slot_t *s, const file_entry_t *f, char *help
 }
 
 void file_ask(int what, const file_entry_t *f) {
-    g_app.file_ask = what;
-    g_app.file_ask_num = f->num;
-    g_app.file_back = g_app.mode;
+    g_app.files.ask = what;
+    g_app.files.ask_num = f->num;
+    g_app.files.back = g_app.mode;
     g_app.mode = MODE_FILE_ASK;
 }
 
@@ -1094,12 +1094,12 @@ static void file_open(session_slot_t *s, const file_entry_t *f) {
 
 void file_ask_yes(void) {
     session_slot_t *s = g_app.selected;
-    int num = g_app.file_ask_num;
-    g_app.mode = g_app.file_back;
+    int num = g_app.files.ask_num;
+    g_app.mode = g_app.files.back;
     g_app.dirty = 1;
     const file_entry_t *f = s && !s->initialising ? chat_file(&s->engine, num) : NULL;
     if (!f) return;
-    switch (g_app.file_ask) {
+    switch (g_app.files.ask) {
         case ASK_VIEW:    if (echo_fetch(s, num, 1, 1, NULL) == 0) g_app.mode = MODE_FILE_VIEW; break;
         case ASK_SHOW:    echo_fetch(s, num, 1, 1, NULL); break;
         case ASK_FETCH:   echo_fetch(s, num, 0, 1, NULL); break;
@@ -1117,19 +1117,19 @@ void file_ask_yes(void) {
 }
 
 void file_ask_no(void) {
-    g_app.mode = g_app.file_back;
+    g_app.mode = g_app.files.back;
     g_app.dirty = 1;
 }
 
 int file_ask_paras(tui_para_t *paras, const char **title, const char **keys) {
     static char text[900];
     session_slot_t *s = g_app.selected;
-    const file_entry_t *f = s && !s->initialising ? chat_file(&s->engine, g_app.file_ask_num) : NULL;
+    const file_entry_t *f = s && !s->initialising ? chat_file(&s->engine, g_app.files.ask_num) : NULL;
     if (!f) { *title = "FILES"; *keys = "n back"; return add_para(paras, 0, TUI_P_TEXT, "That file isn't here any more."); }
     char sz[32], lim[32];
     file_format_size(f->size, sz, sizeof sz);
     file_format_size(chat_file_cap(&s->engine), lim, sizeof lim);
-    switch (g_app.file_ask) {
+    switch (g_app.files.ask) {
         case ASK_STOP: {
             char got[32]; file_format_size(chat_file_got(f), got, sizeof got);
             *title = "STOP";
@@ -1153,7 +1153,7 @@ int file_ask_paras(tui_para_t *paras, const char **title, const char **keys) {
                 file_format_duration(left, eta, sizeof eta);
                 snprintf(took, sizeof took, " At chat's normal rate it takes %s to come, less if %s has fast transfers on.", eta, who);
             }
-            int ask = g_app.file_ask;
+            int ask = g_app.files.ask;
             *title = "OVER YOUR LIMIT";
             *keys = "y fetch it" DOT_SEP "n cancel";
             snprintf(text, sizeof text, "`%s` is %s, over your %s file size limit. Fetch it anyway%s?%s", f->name, sz, lim,
@@ -1183,7 +1183,7 @@ void begin_files(void) {
     session_slot_t *s = g_app.selected;
     if (!s || s->initialising) { note("no session open - ctrl+n starts one, ctrl+j joins one"); return; }
     // The newest file, since that's usually the one to do something with.
-    g_app.file_num = s->engine.file_seq;
+    g_app.files.num = s->engine.file_seq;
     g_app.mode = MODE_FILES;
     g_app.dirty = 1;
 }
@@ -1258,11 +1258,11 @@ void files_key(const tui_key_t *key) {
         case LIST_CLOSE: g_app.mode = MODE_CHAT; break;
         case LIST_NEXT_SECTION:
         case LIST_PREV_SECTION:
-            for (int i = 0; i < n; i++) if (l[i]->mine != (f && f->mine)) { g_app.file_num = l[i]->num; break; }
+            for (int i = 0; i < n; i++) if (l[i]->mine != (f && f->mine)) { g_app.files.num = l[i]->num; break; }
             break;
         default:
             list_move(k, &sel, n);
-            if (n) g_app.file_num = l[sel]->num;
+            if (n) g_app.files.num = l[sel]->num;
             break;
     }
 }
@@ -1408,10 +1408,10 @@ void viewer_key(const tui_key_t *key) {
     int pics[FILE_OFFERS_MAX], np = 0, at = -1;
     for (int i = 0; i < n; i++) if (l[i]->image) { if (i == sel) at = np; pics[np++] = i; }
     switch (list_key(key)) {
-        case LIST_DOWN:  if (at + 1 < np) g_app.file_num = l[pics[at + 1]]->num; break;
-        case LIST_UP:    if (at > 0) g_app.file_num = l[pics[at - 1]]->num; break;
-        case LIST_FIRST: if (np) g_app.file_num = l[pics[0]]->num; break;
-        case LIST_LAST:  if (np) g_app.file_num = l[pics[np - 1]]->num; break;
+        case LIST_DOWN:  if (at + 1 < np) g_app.files.num = l[pics[at + 1]]->num; break;
+        case LIST_UP:    if (at > 0) g_app.files.num = l[pics[at - 1]]->num; break;
+        case LIST_FIRST: if (np) g_app.files.num = l[pics[0]]->num; break;
+        case LIST_LAST:  if (np) g_app.files.num = l[pics[np - 1]]->num; break;
         case LIST_CHOOSE:
         case LIST_RIGHT: if (f) view_fetch(s, f); break;
         case LIST_LEFT:
@@ -1533,7 +1533,7 @@ static int changelog_paras(const tui_para_t **out) {
 void begin_changelog(void) {
     if (g_app.mode != MODE_CHAT) return;
     g_app.mode = MODE_CHANGELOG;
-    g_app.changelog_scroll = 0;
+    g_app.changelog.scroll = 0;
     g_app.dirty = 1;
 }
 
@@ -1542,21 +1542,21 @@ void render_changelog(int rows_n, int cols_n, const char *clock, const tui_bar_t
     int n = changelog_paras(&paras);
     char title[48];
     snprintf(title, sizeof title, "Changelog (v%s here)", CHAT_VERSION);
-    g_app.changelog_most = tui_render_text(rows_n, cols_n, title, clock, paras, n, &g_app.changelog_scroll, bar,
+    g_app.changelog.most = tui_render_text(rows_n, cols_n, title, clock, paras, n, &g_app.changelog.scroll, bar,
                                            g_app.color_enabled);
 }
 
 void changelog_key(const tui_key_t *key) {
     int rows_n, cols_n; term_get_size(&rows_n, &cols_n);
     int page = rows_n > 6 ? rows_n - 4 : 1;
-    int *s = &g_app.changelog_scroll;
+    int *s = &g_app.changelog.scroll;
     switch (key->type) {
         case TUI_KEY_UP:        (*s)--; break;
         case TUI_KEY_DOWN:      (*s)++; break;
         case TUI_KEY_PAGE_UP:   *s -= page; break;
         case TUI_KEY_PAGE_DOWN: *s += page; break;
         case TUI_KEY_HOME:      *s = 0; break;
-        case TUI_KEY_END:       *s = g_app.changelog_most; break;
+        case TUI_KEY_END:       *s = g_app.changelog.most; break;
         case TUI_KEY_ESCAPE:
         case TUI_KEY_HELP:      g_app.mode = MODE_CHAT; break;
         case TUI_KEY_CHAR:
@@ -1567,7 +1567,7 @@ void changelog_key(const tui_key_t *key) {
                 case ' ': *s += page; break;
                 case 'b': *s -= page; break;
                 case 'g': *s = 0; break;
-                case 'G': *s = g_app.changelog_most; break;
+                case 'G': *s = g_app.changelog.most; break;
                 case 'q': g_app.mode = MODE_CHAT; break;
                 default: break;
             }
@@ -1575,7 +1575,7 @@ void changelog_key(const tui_key_t *key) {
         default: break;
     }
     if (*s < 0) *s = 0;
-    if (*s > g_app.changelog_most) *s = g_app.changelog_most;
+    if (*s > g_app.changelog.most) *s = g_app.changelog.most;
     g_app.dirty = 1;
 }
 
