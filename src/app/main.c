@@ -557,7 +557,7 @@ static _Noreturn void close_tui(void) {
     else keep_sessions_saved();
     for (int i = 0; i < MAX_SESSIONS; i++) {
         if (!g_app.used[i]) continue;
-        g_app.sessions[i].engine.coming_back = session_kept(&g_app.sessions[i]);
+        chat_set_coming_back(&g_app.sessions[i].engine, session_kept(&g_app.sessions[i]));
         close_session(&g_app.sessions[i]);
     }
     // After the sessions, so their onion services are removed with their control connections first.

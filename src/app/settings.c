@@ -610,13 +610,13 @@ void settings_to_sessions(void) {
         chat_t *e = &g_app.sessions[i].engine;
         chat_apply_routing(e, &g_app.route);
         chat_set_file_options(e, g_app.file_cap, g_app.fast_files);
-        e->picture_noise = g_app.picture_noise;
-        e->verify_required = !g_app.verify_optional || g_app.sessions[i].contact;
-        e->notify_mode = g_app.notify_mode;
-        e->notify_preview = g_app.notify_preview;
+        chat_set_picture_noise(e, g_app.picture_noise);
+        chat_set_verify_required(e, !g_app.verify_optional || g_app.sessions[i].contact);
+        chat_set_notify_mode(e, g_app.notify_mode);
+        chat_set_notify_preview(e, g_app.notify_preview);
         chat_set_net_log(e, g_app.net_log);
-        if (strcmp(e->nick, g_app.nick) != 0) chat_set_nick(e, g_app.nick);
-        if (memcmp(e->my_color, g_app.color, 3) != 0) chat_set_colour(e, g_app.color);
+        if (strcmp(chat_nick(e), g_app.nick) != 0) chat_set_nick(e, g_app.nick);
+        if (memcmp(chat_colour(e), g_app.color, 3) != 0) chat_set_colour(e, g_app.color);
     }
 }
 
@@ -706,7 +706,7 @@ void setting_choose(setting_id_t id, int i) {
         case SET_VERIFY:
             g_app.verify_optional = i;
             for (int s = 0; s < MAX_SESSIONS; s++)
-                if (takes_settings(s)) g_app.sessions[s].engine.verify_required = !i;
+                if (takes_settings(s)) chat_set_verify_required(&g_app.sessions[s].engine, !i);
             break;
         case SET_TOR_LAUNCH:
             g_app.tor.launch = i;
@@ -716,12 +716,12 @@ void setting_choose(setting_id_t id, int i) {
         case SET_NOTIFY:
             g_app.notify_mode = (notify_mode_t)i;
             for (int s = 0; s < MAX_SESSIONS; s++)
-                if (takes_settings(s)) g_app.sessions[s].engine.notify_mode = g_app.notify_mode;
+                if (takes_settings(s)) chat_set_notify_mode(&g_app.sessions[s].engine, g_app.notify_mode);
             break;
         case SET_PREVIEW:
             g_app.notify_preview = (notify_preview_t)i;
             for (int s = 0; s < MAX_SESSIONS; s++)
-                if (takes_settings(s)) g_app.sessions[s].engine.notify_preview = g_app.notify_preview;
+                if (takes_settings(s)) chat_set_notify_preview(&g_app.sessions[s].engine, g_app.notify_preview);
             break;
         case SET_NET:
             g_app.net_log = i;
@@ -736,7 +736,7 @@ void setting_choose(setting_id_t id, int i) {
         case SET_NOISE:
             g_app.picture_noise = i;
             for (int s = 0; s < MAX_SESSIONS; s++)
-                if (takes_settings(s)) g_app.sessions[s].engine.picture_noise = i;
+                if (takes_settings(s)) chat_set_picture_noise(&g_app.sessions[s].engine, i);
             break;
         case SET_BETAS:
             g_app.betas = i;

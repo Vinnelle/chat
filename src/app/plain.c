@@ -91,7 +91,7 @@ static chat_t *plain_move(chat_t *c, chat_t **left, chat_t engines[2], const cha
     if (*left) { chat_shutdown(*left); *left = NULL; }
     chat_t *n = c == &engines[0] ? &engines[1] : &engines[0];
     chat_opts_t o; memset(&o, 0, sizeof o);
-    copy_str(o.nick, c->nick, sizeof o.nick);
+    copy_str(o.nick, chat_nick(c), sizeof o.nick);
     copy_str(o.session_name, to->session_name, sizeof o.session_name);
     copy_str(o.password, to->password, sizeof o.password);
     o.created = to->created;
@@ -101,9 +101,11 @@ static chat_t *plain_move(chat_t *c, chat_t **left, chat_t engines[2], const cha
         copy_str(o.route.tor.control, g_tor.state == TL_READY ? g_tor.control : "", sizeof o.route.tor.control);
     }
     app_session_opts(&o);
-    memcpy(o.color, c->my_color, 3);
+    memcpy(o.color, chat_colour(c), 3);
     o.moved = 1;
     o.moved_key = to->key;
+    o.file_view = plain_file_view;
+    o.delivery = plain_delivery;
     push_log("* moving to a new room - deriving its keys...");
     chat_init(n, &o, plain_print, plain_notify, NULL, now_seconds());
     crypto_wipe(&o, sizeof o);
@@ -112,18 +114,15 @@ static chat_t *plain_move(chat_t *c, chat_t **left, chat_t engines[2], const cha
         chat_shutdown(n);
         return NULL;
     }
-    if (n->route.mode == ROUTE_TOR && g_tor.state == TL_READY && g_tor.proc)
+    if (chat_route_mode(n) == ROUTE_TOR && g_tor.state == TL_READY && g_tor.proc)
         chat_tor_set_ports(n, g_tor.socks, g_tor.control, torproc_password(g_tor.proc));
-    n->file_view = plain_file_view;
-    n->delivery = plain_delivery;
-    n->net_verbose = c->net_verbose;
-    n->net_quiet = c->net_quiet;
+    chat_set_net_log(n, chat_net_log(c));
     chat_move_go(c, to, n, now_seconds());
-    c->print = plain_quiet;
+    chat_set_print(c, plain_quiet);
     push_log("* moved here from '%s' - %s. Codes compared there count here as each peer arrives", to->from,
              to->created ? "the peers asked along come once they say yes" : "chat opens once someone here answers");
     push_log("* this room's id is %s and its password \"%s\" - this is the only time they're shown, so keep them if you "
-             "want to come back or invite someone", n->session_name, to->password);
+             "want to come back or invite someone", chat_session_name(n), to->password);
     return n;
 }
 
@@ -196,13 +195,13 @@ static int plain_opts(chat_opts_t *o, const char *session_name, const char *pass
 
 static void plain_banner(chat_t *c) {
     chat_set_net_log(c, g_app.net_log);
-    char idhex[SHORT_ID_HEX + 1]; hex_encode(c->my_id, SHORT_ID_LEN, idhex);
-    if (c->route.mode == ROUTE_TOR)
+    char idhex[SHORT_ID_HEX + 1]; hex_encode(chat_my_id(c), SHORT_ID_LEN, idhex);
+    if (chat_route_mode(c) == ROUTE_TOR)
         printf("session '%s', you are %s (peer %s). encrypted, over Tor only. :quit or EOF to stop.\n",
-               c->session_name, c->nick, idhex);
+               chat_session_name(c), chat_nick(c), idhex);
     else
         printf("session '%s', you are %s (peer %s). encrypted, udp/%u, routing: %s. :quit or EOF to stop.\n",
-               c->session_name, c->nick, idhex, (unsigned)c->port, route_label());
+               chat_session_name(c), chat_nick(c), idhex, (unsigned)chat_port(c), route_label());
 }
 
 // A line typed, or EOF: 0 once it's time to stop.
@@ -243,9 +242,9 @@ int run_plain(const char *session_name, const char *password, uint16_t port,
     // Two, so a room :move left can close while the new one runs.
     static chat_t engines[2];
     chat_t *c = &engines[0], *left = NULL;
+    o.file_view = plain_file_view;
+    o.delivery = plain_delivery;
     chat_init(c, &o, plain_print, plain_notify, NULL, now_seconds());
-    c->file_view = plain_file_view;
-    c->delivery = plain_delivery;
     g_plain_engine = c;
     crypto_wipe(&o, sizeof o);
     if (!chat_started(c)) {

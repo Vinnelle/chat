@@ -352,7 +352,7 @@ void move_tick(double now) {
         session_slot_t *s = &g_app.sessions[i];
         if (!g_app.used[i] || !s->leaving || !chat_move_finished(&s->engine, now)) continue;
         for (int j = 0; j < MAX_SESSIONS; j++)
-            if (g_app.used[j] && &g_app.sessions[j].engine == s->engine.move_to)
+            if (g_app.used[j] && &g_app.sessions[j].engine == chat_moved_to(&s->engine))
                 console_note(&g_app.sessions[j], "* left %s, the room you moved from", s->name);
         close_session(s);
     }

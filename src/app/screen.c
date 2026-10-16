@@ -435,8 +435,10 @@ static const tui_dialog_t *quit_dialog(void) {
         if (g_app.sessions[i].initialising) continue;
         const chat_t *e = &g_app.sessions[i].engine;
         online += chat_online_count(e);
-        for (int f = 0; f < FILE_OFFERS_MAX; f++)
-            downloads += e->files[f].used && (e->files[f].dl == DL_ACTIVE || e->files[f].dl == DL_QUEUED);
+        for (int f = 0; f < FILE_OFFERS_MAX; f++) {
+            const file_entry_t *x = chat_file_at(e, f);
+            downloads += x && (x->dl == DL_ACTIVE || x->dl == DL_QUEUED);
+        }
     }
     const char *tor = g_tor.proc ? " Chat's own tor stops too." : "";
     if (n_sessions == 0)
@@ -1004,7 +1006,7 @@ static const char *session_empty_text(const session_slot_t *s) {
         copy_str(text, "Starting the session\nDeriving its keys - this takes a moment.", sizeof text);
     else if (!chat_ready(e))
         snprintf(text, sizeof text, "Connecting to %s\nThe chat opens once someone in the session answers.\n"
-                 "Finding them can take a minute%s.", s->name, e->route.mode == ROUTE_TOR ? " over Tor" : "");
+                 "Finding them can take a minute%s.", s->name, chat_route_mode(e) == ROUTE_TOR ? " over Tor" : "");
     else if (chat_online_count(e) == 0)
         snprintf(text, sizeof text, "No one else is here yet\nTo invite peers, share the session id and its "
                  "password.\n\n%s\n/invite copies both, as one invite", s->name);
@@ -1035,7 +1037,7 @@ tui_view_t current_view(char *sub, size_t cap) {
     v.image = pic_for;
     v.image_ctx = s;
     if (!s->initialising) {
-        v.self = s->engine.nick;
+        v.self = chat_nick(&s->engine);
         v.progress = progress_for;
     }
     if (s->has_new) v.new_lines = (int)(s->sb.total - s->new_at);
@@ -1044,7 +1046,7 @@ tui_view_t current_view(char *sub, size_t cap) {
     chat_format_timer(timer, after, sizeof after);
     if (s->initialising) snprintf(sub, cap, "starting");
     else snprintf(sub, cap, "%d online" DOT_SEP "%s%s%s", chat_online_count(&s->engine) + 1,
-                  routing_mode_name(s->engine.route.mode), timer ? DOT_SEP "messages go after " : "",
+                  routing_mode_name(chat_route_mode(&s->engine)), timer ? DOT_SEP "messages go after " : "",
                   timer ? after : "");
     v.subtitle = sub;
     return v;
@@ -1055,14 +1057,15 @@ tui_view_t current_view(char *sub, size_t cap) {
 // NULL when everyone gets it, or the setting sends to everyone anyway.
 static const char *held_warning(const session_slot_t *s) {
     static char warn[64 + CHAT_NAME_LEN * 2];
-    if (!s || !session_ready(s) || !s->engine.verify_required) return NULL;
+    if (!s || !session_ready(s) || !chat_verify_required(&s->engine)) return NULL;
     const chat_t *e = &s->engine;
     int held = 0;
     char first[CHAT_NAME_LEN] = "";
-    for (int i = 0; i < MAX_PEERS + MAX_PENDING_PEERS; i++) {
-        const peer_t *p = &e->peers[i];
+    for (int i = 0; i < CHAT_PEER_SLOTS; i++) {
+        const peer_t *p = chat_peer_at(e, i);
+        if (!p) continue;
         int code = chat_code_state(e, p);
-        if (!p->used || !p->ok || (code != CODE_TO_COMPARE && code != CODE_KEY_CHANGED)) continue;
+        if (code != CODE_TO_COMPARE && code != CODE_KEY_CHANGED) continue;
         if (held++ == 0) chat_peer_name(e, p, first);
     }
     if (held == 0) return NULL;
@@ -1105,7 +1108,7 @@ void chat_input(tui_bar_t *b, const tui_input_t *in) {
     b->placeholder = placeholder;
     snprintf(hint, sizeof hint, "enter send" DOT_SEP "/ commands%s%s" DOT_SEP "esc normal" DOT_SEP "f1 help",
              session_count() > 1 ? DOT_SEP "tab next session" : "",
-             !s->initialising && s->engine.file_seq > 0 ? DOT_SEP "ctrl+f files" : "");
+             !s->initialising && chat_newest_file(&s->engine) > 0 ? DOT_SEP "ctrl+f files" : "");
     b->hint = hint;
 }
 
@@ -1252,32 +1255,34 @@ static int build_net(tui_kv_t kv[MAX_NET], char vals[MAX_NET][NET_VALUE_MAX]) {
     const chat_t *e = &g_app.selected->engine;
     int n = 0;
 #define KV(l, ...) do { snprintf(vals[n], NET_VALUE_MAX, __VA_ARGS__); kv[n].label = (l); kv[n].value = vals[n]; n++; } while (0)
-    if (e->route.mode == ROUTE_TOR) {
+    chat_net_t net;
+    chat_net(e, &net);
+    if (chat_route_mode(e) == ROUTE_TOR) {
         const char *whose = tor_link_whose();
         if (whose) KV("route", "tor (%s)", whose);
         else KV("route", "tor");
         char t[NET_VALUE_MAX];
         tor_link_status(t, sizeof t);
         KV("tor", "%s", t);
-        KV("onion", "%s", e->tor && tor_my_onion(e->tor)[0] ? "published" : "waiting");
+        KV("onion", "%s", net.onion ? "published" : "waiting");
     } else {
-        KV("route", "udp/%u", (unsigned)e->port);
-        KV("portmap", "%s", !e->pm ? "off" : portmap_mapped(e->pm, NULL) ? "mapped" : "not yet");
+        KV("route", "udp/%u", (unsigned)chat_port(e));
+        KV("portmap", "%s", net.portmap == CHAT_NET_OFF ? "off" : net.portmap ? "mapped" : "not yet");
     }
-    if (e->nostr && !nostr_active(e->nostr)) KV("relays", "not needed");
-    else if (e->nostr) KV("relays", "%d/%d up", nostr_relays_up(e->nostr), nostr_relay_total(e->nostr));
+    if (net.relays == 0) KV("relays", "not needed");
+    else if (net.relays == 1) KV("relays", "%d/%d up", net.relays_up, net.relays_total);
     else KV("relays", "off");
-    if (e->route.mode != ROUTE_TOR) {
-        if (e->dht_on) {
-            KV("dht", "%s", dht_known_count(&e->dht) ? "Connected" : "Connecting");
-            KV("found", "%d peers", dht_found_count(&e->dht));
+    if (chat_route_mode(e) != ROUTE_TOR) {
+        if (net.dht != CHAT_NET_OFF) {
+            KV("dht", "%s", net.dht ? "Connected" : "Connecting");
+            KV("found", "%d peers", net.dht_found);
         } else {
             KV("dht", "Off");
         }
     }
     KV("cands", "%d", chat_candidate_count(e));
     KV("pending", "%d", chat_pending_count(e));
-    KV("rx", "%u packets", e->st.rx);
+    KV("rx", "%u packets", net.rx);
 #undef KV
     return n;
 }
@@ -1327,19 +1332,19 @@ void render(void) {
         default: break;
     }
 
-    static tui_peer_row_t peer_rows[MAX_PEERS + MAX_PENDING_PEERS + 1];
+    static tui_peer_row_t peer_rows[CHAT_PEER_SLOTS + 1];
     int n_peers = 0;
     if (g_app.selected && !g_app.selected->initialising) {
         chat_t *e = &g_app.selected->engine;
         tui_peer_row_t *me = &peer_rows[n_peers++];
         memset(me, 0, sizeof *me);
-        copy_str(me->nick, e->nick, sizeof me->nick);
-        memcpy(me->color, e->my_color, 3);
+        copy_str(me->nick, chat_nick(e), sizeof me->nick);
+        memcpy(me->color, chat_colour(e), 3);
         me->you = 1;
-        me->history = e->persist;
-        for (int i = 0; i < MAX_PEERS + MAX_PENDING_PEERS && n_peers < MAX_PEERS + MAX_PENDING_PEERS + 1; i++) {
-            peer_t *p = &e->peers[i];
-            if (!p->used || !p->ok) continue;
+        me->history = chat_history(e);
+        for (int i = 0; i < CHAT_PEER_SLOTS && n_peers < CHAT_PEER_SLOTS + 1; i++) {
+            const peer_t *p = chat_peer_at(e, i);
+            if (!p) continue;
             tui_peer_row_t *r = &peer_rows[n_peers++];
             memset(r, 0, sizeof *r);
             // Nicks can't contain '#', so one here is the id added to tell lookalikes apart, which the sidebar
@@ -1348,12 +1353,12 @@ void render(void) {
             char *tag = strchr(name, '#');
             if (tag) { copy_str(r->tag, tag, sizeof r->tag); *tag = '\0'; }
             copy_str(r->nick, name, sizeof r->nick);
-            memcpy(r->color, p->color, 3);
-            r->verify = (tui_verify_t)p->identity_state;
+            memcpy(r->color, chat_peer_colour(p), 3);
+            r->verify = (tui_verify_t)chat_peer_verify_state(p);
             r->code = (tui_code_t)chat_code_state(e, p);
-            r->modified = p->build_state == BUILD_MODIFIED;
-            r->history = p->persists;
-            r->ignored = chat_ignored(e, p->id);
+            r->modified = chat_peer_build_state(p) == BUILD_MODIFIED;
+            r->history = chat_peer_keeps_history(p);
+            r->ignored = chat_ignored(e, chat_peer_id(p));
         }
     }
 

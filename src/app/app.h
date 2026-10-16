@@ -5,6 +5,7 @@
 #define CHAT_APP_H
 
 #include "core/chat.h"
+#include "core/state.h"
 #include "core/trust.h"
 #include "crypto/crypto.h"
 #include "crypto/age.h"

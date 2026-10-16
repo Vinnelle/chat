@@ -153,6 +153,66 @@ int chat_candidate_count(const chat_t *c) {
 
 int chat_ready(const chat_t *c) { return c->created || c->ever_connected; }
 
+const char *chat_nick(const chat_t *c) { return c->nick; }
+const char *chat_session_name(const chat_t *c) { return c->session_name; }
+const uint8_t *chat_my_id(const chat_t *c) { return c->my_id; }
+const uint8_t *chat_colour(const chat_t *c) { return c->my_color; }
+route_mode_t chat_route_mode(const chat_t *c) { return c->route.mode; }
+uint16_t chat_port(const chat_t *c) { return c->port; }
+int chat_history(const chat_t *c) { return c->persist; }
+int chat_verify_required(const chat_t *c) { return c->verify_required; }
+int chat_net_log(const chat_t *c) { return c->net_verbose ? NET_LOG_VERBOSE : c->net_quiet ? NET_LOG_OFF : NET_LOG_NORMAL; }
+int chat_newest_file(const chat_t *c) { return c->file_seq; }
+
+const file_entry_t *chat_file_at(const chat_t *c, int i) {
+    return i >= 0 && i < FILE_OFFERS_MAX && c->files[i].used ? &c->files[i] : NULL;
+}
+
+unsigned chat_own_seq(const chat_t *c) { return c->own_seq; }
+int chat_line_quote(const chat_t *c) { return c->line_quote; }
+const chat_t *chat_moved_to(const chat_t *c) { return c->move_to; }
+
+void chat_net(const chat_t *c, chat_net_t *out) {
+    memset(out, 0, sizeof *out);
+    out->onion = c->tor && tor_my_onion(c->tor)[0];
+    out->portmap = !c->pm ? CHAT_NET_OFF : portmap_mapped(c->pm, NULL) ? 1 : 0;
+    if (!c->nostr) {
+        out->relays = CHAT_NET_OFF;
+    } else if (nostr_active(c->nostr)) {
+        out->relays = 1;
+        out->relays_up = nostr_relays_up(c->nostr);
+        out->relays_total = nostr_relay_total(c->nostr);
+    }
+    out->dht = !c->dht_on ? CHAT_NET_OFF : dht_known_count(&c->dht) ? 1 : 0;
+    if (c->dht_on) out->dht_found = dht_found_count(&c->dht);
+    out->rx = c->st.rx;
+}
+
+const peer_t *chat_peer_at(const chat_t *c, int i) {
+    return i >= 0 && i < CHAT_PEER_SLOTS && c->peers[i].used && c->peers[i].ok ? &c->peers[i] : NULL;
+}
+
+const peer_t *chat_peer_by_id(const chat_t *c, const uint8_t id[ID_LEN]) {
+    for (int i = 0; i < CHAT_PEER_SLOTS; i++)
+        if (c->peers[i].used && memcmp(c->peers[i].id, id, ID_LEN) == 0) return &c->peers[i];
+    return NULL;
+}
+
+const char *chat_peer_nick(const peer_t *p) { return p->nick; }
+const uint8_t *chat_peer_id(const peer_t *p) { return p->id; }
+const uint8_t *chat_peer_colour(const peer_t *p) { return p->color; }
+identity_source_t chat_peer_identity_source(const peer_t *p) { return p->identity_source; }
+verify_state_t chat_peer_verify_state(const peer_t *p) { return p->identity_state; }
+build_state_t chat_peer_build_state(const peer_t *p) { return p->build_state; }
+int chat_peer_keeps_history(const peer_t *p) { return p->persists; }
+
+void chat_set_verify_required(chat_t *c, int on) { c->verify_required = on; }
+void chat_set_notify_mode(chat_t *c, notify_mode_t mode) { c->notify_mode = mode; }
+void chat_set_notify_preview(chat_t *c, notify_preview_t preview) { c->notify_preview = preview; }
+void chat_set_picture_noise(chat_t *c, int on) { c->picture_noise = on; }
+void chat_set_print(chat_t *c, chat_print_fn print) { c->print = print; }
+void chat_set_coming_back(chat_t *c, int on) { c->coming_back = on; }
+
 // How many times a message is sent before it's given up on.
 #define MSG_TRIES 5
 
@@ -773,6 +833,8 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
     c->print = print;
     c->notify = notify;
     c->ui = ui;
+    c->file_view = o->file_view;
+    c->delivery = o->delivery;
     set_own_nick(c, o->nick);
     copy_str(c->session_name, o->session_name, sizeof c->session_name);
     c->created = o->created;

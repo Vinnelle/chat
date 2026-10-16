@@ -38,8 +38,10 @@ static int file_cmp(const void *a, const void *b) {
 // The session's files in the page's order: those offered to you, then yours, newest first.
 static int files_list(const session_slot_t *s, const file_entry_t **l) {
     int n = 0;
-    for (int i = 0; s && !s->initialising && i < FILE_OFFERS_MAX; i++)
-        if (s->engine.files[i].used) l[n++] = &s->engine.files[i];
+    for (int i = 0; s && !s->initialising && i < FILE_OFFERS_MAX; i++) {
+        const file_entry_t *f = chat_file_at(&s->engine, i);
+        if (f) l[n++] = f;
+    }
     qsort(l, (size_t)n, sizeof *l, file_cmp);
     return n;
 }
@@ -57,10 +59,8 @@ static const file_entry_t *selected_file(void) {
 
 static void file_owner_name(const chat_t *e, const file_entry_t *f, char out[CHAT_NAME_LEN]) {
     if (f->mine) { copy_str(out, "you", CHAT_NAME_LEN); return; }
-    for (int i = 0; i < MAX_PEERS + MAX_PENDING_PEERS; i++) {
-        const peer_t *p = &e->peers[i];
-        if (p->used && memcmp(p->id, f->owner, ID_LEN) == 0) { chat_peer_name(e, p, out); return; }
-    }
+    const peer_t *p = chat_peer_by_id(e, f->owner);
+    if (p) { chat_peer_name(e, p, out); return; }
     copy_str(out, "someone who left", CHAT_NAME_LEN);
 }
 
@@ -213,7 +213,7 @@ static void file_help(const session_slot_t *s, const file_entry_t *f, char *help
         case FS_MINE:
             if (!f->fp) snprintf(help, cap, "Yours, and no longer offered. :send offers it again, as a new file.");
             else snprintf(help, cap, "Yours, offered to everyone here%s.%s x stops offering it.",
-                          s->engine.verify_required ? " whose verify code you've compared" : "",
+                          chat_verify_required(&s->engine) ? " whose verify code you've compared" : "",
                           f->image ? " Enter shows it big." : "");
             if (f->fp) snprintf(usage, ucap, ":cancel %d", f->num);
             return;
@@ -452,7 +452,7 @@ void begin_files(void) {
     session_slot_t *s = g_app.selected;
     if (!s || s->initialising) { note("no session open - ctrl+n starts one, ctrl+j joins one"); return; }
     // The newest file, since that's usually the one to do something with.
-    g_app.files.num = s->engine.file_seq;
+    g_app.files.num = chat_newest_file(&s->engine);
     g_app.mode = MODE_FILES;
     g_app.dirty = 1;
 }

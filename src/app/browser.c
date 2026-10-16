@@ -162,11 +162,11 @@ void send_browser_key(const tui_key_t *key) {
                 }
                 copy_str(g_app.files.send_dir, b->path, sizeof g_app.files.send_dir);
                 chat_t *e = &g_app.selected->engine;
-                int was = e->file_seq;
+                int was = chat_newest_file(e);
                 g_echo = 1;
                 chat_send_file(e, full, g_app.files.send_asis);
                 g_echo = 0;
-                if (e->file_seq != was) g_app.files.num = e->file_seq;
+                if (chat_newest_file(e) != was) g_app.files.num = chat_newest_file(e);
             }
             break;
         }

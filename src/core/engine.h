@@ -6,6 +6,7 @@
 #define CHAT_ENGINE_H
 
 #include "core/chat.h"
+#include "core/state.h"
 #include "core/trust.h"
 #include "common/util.h"
 #include "common/bytewords.h"

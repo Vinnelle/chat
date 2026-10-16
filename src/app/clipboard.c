@@ -51,7 +51,7 @@ void clipboard_tick(double now) {
 
 void copy_session_id(session_slot_t *s) {
     if (!s) { note("no session selected - nothing to copy"); return; }
-    const char *sid = s->engine.session_name;
+    const char *sid = chat_session_name(&s->engine);
     copy_secret(sid);
     note("session id copied to the clipboard: %s - it comes off in %d s", sid, CLIPBOARD_CLEAR_SECONDS);
 }
@@ -61,7 +61,7 @@ void copy_invite(session_slot_t *s) {
     if (!s) { note("no session selected - nothing to copy"); return; }
     if (s->contact) { note("a call is only for you and the key you called - nobody else can join it"); return; }
     char invite[INVITE_MAX];
-    if (chat_invite(s->engine.session_name, s->password, invite, sizeof invite) != 0) {
+    if (chat_invite(chat_session_name(&s->engine), s->password, invite, sizeof invite) != 0) {
         note("this session's id has a ':' in it, so it can't go in an invite - :copyid copies the id, and the "
              "password goes separately");
         return;

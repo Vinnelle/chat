@@ -21,9 +21,10 @@ files through `platform/`.
 
 ## The engine
 
-A session is a `chat_t` (`chat.h`). The app makes one with `chat_init`, then calls `chat_tick` and
-`chat_on_socket_readable` with the time, and the engine calls back to print a line, notify, or hand
-over a file. It never reads the clock itself: it keeps to the time it's given.
+A session is a `chat_t`, which the app only knows through `chat.h`'s functions: what it holds is in
+`state.h`. The app makes one with `chat_init`, then calls `chat_tick` and `chat_on_socket_readable`
+with the time, and the engine calls back to print a line, notify, or hand over a file. It never
+reads the clock itself: it keeps to the time it's given.
 
 | File | What's there |
 | --- | --- |
@@ -38,6 +39,7 @@ over a file. It never reads the clock itself: it keeps to the time it's given.
 | `commands.c` | The commands a session takes (`CHAT_COMMANDS`) |
 | `trust.c`, `files.c`, `cmd.c` | Verified and ignored keys, file names and sizes, and command tables |
 | `engine.h` | What the engine's files share with each other |
+| `state.h` | What a session holds: `chat_t`, `peer_t`, their queues and tables, and the protocol's timings and sizes |
 
 ## The TUI
 

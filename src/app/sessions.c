@@ -65,10 +65,10 @@ static session_slot_t *open_session(const char *session_name, const char *passwo
     o.created = created;
     app_session_opts(&o);
     if (move) { o.moved = 1; o.moved_key = move->key; }
+    o.file_view = session_file_view;
+    o.delivery = session_delivery;
 
     chat_init(&s->engine, &o, session_print, session_notify, s, now_seconds());
-    s->engine.file_view = session_file_view;
-    s->engine.delivery = session_delivery;
     crypto_wipe(&o, sizeof o);
     if (!chat_started(&s->engine)) {
         const char *why = chat_start_error(&s->engine);
@@ -81,7 +81,7 @@ static session_slot_t *open_session(const char *session_name, const char *passwo
         return NULL;
     }
     // The session's routing holds the password for a running tor, not the one chat's own tor takes.
-    if (s->engine.route.mode == ROUTE_TOR && g_tor.state == TL_READY && g_tor.proc)
+    if (chat_route_mode(&s->engine) == ROUTE_TOR && g_tor.state == TL_READY && g_tor.proc)
         chat_tor_set_ports(&s->engine, g_tor.socks, g_tor.control, torproc_password(g_tor.proc));
     chat_set_net_log(&s->engine, g_app.net_log);
     s->initialising = 0;
@@ -90,20 +90,20 @@ static session_slot_t *open_session(const char *session_name, const char *passwo
     if (g_app.history && history_possible()) history_start(s, 1);
     chat_set_history(&s->engine, s->hist != NULL);
 
-    char idhex[SHORT_ID_HEX + 1]; hex_encode(s->engine.my_id, SHORT_ID_LEN, idhex);
+    char idhex[SHORT_ID_HEX + 1]; hex_encode(chat_my_id(&s->engine), SHORT_ID_LEN, idhex);
     if (move) {
         console_note(s, "moved here from '%s' as %s (peer %s) - %s. Codes compared there count here as each peer arrives",
-                     move->from, s->engine.nick, idhex, created ? "the peers asked along come once they say yes"
+                     move->from, chat_nick(&s->engine), idhex, created ? "the peers asked along come once they say yes"
                                                                  : "chat opens once someone here answers");
         // Nobody typed them, and nothing else shows them.
         console_note(s, "this room's id is %s and its password \"%s\" - this is the only time they're shown: :invite "
-                        "copies them, to pass on, and :keep keeps the room", s->engine.session_name, move->password);
+                        "copies them, to pass on, and :keep keeps the room", chat_session_name(&s->engine), move->password);
     } else if (created) {
         console_note(s, "new session '%s' - :invite copies its id and password, to pass on. you are %s (peer %s)",
-                     s->engine.session_name, s->engine.nick, idhex);
+                     chat_session_name(&s->engine), chat_nick(&s->engine), idhex);
     } else {
         console_note(s, "joining '%s' as %s (peer %s) - chat opens once someone answers",
-                     s->engine.session_name, s->engine.nick, idhex);
+                     chat_session_name(&s->engine), chat_nick(&s->engine), idhex);
     }
     if (g_app.route.mode == ROUTE_TOR && g_app.net_log != NET_LOG_OFF)
         console_note(s, "* routing: %s - connecting takes a little longer", route_label());
@@ -371,7 +371,7 @@ static session_slot_t *call_open(const trust_entry_t *t, uint64_t day) {
     memcpy(s->contact_pub, pub, sizeof s->contact_pub);
     s->contact_day = day;
     snprintf(s->name, sizeof s->name, "@%s", nick);
-    s->engine.verify_required = 1;
+    chat_set_verify_required(&s->engine, 1);
     console_note(s, "* calling %s: a room only your signing key and theirs can work out, for today (UTC). They "
                     "have to :call you too, and nothing goes to anyone there but the key you verified", nick);
     return s;
@@ -439,8 +439,8 @@ void session_print(void *ui, const char *hhmm, const char *text, const uint8_t *
     if (flags & LINE_CHAT) {
         tui_scrollback_push(&s->sb, hhmm, text, rgb, (flags & LINE_MENTION) != 0, color_len);
         if (file) tui_scrollback_mark_file(&s->sb, file);
-        if (flags & LINE_OWN) tui_scrollback_mark_own(&s->sb, s->engine.own_seq);
-        if (s->engine.line_quote) tui_scrollback_mark_quote(&s->sb, s->engine.line_quote);
+        if (flags & LINE_OWN) tui_scrollback_mark_own(&s->sb, chat_own_seq(&s->engine));
+        if (chat_line_quote(&s->engine)) tui_scrollback_mark_quote(&s->sb, chat_line_quote(&s->engine));
         if (s != g_app.selected) {
             s->unread++;
             if (flags & LINE_MENTION) s->mentioned = 1;

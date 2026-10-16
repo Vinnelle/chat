@@ -33,9 +33,9 @@ static void each_tor_session(void (*fn)(chat_t *e)) {
     for (int i = 0; i < MAX_SESSIONS; i++) {
         if (!g_app.used[i] || g_app.sessions[i].initialising) continue;
         chat_t *e = &g_app.sessions[i].engine;
-        if (e->route.mode == ROUTE_TOR) fn(e);
+        if (chat_route_mode(e) == ROUTE_TOR) fn(e);
     }
-    if (g_plain_engine && g_plain_engine->route.mode == ROUTE_TOR) fn(g_plain_engine);
+    if (g_plain_engine && chat_route_mode(g_plain_engine) == ROUTE_TOR) fn(g_plain_engine);
 }
 
 static void set_tor_ports(chat_t *e) { chat_tor_set_ports(e, g_tor.socks, g_tor.control, tor_link_password()); }

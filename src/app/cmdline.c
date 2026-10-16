@@ -38,9 +38,9 @@ static chat_t *peer_engine(void) {
 const char *complete_mention(const char *typed) {
     chat_t *e = peer_engine();
     if (!e) return NULL;
-    for (int i = 0; i < MAX_PEERS + MAX_PENDING_PEERS; i++) {
-        peer_t *p = &e->peers[i];
-        if (p->used && p->ok && nick_has_prefix(p->nick, typed)) return p->nick;
+    for (int i = 0; i < CHAT_PEER_SLOTS; i++) {
+        const peer_t *p = chat_peer_at(e, i);
+        if (p && nick_has_prefix(chat_peer_nick(p), typed)) return chat_peer_nick(p);
     }
     return NULL;
 }
@@ -115,13 +115,13 @@ static int arg_item(arg_menu_t *m, const char *at, const char *text, const char 
 static int match_peers(const chat_t *e, const char *typed, const peer_t **m) {
     size_t tn = strlen(typed);
     int n = 0;
-    for (int i = 0; i < MAX_PEERS + MAX_PENDING_PEERS; i++) {
-        const peer_t *p = &e->peers[i];
-        if (!p->used || !p->ok || !nick_has_prefix(p->nick, typed)) continue;
-        int exact = strlen(p->nick) == tn, j = n++;
+    for (int i = 0; i < CHAT_PEER_SLOTS; i++) {
+        const peer_t *p = chat_peer_at(e, i);
+        if (!p || !nick_has_prefix(chat_peer_nick(p), typed)) continue;
+        int exact = strlen(chat_peer_nick(p)) == tn, j = n++;
         for (; j > 0; j--) {
-            int prev_exact = strlen(m[j - 1]->nick) == tn;
-            if (prev_exact > exact || (prev_exact == exact && strcasecmp(m[j - 1]->nick, p->nick) <= 0)) break;
+            int prev_exact = strlen(chat_peer_nick(m[j - 1])) == tn;
+            if (prev_exact > exact || (prev_exact == exact && strcasecmp(chat_peer_nick(m[j - 1]), chat_peer_nick(p)) <= 0)) break;
             m[j] = m[j - 1];
         }
         m[j] = p;
@@ -131,14 +131,14 @@ static int match_peers(const chat_t *e, const char *typed, const peer_t **m) {
 
 static int arg_nicks(arg_menu_t *m, const char *rest) {
     chat_t *e = peer_engine();
-    const peer_t *p[MAX_PEERS + MAX_PENDING_PEERS];
+    const peer_t *p[CHAT_PEER_SLOTS];
     int n = e ? match_peers(e, rest, p) : 0;
     for (int i = 0; i < n; i++) {
         char name[CHAT_NAME_LEN]; chat_peer_name(e, p[i], name);
-        if (!arg_item(m, rest, p[i]->nick, name, "peers")) continue;
+        if (!arg_item(m, rest, chat_peer_nick(p[i]), name, "peers")) continue;
         snprintf(m->out->help, sizeof m->out->help, "%s%s",
-                 p[i]->identity_source == IDENT_NONE ? "unsigned" : chat_verify_label(p[i]->identity_state),
-                 p[i]->build_state == BUILD_MODIFIED ? DOT_SEP "modified client" : "");
+                 chat_peer_identity_source(p[i]) == IDENT_NONE ? "unsigned" : chat_verify_label(chat_peer_verify_state(p[i])),
+                 chat_peer_build_state(p[i]) == BUILD_MODIFIED ? DOT_SEP "modified client" : "");
         return 1;
     }
     return 0;
@@ -171,9 +171,10 @@ static int arg_files(arg_menu_t *m, const char *rest) {
     size_t rn = strlen(rest);
     int n = 0, exact = e && rn ? atoi(rest) : 0;
     for (int i = 0; e && i < FILE_OFFERS_MAX; i++) {
-        const file_entry_t *f = &e->files[i];
+        const file_entry_t *f = chat_file_at(e, i);
+        if (!f) continue;
         char ns[12]; snprintf(ns, sizeof ns, "%d", f->num);
-        if (!f->used || strncmp(ns, rest, rn) != 0 || !file_fits(m->c, f)) continue;
+        if (strncmp(ns, rest, rn) != 0 || !file_fits(m->c, f)) continue;
         int j = n++;
         for (; j > 0 && l[j - 1]->num != exact && (f->num == exact || l[j - 1]->num < f->num); j--) l[j] = l[j - 1];
         l[j] = f;
@@ -269,10 +270,11 @@ static const char *arg_end(const command_t *c, int kind, const char *rest) {
         }
     } else if (kind == A_NICK) {
         chat_t *e = peer_engine();
-        for (int i = 0; e && i < MAX_PEERS + MAX_PENDING_PEERS; i++) {
-            const peer_t *p = &e->peers[i];
-            size_t pl = strlen(p->nick);
-            if (p->used && p->ok && pl > n && nick_has_prefix(rest, p->nick) && rest[pl] == ' ') n = pl;
+        for (int i = 0; e && i < CHAT_PEER_SLOTS; i++) {
+            const peer_t *p = chat_peer_at(e, i);
+            if (!p) continue;
+            size_t pl = strlen(chat_peer_nick(p));
+            if (pl > n && nick_has_prefix(rest, chat_peer_nick(p)) && rest[pl] == ' ') n = pl;
         }
     }
     return n > 0 && rest[n] == ' ' ? rest + n + 1 : NULL;
