@@ -368,6 +368,11 @@ if(NOT MSVC)
 
     chat_try_compile_flag(-Wformat)
     chat_try_compile_flag(-Werror=format-security -Wformat)
+    # Each is quiet across chat's code, so a warning from one is something new.
+    foreach(flag -Wshadow -Wmissing-prototypes -Wstrict-prototypes -Wold-style-definition -Wpointer-arith -Wvla
+                 -Wwrite-strings -Wformat=2 -Wduplicated-cond -Wduplicated-branches)
+        chat_try_compile_flag(${flag})
+    endforeach()
 
     chat_try_compile_flag(-fwrapv)
     chat_try_compile_flag(-fno-strict-aliasing)

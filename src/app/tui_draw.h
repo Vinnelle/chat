@@ -96,7 +96,7 @@ extern grid_t g_grid;
 extern int g_input_h;
 
 // tui.c
-void wapp(wbuf_t *w, const char *fmt, ...);
+void wapp(wbuf_t *w, const char *fmt, ...) PRINTF_LIKE(2, 3);
 void copy_slice(char *out, size_t cap, const char *s, size_t len);
 int wapp_trunc(wbuf_t *w, const char *s, int width);
 void at(wbuf_t *w, int row, int col);

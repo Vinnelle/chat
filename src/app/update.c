@@ -117,7 +117,7 @@ static void view_reset(void) {
 }
 
 // A line in the console. The oldest is dropped once it's full.
-static void say(update_line_kind_t kind, const char *fmt, ...) {
+PRINTF_LIKE(2, 3) static void say(update_line_kind_t kind, const char *fmt, ...) {
     char line[UPDATE_LINE_MAX];
     va_list ap;
     va_start(ap, fmt);
@@ -136,11 +136,14 @@ static void say(update_line_kind_t kind, const char *fmt, ...) {
 }
 
 // A short description of the current step, and how far along it is.
-static void stage(int permille, const char *fmt, const char *arg) {
+PRINTF_LIKE(2, 3) static void stage(int permille, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
     view_lock();
     g_view.permille = permille;
-    snprintf(g_view.step, sizeof g_view.step, fmt, arg);
+    vsnprintf(g_view.step, sizeof g_view.step, fmt, ap);
     view_unlock();
+    va_end(ap);
     report(0);
 }
 
@@ -396,8 +399,8 @@ static const char *shown_url(const char *url) { return url + sizeof "https://" -
 
 // The message goes to the console log and into the box. A failure replaces the step it failed
 // at, and leaves the bar where it stopped.
-static void finish(const char *fmt, const char *arg) {
-    snprintf(g_msg, sizeof g_msg, fmt, arg);
+static void finish_v(const char *fmt, va_list ap) {
+    vsnprintf(g_msg, sizeof g_msg, fmt, ap);
     const char *text = starts_with(g_msg, UPDATE_PREFIX) ? g_msg + sizeof UPDATE_PREFIX - 1 : g_msg;
     say(g_ok ? UPDATE_LINE_GOOD : UPDATE_LINE_BAD, "%s", text);
     downloading(NULL, 0);
@@ -411,24 +414,34 @@ static void finish(const char *fmt, const char *arg) {
     __atomic_store_n(&g_state, UPD_DONE, __ATOMIC_RELEASE);
 }
 
-static void succeed(const char *fmt, const char *arg) {
+PRINTF_LIKE(1, 2) static void finish(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    finish_v(fmt, ap);
+    va_end(ap);
+}
+
+PRINTF_LIKE(1, 2) static void succeed(const char *fmt, ...) {
     g_ok = 1;
-    finish(fmt, arg);
+    va_list ap;
+    va_start(ap, fmt);
+    finish_v(fmt, ap);
+    va_end(ap);
 }
 
 static void update_thread(void *unused) {
     (void)unused;
     stage(AT_CHECKING, "Checking GitHub for a newer release%s", g_betas ? " or beta" : "");
 #if !defined(UPDATE_ASSET)
-    finish(UPDATE_PREFIX "no release builds exist for this CPU architecture%s", "");
+    finish(UPDATE_PREFIX "no release builds exist for this CPU architecture");
 #else
     if (!RELEASE_PUBKEY[0]) {
-        finish(UPDATE_PREFIX "this build has no release signing key (minisign.pub), so it can't check a release%s", "");
+        finish(UPDATE_PREFIX "this build has no release signing key (minisign.pub), so it can't check a release");
         return;
     }
     char exe[EXE_PATH_MAX], tmp_json[EXE_TMP_MAX], tmp_sums[EXE_TMP_MAX], tmp_sig[EXE_TMP_MAX], tmp_bin[EXE_TMP_MAX];
     char url[512];
-    if (platform_exe_path(exe, sizeof exe) != 0) { finish(UPDATE_PREFIX "could not locate the running executable%s", ""); return; }
+    if (platform_exe_path(exe, sizeof exe) != 0) { finish(UPDATE_PREFIX "could not locate the running executable"); return; }
     snprintf(tmp_json, sizeof tmp_json, "%s.release", exe);
     snprintf(tmp_sums, sizeof tmp_sums, "%s.sums", exe);
     snprintf(tmp_sig, sizeof tmp_sig, "%s.sums.minisig", exe);
@@ -451,10 +464,10 @@ static void update_thread(void *unused) {
     int ok = json && parse_tag(json, tag, sizeof tag) == 0;
     long total = ok ? asset_size(json, UPDATE_ASSET) : 0;
     free(json);
-    if (!ok) { finish(UPDATE_PREFIX "GitHub's reply had no usable release tag%s", ""); return; }
+    if (!ok) { finish(UPDATE_PREFIX "GitHub's reply had no usable release tag"); return; }
     say(UPDATE_LINE_INFO, g_betas ? "newest release, betas included, is %s" : "latest release is %s", tag);
     if (!version_newer(tag, CHAT_VERSION)) {
-        stage(AT_DONE, "Already up to date", "");
+        stage(AT_DONE, "Already up to date");
         if (g_betas) succeed(UPDATE_PREFIX "already up to date (v" CHAT_VERSION ", newest with betas is %s)", tag);
         else succeed(UPDATE_PREFIX "already up to date (v" CHAT_VERSION ", latest is %s)", tag);
         return;
@@ -514,7 +527,7 @@ static void update_thread(void *unused) {
         finish(UPDATE_PREFIX "downloading " UPDATE_ASSET " from %s failed - nothing installed", tag);
         return;
     }
-    stage(AT_VERIFYING, "Verifying the download", "");
+    stage(AT_VERIFYING, "Verifying the download");
     uint8_t got[crypto_hash_sha256_BYTES];
     long size = 0;
     if (hash_file(tmp_bin, got, &size) != 0 || size == 0 || memcmp(got, want, sizeof got) != 0) {
@@ -562,7 +575,7 @@ static void relay_thread(void *unused) {
         }
     }
     update_helper_stop();
-    finish(UPDATE_PREFIX "the updater has stopped - quit chat and run chat --update%s", "");
+    finish(UPDATE_PREFIX "the updater has stopped - quit chat and run chat --update");
 }
 
 int update_start(int betas) {

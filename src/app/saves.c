@@ -669,10 +669,15 @@ static void to_install_mode(app_mode_t mode) {
     g_app.dirty = 1;
 }
 
-static void not_installed(const char *fmt, const char *why) {
+PRINTF_LIKE(1, 2) static void not_installed(const char *fmt, ...) {
+    char text[sizeof g_app.message];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(text, sizeof text, fmt, ap);
+    va_end(ap);
     install_setup_forget();
     end_prompt();
-    note(fmt, why);
+    note("%s", text);
     install_ended();
 }
 

@@ -357,8 +357,8 @@ void setting_value(setting_id_t id, char *out, size_t cap) {
         }
         case SET_BRIDGES: {
             char kinds[80];
-            int n = bridge_count(g_app.tor.bridges, kinds, sizeof kinds);
-            if (n) snprintf(out, cap, "%d (%s)", n, kinds);
+            int bridges = bridge_count(g_app.tor.bridges, kinds, sizeof kinds);
+            if (bridges) snprintf(out, cap, "%d (%s)", bridges, kinds);
             else snprintf(out, cap, "none");
             break;
         }

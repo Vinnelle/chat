@@ -198,7 +198,7 @@ static secp256k1_context *secp(void) {
     return g_secp;
 }
 
-static void logf_(nostr_t *n, int kind, const char *fmt, ...) {
+PRINTF_LIKE(3, 4) static void logf_(nostr_t *n, int kind, const char *fmt, ...) {
     char msg[300];
     va_list ap; va_start(ap, fmt); vsnprintf(msg, sizeof msg, fmt, ap); va_end(ap);
     if (n->log) n->log(n->ctx, kind, msg);

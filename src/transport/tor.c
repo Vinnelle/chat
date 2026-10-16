@@ -120,7 +120,7 @@ struct tor {
     char last_error[160];
 };
 
-static void logf_(tor_t *t, int kind, const char *fmt, ...) {
+PRINTF_LIKE(3, 4) static void logf_(tor_t *t, int kind, const char *fmt, ...) {
     char msg[300];
     va_list ap; va_start(ap, fmt); vsnprintf(msg, sizeof msg, fmt, ap); va_end(ap);
     if (t->log) t->log(t->ctx, kind, msg);

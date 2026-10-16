@@ -8,6 +8,14 @@
 
 #define COUNT_OF(a) (sizeof (a) / sizeof (a)[0])
 
+// A printf-like function, its format string the fmt-th argument and what it formats from the args-th,
+// so the compiler checks each call.
+#if defined(__GNUC__) || defined(__clang__)
+#define PRINTF_LIKE(fmt, args) __attribute__((format(printf, fmt, args)))
+#else
+#define PRINTF_LIKE(fmt, args)
+#endif
+
 // " · ", between the parts of a line.
 #define DOT_SEP " \xc2\xb7 "
 

@@ -463,8 +463,8 @@ extern int g_echo;
 #define WAIT_MS 200
 void catch_quit_signals(void);
 void push_console(tui_scrollback_t *sb, int *scroll, const char *hhmm, const char *text, const uint8_t *rgb);
-void push_log(const char *fmt, ...);
-void note(const char *fmt, ...);
+void push_log(const char *fmt, ...) PRINTF_LIKE(1, 2);
+void note(const char *fmt, ...) PRINTF_LIKE(1, 2);
 void choose_route(route_mode_t m);
 const char *route_label(void);
 void reapply_options(void);
@@ -495,7 +495,7 @@ void select_session(session_slot_t *s);
 session_slot_t *first_session(void);
 void close_session(session_slot_t *s);
 void select_step(int dir);
-void console_note(session_slot_t *s, const char *fmt, ...);
+void console_note(session_slot_t *s, const char *fmt, ...) PRINTF_LIKE(2, 3);
 extern chat_build_t g_self_build;
 void app_session_opts(chat_opts_t *o);
 session_slot_t *start_session(const char *session_name, const char *password, int created, uint16_t port,
@@ -732,7 +732,7 @@ int page_section_step(const tui_row_t *rows, int n, int sel, int dir);
 int page_section_nth(const tui_row_t *rows, int n, int nth);
 
 // saves.c
-void saved_note(const char *fmt, ...);
+void saved_note(const char *fmt, ...) PRINTF_LIKE(1, 2);
 void say_saved_notes(void);
 int key_saved_as_path(void);
 void save_verified(void);
