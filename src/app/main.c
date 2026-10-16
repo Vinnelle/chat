@@ -386,16 +386,9 @@ void panic_saves(void) {
         if (g_app.used[i] && !keep) history_stop(&g_app.sessions[i], 0);
 }
 
-static int run_tui(const char *explicit_session, char *explicit_password, uint16_t explicit_port,
-                    const char peer_args[][PEER_ARG_LEN], int n_peer_args) {
-    term_watch_resize();
-    if (term_raw_enable() != 0) {
-        fprintf(stderr, "chat: this terminal can't do the full-screen UI, using --simple instead\n");
-        if (g_app.unlock_at_start) unlock_at_start(0);
-        if (!g_app.nick[0]) random_nickname(g_app.nick, sizeof g_app.nick);
-        return run_plain(explicit_session, explicit_password, explicit_port, peer_args, n_peer_args);
-    }
-
+// The terminal's state while the full-screen UI runs, and the first frame.
+static void open_tui(const char *explicit_session, char *explicit_password, uint16_t explicit_port,
+                     const char peer_args[][PEER_ARG_LEN], int n_peer_args) {
     // The terminal's background colour, and reports of its theme changing, arrive as keys.
     fputs(SCREEN_ENTER TUI_THEME_WATCH, stdout);
     fflush(stdout);
@@ -437,113 +430,129 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
         if (g_app.installed && install_has_settings(install_current())) settings_done();
     }
     render();
+}
 
-    // Once a second at least, for the clock.
-    double next_ui_tick = now_seconds() + 1.0;
-    lock_saw_key();
+// The sockets of the sessions running, waited on with the keyboard, and which of them can be read.
+typedef struct {
+    sock_t socks[PLATFORM_WAIT_MAX];
+    session_slot_t *owner[PLATFORM_WAIT_MAX];
+    int ready[PLATFORM_WAIT_MAX];
+    int n, stdin_ready;
+} waited_t;
+
+static void wait_for_input(waited_t *w, int wait_ms) {
+    w->n = 0;
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        if (!g_app.used[i] || g_app.sessions[i].initialising) continue;
+        sock_t mine[CHAT_MAX_SOCKS];
+        int ns = chat_sockets(&g_app.sessions[i].engine, mine);
+        // Beyond the limit a socket just waits for the next tick, WAIT_MS at most.
+        for (int j = 0; j < ns && w->n < PLATFORM_WAIT_MAX; j++) { w->socks[w->n] = mine[j]; w->owner[w->n] = &g_app.sessions[i]; w->n++; }
+    }
+    w->stdin_ready = 0;
+    platform_wait(w->socks, w->n, w->ready, &w->stdin_ready, wait_ms);
+}
+
+static void take_signals(void) {
+    if (g_ctrl_c) {
+        g_ctrl_c = 0;
+        // A second one quits once the QUIT box shows, as a second Ctrl+C key does.
+        if (g_app.asking_quit && !g_app.screen_locked) g_interrupted = 1;
+        else { g_app.asking_quit = 1; g_app.dirty = 1; }
+    }
+    if (g_sigquit) {
+        g_sigquit = 0;
+        if (g_app.panic_key) panic(PANIC_KEY);
+        else g_interrupted = 1;
+    }
+}
+
+// Keys as the terminal sends them: what a read cut off, waiting for the rest, and whether a paste is
+// coming in.
+typedef struct {
     uint8_t cut[TUI_KEY_CUT_MAX];
-    size_t n_cut = 0;
-    double cut_at = 0;
-    int pasting = 0;
-    double paste_at = 0;
+    size_t n_cut;
+    double cut_at;
+    int pasting;
+    double paste_at;
+} key_reader_t;
 
-    while (!g_interrupted) {
-        sock_t socks[PLATFORM_WAIT_MAX];
-        session_slot_t *owner[PLATFORM_WAIT_MAX];
-        int ready[PLATFORM_WAIT_MAX];
-        int n = 0;
-        for (int i = 0; i < MAX_SESSIONS; i++) {
-            if (!g_app.used[i] || g_app.sessions[i].initialising) continue;
-            sock_t mine[CHAT_MAX_SOCKS];
-            int ns = chat_sockets(&g_app.sessions[i].engine, mine);
-            // Beyond the limit a socket just waits for the next tick, WAIT_MS at most.
-            for (int j = 0; j < ns && n < PLATFORM_WAIT_MAX; j++) { socks[n] = mine[j]; owner[n] = &g_app.sessions[i]; n++; }
-        }
-        int stdin_ready = 0;
-        platform_wait(socks, n, ready, &stdin_ready, n_cut ? KEY_CUT_WAIT_MS : WAIT_MS);
-
-        if (g_ctrl_c) {
-            g_ctrl_c = 0;
-            // A second one quits once the QUIT box shows, as a second Ctrl+C key does.
-            if (g_app.asking_quit && !g_app.screen_locked) g_interrupted = 1;
-            else { g_app.asking_quit = 1; g_app.dirty = 1; }
-        }
-        if (g_sigquit) {
-            g_sigquit = 0;
-            if (g_app.panic_key) panic(PANIC_KEY);
-            else g_interrupted = 1;
-        }
-
-        // A read can stop partway through a sequence: Windows hands over input a few dozen characters
-        // at a time, and a burst of mouse wheel reports can fill buf. What's cut off waits for the
-        // rest, which comes straight after, rather than being typed as text. An Esc on its own waits
-        // too, then it's the key.
-        int cut_due = n_cut && now_seconds() - cut_at >= KEY_CUT_WAIT_MS / 1000.0;
-        if ((stdin_ready || cut_due) && !g_panic) {
-            uint8_t buf[512];
-            memcpy(buf, cut, n_cut);
-            long got = stdin_ready ? term_read_raw(buf + n_cut, sizeof buf - n_cut) : 0;
-            if (got < 0) {
-                g_interrupted = 1;
-            } else if (got > 0 || cut_due) {
-                size_t len = n_cut + (size_t)got, off = 0;
-                n_cut = got > 0 ? tui_key_cut(buf, len) : 0;
-                len -= n_cut;
-                memcpy(cut, buf + len, n_cut);
-                cut_at = now_seconds();
-                if (pasting) paste_at = now_seconds();
-                while (len > off && !g_panic) {
-                    tui_key_t key;
-                    size_t used = tui_decode_key(buf + off, len - off, &key);
-                    if (used == 0) break;
-                    off += used;
-                    if (key.type == TUI_KEY_PASTE_START || key.type == TUI_KEY_PASTE_END) {
-                        pasting = key.type == TUI_KEY_PASTE_START;
-                        paste_at = now_seconds();
-                    } else if (pasting && !tui_key_paste(&key)) {
-                        continue;
-                    }
-                    handle_key(&key);
+static void read_keys(key_reader_t *r, int stdin_ready) {
+    // A read can stop partway through a sequence: Windows hands over input a few dozen characters
+    // at a time, and a burst of mouse wheel reports can fill buf. What's cut off waits for the
+    // rest, which comes straight after, rather than being typed as text. An Esc on its own waits
+    // too, then it's the key.
+    int cut_due = r->n_cut && now_seconds() - r->cut_at >= KEY_CUT_WAIT_MS / 1000.0;
+    if ((stdin_ready || cut_due) && !g_panic) {
+        uint8_t buf[512];
+        memcpy(buf, r->cut, r->n_cut);
+        long got = stdin_ready ? term_read_raw(buf + r->n_cut, sizeof buf - r->n_cut) : 0;
+        if (got < 0) {
+            g_interrupted = 1;
+        } else if (got > 0 || cut_due) {
+            size_t len = r->n_cut + (size_t)got, off = 0;
+            r->n_cut = got > 0 ? tui_key_cut(buf, len) : 0;
+            len -= r->n_cut;
+            memcpy(r->cut, buf + len, r->n_cut);
+            r->cut_at = now_seconds();
+            if (r->pasting) r->paste_at = now_seconds();
+            while (len > off && !g_panic) {
+                tui_key_t key;
+                size_t used = tui_decode_key(buf + off, len - off, &key);
+                if (used == 0) break;
+                off += used;
+                if (key.type == TUI_KEY_PASTE_START || key.type == TUI_KEY_PASTE_END) {
+                    r->pasting = key.type == TUI_KEY_PASTE_START;
+                    r->paste_at = now_seconds();
+                } else if (r->pasting && !tui_key_paste(&key)) {
+                    continue;
                 }
+                handle_key(&key);
             }
         }
-        if (pasting && now_seconds() - paste_at > PASTE_GAP_MAX) pasting = 0;
-        if (g_panic) break;
-        double now = now_seconds();
-        for (int i = 0; i < n; i++)
-            if (ready[i]) chat_on_socket_readable(&owner[i]->engine, socks[i], now);
-        for (int i = 0; i < MAX_SESSIONS; i++)
-            if (g_app.used[i]) chat_tick(&g_app.sessions[i].engine, now_seconds());
-        move_tick(now_seconds());
-        contacts_tick();
-        reopen_tick();
-        timers_tick(now_seconds());
-        lock_tick();
-        clipboard_tick(now_seconds());
-        history_sync(now);
+    }
+    if (r->pasting && now_seconds() - r->paste_at > PASTE_GAP_MAX) r->pasting = 0;
+}
 
-        if (!g_app.onboarding) {
-            tor_link_ensure(now);
-            tor_link_step(now);
-        }
+// The sessions' sockets and ticks, then everything else the app does on its own.
+static void run_ticks(const waited_t *w, double now) {
+    for (int i = 0; i < w->n; i++)
+        if (w->ready[i]) chat_on_socket_readable(&w->owner[i]->engine, w->socks[i], now);
+    for (int i = 0; i < MAX_SESSIONS; i++)
+        if (g_app.used[i]) chat_tick(&g_app.sessions[i].engine, now_seconds());
+    move_tick(now_seconds());
+    contacts_tick();
+    reopen_tick();
+    timers_tick(now_seconds());
+    lock_tick();
+    clipboard_tick(now_seconds());
+    history_sync(now);
 
-        char update_msg[UPDATE_MSG_MAX];
-        if (update_poll(update_msg, sizeof update_msg)) { push_log("%s", update_msg); g_app.dirty = 1; }
-        // Its box redraws on each wait while the update runs, so the bar moves as the file downloads.
-        if (g_app.mode == MODE_UPDATE) {
-            update_view_t v;
-            update_view(&v);
-            if (v.running) g_app.dirty = 1;
-        }
-        if (g_app.mode == MODE_KEY_WAIT) key_wait_tick();
-
-        // The terminal may have redrawn or reflowed the screen, so the next frame is sent in full.
-        if (term_resized()) { g_app.dirty = 1; tui_invalidate(); }
-        if (now >= next_ui_tick) { next_ui_tick = now + 1.0; g_app.dirty = 1; }
-        if (g_app.dirty) { keep_settings_saved(); keep_sessions_saved(); render(); g_app.dirty = 0; g_app.input_dirty = 0; }
-        else if (g_app.input_dirty) { render_bar(); g_app.input_dirty = 0; }
+    if (!g_app.onboarding) {
+        tor_link_ensure(now);
+        tor_link_step(now);
     }
 
+    char update_msg[UPDATE_MSG_MAX];
+    if (update_poll(update_msg, sizeof update_msg)) { push_log("%s", update_msg); g_app.dirty = 1; }
+    // Its box redraws on each wait while the update runs, so the bar moves as the file downloads.
+    if (g_app.mode == MODE_UPDATE) {
+        update_view_t v;
+        update_view(&v);
+        if (v.running) g_app.dirty = 1;
+    }
+    if (g_app.mode == MODE_KEY_WAIT) key_wait_tick();
+}
+
+static void redraw(double now, double *next_ui_tick) {
+    // The terminal may have redrawn or reflowed the screen, so the next frame is sent in full.
+    if (term_resized()) { g_app.dirty = 1; tui_invalidate(); }
+    if (now >= *next_ui_tick) { *next_ui_tick = now + 1.0; g_app.dirty = 1; }
+    if (g_app.dirty) { keep_settings_saved(); keep_sessions_saved(); render(); g_app.dirty = 0; g_app.input_dirty = 0; }
+    else if (g_app.input_dirty) { render_bar(); g_app.input_dirty = 0; }
+}
+
+static _Noreturn void close_tui(void) {
     if (g_panic) panic_saves();
     else keep_sessions_saved();
     for (int i = 0; i < MAX_SESSIONS; i++) {
@@ -578,6 +587,34 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
     platform_notify_shutdown();
 
     _exit(0);
+}
+
+static int run_tui(const char *explicit_session, char *explicit_password, uint16_t explicit_port,
+                    const char peer_args[][PEER_ARG_LEN], int n_peer_args) {
+    term_watch_resize();
+    if (term_raw_enable() != 0) {
+        fprintf(stderr, "chat: this terminal can't do the full-screen UI, using --simple instead\n");
+        if (g_app.unlock_at_start) unlock_at_start(0);
+        if (!g_app.nick[0]) random_nickname(g_app.nick, sizeof g_app.nick);
+        return run_plain(explicit_session, explicit_password, explicit_port, peer_args, n_peer_args);
+    }
+    open_tui(explicit_session, explicit_password, explicit_port, peer_args, n_peer_args);
+
+    // Once a second at least, for the clock.
+    double next_ui_tick = now_seconds() + 1.0;
+    lock_saw_key();
+    key_reader_t keys = { 0 };
+    while (!g_interrupted) {
+        waited_t w;
+        wait_for_input(&w, keys.n_cut ? KEY_CUT_WAIT_MS : WAIT_MS);
+        take_signals();
+        read_keys(&keys, w.stdin_ready);
+        if (g_panic) break;
+        double now = now_seconds();
+        run_ticks(&w, now);
+        redraw(now, &next_ui_tick);
+    }
+    close_tui();
 }
 
 // -1 to go on, else what chat exits with.
@@ -702,6 +739,102 @@ void reapply_options(void) {
     if (o.nick[0]) chat_clean_nick(o.nick, g_app.nick);
 }
 
+static void app_defaults(void) {
+    routing_defaults(&g_app.route);
+    g_app.notify_mode = NOTIFY_MENTIONS;
+    g_app.verify_optional = 1;
+    g_app.show_sidebar = g_app.show_console = g_app.show_chat = 1;
+    g_app.lock_key = g_app.panic_key = 1;
+    g_app.sandbox = g_app.updater = 1;
+    g_app.picture_noise = 1;
+    note_setting_defaults();
+    trust_on_change(save_verified);
+    ignore_on_change(save_ignored);
+}
+
+static void lock_app_secrets(void) {
+    // The signing key, a pasted key block and typed passwords pass through these for the whole run.
+    // Best effort, as in chat_init.
+    crypto_lock(&g_app.identity, sizeof g_app.identity);
+    crypto_lock(g_app.paste_buf, sizeof g_app.paste_buf);
+    crypto_lock(&g_app.input, sizeof g_app.input);
+    crypto_lock(&g_app.saved_input, sizeof g_app.saved_input);
+    crypto_lock(&g_app.lock_input, sizeof g_app.lock_input);
+    crypto_lock(g_app.pending_auto_password, sizeof g_app.pending_auto_password);
+    crypto_lock(g_app.install_pass, sizeof g_app.install_pass);
+}
+
+static int pick_save(const options_t *o) {
+    // The save to open: the one --save names, the only one there is, or one picked later.
+    g_app.n_saves = install_list(g_app.saves, INSTALL_SAVES_MAX);
+    if (o->save[0]) install_use(o->save);
+    else if (g_app.n_saves == 1) install_use(g_app.saves[0].name);
+    int saved = o->save[0] ? save_exists(o->save) : g_app.n_saves > 0;
+    if (o->save[0] && !saved && !o->update)
+        saved_note("* there's no save called %s yet: chat starts from its defaults, and :install makes it",
+                   install_shown_name(o->save));
+    return saved;
+}
+
+// --update: what chat exits with.
+static int run_update(int saved) {
+    // What :install saved may route the download through Tor, so it isn't skipped silently.
+    if (saved) unlock_at_start(0);
+    if (g_app.locked && !g_app.route_chosen) {
+        fprintf(stderr, "chat: not updating - what :install saved stays sealed, and with it the routing to "
+                        "download by: CHAT_INSTALL_PASSWORD opens it, or --routing chooses one\n");
+        return 1;
+    }
+    // With --routing tor the download goes through Tor, never direct, so find or start a tor first.
+    int over_tor = g_app.route_chosen && g_app.route.mode == ROUTE_TOR;
+    if (over_tor) {
+        enum { TOR_WAIT_S = 120, TOR_POLL_MS = 100 };
+        net_startup();
+        g_plain = 1;
+        double give_up = now_seconds() + TOR_WAIT_S;
+        tor_link_ensure(now_seconds());
+        while (g_tor.state != TL_READY && g_tor.state != TL_FAILED && now_seconds() < give_up) {
+            tor_link_step(now_seconds());
+            platform_sleep_ms(TOR_POLL_MS);
+        }
+        if (g_tor.state != TL_READY) {
+            fprintf(stderr, "chat: no tor to download through - not updating\n");
+            tor_link_stop();
+            return 1;
+        }
+        sync_update_proxy();
+    }
+    printf("chat: checking GitHub for a newer release%s (v" CHAT_VERSION " here)%s...\n",
+           g_app.betas ? " or beta" : "", over_tor ? " through Tor" : "");
+    fflush(stdout);
+    char msg[UPDATE_MSG_MAX];
+    int rc = update_run(g_app.betas, msg, sizeof msg);
+    if (over_tor) tor_link_stop();
+    const char *text = starts_with(msg, UPDATE_PREFIX) ? msg + sizeof UPDATE_PREFIX - 1 : msg;
+    fprintf(rc == 0 ? stdout : stderr, "chat: %s\n", text);
+    return rc == 0 ? 0 : 1;
+}
+
+static void identity_from_options(const options_t *o) {
+    g_app.identity_source = IDENT_NONE;
+    if (o->identity[0]) {
+        identity_source_t kind = o->identity[0] == 'a' ? IDENT_AGE : IDENT_PGP;
+        const char *path = o->identity[3] == ':' ? o->identity + 4 : NULL;
+        if (!path) {
+            // Like a session's password: from the environment, otherwise asked for, otherwise blank.
+            char pw[MAX_PASSWORD + 1] = "";
+            if (platform_env_take("CHAT_SIGN_PASSWORD", pw, sizeof pw) != 0 && term_is_tty())
+                term_read_password("signing key password (always the same one keeps the same key; blank for a "
+                                   "new key): ", pw, sizeof pw);
+            const char *why = make_identity(kind, pw);
+            crypto_wipe(pw, sizeof pw);
+            if (why) fprintf(stderr, "chat: %s\n", why);
+        } else if (!path[0] || load_key_file(kind, path) != 0)
+            fprintf(stderr, "chat: could not load %s identity from %s\n", kind == IDENT_AGE ? "an AGE" : "a PGP",
+                    path[0] ? path : "(no path given)");
+    }
+}
+
 int main(int argc, char **argv) {
     platform_harden_process(SECRET_ENV);
     g_argc = argc;
@@ -713,16 +846,7 @@ int main(int argc, char **argv) {
         crypto_setup();
         return update_helper(link);
     }
-    routing_defaults(&g_app.route);
-    g_app.notify_mode = NOTIFY_MENTIONS;
-    g_app.verify_optional = 1;
-    g_app.show_sidebar = g_app.show_console = g_app.show_chat = 1;
-    g_app.lock_key = g_app.panic_key = 1;
-    g_app.sandbox = g_app.updater = 1;
-    g_app.picture_noise = 1;
-    note_setting_defaults();
-    trust_on_change(save_verified);
-    ignore_on_change(save_ignored);
+    app_defaults();
     int exit_code = read_options(g_argc, g_argv, &g_opts);
     if (exit_code >= 0) return exit_code;
     const options_t *o = &g_opts;
@@ -732,61 +856,10 @@ int main(int argc, char **argv) {
     crypto_setup();
     device_check();
     update_self_build(&g_self_build);
-    // The signing key, a pasted key block and typed passwords pass through these for the whole run.
-    // Best effort, as in chat_init.
-    crypto_lock(&g_app.identity, sizeof g_app.identity);
-    crypto_lock(g_app.paste_buf, sizeof g_app.paste_buf);
-    crypto_lock(&g_app.input, sizeof g_app.input);
-    crypto_lock(&g_app.saved_input, sizeof g_app.saved_input);
-    crypto_lock(&g_app.lock_input, sizeof g_app.lock_input);
-    crypto_lock(g_app.pending_auto_password, sizeof g_app.pending_auto_password);
-    crypto_lock(g_app.install_pass, sizeof g_app.install_pass);
+    lock_app_secrets();
 
-    // The save to open: the one --save names, the only one there is, or one picked later.
-    g_app.n_saves = install_list(g_app.saves, INSTALL_SAVES_MAX);
-    if (o->save[0]) install_use(o->save);
-    else if (g_app.n_saves == 1) install_use(g_app.saves[0].name);
-    int saved = o->save[0] ? save_exists(o->save) : g_app.n_saves > 0;
-    if (o->save[0] && !saved && !o->update)
-        saved_note("* there's no save called %s yet: chat starts from its defaults, and :install makes it",
-                   install_shown_name(o->save));
-    if (o->update) {
-        // What :install saved may route the download through Tor, so it isn't skipped silently.
-        if (saved) unlock_at_start(0);
-        if (g_app.locked && !g_app.route_chosen) {
-            fprintf(stderr, "chat: not updating - what :install saved stays sealed, and with it the routing to "
-                            "download by: CHAT_INSTALL_PASSWORD opens it, or --routing chooses one\n");
-            return 1;
-        }
-        // With --routing tor the download goes through Tor, never direct, so find or start a tor first.
-        int over_tor = g_app.route_chosen && g_app.route.mode == ROUTE_TOR;
-        if (over_tor) {
-            enum { TOR_WAIT_S = 120, TOR_POLL_MS = 100 };
-            net_startup();
-            g_plain = 1;
-            double give_up = now_seconds() + TOR_WAIT_S;
-            tor_link_ensure(now_seconds());
-            while (g_tor.state != TL_READY && g_tor.state != TL_FAILED && now_seconds() < give_up) {
-                tor_link_step(now_seconds());
-                platform_sleep_ms(TOR_POLL_MS);
-            }
-            if (g_tor.state != TL_READY) {
-                fprintf(stderr, "chat: no tor to download through - not updating\n");
-                tor_link_stop();
-                return 1;
-            }
-            sync_update_proxy();
-        }
-        printf("chat: checking GitHub for a newer release%s (v" CHAT_VERSION " here)%s...\n",
-               g_app.betas ? " or beta" : "", over_tor ? " through Tor" : "");
-        fflush(stdout);
-        char msg[UPDATE_MSG_MAX];
-        int rc = update_run(g_app.betas, msg, sizeof msg);
-        if (over_tor) tor_link_stop();
-        const char *text = starts_with(msg, UPDATE_PREFIX) ? msg + sizeof UPDATE_PREFIX - 1 : msg;
-        fprintf(rc == 0 ? stdout : stderr, "chat: %s\n", text);
-        return rc == 0 ? 0 : 1;
-    }
+    int saved = pick_save(o);
+    if (o->update) return run_update(saved);
 
     net_startup();
 
@@ -807,23 +880,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    g_app.identity_source = IDENT_NONE;
-    if (o->identity[0]) {
-        identity_source_t kind = o->identity[0] == 'a' ? IDENT_AGE : IDENT_PGP;
-        const char *path = o->identity[3] == ':' ? o->identity + 4 : NULL;
-        if (!path) {
-            // Like a session's password: from the environment, otherwise asked for, otherwise blank.
-            char pw[MAX_PASSWORD + 1] = "";
-            if (platform_env_take("CHAT_SIGN_PASSWORD", pw, sizeof pw) != 0 && term_is_tty())
-                term_read_password("signing key password (always the same one keeps the same key; blank for a "
-                                   "new key): ", pw, sizeof pw);
-            const char *why = make_identity(kind, pw);
-            crypto_wipe(pw, sizeof pw);
-            if (why) fprintf(stderr, "chat: %s\n", why);
-        } else if (!path[0] || load_key_file(kind, path) != 0)
-            fprintf(stderr, "chat: could not load %s identity from %s\n", kind == IDENT_AGE ? "an AGE" : "a PGP",
-                    path[0] ? path : "(no path given)");
-    }
+    identity_from_options(o);
 
     if (saved) unlock_at_start(interactive);
     // What's still sealed could have chosen Tor, and with nobody to ask, chat doesn't guess.
