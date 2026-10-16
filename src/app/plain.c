@@ -127,35 +127,34 @@ static chat_t *plain_move(chat_t *c, chat_t **left, chat_t engines[2], const cha
     return n;
 }
 
-int run_plain(const char *session_name, const char *password, uint16_t port,
-              const char peer_args[][PEER_ARG_LEN], int n_peer_args) {
+// The session --simple opens, from what was given and what's asked for. 0, or what chat exits with.
+static int plain_opts(chat_opts_t *o, const char *session_name, const char *password, uint16_t port,
+                      const char peer_args[][PEER_ARG_LEN], int n_peer_args) {
     int tty = term_is_tty();
-    g_plain = 1;
-    say_saved_notes();
-    chat_opts_t o; memset(&o, 0, sizeof o);
-    copy_str(o.nick, g_app.nick[0] ? g_app.nick : "anon", sizeof o.nick);
+    memset(o, 0, sizeof *o);
+    copy_str(o->nick, g_app.nick[0] ? g_app.nick : "anon", sizeof o->nick);
 
     if (session_name) {
-        copy_str(o.session_name, session_name, sizeof o.session_name);
+        copy_str(o->session_name, session_name, sizeof o->session_name);
     } else if (tty) {
         char line[MAX_SESSION_NAME + 1];
         if (term_read_line("session id (blank = start a new one): ", line, sizeof line) != 0) return 1;
-        copy_str(o.session_name, line, sizeof o.session_name);
+        copy_str(o->session_name, line, sizeof o->session_name);
     }
-    if (!o.session_name[0]) {
+    if (!o->session_name[0]) {
         // Without a terminal too: no fixed default, since a well known id with a blank password would
         // be a room anyone can join.
-        random_session_id(o.session_name, SESSION_ID_LEN);
-        o.created = 1;
-        printf("new session id: %s  (share this and the password)\n", o.session_name);
+        random_session_id(o->session_name, SESSION_ID_LEN);
+        o->created = 1;
+        printf("new session id: %s  (share this and the password)\n", o->session_name);
     }
 
-    if (password) copy_str(o.password, password, sizeof o.password);
-    else if (platform_env_take("CHAT_PASSWORD", o.password, sizeof o.password) != 0 && tty
-             && term_read_password(o.created ? "create password: " : "password: ", o.password, sizeof o.password) != 0)
+    if (password) copy_str(o->password, password, sizeof o->password);
+    else if (platform_env_take("CHAT_PASSWORD", o->password, sizeof o->password) != 0 && tty
+             && term_read_password(o->created ? "create password: " : "password: ", o->password, sizeof o->password) != 0)
         return 1;
 
-    o.port = port;
+    o->port = port;
     if (!g_app.route_chosen) {
         route_mode_t m = ROUTE_UDP;
         if (tty) {
@@ -173,24 +172,73 @@ int run_plain(const char *session_name, const char *password, uint16_t port,
     // would bypass it.
     if (n_peer_args > 0 && g_app.route.mode == ROUTE_TOR) {
         fprintf(stderr, "chat: --peer can't be used with Tor routing\n");
-        crypto_wipe(&o, sizeof o);
+        crypto_wipe(o, sizeof *o);
         return 1;
     }
-    for (int i = 0; i < n_peer_args && o.n_peers < (int)COUNT_OF(o.peers); i++) {
-        if (addr_parse_hostport(peer_args[i], &o.peers[o.n_peers]) != 0) {
+    for (int i = 0; i < n_peer_args && o->n_peers < (int)COUNT_OF(o->peers); i++) {
+        if (addr_parse_hostport(peer_args[i], &o->peers[o->n_peers]) != 0) {
             fprintf(stderr, "chat: can't use --peer %s\n", peer_args[i]);
-            crypto_wipe(&o, sizeof o);
+            crypto_wipe(o, sizeof *o);
             return 1;
         }
-        o.n_peers++;
+        o->n_peers++;
     }
     sync_update_proxy();
-    o.route = g_app.route;
-    if (o.route.mode == ROUTE_TOR) {
+    o->route = g_app.route;
+    if (o->route.mode == ROUTE_TOR) {
         tor_link_ensure(now_seconds());
-        o.route.tor.socks[0] = o.route.tor.control[0] = '\0';
+        o->route.tor.socks[0] = o->route.tor.control[0] = '\0';
     }
-    app_session_opts(&o);
+    app_session_opts(o);
+
+    return 0;
+}
+
+static void plain_banner(chat_t *c) {
+    chat_set_net_log(c, g_app.net_log);
+    char idhex[SHORT_ID_HEX + 1]; hex_encode(c->my_id, SHORT_ID_LEN, idhex);
+    if (c->route.mode == ROUTE_TOR)
+        printf("session '%s', you are %s (peer %s). encrypted, over Tor only. :quit or EOF to stop.\n",
+               c->session_name, c->nick, idhex);
+    else
+        printf("session '%s', you are %s (peer %s). encrypted, udp/%u, routing: %s. :quit or EOF to stop.\n",
+               c->session_name, c->nick, idhex, (unsigned)c->port, route_label());
+}
+
+// A line typed, or EOF: 0 once it's time to stop.
+static int plain_input(chat_t *c, stdin_reader_t *reader, double now) {
+    char line[MAX_TEXT + 1];
+    int rc = stdin_reader_poll(reader, line, sizeof line);
+    static const char show[] = ":show ";
+    int show_anyway, show_n = rc == 1 && starts_with(line, show) ? file_arg(line + sizeof show - 1, &show_anyway) : 0;
+    if (rc == 1 && (strcmp(line, ":changelog") == 0 || strcmp(line, ":news") == 0)) { fputs(CHANGELOG_TEXT, stdout); fflush(stdout); }
+    else if (rc == 1 && strcmp(line, ":newtor") == 0) { app_newtor(NULL, NULL); push_log("* %s", g_app.message); g_app.message[0] = '\0'; }
+    else if (show_n) chat_file_fetch(c, show_n, 1, show_anyway, NULL);
+    else if (rc == 1) return chat_submit_line(c, line, now);
+    else if (rc == -1) return 0;
+    return 1;
+}
+
+static _Noreturn void plain_quit(chat_t *c, chat_t *left, stdin_reader_t *reader) {
+    if (g_panic) panic_saves();
+    if (left) chat_shutdown(left);
+    chat_shutdown(c);
+    g_plain_engine = NULL;
+    tor_link_stop();
+    if (reader) stdin_reader_stop(reader);
+    term_raw_disable();
+    net_shutdown();
+    platform_notify_shutdown();
+    fflush(stdout);
+    _exit(0);
+}
+
+int run_plain(const char *session_name, const char *password, uint16_t port,
+              const char peer_args[][PEER_ARG_LEN], int n_peer_args) {
+    g_plain = 1;
+    say_saved_notes();
+    chat_opts_t o;
+    if (plain_opts(&o, session_name, password, port, peer_args, n_peer_args) != 0) return 1;
 
     // Two, so a room :move left can close while the new one runs.
     static chat_t engines[2];
@@ -207,14 +255,7 @@ int run_plain(const char *session_name, const char *password, uint16_t port,
         tor_link_stop();
         return 1;
     }
-    chat_set_net_log(c, g_app.net_log);
-    char idhex[SHORT_ID_HEX + 1]; hex_encode(c->my_id, SHORT_ID_LEN, idhex);
-    if (c->route.mode == ROUTE_TOR)
-        printf("session '%s', you are %s (peer %s). encrypted, over Tor only. :quit or EOF to stop.\n",
-               c->session_name, c->nick, idhex);
-    else
-        printf("session '%s', you are %s (peer %s). encrypted, udp/%u, routing: %s. :quit or EOF to stop.\n",
-               c->session_name, c->nick, idhex, (unsigned)c->port, route_label());
+    plain_banner(c);
 
     catch_quit_signals();
     stdin_reader_t *reader = stdin_reader_start();
@@ -241,15 +282,7 @@ int run_plain(const char *session_name, const char *password, uint16_t port,
             break;
         }
         for (int i = 0; i < ns; i++) if (ready[i]) chat_on_socket_readable(i < nc ? c : left, socks[i], now);
-        char line[MAX_TEXT + 1];
-        int rc = stdin_reader_poll(reader, line, sizeof line);
-        static const char show[] = ":show ";
-        int show_anyway, show_n = rc == 1 && starts_with(line, show) ? file_arg(line + sizeof show - 1, &show_anyway) : 0;
-        if (rc == 1 && (strcmp(line, ":changelog") == 0 || strcmp(line, ":news") == 0)) { fputs(CHANGELOG_TEXT, stdout); fflush(stdout); }
-        else if (rc == 1 && strcmp(line, ":newtor") == 0) { app_newtor(NULL, NULL); push_log("* %s", g_app.message); g_app.message[0] = '\0'; }
-        else if (show_n) chat_file_fetch(c, show_n, 1, show_anyway, NULL);
-        else if (rc == 1) alive = chat_submit_line(c, line, now);
-        else if (rc == -1) alive = 0;
+        alive = plain_input(c, reader, now);
         chat_move_to_t to;
         if (alive && chat_move_staged(c, &to)) {
             chat_t *n = plain_move(c, &left, engines, &to);
@@ -264,15 +297,5 @@ int run_plain(const char *session_name, const char *password, uint16_t port,
             if (chat_move_finished(left, now_seconds())) { chat_shutdown(left); left = NULL; }
         }
     }
-    if (g_panic) panic_saves();
-    if (left) chat_shutdown(left);
-    chat_shutdown(c);
-    g_plain_engine = NULL;
-    tor_link_stop();
-    if (reader) stdin_reader_stop(reader);
-    term_raw_disable();
-    net_shutdown();
-    platform_notify_shutdown();
-    fflush(stdout);
-    _exit(0);
+    plain_quit(c, left, reader);
 }
