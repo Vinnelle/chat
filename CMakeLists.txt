@@ -14,7 +14,8 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # CHAT_OS names the folder with os.h and the device lock and security key code. macOS shares the
-# rest (platform.c, net.c) with Linux, which is POSIX apart from what it guards.
+# rest (process.c, term.c, notify.c, files.c, sandbox.c, net.c) with Linux, which is POSIX apart
+# from what it guards.
 if(WIN32)
     set(CHAT_OS windows)
     set(CHAT_POSIX_OS windows)
@@ -203,7 +204,11 @@ set(CHAT_CORE_SOURCES
     src/common/clean.c
     src/common/qr.c
     src/common/bytewords.c
-    src/platform/${CHAT_POSIX_OS}/platform.c
+    src/platform/${CHAT_POSIX_OS}/process.c
+    src/platform/${CHAT_POSIX_OS}/term.c
+    src/platform/${CHAT_POSIX_OS}/notify.c
+    src/platform/${CHAT_POSIX_OS}/files.c
+    src/platform/${CHAT_POSIX_OS}/sandbox.c
 )
 list(TRANSFORM CHAT_CORE_SOURCES PREPEND ${CMAKE_SOURCE_DIR}/)
 

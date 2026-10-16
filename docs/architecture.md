@@ -71,6 +71,22 @@ its box holds.
 | `lock.c`, `history.c`, `rooms.c`, `update.c` | The lock screen, histories, kept rooms, and `:update` |
 | `pics.c`, `clipboard.c`, `browser.c` | Pictures under the lines that offered them, the clipboard, and the folder browser |
 
+## The platform
+
+`linux/` and `windows/` have the same files, each with its part of `platform.h` and `net.h`. macOS
+builds the Linux ones, apart from `device.c` and `seckey.c`, which it has its own of.
+
+| File | What's there |
+| --- | --- |
+| `process.c` | Hardening the process, the secrets in its environment, its arguments, the clock, threads, the executable, and the programs and processes it starts |
+| `term.c` | The terminal: raw mode, its size, keys and lines, writing to it, and waiting on it and the sockets together |
+| `notify.c` | Notifications, and the clipboard |
+| `files.c` | Files and folders, temporary folders, and what chat reads from the system: the machine id, the default gateway, the CA roots |
+| `sandbox.c` | Landlock and seccomp, and the child pictures are decoded in: Linux only, stubs elsewhere |
+| `net.c` | Sockets (`net.h`) |
+| `device.c`, `seckey.c` | The device lock and security keys, over `tpm2.c` and `ctap2.c` on Linux |
+| `posix.h`, `win.h` | What the files in each folder share |
+
 ## A message, end to end
 
 1. `Enter` in the input box: `handle_key` (`app/commands.c`) hands the line to `chat_send_text`,
