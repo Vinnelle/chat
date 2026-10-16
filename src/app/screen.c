@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
+// What goes on screen: each mode's box, which page it shows, the chat pane and its input, and the
+// bottom row.
 #include "app/app.h"
 
 // ---- the dialogs ----
@@ -934,6 +936,177 @@ static const tui_dialog_t *current_dialog(void) {
     d = (tui_dialog_t){ .input = &g_app.input, .mask = 1, .text = paras };
     box(&d, paras);
     return &d;
+}
+
+// ---- which page a mode shows, and the chat screen ----
+
+// :install's own boxes, over the page install.back says.
+int install_mode(app_mode_t m) {
+    switch (m) {
+        case MODE_INSTALL: case MODE_INSTALL_PASS: case MODE_INSTALL_PASS2: case MODE_INSTALL_UNLOCK:
+        case MODE_INSTALL_EXISTING: case MODE_INSTALL_PICK: case MODE_INSTALL_OVERWRITE: case MODE_INSTALL_NAME:
+        case MODE_INSTALL_FIRST:
+            return 1;
+        case MODE_UNLOCK_CODE:
+            return g_app.factor.key_purpose == KP_INSTALL_UNLOCK;
+        default:
+            return 0;
+    }
+}
+
+// A box opened from the settings page goes back there, and one opened anywhere else to the chat.
+static app_mode_t back_to(app_mode_t back) { return back == MODE_SETTINGS ? MODE_SETTINGS : MODE_CHAT; }
+
+app_mode_t page_of(app_mode_t m) {
+    if (install_mode(m)) return back_to(g_app.install.back);
+    switch (m) {
+        case MODE_HELP: case MODE_CHANGELOG: case MODE_SETTINGS: case MODE_SIGN_CHOICE: case MODE_SIGN_BROWSE:
+        case MODE_SEND_BROWSE: case MODE_SAVE_BROWSE: case MODE_FILES: case MODE_FILE_VIEW:
+            return m;
+        case MODE_SETTINGS_EDIT:
+            return MODE_SETTINGS;
+        case MODE_SIGN_PASTE: case MODE_SIGN_PASSWORD:
+            return MODE_SIGN_CHOICE;
+        case MODE_SIGN_PATH:
+            return g_app.key.path_from_browser ? MODE_SIGN_BROWSE : MODE_SIGN_CHOICE;
+        case MODE_FILE_ASK:
+            return g_app.files.back == MODE_FILE_VIEW ? MODE_FILE_VIEW : MODE_FILES;
+        case MODE_DEVICE_LOCK:
+            return back_to(g_app.device.back);
+        case MODE_TOR_STATE:
+            return back_to(g_app.tor.back);
+        case MODE_FACTOR: case MODE_CODE_SETUP: case MODE_KEY_WAIT: case MODE_KEY_PIN:
+        case MODE_SHADOW_PASS: case MODE_SHADOW_PASS2:
+            return back_to(g_app.factor.back);
+        default:
+            return MODE_CHAT;
+    }
+}
+
+int on_chat_screen(void) { return page_of(g_app.mode) == MODE_CHAT; }
+
+static int session_count(void) {
+    int n = 0;
+    for (int i = 0; i < MAX_SESSIONS; i++) n += g_app.used[i] && !g_app.sessions[i].leaving;
+    return n;
+}
+
+tui_session_state_t session_state(const session_slot_t *s) {
+    if (s->initialising) return TUI_SESSION_STARTING;
+    return chat_ready(&s->engine) ? TUI_SESSION_LIVE : TUI_SESSION_CONNECTING;
+}
+
+// What the chat shows while a session has no messages: its progress, and what to do next.
+static const char *session_empty_text(const session_slot_t *s) {
+    static char text[400];
+    const chat_t *e = &s->engine;
+    if (s->initialising)
+        copy_str(text, "Starting the session\nDeriving its keys - this takes a moment.", sizeof text);
+    else if (!chat_ready(e))
+        snprintf(text, sizeof text, "Connecting to %s\nThe chat opens once someone in the session answers.\n"
+                 "Finding them can take a minute%s.", s->name, e->route.mode == ROUTE_TOR ? " over Tor" : "");
+    else if (chat_online_count(e) == 0)
+        snprintf(text, sizeof text, "No one else is here yet\nTo invite peers, share the session id and its "
+                 "password.\n\n%s\n/invite copies both, as one invite", s->name);
+    else
+        copy_str(text, "No messages yet\nSay hello - it's end-to-end encrypted.", sizeof text);
+    return text;
+}
+
+// The chat pane: the selected session's name, how it's connected, what to show while it's empty,
+// where the messages that arrived while it was away start, and unread counts for other sessions.
+tui_view_t current_view(char *sub, size_t cap) {
+    tui_view_t v = { g_app.show.sidebar, g_app.show.console, g_app.show.chat, NULL, NULL, TUI_SESSION_LIVE,
+                     NULL, NULL, 0, NULL, NULL, NULL, 0, 0, 0, NULL, TEST_BUILD ? TEST_LABEL : NULL, 0 };
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        const session_slot_t *o = &g_app.sessions[i];
+        if (!g_app.used[i] || o->leaving || o == g_app.selected) continue;
+        v.elsewhere += o->unread;
+        v.elsewhere_mention |= o->mentioned;
+    }
+    v.console_scroll = g_app.log_scroll;
+    const session_slot_t *s = g_app.selected;
+    if (!s) return v;
+    v.title = s->name;
+    v.state = session_state(s);
+    v.scroll = s->scroll;
+    v.console_scroll = s->console_scroll;
+    v.empty = session_empty_text(s);
+    v.image = pic_for;
+    v.image_ctx = s;
+    if (!s->initialising) {
+        v.self = s->engine.nick;
+        v.progress = progress_for;
+    }
+    if (s->has_new) v.new_lines = (int)(s->sb.total - s->new_at);
+    unsigned timer = s->initialising ? 0 : chat_timer(&s->engine, NULL, 0);
+    char after[16];
+    chat_format_timer(timer, after, sizeof after);
+    if (s->initialising) snprintf(sub, cap, "starting");
+    else snprintf(sub, cap, "%d online" DOT_SEP "%s%s%s", chat_online_count(&s->engine) + 1,
+                  routing_mode_name(s->engine.route.mode), timer ? DOT_SEP "messages go after " : "",
+                  timer ? after : "");
+    v.subtitle = sub;
+    return v;
+}
+
+// Who in s doesn't get what you send until their verify code is compared, for the input box's title
+// while that's the case, since the console's note that a message went to nobody is easy to miss.
+// NULL when everyone gets it, or the setting sends to everyone anyway.
+static const char *held_warning(const session_slot_t *s) {
+    static char warn[64 + CHAT_NAME_LEN * 2];
+    if (!s || !session_ready(s) || !s->engine.verify_required) return NULL;
+    const chat_t *e = &s->engine;
+    int held = 0;
+    char first[CHAT_NAME_LEN] = "";
+    for (int i = 0; i < MAX_PEERS + MAX_PENDING_PEERS; i++) {
+        const peer_t *p = &e->peers[i];
+        int code = chat_code_state(e, p);
+        if (!p->used || !p->ok || (code != CODE_TO_COMPARE && code != CODE_KEY_CHANGED)) continue;
+        if (held++ == 0) chat_peer_name(e, p, first);
+    }
+    if (held == 0) return NULL;
+    if (held == 1)
+        snprintf(warn, sizeof warn, "not sent to %s until you compare codes" DOT_SEP ":verify %s", first, first);
+    else
+        snprintf(warn, sizeof warn, "not sent to %d peers until you compare codes" DOT_SEP ":peers", held);
+    return warn;
+}
+
+// The chat screen's input: its faint text while it's empty, and what the keys do there.
+void chat_input(tui_bar_t *b, const tui_input_t *in) {
+    static char placeholder[MAX_SESSION_NAME + 64];
+    static char hint[160];
+    const session_slot_t *s = g_app.selected;
+    tui_input_mode_t m = in->mode;
+    b->chip = tui_mode_name(m);
+    b->tone = m == TUI_IMODE_NORMAL ? TUI_TONE_NORMAL : m == TUI_IMODE_COMMAND ? TUI_TONE_COMMAND : TUI_TONE_INSERT;
+    b->input = in;
+    b->limit = MAX_TEXT;
+    b->warn = held_warning(s);
+    if (m == TUI_IMODE_NORMAL) {
+        b->placeholder = "i to type" DOT_SEP ": for a command";
+        b->hint = s && !s->initialising ? "i type" DOT_SEP ": command" DOT_SEP "f files" DOT_SEP "j/k session" DOT_SEP "pgup/pgdn scroll" DOT_SEP "? help"
+                                        : "i type" DOT_SEP ": command" DOT_SEP "j/k session" DOT_SEP "pgup/pgdn scroll" DOT_SEP "? help";
+        return;
+    }
+    if (m == TUI_IMODE_COMMAND) {
+        b->hint = "enter run" DOT_SEP "tab complete" DOT_SEP "\xe2\x86\x91\xe2\x86\x93 choose" DOT_SEP "esc back";
+        return;
+    }
+    if (!s) {
+        b->placeholder = "No session yet" DOT_SEP "ctrl+n starts one, ctrl+j joins one, / for commands";
+        b->hint = "ctrl+n new" DOT_SEP "ctrl+j join" DOT_SEP "/ commands" DOT_SEP "ctrl+s settings";
+        return;
+    }
+    if (s->initialising) snprintf(placeholder, sizeof placeholder, "Starting %s\xe2\x80\xa6", s->name);
+    else if (!session_ready(s)) snprintf(placeholder, sizeof placeholder, "Waiting for someone in %s to answer\xe2\x80\xa6", s->name);
+    else snprintf(placeholder, sizeof placeholder, "Message %s", s->name);
+    b->placeholder = placeholder;
+    snprintf(hint, sizeof hint, "enter send" DOT_SEP "/ commands%s%s" DOT_SEP "esc normal" DOT_SEP "f1 help",
+             session_count() > 1 ? DOT_SEP "tab next session" : "",
+             !s->initialising && s->engine.file_seq > 0 ? DOT_SEP "ctrl+f files" : "");
+    b->hint = hint;
 }
 
 // The bottom row for the current screen: the chip names it, and the hint says what the keys do there.

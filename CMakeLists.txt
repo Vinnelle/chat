@@ -227,9 +227,13 @@ add_executable(chat
     src/app/history.c
     src/app/torlink.c
     src/app/settings.c
+    src/app/identity.c
     src/app/pages.c
+    src/app/files_page.c
     src/app/saves.c
     src/app/commands.c
+    src/app/cmdline.c
+    src/app/keys.c
     src/app/lock.c
     src/app/rooms.c
     src/app/screen.c

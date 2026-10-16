@@ -54,22 +54,26 @@ over a file. It never reads the clock itself: it keeps to the time it's given.
 
 The app's state is one `app_t`, `g_app` (`app.h`), grouped by what each part is for:
 `g_app.install`, `g_app.factor`, `g_app.lock`, and so on. Each screen is a mode: `MODE_KEYS`
-(`commands.c`) says how it takes keys, `page_of` which page it shows, and `BOXES` (`screen.c`) what
-its box holds.
+(`keys.c`) says how it takes keys, and `page_of` and `BOXES` (`screen.c`) which page it shows and
+what its box holds.
 
 | File | What's there |
 | --- | --- |
 | `main.c` | Starting up, the full-screen UI's main loop, and the panic key |
 | `sessions.c` | Session slots, opening sessions, what the engine tells the app, the NEW and JOIN boxes, kept rooms, reopening and calls |
 | `plain.c` | `--simple` |
-| `commands.c` | The app's commands, the help page, the command line's menu, and what each key does |
-| `screen.c` | What goes on screen: each mode's box and the bottom row |
-| `pages.c` | The settings page and the pages under it, the files page, a picture's page, and the changelog |
-| `settings.c` | The settings rows, `:set`, the settings file, and the signing identity |
+| `commands.c` | The app's own commands, `:move`'s boxes, the help page, and running a command |
+| `cmdline.c` | The command line: completing commands, nicks and arguments, and the menu over the input box |
+| `keys.c` | What each key does, in each mode and on the chat screen |
+| `screen.c` | What goes on screen: each mode's box, which page it shows, the chat pane and its input, and the bottom row |
+| `pages.c` | The list pages' keys, the settings page and the signing identity's picker, and the changelog |
+| `files_page.c` | The files page, and a picture on a page of its own |
+| `settings.c` | The settings rows, `:set`, and the settings file |
+| `identity.c` | The signing identity: made from a password, or read from a key file or a paste |
 | `saves.c`, `install.c` | `:install`'s boxes and unlocking (`saves.c`), and the save files themselves (`install.c`) |
 | `torlink.c` | Which tor Tor mode uses, chat's own tor, and its bridges |
 | `lock.c`, `history.c`, `rooms.c`, `update.c` | The lock screen, histories, kept rooms, and `:update` |
-| `pics.c`, `clipboard.c`, `browser.c` | Pictures under the lines that offered them, the clipboard, and the folder browser |
+| `pics.c`, `clipboard.c`, `browser.c` | Pictures under the lines that offered them, the clipboard, and the folder browser and its pages |
 
 ## The platform
 

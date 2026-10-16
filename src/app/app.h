@@ -451,6 +451,8 @@ typedef enum {
     LIST_NEXT_SECTION, LIST_PREV_SECTION
 } list_key_t;
 
+#define CRUMB " \xe2\x80\xba "   // between the levels of a page's title
+
 // main.c
 extern app_t g_app;
 extern options_t g_opts;
@@ -604,6 +606,14 @@ void path_parent(char *p);
 int browser_load(browser_t *b, const char *path);
 void browser_select(browser_t *b, const char *name);
 void browser_entry_path(const browser_t *b, const dir_entry_t *e, char *out, size_t cap);
+void browser_key(const tui_key_t *key);
+void begin_send_browse(int asis);
+void send_browser_key(const tui_key_t *key);
+void begin_save_browse(int num, int anyway);
+void save_browser_key(const tui_key_t *key);
+void render_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar);
+void render_send_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar);
+void render_save_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar);
 
 // settings.c
 extern const setting_def_t SETTINGS[N_SETTING_IDS];
@@ -618,15 +628,6 @@ extern int g_hold_sessions;
 extern int g_loading_settings;
 extern const char DEVICE_REMINDER[];
 extern const char KEY_REMINDER[];
-extern const sign_pick_row_t SIGN_PICKS[N_PICKS];
-extern const char KEY_WHY[];
-extern const char KEY_FILE_SAVED[];
-extern const char KEY_PASTE_SAVED[];
-extern const char AGE_PASTE_HELP[];
-extern const char PGP_PASTE_HELP[];
-extern const char AGE_PATH_HELP[];
-extern const char PGP_PATH_HELP[];
-extern const char SIGN_PASSWORD_HELP[];
 int settings_index(setting_id_t id);
 const setting_def_t *setting_def(setting_id_t id);
 const setting_def_t *setting_by_key(const char *key);
@@ -672,6 +673,18 @@ void begin_settings(void);
 void settings_open_at(setting_id_t id);
 void settings_done(void);
 const char *settings_hint(void);
+void finish_onboarding(void);
+
+// identity.c
+extern const sign_pick_row_t SIGN_PICKS[N_PICKS];
+extern const char KEY_WHY[];
+extern const char KEY_FILE_SAVED[];
+extern const char KEY_PASTE_SAVED[];
+extern const char AGE_PASTE_HELP[];
+extern const char PGP_PASTE_HELP[];
+extern const char AGE_PATH_HELP[];
+extern const char PGP_PATH_HELP[];
+extern const char SIGN_PASSWORD_HELP[];
 int sign_row_in_use(void);
 void begin_sign(void);
 void identity_chosen(void);
@@ -690,28 +703,26 @@ int try_load_key_from_browser(void);
 void sign_pick(int pick);
 void copy_age_recipient(void);
 void copy_pgp_public_key(void);
-
 int pgp_key_made_here(void);
 void pgp_public_key(char armor[PGP_ARMOR_MAX], uint8_t fp[PGP_FP_LEN]);
 void show_identity_result(void);
-void finish_onboarding(void);
+
 // pages.c
 list_key_t list_key(const tui_key_t *key);
 int section_digit(const tui_key_t *key);
 void list_move(list_key_t k, int *sel, int n);
 void settings_key(const tui_key_t *key);
 void sign_picker_key(const tui_key_t *key);
-void browser_key(const tui_key_t *key);
-void begin_send_browse(int asis);
-void send_browser_key(const tui_key_t *key);
-void begin_save_browse(int num, int anyway);
-void save_browser_key(const tui_key_t *key);
 void paste_key(const tui_key_t *key);
 void render_settings(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar);
 void render_sign_picker(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar);
-void render_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar);
-void render_send_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar);
-void render_save_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar);
+void begin_changelog(void);
+void render_changelog(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar);
+void changelog_key(const tui_key_t *key);
+int page_section_step(const tui_row_t *rows, int n, int sel, int dir);
+int page_section_nth(const tui_row_t *rows, int n, int nth);
+
+// files_page.c
 void file_ask(int what, const file_entry_t *f);
 int echo_fetch(session_slot_t *s, int num, int view, int anyway, const char *dir);
 void file_ask_yes(void);
@@ -725,11 +736,6 @@ void view_forget(const session_slot_t *s);
 void render_viewer(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar);
 void viewer_key(const tui_key_t *key);
 const char *viewer_hint(void);
-void begin_changelog(void);
-void render_changelog(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar);
-void changelog_key(const tui_key_t *key);
-int page_section_step(const tui_row_t *rows, int n, int sel, int dir);
-int page_section_nth(const tui_row_t *rows, int n, int nth);
 
 // saves.c
 void saved_note(const char *fmt, ...) PRINTF_LIKE(1, 2);
@@ -792,7 +798,14 @@ void field_key(const tui_key_t *key, void (*enter)(void), void (*esc)(void));
 void code_setup_key(const tui_key_t *key);
 
 // commands.c
+extern const command_t APP_COMMANDS[];
+extern const command_t *const ALL_COMMANDS[];
+void begin_help(void);
 int begin_install(const char *arg);
+void move_yes(void);
+void move_no(void);
+void move_ask_key(const tui_key_t *key);
+void move_tick(double now);
 cmd_result_t app_help(void *ctx, const char *arg);
 cmd_result_t app_changelog(void *ctx, const char *arg);
 int file_arg(const char *arg, int *anyway);
@@ -801,10 +814,25 @@ cmd_result_t app_files(void *ctx, const char *arg);
 cmd_result_t app_saveto(void *ctx, const char *arg);
 cmd_result_t app_hide(void *ctx, const char *arg);
 void render_help(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar);
+void help_key(const tui_key_t *key);
+void run_command(const char *line);
+cmd_result_t app_quit(void *ctx, const char *arg);
+cmd_result_t app_quitall(void *ctx, const char *arg);
+cmd_result_t app_copyid(void *ctx, const char *arg);
+cmd_result_t app_invite(void *ctx, const char *arg);
+cmd_result_t app_update(void *ctx, const char *arg);
+void update_key(const tui_key_t *key);
+
+// cmdline.c
 int command_word(const char *word, int whole);
 const char *complete_mention(const char *typed);
 int suggest_command(const char *typed, int nth, tui_suggestion_t *out);
+
+// keys.c
 void handle_key(const tui_key_t *key);
+
+// screen.c
+int add_para(tui_para_t *p, int n, tui_para_kind_t kind, const char *text);
 int install_mode(app_mode_t m);
 // The page a mode shows: itself, for a page, or the one under its box (MODE_CHAT for the chat screen).
 app_mode_t page_of(app_mode_t m);
@@ -812,16 +840,6 @@ int on_chat_screen(void);
 tui_session_state_t session_state(const session_slot_t *s);
 tui_view_t current_view(char *sub, size_t cap);
 void chat_input(tui_bar_t *b, const tui_input_t *in);
-void move_tick(double now);
-
-cmd_result_t app_quit(void *ctx, const char *arg);
-cmd_result_t app_quitall(void *ctx, const char *arg);
-cmd_result_t app_copyid(void *ctx, const char *arg);
-cmd_result_t app_invite(void *ctx, const char *arg);
-cmd_result_t app_update(void *ctx, const char *arg);
-void update_key(const tui_key_t *key);
-// screen.c
-int add_para(tui_para_t *p, int n, tui_para_kind_t kind, const char *text);
 void render_bar(void);
 void render(void);
 
