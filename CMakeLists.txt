@@ -171,6 +171,10 @@ set(SECP256K1_STATIC_LIB ${SECP256K1_PREFIX}/install/lib/libsecp256k1.a)
 # app's own files and the platform code the tests fake.
 set(CHAT_CORE_SOURCES
     src/app/tui.c
+    src/app/tui_input.c
+    src/app/tui_chat.c
+    src/app/tui_bar.c
+    src/app/tui_pages.c
     src/core/chat.c
     src/core/names.c
     src/core/messages.c
