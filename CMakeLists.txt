@@ -7,6 +7,8 @@ set(CHAT_PRERELEASE "-beta.3")
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
+# For clangd and clang-tidy: build/compile_commands.json.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
@@ -165,21 +167,10 @@ ExternalProject_Add(secp256k1_ext
 set(SECP256K1_INCLUDE_DIRS ${SECP256K1_PREFIX}/install/include)
 set(SECP256K1_STATIC_LIB ${SECP256K1_PREFIX}/install/lib/libsecp256k1.a)
 
-add_executable(chat
-    src/app/main.c
-    src/app/history.c
-    src/app/torlink.c
-    src/app/settings.c
-    src/app/pages.c
-    src/app/saves.c
-    src/app/commands.c
-    src/app/lock.c
-    src/app/rooms.c
-    src/app/screen.c
+# What the engine test and the fuzz targets build too (tests/CMakeLists.txt): everything but the
+# app's own files and the platform code the tests fake.
+set(CHAT_CORE_SOURCES
     src/app/tui.c
-    src/app/update.c
-    src/app/install.c
-    src/common/toml.c
     src/core/chat.c
     src/core/cmd.c
     src/core/files.c
@@ -191,17 +182,35 @@ add_executable(chat
     src/transport/nostr.c
     src/transport/tls.c
     src/transport/tor.c
-    src/transport/torproc.c
     src/transport/portmap.c
     src/common/util.c
     src/common/bencode.c
     src/common/json.c
+    src/common/toml.c
     src/common/image.c
     src/common/clean.c
     src/common/qr.c
     src/common/bytewords.c
-    src/platform/${CHAT_POSIX_OS}/net.c
     src/platform/${CHAT_POSIX_OS}/platform.c
+)
+list(TRANSFORM CHAT_CORE_SOURCES PREPEND ${CMAKE_SOURCE_DIR}/)
+
+add_executable(chat
+    ${CHAT_CORE_SOURCES}
+    src/app/main.c
+    src/app/history.c
+    src/app/torlink.c
+    src/app/settings.c
+    src/app/pages.c
+    src/app/saves.c
+    src/app/commands.c
+    src/app/lock.c
+    src/app/rooms.c
+    src/app/screen.c
+    src/app/update.c
+    src/app/install.c
+    src/transport/torproc.c
+    src/platform/${CHAT_POSIX_OS}/net.c
     src/platform/${CHAT_OS}/device.c
     src/platform/${CHAT_OS}/seckey.c
 )

@@ -151,13 +151,14 @@ clean:
 # Test
 
 # Sessions handshake and chat over an in-memory network. -v also prints every session line and
-# check, then the summary.
+# check, then the summary. It's built in build/, with the dependencies already built there, and
+# `just build` leaves it out.
 # Build and run the engine test (-v for everything)
 [group('test')]
 test *flags:
-    cmake -B build-test -DCHAT_TESTS=ON
-    cmake --build build-test -j {{num_cpus()}} --target engine_test
-    ./build-test/tests/engine_test "$@"
+    cmake -B build -DCHAT_TESTS=ON
+    cmake --build build -j {{num_cpus()}} --target engine_test
+    ./build/tests/engine_test "$@"
 
 # This build and OLD, another chat executable (an older release, say), as two peers in one room on
 # this computer, through what PROTOCOL.md promises older versions. CI runs it against the latest

@@ -7,35 +7,11 @@ if(WIN32 AND CHAT_FUZZ)
     message(FATAL_ERROR "chat: the fuzz targets build on Linux only")
 endif()
 
-set(CHAT_CORE_SOURCES
-    ${PROJECT_SOURCE_DIR}/src/app/tui.c
-    ${PROJECT_SOURCE_DIR}/src/core/chat.c
-    ${PROJECT_SOURCE_DIR}/src/core/cmd.c
-    ${PROJECT_SOURCE_DIR}/src/core/files.c
-    ${PROJECT_SOURCE_DIR}/src/core/trust.c
-    ${PROJECT_SOURCE_DIR}/src/crypto/crypto.c
-    ${PROJECT_SOURCE_DIR}/src/crypto/age.c
-    ${PROJECT_SOURCE_DIR}/src/crypto/pgp.c
-    ${PROJECT_SOURCE_DIR}/src/transport/dht.c
-    ${PROJECT_SOURCE_DIR}/src/transport/nostr.c
-    ${PROJECT_SOURCE_DIR}/src/transport/tls.c
-    ${PROJECT_SOURCE_DIR}/src/transport/tor.c
-    ${PROJECT_SOURCE_DIR}/src/transport/portmap.c
-    ${PROJECT_SOURCE_DIR}/src/common/util.c
-    ${PROJECT_SOURCE_DIR}/src/common/bencode.c
-    ${PROJECT_SOURCE_DIR}/src/common/json.c
-    ${PROJECT_SOURCE_DIR}/src/common/toml.c
-    ${PROJECT_SOURCE_DIR}/src/common/image.c
-    ${PROJECT_SOURCE_DIR}/src/common/clean.c
-    ${PROJECT_SOURCE_DIR}/src/common/qr.c
-    ${PROJECT_SOURCE_DIR}/src/common/bytewords.c
-    ${PROJECT_SOURCE_DIR}/src/platform/${CHAT_POSIX_OS}/platform.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/fake_net.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_os.c
-)
+# The top level's CHAT_CORE_SOURCES, with the sockets and the platform's own code faked.
+set(TEST_SOURCES ${CHAT_CORE_SOURCES} ${CMAKE_CURRENT_SOURCE_DIR}/fake_net.c ${CMAKE_CURRENT_SOURCE_DIR}/test_os.c)
 
 function(chat_test_executable name)
-    add_executable(${name} ${ARGN} ${CHAT_CORE_SOURCES})
+    add_executable(${name} EXCLUDE_FROM_ALL ${ARGN} ${TEST_SOURCES})
     add_dependencies(${name} libsodium_ext liboqs_ext mbedtls_ext secp256k1_ext)
     target_compile_definitions(${name} PRIVATE CHAT_VERSION="test" MBEDTLS_USER_CONFIG_FILE="${CHAT_MBEDTLS_CONFIG}")
     target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/src
