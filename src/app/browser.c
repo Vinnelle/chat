@@ -161,7 +161,7 @@ void send_browser_key(const tui_key_t *key) {
                     break;
                 }
                 copy_str(g_app.files.send_dir, b->path, sizeof g_app.files.send_dir);
-                chat_t *e = &g_app.selected->engine;
+                chat_t *e = g_app.selected->engine;
                 int was = chat_newest_file(e);
                 g_echo = 1;
                 chat_send_file(e, full, g_app.files.send_asis);
@@ -204,7 +204,7 @@ void save_browser_key(const tui_key_t *key) {
         if (!g_app.selected || g_app.selected->initialising) { note("no session to save file %d from", g_app.files.save_num); return; }
         copy_str(g_app.files.save_dir, b->path, sizeof g_app.files.save_dir);
         g_echo = 1;
-        chat_file_fetch(&g_app.selected->engine, g_app.files.save_num, 0, g_app.files.save_anyway, b->path);
+        chat_file_fetch(g_app.selected->engine, g_app.files.save_num, 0, g_app.files.save_anyway, b->path);
         g_echo = 0;
         return;
     }
@@ -530,7 +530,7 @@ void render_save_browser(int rows_n, int cols_n, const char *clock, const tui_ba
     static browser_page_t v;
     browser_lay_out(&v, rows_n, cols_n, IDENT_NONE);
     char help[1400], title[160];
-    const file_entry_t *f = g_app.selected ? chat_file(&g_app.selected->engine, g_app.files.save_num) : NULL;
+    const file_entry_t *f = g_app.selected ? chat_file(g_app.selected->engine, g_app.files.save_num) : NULL;
     char what[FILE_NAME_MAX + 48];
     if (f) {
         char sz[32]; file_format_size(f->size, sz, sizeof sz);

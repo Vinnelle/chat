@@ -383,7 +383,7 @@ static int move_paras(tui_para_t *p) {
     session_slot_t *s = g_app.selected;
     chat_move_plan_t plan;
     if (!s || s->initialising) return add_para(p, 0, TUI_P_TEXT, "That session isn't open any more.");
-    chat_move_plan(&s->engine, &plan);
+    chat_move_plan(s->engine, &plan);
     if (!plan.coming) return add_para(p, 0, TUI_P_TEXT, "Nobody here can come along any more.");
     char coming[MOVE_NAMES_LEN * 2], gone[MOVE_NAMES_LEN * 2];
     md_escape(plan.coming_names, coming, sizeof coming);
@@ -407,7 +407,7 @@ static int move_paras(tui_para_t *p) {
 static int move_ask_paras(tui_para_t *p) {
     static char what[MOVE_NAMES_LEN * 2 + MOVE_NAME_LEN * 2 + 120];
     session_slot_t *s = g_app.selected;
-    const chat_move_ask_t *a = s && !s->initialising ? chat_move_asked(&s->engine) : NULL;
+    const chat_move_ask_t *a = s && !s->initialising ? chat_move_asked(s->engine) : NULL;
     if (!a) return add_para(p, 0, TUI_P_TEXT, "That request isn't here any more.");
     char from[MOVE_NAME_LEN * 2], with[MOVE_NAMES_LEN * 2];
     md_escape(a->from, from, sizeof from);
@@ -433,7 +433,7 @@ static const tui_dialog_t *quit_dialog(void) {
         n_sessions++;
         kept += session_kept(&g_app.sessions[i]);
         if (g_app.sessions[i].initialising) continue;
-        const chat_t *e = &g_app.sessions[i].engine;
+        const chat_t *e = g_app.sessions[i].engine;
         online += chat_online_count(e);
         for (int f = 0; f < FILE_OFFERS_MAX; f++) {
             const file_entry_t *x = chat_file_at(e, f);
@@ -995,13 +995,13 @@ static int session_count(void) {
 
 tui_session_state_t session_state(const session_slot_t *s) {
     if (s->initialising) return TUI_SESSION_STARTING;
-    return chat_ready(&s->engine) ? TUI_SESSION_LIVE : TUI_SESSION_CONNECTING;
+    return chat_ready(s->engine) ? TUI_SESSION_LIVE : TUI_SESSION_CONNECTING;
 }
 
 // What the chat shows while a session has no messages: its progress, and what to do next.
 static const char *session_empty_text(const session_slot_t *s) {
     static char text[400];
-    const chat_t *e = &s->engine;
+    const chat_t *e = s->engine;
     if (s->initialising)
         copy_str(text, "Starting the session\nDeriving its keys - this takes a moment.", sizeof text);
     else if (!chat_ready(e))
@@ -1037,16 +1037,16 @@ tui_view_t current_view(char *sub, size_t cap) {
     v.image = pic_for;
     v.image_ctx = s;
     if (!s->initialising) {
-        v.self = chat_nick(&s->engine);
+        v.self = chat_nick(s->engine);
         v.progress = progress_for;
     }
     if (s->has_new) v.new_lines = (int)(s->sb.total - s->new_at);
-    unsigned timer = s->initialising ? 0 : chat_timer(&s->engine, NULL, 0);
+    unsigned timer = s->initialising ? 0 : chat_timer(s->engine, NULL, 0);
     char after[16];
     chat_format_timer(timer, after, sizeof after);
     if (s->initialising) snprintf(sub, cap, "starting");
-    else snprintf(sub, cap, "%d online" DOT_SEP "%s%s%s", chat_online_count(&s->engine) + 1,
-                  routing_mode_name(chat_route_mode(&s->engine)), timer ? DOT_SEP "messages go after " : "",
+    else snprintf(sub, cap, "%d online" DOT_SEP "%s%s%s", chat_online_count(s->engine) + 1,
+                  routing_mode_name(chat_route_mode(s->engine)), timer ? DOT_SEP "messages go after " : "",
                   timer ? after : "");
     v.subtitle = sub;
     return v;
@@ -1057,8 +1057,8 @@ tui_view_t current_view(char *sub, size_t cap) {
 // NULL when everyone gets it, or the setting sends to everyone anyway.
 static const char *held_warning(const session_slot_t *s) {
     static char warn[64 + CHAT_NAME_LEN * 2];
-    if (!s || !session_ready(s) || !chat_verify_required(&s->engine)) return NULL;
-    const chat_t *e = &s->engine;
+    if (!s || !session_ready(s) || !chat_verify_required(s->engine)) return NULL;
+    const chat_t *e = s->engine;
     int held = 0;
     char first[CHAT_NAME_LEN] = "";
     for (int i = 0; i < CHAT_PEER_SLOTS; i++) {
@@ -1108,7 +1108,7 @@ void chat_input(tui_bar_t *b, const tui_input_t *in) {
     b->placeholder = placeholder;
     snprintf(hint, sizeof hint, "enter send" DOT_SEP "/ commands%s%s" DOT_SEP "esc normal" DOT_SEP "f1 help",
              session_count() > 1 ? DOT_SEP "tab next session" : "",
-             !s->initialising && chat_newest_file(&s->engine) > 0 ? DOT_SEP "ctrl+f files" : "");
+             !s->initialising && chat_newest_file(s->engine) > 0 ? DOT_SEP "ctrl+f files" : "");
     b->hint = hint;
 }
 
@@ -1252,7 +1252,7 @@ void render_bar(void) {
 
 static int build_net(tui_kv_t kv[MAX_NET], char vals[MAX_NET][NET_VALUE_MAX]) {
     if (!g_app.selected || g_app.selected->initialising) return 0;
-    const chat_t *e = &g_app.selected->engine;
+    const chat_t *e = g_app.selected->engine;
     int n = 0;
 #define KV(l, ...) do { snprintf(vals[n], NET_VALUE_MAX, __VA_ARGS__); kv[n].label = (l); kv[n].value = vals[n]; n++; } while (0)
     chat_net_t net;
@@ -1307,7 +1307,7 @@ void render(void) {
         session_slot_t *s = &g_app.sessions[i];
         tui_session_row_t *r = &rows[n];
         copy_str(r->label, s->name, sizeof r->label);
-        r->online = s->initialising ? 1 : chat_online_count(&s->engine) + 1;
+        r->online = s->initialising ? 1 : chat_online_count(s->engine) + 1;
         r->unread = s->unread;
         r->mention = s->mentioned;
         r->state = session_state(s);
@@ -1335,7 +1335,7 @@ void render(void) {
     static tui_peer_row_t peer_rows[CHAT_PEER_SLOTS + 1];
     int n_peers = 0;
     if (g_app.selected && !g_app.selected->initialising) {
-        chat_t *e = &g_app.selected->engine;
+        chat_t *e = g_app.selected->engine;
         tui_peer_row_t *me = &peer_rows[n_peers++];
         memset(me, 0, sizeof *me);
         copy_str(me->nick, chat_nick(e), sizeof me->nick);

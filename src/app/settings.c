@@ -607,7 +607,7 @@ static int takes_settings(int i) {
 void settings_to_sessions(void) {
     for (int i = 0; i < MAX_SESSIONS; i++) {
         if (!takes_settings(i)) continue;
-        chat_t *e = &g_app.sessions[i].engine;
+        chat_t *e = g_app.sessions[i].engine;
         chat_apply_routing(e, &g_app.route);
         chat_set_file_options(e, g_app.file_cap, g_app.fast_files);
         chat_set_picture_noise(e, g_app.picture_noise);
@@ -628,7 +628,7 @@ static void routing_changed(setting_id_t id) {
     }
     for (int i = 0; i < MAX_SESSIONS; i++) {
         if (!takes_settings(i)) continue;
-        later |= chat_apply_routing(&g_app.sessions[i].engine, &g_app.route);
+        later |= chat_apply_routing(g_app.sessions[i].engine, &g_app.route);
         any = 1;
     }
     char v[160]; setting_value(id, v, sizeof v);
@@ -641,7 +641,7 @@ static void routing_changed(setting_id_t id) {
 
 static void set_colour_all(void) {
     for (int i = 0; i < MAX_SESSIONS; i++)
-        if (takes_settings(i)) chat_set_colour(&g_app.sessions[i].engine, g_app.color);
+        if (takes_settings(i)) chat_set_colour(g_app.sessions[i].engine, g_app.color);
 }
 
 // Security keys too.
@@ -706,7 +706,7 @@ void setting_choose(setting_id_t id, int i) {
         case SET_VERIFY:
             g_app.verify_optional = i;
             for (int s = 0; s < MAX_SESSIONS; s++)
-                if (takes_settings(s)) chat_set_verify_required(&g_app.sessions[s].engine, !i);
+                if (takes_settings(s)) chat_set_verify_required(g_app.sessions[s].engine, !i);
             break;
         case SET_TOR_LAUNCH:
             g_app.tor.launch = i;
@@ -716,27 +716,27 @@ void setting_choose(setting_id_t id, int i) {
         case SET_NOTIFY:
             g_app.notify_mode = (notify_mode_t)i;
             for (int s = 0; s < MAX_SESSIONS; s++)
-                if (takes_settings(s)) chat_set_notify_mode(&g_app.sessions[s].engine, g_app.notify_mode);
+                if (takes_settings(s)) chat_set_notify_mode(g_app.sessions[s].engine, g_app.notify_mode);
             break;
         case SET_PREVIEW:
             g_app.notify_preview = (notify_preview_t)i;
             for (int s = 0; s < MAX_SESSIONS; s++)
-                if (takes_settings(s)) chat_set_notify_preview(&g_app.sessions[s].engine, g_app.notify_preview);
+                if (takes_settings(s)) chat_set_notify_preview(g_app.sessions[s].engine, g_app.notify_preview);
             break;
         case SET_NET:
             g_app.net_log = i;
             for (int s = 0; s < MAX_SESSIONS; s++)
-                if (takes_settings(s)) chat_set_net_log(&g_app.sessions[s].engine, i);
+                if (takes_settings(s)) chat_set_net_log(g_app.sessions[s].engine, i);
             break;
         case SET_FAST_FILES:
             g_app.fast_files = i;
             for (int s = 0; s < MAX_SESSIONS; s++)
-                if (takes_settings(s)) chat_set_file_options(&g_app.sessions[s].engine, g_app.file_cap, i);
+                if (takes_settings(s)) chat_set_file_options(g_app.sessions[s].engine, g_app.file_cap, i);
             break;
         case SET_NOISE:
             g_app.picture_noise = i;
             for (int s = 0; s < MAX_SESSIONS; s++)
-                if (takes_settings(s)) chat_set_picture_noise(&g_app.sessions[s].engine, i);
+                if (takes_settings(s)) chat_set_picture_noise(g_app.sessions[s].engine, i);
             break;
         case SET_BETAS:
             g_app.betas = i;
@@ -897,7 +897,7 @@ void setting_apply_text(setting_id_t id, const char *typed) {
             if (file_parse_size(text, &v) != 0 || v == 0 || v > FILE_HARD_MAX) { note("that isn't a size from 1 byte to 1 GB (8M, 500K, 1G)"); return; }
             g_app.file_cap = v;
             for (int i = 0; i < MAX_SESSIONS; i++)
-                if (takes_settings(i)) chat_set_file_options(&g_app.sessions[i].engine, v, g_app.fast_files);
+                if (takes_settings(i)) chat_set_file_options(g_app.sessions[i].engine, v, g_app.fast_files);
             char sz[32]; file_format_size(v, sz, sizeof sz);
             note("File size limit: %s - for open sessions too", sz);
             return;
@@ -911,7 +911,7 @@ void setting_apply_text(setting_id_t id, const char *typed) {
             if (!text[0]) return;
             chat_clean_nick(text, g_app.nick);
             for (int i = 0; i < MAX_SESSIONS; i++)
-                if (takes_settings(i)) chat_set_nick(&g_app.sessions[i].engine, g_app.nick);
+                if (takes_settings(i)) chat_set_nick(g_app.sessions[i].engine, g_app.nick);
             note("Nickname: %s", g_app.nick);
             return;
         case SET_COLOUR: {

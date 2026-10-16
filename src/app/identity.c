@@ -88,7 +88,7 @@ void identity_chosen(void) {
     int any = 0;
     for (int i = 0; i < MAX_SESSIONS; i++) {
         if (!g_app.used[i] || g_app.sessions[i].initialising) continue;
-        chat_set_identity(&g_app.sessions[i].engine, g_app.identity_source, &g_app.identity);
+        chat_set_identity(g_app.sessions[i].engine, g_app.identity_source, &g_app.identity);
         any = 1;
     }
     show_identity_result();

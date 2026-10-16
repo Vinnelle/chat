@@ -5,7 +5,6 @@
 #define CHAT_APP_H
 
 #include "core/chat.h"
-#include "core/state.h"
 #include "core/trust.h"
 #include "crypto/crypto.h"
 #include "crypto/age.h"
@@ -61,7 +60,7 @@ static inline void thumb_free(image_thumb_t *t) {
 }
 
 typedef struct {
-    chat_t engine;
+    chat_t *engine;
     tui_scrollback_t sb;
     tui_scrollback_t console;
     pic_t pics[MAX_PICS];

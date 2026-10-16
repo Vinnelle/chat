@@ -240,7 +240,7 @@ static cmd_result_t app_history(void *ctx, const char *arg) {
         if (what[0]) { note("history forget takes all, or nothing for this session's"); return CMD_OK; }
         if (!s) { note("open a session first - :history forget all deletes every session's"); return CMD_OK; }
         uint8_t id[CHAT_HISTORY_ID_LEN];
-        chat_history_id(&s->engine, id);
+        chat_history_id(s->engine, id);
         install_forget_history(id);
         if (s->hist) { crypto_wipe(s->hist, s->hist_len); s->hist_len = 0; s->hist_dirty = 0; }
         note("deleted this session's history%s", g_app.history ? " - it's kept again from here" : "");
@@ -274,14 +274,14 @@ static cmd_result_t app_move(void *ctx, const char *arg) {
     (void)ctx; (void)arg;
     session_slot_t *s = g_app.selected;
     if (!s || s->initialising) { note("open a session first"); return CMD_OK; }
-    if (chat_move_asked(&s->engine)) {
+    if (chat_move_asked(s->engine)) {
         g_app.mode = MODE_MOVE_ASK;
         g_app.move_shown = 0.0;
         g_app.dirty = 1;
         return CMD_OK;
     }
     chat_move_plan_t plan;
-    chat_move_plan(&s->engine, &plan);
+    chat_move_plan(s->engine, &plan);
     if (!plan.coming) {
         note(plan.left ? "nobody can come along yet - compare verify codes with them first (:peers lists them)"
                        : "nobody else is here to move with");
@@ -296,7 +296,7 @@ static cmd_result_t app_move(void *ctx, const char *arg) {
 static void move_to_room(session_slot_t *old, const chat_move_to_t *to) {
     session_slot_t *s = start_moved_session(to);
     if (!s) { select_session(old); return; }
-    chat_move_go(&old->engine, to, &s->engine, now_seconds());
+    chat_move_go(old->engine, to, s->engine, now_seconds());
     old->leaving = 1;
 }
 
@@ -308,7 +308,7 @@ void move_yes(void) {
     chat_move_to_t to;
     // Peers may have gone since the box came up, and the engine says so on the bar.
     g_echo = 1;
-    int ok = chat_move_begin(&s->engine, &to) == 0;
+    int ok = chat_move_begin(s->engine, &to) == 0;
     g_echo = 0;
     if (ok) move_to_room(s, &to);
     crypto_wipe(&to, sizeof to);
@@ -322,7 +322,7 @@ void move_no(void) {
 // y goes and n stays, which can't be undone, so Esc only puts the box away until :move.
 void move_ask_key(const tui_key_t *key) {
     session_slot_t *s = g_app.selected;
-    const chat_move_ask_t *a = s && !s->initialising ? chat_move_asked(&s->engine) : NULL;
+    const chat_move_ask_t *a = s && !s->initialising ? chat_move_asked(s->engine) : NULL;
     if (!a) { g_app.mode = MODE_CHAT; g_app.dirty = 1; return; }
     if (now_seconds() - g_app.move_shown < MOVE_KEY_GUARD) return;
     char ch = key->type == TUI_KEY_CHAR && key->ch_len == 1 ? key->ch[0] : 0;
@@ -330,12 +330,12 @@ void move_ask_key(const tui_key_t *key) {
         g_app.mode = MODE_CHAT;
         g_app.dirty = 1;
         chat_move_to_t to;
-        if (chat_move_accept(&s->engine, &to) == 0) move_to_room(s, &to);
+        if (chat_move_accept(s->engine, &to) == 0) move_to_room(s, &to);
         crypto_wipe(&to, sizeof to);
     } else if (ch == 'n' || ch == 'N') {
         g_app.mode = MODE_CHAT;
         g_app.dirty = 1;
-        chat_move_decline(&s->engine);
+        chat_move_decline(s->engine);
         note("you stay in this room");
     } else if (ch == 'q' || key->type == TUI_KEY_ESCAPE) {
         s->move_later = a->seq;
@@ -350,14 +350,14 @@ void move_ask_key(const tui_key_t *key) {
 void move_tick(double now) {
     for (int i = 0; i < MAX_SESSIONS; i++) {
         session_slot_t *s = &g_app.sessions[i];
-        if (!g_app.used[i] || !s->leaving || !chat_move_finished(&s->engine, now)) continue;
+        if (!g_app.used[i] || !s->leaving || !chat_move_finished(s->engine, now)) continue;
         for (int j = 0; j < MAX_SESSIONS; j++)
-            if (g_app.used[j] && &g_app.sessions[j].engine == chat_moved_to(&s->engine))
+            if (g_app.used[j] && g_app.sessions[j].engine == chat_moved_to(s->engine))
                 console_note(&g_app.sessions[j], "* left %s, the room you moved from", s->name);
         close_session(s);
     }
     session_slot_t *s = g_app.selected;
-    const chat_move_ask_t *a = s && !s->initialising ? chat_move_asked(&s->engine) : NULL;
+    const chat_move_ask_t *a = s && !s->initialising ? chat_move_asked(s->engine) : NULL;
     if (a && g_app.mode == MODE_CHAT && !g_app.asking_quit && !g_app.lock.on && !g_app.lock.pin_step
         && s->move_later != a->seq) {
         g_app.mode = MODE_MOVE_ASK;
@@ -442,7 +442,7 @@ cmd_result_t app_saveto(void *ctx, const char *arg) {
     int anyway, n = file_arg(arg, &anyway);
     if (!s || s->initialising) { note("open a session first"); return CMD_OK; }
     if (!n) { note("usage: :saveto N [anyway] - N is the number in the offer"); return CMD_OK; }
-    const file_entry_t *f = chat_file(&s->engine, n);
+    const file_entry_t *f = chat_file(s->engine, n);
     if (!f) { note("there's no file %d - :files lists them", n); return CMD_OK; }
     if (f->mine) { note("file %d is yours", n); return CMD_OK; }
     begin_save_browse(n, anyway);
@@ -566,7 +566,7 @@ void run_command(const char *line) {
         if (!rest[0] || asis) { begin_send_browse(asis); return; }
     }
     g_echo = strcmp(word, "download") == 0 || strcmp(word, "dl") == 0 || strcmp(word, "cancel") == 0 || strcmp(word, "send") == 0;
-    cmd_result_t r = chat_run_command(&g_app.selected->engine, line);
+    cmd_result_t r = chat_run_command(g_app.selected->engine, line);
     g_echo = 0;
     if (r == CMD_QUIT) close_session(g_app.selected);
 }

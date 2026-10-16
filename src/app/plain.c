@@ -85,11 +85,12 @@ static void plain_quiet(void *ui, const char *hhmm, const char *text, const uint
     (void)ui; (void)hhmm; (void)text; (void)rgb; (void)flags; (void)color_len; (void)file;
 }
 
-// --simple's :move opens the new room in whichever engine isn't in use. A room an earlier move left, if
-// it's still closing, closes first. Returns the new room, or NULL after saying why it didn't open.
-static chat_t *plain_move(chat_t *c, chat_t **left, chat_t engines[2], const chat_move_to_t *to) {
-    if (*left) { chat_shutdown(*left); *left = NULL; }
-    chat_t *n = c == &engines[0] ? &engines[1] : &engines[0];
+// --simple's :move opens the new room as a session of its own. A room an earlier move left, if it's
+// still closing, closes first. Returns the new room, or NULL after saying why it didn't open.
+static chat_t *plain_move(chat_t *c, chat_t **left, const chat_move_to_t *to) {
+    if (*left) { chat_shutdown(*left); chat_free(*left); *left = NULL; }
+    chat_t *n = chat_new();
+    if (!n) { push_log("* couldn't open the new room: not enough memory"); return NULL; }
     chat_opts_t o; memset(&o, 0, sizeof o);
     copy_str(o.nick, chat_nick(c), sizeof o.nick);
     copy_str(o.session_name, to->session_name, sizeof o.session_name);
@@ -112,6 +113,7 @@ static chat_t *plain_move(chat_t *c, chat_t **left, chat_t engines[2], const cha
     if (!chat_started(n)) {
         push_log("* couldn't open the new room: %s", chat_start_error(n));
         chat_shutdown(n);
+        chat_free(n);
         return NULL;
     }
     if (chat_route_mode(n) == ROUTE_TOR && g_tor.state == TL_READY && g_tor.proc)
@@ -220,8 +222,9 @@ static int plain_input(chat_t *c, stdin_reader_t *reader, double now) {
 
 static _Noreturn void plain_quit(chat_t *c, chat_t *left, stdin_reader_t *reader) {
     if (g_panic) panic_saves();
-    if (left) chat_shutdown(left);
+    if (left) { chat_shutdown(left); chat_free(left); }
     chat_shutdown(c);
+    chat_free(c);
     g_plain_engine = NULL;
     tor_link_stop();
     if (reader) stdin_reader_stop(reader);
@@ -239,9 +242,14 @@ int run_plain(const char *session_name, const char *password, uint16_t port,
     chat_opts_t o;
     if (plain_opts(&o, session_name, password, port, peer_args, n_peer_args) != 0) return 1;
 
-    // Two, so a room :move left can close while the new one runs.
-    static chat_t engines[2];
-    chat_t *c = &engines[0], *left = NULL;
+    // A room :move left (left) closes while the new one runs.
+    chat_t *c = chat_new(), *left = NULL;
+    if (!c) {
+        crypto_wipe(&o, sizeof o);
+        fprintf(stderr, "chat: not enough memory for a session\n");
+        tor_link_stop();
+        return 1;
+    }
     o.file_view = plain_file_view;
     o.delivery = plain_delivery;
     chat_init(c, &o, plain_print, plain_notify, NULL, now_seconds());
@@ -250,6 +258,7 @@ int run_plain(const char *session_name, const char *password, uint16_t port,
     if (!chat_started(c)) {
         fprintf(stderr, "chat: %s\n", chat_start_error(c));
         chat_shutdown(c);
+        chat_free(c);
         g_plain_engine = NULL;
         tor_link_stop();
         return 1;
@@ -284,7 +293,7 @@ int run_plain(const char *session_name, const char *password, uint16_t port,
         alive = plain_input(c, reader, now);
         chat_move_to_t to;
         if (alive && chat_move_staged(c, &to)) {
-            chat_t *n = plain_move(c, &left, engines, &to);
+            chat_t *n = plain_move(c, &left, &to);
             if (n) { left = c; c = n; g_plain_engine = c; }
             crypto_wipe(&to, sizeof to);
         }
@@ -293,7 +302,7 @@ int run_plain(const char *session_name, const char *password, uint16_t port,
         chat_tick(c, now_seconds());
         if (left) {
             chat_tick(left, now_seconds());
-            if (chat_move_finished(left, now_seconds())) { chat_shutdown(left); left = NULL; }
+            if (chat_move_finished(left, now_seconds())) { chat_shutdown(left); chat_free(left); left = NULL; }
         }
     }
     plain_quit(c, left, reader);

@@ -34,6 +34,8 @@ static session_slot_t *open_session(const char *session_name, const char *passwo
     if (!s) { push_log("* too many sessions open already"); return NULL; }
     int idx = slot_index(s);
     memset(s, 0, sizeof *s);
+    s->engine = chat_new();
+    if (!s->engine) { push_log("* not enough memory for another session"); return NULL; }
     lock_scrollbacks(s);
     copy_str(s->name, session_name, sizeof s->name);
 
@@ -68,11 +70,13 @@ static session_slot_t *open_session(const char *session_name, const char *passwo
     o.file_view = session_file_view;
     o.delivery = session_delivery;
 
-    chat_init(&s->engine, &o, session_print, session_notify, s, now_seconds());
+    chat_init(s->engine, &o, session_print, session_notify, s, now_seconds());
     crypto_wipe(&o, sizeof o);
-    if (!chat_started(&s->engine)) {
-        const char *why = chat_start_error(&s->engine);
-        chat_shutdown(&s->engine);
+    if (!chat_started(s->engine)) {
+        const char *why = chat_start_error(s->engine);
+        chat_shutdown(s->engine);
+        chat_free(s->engine);
+        s->engine = NULL;
         release_scrollbacks(s);
         g_app.used[idx] = 0;
         g_app.selected = NULL;
@@ -81,29 +85,29 @@ static session_slot_t *open_session(const char *session_name, const char *passwo
         return NULL;
     }
     // The session's routing holds the password for a running tor, not the one chat's own tor takes.
-    if (chat_route_mode(&s->engine) == ROUTE_TOR && g_tor.state == TL_READY && g_tor.proc)
-        chat_tor_set_ports(&s->engine, g_tor.socks, g_tor.control, torproc_password(g_tor.proc));
-    chat_set_net_log(&s->engine, g_app.net_log);
+    if (chat_route_mode(s->engine) == ROUTE_TOR && g_tor.state == TL_READY && g_tor.proc)
+        chat_tor_set_ports(s->engine, g_tor.socks, g_tor.control, torproc_password(g_tor.proc));
+    chat_set_net_log(s->engine, g_app.net_log);
     s->initialising = 0;
     g_app.dirty = 1;
     // Before anyone can connect, so peers hear of it in the handshake.
     if (g_app.history && history_possible()) history_start(s, 1);
-    chat_set_history(&s->engine, s->hist != NULL);
+    chat_set_history(s->engine, s->hist != NULL);
 
-    char idhex[SHORT_ID_HEX + 1]; hex_encode(chat_my_id(&s->engine), SHORT_ID_LEN, idhex);
+    char idhex[SHORT_ID_HEX + 1]; hex_encode(chat_my_id(s->engine), SHORT_ID_LEN, idhex);
     if (move) {
         console_note(s, "moved here from '%s' as %s (peer %s) - %s. Codes compared there count here as each peer arrives",
-                     move->from, chat_nick(&s->engine), idhex, created ? "the peers asked along come once they say yes"
+                     move->from, chat_nick(s->engine), idhex, created ? "the peers asked along come once they say yes"
                                                                  : "chat opens once someone here answers");
         // Nobody typed them, and nothing else shows them.
         console_note(s, "this room's id is %s and its password \"%s\" - this is the only time they're shown: :invite "
-                        "copies them, to pass on, and :keep keeps the room", chat_session_name(&s->engine), move->password);
+                        "copies them, to pass on, and :keep keeps the room", chat_session_name(s->engine), move->password);
     } else if (created) {
         console_note(s, "new session '%s' - :invite copies its id and password, to pass on. you are %s (peer %s)",
-                     chat_session_name(&s->engine), chat_nick(&s->engine), idhex);
+                     chat_session_name(s->engine), chat_nick(s->engine), idhex);
     } else {
         console_note(s, "joining '%s' as %s (peer %s) - chat opens once someone answers",
-                     chat_session_name(&s->engine), chat_nick(&s->engine), idhex);
+                     chat_session_name(s->engine), chat_nick(s->engine), idhex);
     }
     if (g_app.route.mode == ROUTE_TOR && g_app.net_log != NET_LOG_OFF)
         console_note(s, "* routing: %s - connecting takes a little longer", route_label());
@@ -371,7 +375,7 @@ static session_slot_t *call_open(const trust_entry_t *t, uint64_t day) {
     memcpy(s->contact_pub, pub, sizeof s->contact_pub);
     s->contact_day = day;
     snprintf(s->name, sizeof s->name, "@%s", nick);
-    chat_set_verify_required(&s->engine, 1);
+    chat_set_verify_required(s->engine, 1);
     console_note(s, "* calling %s: a room only your signing key and theirs can work out, for today (UTC). They "
                     "have to :call you too, and nothing goes to anyone there but the key you verified", nick);
     return s;
@@ -407,7 +411,7 @@ void contacts_tick(void) {
     for (int i = 0; i < MAX_SESSIONS; i++) {
         session_slot_t *s = &g_app.sessions[i], *sel = g_app.selected;
         if (!g_app.used[i] || s->leaving || !s->contact || s->initialising || s->contact_day == day
-            || chat_online_count(&s->engine) > 0)
+            || chat_online_count(s->engine) > 0)
             continue;
         const trust_entry_t *t = trust_by_key(s->contact_pub);
         char name[sizeof s->name];
@@ -439,8 +443,8 @@ void session_print(void *ui, const char *hhmm, const char *text, const uint8_t *
     if (flags & LINE_CHAT) {
         tui_scrollback_push(&s->sb, hhmm, text, rgb, (flags & LINE_MENTION) != 0, color_len);
         if (file) tui_scrollback_mark_file(&s->sb, file);
-        if (flags & LINE_OWN) tui_scrollback_mark_own(&s->sb, chat_own_seq(&s->engine));
-        if (chat_line_quote(&s->engine)) tui_scrollback_mark_quote(&s->sb, chat_line_quote(&s->engine));
+        if (flags & LINE_OWN) tui_scrollback_mark_own(&s->sb, chat_own_seq(s->engine));
+        if (chat_line_quote(s->engine)) tui_scrollback_mark_quote(&s->sb, chat_line_quote(s->engine));
         if (s != g_app.selected) {
             s->unread++;
             if (flags & LINE_MENTION) s->mentioned = 1;
@@ -458,7 +462,7 @@ void session_delivery(void *ui, unsigned own, chat_delivery_t what, const char *
     if (tui_scrollback_delivery(&s->sb, own, what == CHAT_MISSED ? name : NULL) && s == g_app.selected) g_app.dirty = 1;
 }
 
-int session_ready(const session_slot_t *s) { return !s->initialising && chat_ready(&s->engine); }
+int session_ready(const session_slot_t *s) { return !s->initialising && chat_ready(s->engine); }
 
 // Each session's message timer: what came before it goes from the chat, the pictures shown with it
 // go too, and so does that much of its history.
@@ -469,7 +473,7 @@ void timers_tick(double now) {
     for (int i = 0; i < MAX_SESSIONS; i++) {
         session_slot_t *s = &g_app.sessions[i];
         if (!g_app.used[i] || s->initialising) continue;
-        unsigned timer = chat_timer(&s->engine, NULL, 0);
+        unsigned timer = chat_timer(s->engine, NULL, 0);
         if (!timer) continue;
         int files[TUI_SCROLLBACK], n_files = 0;
         int gone = tui_scrollback_expire(&s->sb, now - timer, files, &n_files, TUI_SCROLLBACK);
@@ -556,10 +560,12 @@ session_slot_t *first_session(void) {
 void close_session(session_slot_t *s) {
     if (!s) return;
     int idx = slot_index(s);
-    for (int i = 0; i < MAX_SESSIONS; i++) if (g_app.used[i]) chat_move_unlink(&g_app.sessions[i].engine, &s->engine);
+    for (int i = 0; i < MAX_SESSIONS; i++) if (g_app.used[i]) chat_move_unlink(g_app.sessions[i].engine, s->engine);
     view_forget(s);
     history_stop(s, 1);
-    chat_shutdown(&s->engine);
+    chat_shutdown(s->engine);
+    chat_free(s->engine);
+    s->engine = NULL;
     pics_free(s);
     release_scrollbacks(s);
     g_app.used[idx] = 0;

@@ -61,7 +61,7 @@ void history_expire(session_slot_t *s, unsigned seconds) {
 static void history_write(session_slot_t *s) {
     if (!s->hist || !s->hist_dirty || !history_possible() || strcmp(s->hist_save, install_current()) != 0) return;
     uint8_t id[CHAT_HISTORY_ID_LEN];
-    chat_history_id(&s->engine, id);
+    chat_history_id(s->engine, id);
     if (install_write_history(id, s->hist, s->hist_len) == 0) s->hist_dirty = 0;
     else console_note(s, "couldn't write this session's history to the save - it's tried again in a moment");
 }
@@ -121,7 +121,7 @@ void history_start(session_slot_t *s, int show) {
     s->hist_dirty = 0;
     copy_str(s->hist_save, install_current(), sizeof s->hist_save);
     uint8_t id[CHAT_HISTORY_ID_LEN];
-    chat_history_id(&s->engine, id);
+    chat_history_id(s->engine, id);
     long n = install_read_history(id, s->hist, INSTALL_HISTORY_MAX);
     if (n > 0) s->hist_len = (size_t)n;
     else if (n != 0 && n != INSTALL_NO_FILE)
@@ -151,7 +151,7 @@ void history_sync(double now) {
         if (s->hist && strcmp(s->hist_save, install_current()) != 0) history_stop(s, 0);
         if (want && !s->hist) history_start(s, 0);
         else if (!want && s->hist) history_stop(s, 1);
-        chat_set_history(&s->engine, s->hist != NULL);
+        chat_set_history(s->engine, s->hist != NULL);
     }
     if (now - written >= HISTORY_WRITE_EVERY) {
         written = now;

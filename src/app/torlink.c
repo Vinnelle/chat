@@ -32,7 +32,7 @@ static const char *tor_link_password(void) {
 static void each_tor_session(void (*fn)(chat_t *e)) {
     for (int i = 0; i < MAX_SESSIONS; i++) {
         if (!g_app.used[i] || g_app.sessions[i].initialising) continue;
-        chat_t *e = &g_app.sessions[i].engine;
+        chat_t *e = g_app.sessions[i].engine;
         if (chat_route_mode(e) == ROUTE_TOR) fn(e);
     }
     if (g_plain_engine && chat_route_mode(g_plain_engine) == ROUTE_TOR) fn(g_plain_engine);

@@ -283,6 +283,11 @@ typedef struct {
     chat_delivery_fn delivery;
 } chat_opts_t;
 
+// A session's memory, zeroed, for chat_init (NULL if there's none), and back once chat_shutdown is
+// done with it.
+chat_t *chat_new(void);
+void chat_free(chat_t *c);
+
 void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify_fn notify, void *ui, double now);
 void chat_shutdown(chat_t *c);
 

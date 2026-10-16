@@ -122,7 +122,7 @@ static void submit_chat_line(void) {
         note("too long to send by %d - a message holds %d bytes", input->len - MAX_TEXT, MAX_TEXT);
         return;
     }
-    chat_send_text(&g_app.selected->engine, input->buf, now_seconds());
+    chat_send_text(g_app.selected->engine, input->buf, now_seconds());
     tui_input_clear(input);
     g_app.selected->scroll = 0;
     // Sending a reply counts as reading, so the new messages line is removed.

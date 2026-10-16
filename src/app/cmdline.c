@@ -31,7 +31,7 @@ static int nick_has_prefix(const char *nick, const char *typed) {
 // The selected session's engine, once there is one to name peers from.
 static chat_t *peer_engine(void) {
     if (g_app.mode != MODE_CHAT || !g_app.selected || g_app.selected->initialising) return NULL;
-    return &g_app.selected->engine;
+    return g_app.selected->engine;
 }
 
 // First online peer whose nick starts with typed, ignoring case.

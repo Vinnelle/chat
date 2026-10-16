@@ -55,12 +55,12 @@ int fetch_progress(const chat_t *e, const file_entry_t *f, char *text, size_t ca
 const tui_progress_t *progress_for(const void *ctx, int file) {
     static tui_progress_t pg;
     const session_slot_t *s = ctx;
-    const file_entry_t *f = chat_file(&s->engine, file);
+    const file_entry_t *f = chat_file(s->engine, file);
     if (!f) return NULL;
     memset(&pg, 0, sizeof pg);
     if (f->mine) {
         char name[CHAT_NAME_LEN], to[CHAT_NAME_LEN * 2 + 16];
-        int pm, n = chat_file_sending(&s->engine, f, now_seconds(), name, &pm);
+        int pm, n = chat_file_sending(s->engine, f, now_seconds(), name, &pm);
         chat_file_sent_to(f, to, sizeof to);
         if (n) {
             pg.permille = pm;
@@ -77,7 +77,7 @@ const tui_progress_t *progress_for(const void *ctx, int file) {
         return &pg;
     }
     if (f->dl == DL_ACTIVE || f->dl == DL_QUEUED) {
-        pg.permille = fetch_progress(&s->engine, f, pg.text, sizeof pg.text);
+        pg.permille = fetch_progress(s->engine, f, pg.text, sizeof pg.text);
         return &pg;
     }
     if (f->dl == DL_FAILED) {
@@ -191,7 +191,7 @@ void session_file_view(void *ui, int num, const char *name, const uint8_t *data,
     image_thumb_t th;
     char why[160];
     if (thumb_decode(data, len, TUI_IMAGE_MAX_W, TUI_IMAGE_MAX_H, bg, &th, why, sizeof why) != 0) {
-        const file_entry_t *f = chat_file(&s->engine, num);
+        const file_entry_t *f = chat_file(s->engine, num);
         copy_str(pic_slot(s, num)->why, why, sizeof s->pics[0].why);
         if (f && f->mine) console_note(s, "* can't show file %d: %s", num, why);
         else console_note(s, "* can't show file %d: %s - :download %d saves it", num, why, num);

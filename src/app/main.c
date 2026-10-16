@@ -445,7 +445,7 @@ static void wait_for_input(waited_t *w, int wait_ms) {
     for (int i = 0; i < MAX_SESSIONS; i++) {
         if (!g_app.used[i] || g_app.sessions[i].initialising) continue;
         sock_t mine[CHAT_MAX_SOCKS];
-        int ns = chat_sockets(&g_app.sessions[i].engine, mine);
+        int ns = chat_sockets(g_app.sessions[i].engine, mine);
         // Beyond the limit a socket just waits for the next tick, WAIT_MS at most.
         for (int j = 0; j < ns && w->n < PLATFORM_WAIT_MAX; j++) { w->socks[w->n] = mine[j]; w->owner[w->n] = &g_app.sessions[i]; w->n++; }
     }
@@ -517,9 +517,9 @@ static void read_keys(key_reader_t *r, int stdin_ready) {
 // The sessions' sockets and ticks, then everything else the app does on its own.
 static void run_ticks(const waited_t *w, double now) {
     for (int i = 0; i < w->n; i++)
-        if (w->ready[i]) chat_on_socket_readable(&w->owner[i]->engine, w->socks[i], now);
+        if (w->ready[i]) chat_on_socket_readable(w->owner[i]->engine, w->socks[i], now);
     for (int i = 0; i < MAX_SESSIONS; i++)
-        if (g_app.used[i]) chat_tick(&g_app.sessions[i].engine, now_seconds());
+        if (g_app.used[i]) chat_tick(g_app.sessions[i].engine, now_seconds());
     move_tick(now_seconds());
     contacts_tick();
     reopen_tick();
@@ -557,7 +557,7 @@ static _Noreturn void close_tui(void) {
     else keep_sessions_saved();
     for (int i = 0; i < MAX_SESSIONS; i++) {
         if (!g_app.used[i]) continue;
-        chat_set_coming_back(&g_app.sessions[i].engine, session_kept(&g_app.sessions[i]));
+        chat_set_coming_back(g_app.sessions[i].engine, session_kept(&g_app.sessions[i]));
         close_session(&g_app.sessions[i]);
     }
     // After the sessions, so their onion services are removed with their control connections first.

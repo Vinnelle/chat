@@ -22,9 +22,10 @@ files through `platform/`.
 ## The engine
 
 A session is a `chat_t`, which the app only knows through `chat.h`'s functions: what it holds is in
-`state.h`. The app makes one with `chat_init`, then calls `chat_tick` and `chat_on_socket_readable`
-with the time, and the engine calls back to print a line, notify, or hand over a file. It never
-reads the clock itself: it keeps to the time it's given.
+`state.h`, which only the engine and the tests see. The app gets one from `chat_new` and starts it
+with `chat_init`, then calls `chat_tick` and `chat_on_socket_readable` with the time, and the engine
+calls back to print a line, notify, or hand over a file. It never reads the clock itself: it keeps
+to the time it's given. `chat_shutdown` and `chat_free` end it.
 
 | File | What's there |
 | --- | --- |

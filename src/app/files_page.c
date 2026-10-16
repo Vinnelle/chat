@@ -22,12 +22,12 @@ static file_state_t file_state(const session_slot_t *s, const file_entry_t *f) {
     const pic_t *p = pic_of(s, f->num);
     if (f->cache || (p && p->th.rgb)) return FS_HERE;
     if (p && p->why[0]) return FS_BROKEN;
-    return f->size > chat_file_cap(&s->engine) ? FS_OVER : FS_NEW;
+    return f->size > chat_file_cap(s->engine) ? FS_OVER : FS_NEW;
 }
 
 // Fetching f now would take it past the size limit: it's over, and there's no copy here to use instead.
 static int file_needs_anyway(const session_slot_t *s, const file_entry_t *f) {
-    return !f->mine && f->size > chat_file_cap(&s->engine) && !f->cache && !f->saved[0] && f->dl != DL_ACTIVE && f->dl != DL_QUEUED;
+    return !f->mine && f->size > chat_file_cap(s->engine) && !f->cache && !f->saved[0] && f->dl != DL_ACTIVE && f->dl != DL_QUEUED;
 }
 
 static int file_cmp(const void *a, const void *b) {
@@ -39,7 +39,7 @@ static int file_cmp(const void *a, const void *b) {
 static int files_list(const session_slot_t *s, const file_entry_t **l) {
     int n = 0;
     for (int i = 0; s && !s->initialising && i < FILE_OFFERS_MAX; i++) {
-        const file_entry_t *f = chat_file_at(&s->engine, i);
+        const file_entry_t *f = chat_file_at(s->engine, i);
         if (f) l[n++] = f;
     }
     qsort(l, (size_t)n, sizeof *l, file_cmp);
@@ -70,7 +70,7 @@ static tui_value_kind_t file_value(const session_slot_t *s, const file_entry_t *
     switch (file_state(s, f)) {
         case FS_MINE: {
             char name[CHAT_NAME_LEN], to[CHAT_NAME_LEN * 2 + 16];
-            int pm, n = chat_file_sending(&s->engine, f, now_seconds(), name, &pm);
+            int pm, n = chat_file_sending(s->engine, f, now_seconds(), name, &pm);
             chat_file_sent_to(f, to, sizeof to);
             if (n) {
                 *permille = pm;
@@ -83,7 +83,7 @@ static tui_value_kind_t file_value(const session_slot_t *s, const file_entry_t *
             return TUI_V_TEXT;
         }
         case FS_COMING:
-        case FS_QUEUED: *permille = fetch_progress(&s->engine, f, out, cap); return TUI_V_PROGRESS;
+        case FS_QUEUED: *permille = fetch_progress(s->engine, f, out, cap); return TUI_V_PROGRESS;
         case FS_FAILED: snprintf(out, cap, "%s", f->why[0] ? f->why : "it didn't finish"); return TUI_V_BAD;
         case FS_SAVED:  snprintf(out, cap, "saved" DOT_SEP "%s", sz); return TUI_V_ON;
         case FS_HERE: {
@@ -125,7 +125,7 @@ static int file_details(const session_slot_t *s, const file_entry_t *f, int widt
     int n = 0;
     if (width < 8) return 0;
     file_format_size(f->size, sz, sizeof sz);
-    file_owner_name(&s->engine, f, who);
+    file_owner_name(s->engine, f, who);
     n = add_wrapped(lines, n, f->name, width);
     n = add_wrapped(lines, n, "", width);
     snprintf(t, sizeof t, "%s" DOT_SEP "%s", f->image ? "picture" : "file", sz);
@@ -141,14 +141,14 @@ static int file_details(const session_slot_t *s, const file_entry_t *f, int widt
     switch (file_state(s, f)) {
         case FS_MINE:
             chat_file_sent_to(f, to, sizeof to);
-            if (chat_file_sending(&s->engine, f, now_seconds(), name, &pm)) snprintf(t, sizeof t, "sending to %s: %d%%", name, pm / 10);
+            if (chat_file_sending(s->engine, f, now_seconds(), name, &pm)) snprintf(t, sizeof t, "sending to %s: %d%%", name, pm / 10);
             else snprintf(t, sizeof t, "%s", f->fp ? "offered to everyone here" : "no longer offered");
             n = add_wrapped(lines, n, t, width);
             if (to[0]) { snprintf(t, sizeof t, "sent to %s", to); n = add_wrapped(lines, n, t, width); }
             break;
         case FS_COMING:
         case FS_QUEUED: {
-            fetch_progress(&s->engine, f, t, sizeof t);
+            fetch_progress(s->engine, f, t, sizeof t);
             for (char *part = t, *next; part; part = next) {
                 next = strstr(part, DOT_SEP);
                 if (next) { *next = '\0'; next += sizeof DOT_SEP - 1; }
@@ -181,7 +181,7 @@ static int file_details(const session_slot_t *s, const file_entry_t *f, int widt
             n = add_wrapped(lines, n, t, width);
             break;
         case FS_OVER: {
-            char lim[32]; file_format_size(chat_file_cap(&s->engine), lim, sizeof lim);
+            char lim[32]; file_format_size(chat_file_cap(s->engine), lim, sizeof lim);
             snprintf(t, sizeof t, "not fetched, and over your %s limit", lim);
             n = add_wrapped(lines, n, t, width);
             break;
@@ -205,7 +205,7 @@ static const char *file_enter(const session_slot_t *s, const file_entry_t *f) {
 // usage gets the command that does what Enter does.
 static void file_help(const session_slot_t *s, const file_entry_t *f, char *help, size_t cap, char *usage, size_t ucap) {
     char who[CHAT_NAME_LEN], where[sizeof f->saved] = "";
-    file_owner_name(&s->engine, f, who);
+    file_owner_name(s->engine, f, who);
     if (f->saved[0]) tilde_path(f->saved, where, sizeof where);
     const char *save = "d saves it in Downloads, s in a folder you pick.";
     usage[0] = '\0';
@@ -213,7 +213,7 @@ static void file_help(const session_slot_t *s, const file_entry_t *f, char *help
         case FS_MINE:
             if (!f->fp) snprintf(help, cap, "Yours, and no longer offered. :send offers it again, as a new file.");
             else snprintf(help, cap, "Yours, offered to everyone here%s.%s x stops offering it.",
-                          chat_verify_required(&s->engine) ? " whose verify code you've compared" : "",
+                          chat_verify_required(s->engine) ? " whose verify code you've compared" : "",
                           f->image ? " Enter shows it big." : "");
             if (f->fp) snprintf(usage, ucap, ":cancel %d", f->num);
             return;
@@ -264,7 +264,7 @@ void file_ask(int what, const file_entry_t *f) {
 // The engine's reply goes on the bottom bar, since the page covers the console.
 int echo_fetch(session_slot_t *s, int num, int view, int anyway, const char *dir) {
     g_echo = 1;
-    int r = chat_file_fetch(&s->engine, num, view, anyway, dir);
+    int r = chat_file_fetch(s->engine, num, view, anyway, dir);
     g_echo = 0;
     return r;
 }
@@ -273,7 +273,7 @@ static void echo_cancel(session_slot_t *s, int num) {
     char cmd[32];
     snprintf(cmd, sizeof cmd, "cancel %d", num);
     g_echo = 1;
-    chat_run_command(&s->engine, cmd);
+    chat_run_command(s->engine, cmd);
     g_echo = 0;
 }
 
@@ -366,7 +366,7 @@ void file_ask_yes(void) {
     int num = g_app.files.ask_num;
     g_app.mode = g_app.files.back;
     g_app.dirty = 1;
-    const file_entry_t *f = s && !s->initialising ? chat_file(&s->engine, num) : NULL;
+    const file_entry_t *f = s && !s->initialising ? chat_file(s->engine, num) : NULL;
     if (!f) return;
     switch (g_app.files.ask) {
         case ASK_VIEW:    if (echo_fetch(s, num, 1, 1, NULL) == 0) g_app.mode = MODE_FILE_VIEW; break;
@@ -393,11 +393,11 @@ void file_ask_no(void) {
 int file_ask_paras(tui_para_t *paras, const char **title, const char **keys) {
     static char text[900];
     session_slot_t *s = g_app.selected;
-    const file_entry_t *f = s && !s->initialising ? chat_file(&s->engine, g_app.files.ask_num) : NULL;
+    const file_entry_t *f = s && !s->initialising ? chat_file(s->engine, g_app.files.ask_num) : NULL;
     if (!f) { *title = "FILES"; *keys = "n back"; return add_para(paras, 0, TUI_P_TEXT, "That file isn't here any more."); }
     char sz[32], lim[32];
     file_format_size(f->size, sz, sizeof sz);
-    file_format_size(chat_file_cap(&s->engine), lim, sizeof lim);
+    file_format_size(chat_file_cap(s->engine), lim, sizeof lim);
     switch (g_app.files.ask) {
         case ASK_STOP: {
             char got[32]; file_format_size(chat_file_got(f), got, sizeof got);
@@ -415,10 +415,10 @@ int file_ask_paras(tui_para_t *paras, const char **title, const char **keys) {
             break;
         default: {
             char eta[48], took[160] = "";
-            double left = chat_file_eta(&s->engine, f, now_seconds());
+            double left = chat_file_eta(s->engine, f, now_seconds());
             if (left >= 0.0) {
                 char who[CHAT_NAME_LEN];
-                file_owner_name(&s->engine, f, who);
+                file_owner_name(s->engine, f, who);
                 file_format_duration(left, eta, sizeof eta);
                 snprintf(took, sizeof took, " At chat's normal rate it takes %s to come, less if %s has fast transfers on.", eta, who);
             }
@@ -452,7 +452,7 @@ void begin_files(void) {
     session_slot_t *s = g_app.selected;
     if (!s || s->initialising) { note("no session open - ctrl+n starts one, ctrl+j joins one"); return; }
     // The newest file, since that's usually the one to do something with.
-    g_app.files.num = chat_newest_file(&s->engine);
+    g_app.files.num = chat_newest_file(s->engine);
     g_app.mode = MODE_FILES;
     g_app.dirty = 1;
 }
@@ -572,7 +572,7 @@ static void view_update(session_slot_t *s, const file_entry_t *f, int w, int h) 
     g_view.num = f->num;
     g_view.w = w;
     g_view.h = h;
-    const uint8_t *b = f->dl == DL_ACTIVE || f->dl == DL_QUEUED ? NULL : chat_file_bytes(&s->engine, f->num);
+    const uint8_t *b = f->dl == DL_ACTIVE || f->dl == DL_QUEUED ? NULL : chat_file_bytes(s->engine, f->num);
     static const uint8_t bg[3] = { 0, 0, 0 };
     if (b && thumb_decode(b, (size_t)f->size, w, h, bg, &g_view.th, g_view.why, sizeof g_view.why) == 0)
         g_view.ti = (tui_image_t){ g_view.th.w, g_view.th.h, g_view.th.rgb };
@@ -602,7 +602,7 @@ void render_viewer(int rows_n, int cols_n, const char *clock, const tui_bar_t *b
     for (int i = 0; i < n; i++) if (l[i]->image) { pics++; if (l[i] == f) at = pics; }
     char sz[32], who[CHAT_NAME_LEN], dims[32] = "", of[40] = "";
     file_format_size(f->size, sz, sizeof sz);
-    file_owner_name(&s->engine, f, who);
+    file_owner_name(s->engine, f, who);
     const pic_t *small = pic_of(s, f->num);
     file_state_t st = file_state(s, f);
     if (g_view.th.rgb) {
@@ -622,7 +622,7 @@ void render_viewer(int rows_n, int cols_n, const char *clock, const tui_bar_t *b
             case FS_COMING:
             case FS_QUEUED: {
                 snprintf(text, sizeof text, "On its way\n%s from %s", sz, who);
-                pg.permille = fetch_progress(&s->engine, f, pg.text, sizeof pg.text);
+                pg.permille = fetch_progress(s->engine, f, pg.text, sizeof pg.text);
                 // The bar has the percentage already.
                 char *after = f->dl == DL_ACTIVE ? strstr(pg.text, DOT_SEP) : NULL;
                 if (after) memmove(pg.text, after + sizeof DOT_SEP - 1, strlen(after + sizeof DOT_SEP - 1) + 1);

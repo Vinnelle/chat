@@ -820,6 +820,14 @@ void chat_tor_refresh(chat_t *c) {
     if (c->nostr) nostr_reconnect(c->nostr);
 }
 
+chat_t *chat_new(void) { return calloc(1, sizeof(chat_t)); }
+
+void chat_free(chat_t *c) {
+    if (!c) return;
+    crypto_wipe(c, sizeof *c);
+    free(c);
+}
+
 void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify_fn notify, void *ui, double now) {
     memset(c, 0, sizeof *c);
     c->now = now;
