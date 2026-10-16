@@ -11,7 +11,7 @@
 #include "crypto/pgp.h"
 #include "platform/net.h"
 #include "platform/platform.h"
-#include "app/tui.h"
+#include "tui/tui.h"
 #include "common/util.h"
 #include "app/update.h"
 #include "app/install.h"

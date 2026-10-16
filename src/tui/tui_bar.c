@@ -2,7 +2,7 @@
 // Copyright (C) 2026 finlay@tuta.com
 // The bar (tui_bar_t): the input box, the command menu over it, the bottom row, and the dialog
 // drawn over the screen.
-#include "app/tui_draw.h"
+#include "tui/tui_draw.h"
 
 // ---- the input box, the menu over it, and the bottom row ----
 

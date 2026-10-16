@@ -4,7 +4,7 @@
 // editor fed with arbitrary key bytes, and file names from peers on their way to the disk.
 #define _POSIX_C_SOURCE 200809L
 #include "core/chat.h"
-#include "app/tui.h"
+#include "tui/tui.h"
 #include "common/util.h"
 #include "core/files.h"
 #include <fcntl.h>

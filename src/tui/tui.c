@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
 // Scrollbacks, and what every screen is drawn with: styles, boxes, the grid and the frame.
-#include "app/tui_draw.h"
+#include "tui/tui_draw.h"
 
 #ifndef CHAT_VERSION
 #define CHAT_VERSION "0.0.0"

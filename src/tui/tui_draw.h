@@ -5,7 +5,7 @@
 #ifndef CHAT_TUI_DRAW_H
 #define CHAT_TUI_DRAW_H
 
-#include "app/tui.h"
+#include "tui/tui.h"
 #include "crypto/crypto.h"
 #include "platform/platform.h"
 #include "common/util.h"

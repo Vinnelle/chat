@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
 // The pages: lists (settings, help), a page of text, a picture, and the empty screen under a dialog.
-#include "app/tui_draw.h"
+#include "tui/tui_draw.h"
 
 #define G_LSAQ    "\xe2\x80\xb9"   // ‹
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
 // The chat screen: the messages, the console, the sidebar, and the input box under them.
-#include "app/tui_draw.h"
+#include "tui/tui_draw.h"
 
 #define G_HEAVY   "\xe2\x94\x81"   // ━
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
 // Keys as the terminal sends them, and the input line they edit.
-#include "app/tui_draw.h"
+#include "tui/tui_draw.h"
 
 #define ESC 0x1b
 #define BEL 0x07
