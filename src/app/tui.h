@@ -10,6 +10,9 @@
 #define TUI_SCROLLBACK 400
 #define TUI_LINE_MAX 1024
 #define TUI_MARK_MAX 48
+// What a scrollback's lines say, one after another in a ring, each kept whole: a line that doesn't
+// fit with the rest pushes the oldest lines out first.
+#define TUI_SCROLLBACK_TEXT (96 * 1024)
 
 // Your own message, once there's nothing more to hear about it: every peer it went to has it, drawn
 // as a faint dot after it, or some didn't get it, named after it.
@@ -17,7 +20,8 @@ enum { TUI_SENDING, TUI_REACHED, TUI_MISSED };
 
 typedef struct {
     char hhmm[HHMM_LEN];
-    char text[TUI_LINE_MAX];
+    uint32_t off;      // its text, in the scrollback's ring (tui_line_text)
+    uint16_t len;      // and how long that is, without the NUL after it
     uint8_t rgb[3];
     int has_color;
     int color_len;
@@ -35,7 +39,11 @@ typedef struct {
     int head;
     int count;
     unsigned total;    // every line ever pushed, those scrolled out of it too
+    char text[TUI_SCROLLBACK_TEXT];
+    uint32_t text_head;   // where the next line's text goes
 } tui_scrollback_t;
+
+static inline const char *tui_line_text(const tui_scrollback_t *sb, const tui_line_t *l) { return sb->text + l->off; }
 
 void tui_scrollback_push(tui_scrollback_t *sb, const char *hhmm, const char *text, const uint8_t *rgb,
                          int mention, int color_len);

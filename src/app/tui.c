@@ -10,18 +10,53 @@
 #define G_TT      "\xe2\x94\xac"   // ┬
 #define G_BT      "\xe2\x94\xb4"   // ┴
 
+static tui_line_t *oldest_line(tui_scrollback_t *sb) {
+    return &sb->lines[(sb->head - sb->count + TUI_SCROLLBACK) % TUI_SCROLLBACK];
+}
+
+static void drop_oldest(tui_scrollback_t *sb) {
+    tui_line_t *l = oldest_line(sb);
+    crypto_wipe(sb->text + l->off, (size_t)l->len + 1);
+    crypto_wipe(l, sizeof *l);
+    sb->count--;
+}
+
+// Whether the oldest line's text is in [from, to) of the ring.
+static int oldest_in(tui_scrollback_t *sb, uint32_t from, uint32_t to) {
+    const tui_line_t *l = oldest_line(sb);
+    return sb->count > 0 && l->off < to && from < l->off + l->len + 1u;
+}
+
+// Where n bytes of text go, after the newest line's, or from the start of the ring if they don't fit
+// before its end. The lines that were there are the oldest, so they go.
+static uint32_t text_room(tui_scrollback_t *sb, uint32_t n) {
+    uint32_t at = sb->text_head;
+    if (at + n > TUI_SCROLLBACK_TEXT) {
+        while (oldest_in(sb, at, TUI_SCROLLBACK_TEXT)) drop_oldest(sb);
+        crypto_wipe(sb->text + at, TUI_SCROLLBACK_TEXT - at);
+        at = 0;
+    }
+    while (oldest_in(sb, at, at + n)) drop_oldest(sb);
+    sb->text_head = at + n;
+    return at;
+}
+
 void tui_scrollback_push(tui_scrollback_t *sb, const char *hhmm, const char *text, const uint8_t *rgb,
                          int mention, int color_len) {
-    tui_line_t *l = &sb->lines[sb->head];
-    memcpy(l->hhmm, hhmm, HHMM_LEN);
     size_t n = strlen(text);
     if (n > TUI_LINE_MAX - 1) {
         // Cut before a character, never inside one.
         n = TUI_LINE_MAX - 1;
         while (n > 0 && utf8_is_cont(text[n])) n--;
     }
-    memcpy(l->text, text, n);
-    l->text[n] = '\0';
+    if (sb->count == TUI_SCROLLBACK) drop_oldest(sb);
+    uint32_t at = text_room(sb, (uint32_t)n + 1);
+    tui_line_t *l = &sb->lines[sb->head];
+    memcpy(l->hhmm, hhmm, HHMM_LEN);
+    memcpy(sb->text + at, text, n);
+    sb->text[at + n] = '\0';
+    l->off = at;
+    l->len = (uint16_t)n;
     if (rgb) { memcpy(l->rgb, rgb, sizeof l->rgb); l->has_color = 1; }
     else l->has_color = 0;
     l->mention = mention;
@@ -33,7 +68,7 @@ void tui_scrollback_push(tui_scrollback_t *sb, const char *hhmm, const char *tex
     l->quote = 0;
     l->at = now_seconds();
     sb->head = (sb->head + 1) % TUI_SCROLLBACK;
-    if (sb->count < TUI_SCROLLBACK) sb->count++;
+    sb->count++;
     sb->total++;
 }
 
@@ -56,11 +91,10 @@ void tui_scrollback_mark_quote(tui_scrollback_t *sb, int quote) {
 int tui_scrollback_expire(tui_scrollback_t *sb, double before, int *files, int *n_files, int max) {
     int gone = 0;
     while (sb->count > 0) {
-        tui_line_t *l = &sb->lines[(sb->head - sb->count + TUI_SCROLLBACK) % TUI_SCROLLBACK];
+        tui_line_t *l = oldest_line(sb);
         if (l->at >= before) break;
         if (l->file && *n_files < max) files[(*n_files)++] = l->file;
-        crypto_wipe(l, sizeof *l);
-        sb->count--;
+        drop_oldest(sb);
         gone++;
     }
     return gone;

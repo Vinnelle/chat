@@ -53,14 +53,16 @@ int wrap_rows(const char *text, int first_w, int rest_w, size_t *off, size_t *le
 
 // A chat line's name (its first color_len bytes, minus a mention's "@ " and the ':' after it) and
 // the text after it. 0 for a line that isn't a chat line.
-static int split_chat_line(const tui_line_t *l, char *name, size_t cap, const char **body) {
-    size_t n = strlen(l->text);
-    if (l->color_len <= 1 || (size_t)l->color_len > n || l->text[l->color_len - 1] != ':') return 0;
-    const char *s = l->text;
+static int split_chat_line(const tui_scrollback_t *sb, const tui_line_t *l, char *name, size_t cap,
+                           const char **body) {
+    const char *text = tui_line_text(sb, l);
+    size_t n = l->len;
+    if (l->color_len <= 1 || (size_t)l->color_len > n || text[l->color_len - 1] != ':') return 0;
+    const char *s = text;
     size_t len = (size_t)l->color_len - 1;
     if (l->mention && len >= 2 && s[0] == '@' && s[1] == ' ') { s += 2; len -= 2; }
     copy_slice(name, cap, s, len);
-    const char *b = l->text + l->color_len;
+    const char *b = text + l->color_len;
     while (*b == ' ') b++;
     *body = b;
     return 1;
@@ -277,7 +279,7 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
             char name[NAME_BUF];
             const char *body;
             chat_name_t cn;
-            if (!split_chat_line(SB_AT(sb, k), name, sizeof name, &body)) continue;
+            if (!split_chat_line(sb, SB_AT(sb, k), name, sizeof name, &body)) continue;
             int c = split_name(name, &cn);
             if (c > nw && c <= W / 4) nw = c;
             if (cn.mark >= 0) mw = MARK_COLS;
@@ -288,8 +290,8 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
     for (int k = skip; k < sb->count && bottom >= first; k++) {
         const tui_line_t *l = SB_AT(sb, k);
         char name[NAME_BUF];
-        const char *body = l->text;
-        int chat = split_chat_line(l, name, sizeof name, &body);
+        const char *body = tui_line_text(sb, l);
+        int chat = split_chat_line(sb, l, name, sizeof name, &body);
         if (!chat && body[0] == '*' && body[1] == ' ') body += 2;
         chat_name_t cn = { .mark = -1 };
         int name_c = chat ? split_name(name, &cn) : 0;
@@ -337,7 +339,7 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
             char oname[NAME_BUF];
             const char *ob;
             grouped = memcmp(older->hhmm, l->hhmm, HHMM_LEN - 1) == 0 && older->mention == l->mention
-                   && split_chat_line(older, oname, sizeof oname, &ob) && strcmp(oname, name) == 0;
+                   && split_chat_line(sb, older, oname, sizeof oname, &ob) && strcmp(oname, name) == 0;
         }
 
         int head = stacked && !grouped;
@@ -558,7 +560,7 @@ static int console_skip(const tui_scrollback_t *sb, int scroll, int w, int nrows
     if (pre > w - 1) pre = w - 1 > 0 ? w - 1 : 0;
     *most = 0;
     for (int k = sb->count - 1; k >= 0; k--) {
-        const char *body = SB_AT(sb, k)->text;
+        const char *body = tui_line_text(sb, SB_AT(sb, k));
         if (body[0] == '*' && body[1] == ' ') body += 2;
         size_t off[WRAP_ROWS_MAX], len[WRAP_ROWS_MAX];
         rows += wrap_rows(body, w - pre, w - pre, off, len, WRAP_ROWS_MAX);
