@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
-#include "app/rooms.h"
+#include "app/sessions/rooms.h"
 #include "common/util.h"
 #include "crypto/crypto.h"
 #include <stdio.h>

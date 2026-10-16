@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
-// What src/app's files share: the app's state, and what one file uses of another's.
+// What src/app's files share: the app's state, and what the files at the top of src/app offer the
+// rest. Each folder's own header, included at the end, has what its files offer.
 #ifndef CHAT_APP_H
 #define CHAT_APP_H
 
@@ -15,7 +16,7 @@
 #include "common/util.h"
 #include "app/update.h"
 #include "app/saves/saves.h"
-#include "app/rooms.h"
+#include "app/sessions/rooms.h"
 #include "transport/torproc.h"
 #include "common/image/image.h"
 #include "common/qr.h"
@@ -481,139 +482,10 @@ void sandbox_up(void);
 extern const char *const PANIC_KEY_NAMES[N_PANIC_KEYS];
 int panic_key_is(const tui_key_t *key);
 
-// sessions.c
-void session_print(void *ui, const char *hhmm, const char *text, const uint8_t *rgb, unsigned flags, int color_len,
-                   int file);
-void session_delivery(void *ui, unsigned own, chat_delivery_t what, const char *name);
-int session_ready(const session_slot_t *s);
-void timers_tick(double now);
-void send_notification(const char *nick, const char *text, int mentioned);
-void session_notify(void *ui, const char *nick, const char *text, int mentioned);
-int slot_index(session_slot_t *s);
-session_slot_t *find_free_slot(void);
-void lock_scrollbacks(session_slot_t *s);
-void release_scrollbacks(session_slot_t *s);
-void select_session(session_slot_t *s);
-session_slot_t *first_session(void);
-void close_session(session_slot_t *s);
-void select_step(int dir);
-void console_note(session_slot_t *s, const char *fmt, ...) PRINTF_LIKE(2, 3);
-extern chat_build_t g_self_build;
-void app_session_opts(chat_opts_t *o);
-session_slot_t *start_session(const char *session_name, const char *password, int created, uint16_t port,
-                              const addr_t *peers, int n_peers);
-session_slot_t *start_moved_session(const chat_move_to_t *to);
-void begin_prompt(app_mode_t mode);
-void begin_new_session(void);
-void end_prompt(void);
-cmd_result_t app_new(void *ctx, const char *arg);
-cmd_result_t app_join(void *ctx, const char *arg);
-cmd_result_t app_keep(void *ctx, const char *arg);
-void begin_rooms(void);
-void rooms_key(const tui_key_t *key);
-void rooms_join_at_start(void);
-// Kept in the open save to open again (Reopen sessions), so it goes offline rather than leaving.
-int session_kept(const session_slot_t *s);
-void reopen_tick(void);
-void keep_sessions_saved(void);
-cmd_result_t app_call(void *ctx, const char *arg);
-void contacts_tick(void);
-
 // plain.c
 extern chat_t *g_plain_engine;
 int run_plain(const char *session_name, const char *password, uint16_t port,
               const char peer_args[][PEER_ARG_LEN], int n_peer_args);
-
-// pics.c
-pic_t *pic_find(session_slot_t *s, int num);
-void pic_free(pic_t *p);
-void pics_free(session_slot_t *s);
-const tui_image_t *pic_for(const void *ctx, int file);
-const char *pic_why(const session_slot_t *s, int num);
-int fetch_progress(const chat_t *e, const file_entry_t *f, char *text, size_t cap);
-const tui_progress_t *progress_for(const void *ctx, int file);
-// image_thumbnail, in a child process of its own where the platform can do that.
-int thumb_decode(const uint8_t *data, size_t len, int max_w, int max_h, const uint8_t bg[3], image_thumb_t *out,
-                 char *why, size_t why_cap);
-void session_file_view(void *ui, int num, const char *name, const uint8_t *data, size_t len);
-
-// clipboard.c
-// Public text goes on the clipboard with osc52_copy. A secret goes with copy_secret, and comes off
-// again after CLIPBOARD_CLEAR_SECONDS, or as soon as chat quits, locks or panics.
-#define CLIPBOARD_CLEAR_SECONDS 30
-void osc52_copy(const char *text);
-void copy_secret(const char *text);
-void clipboard_clear_now(void);
-void clipboard_tick(double now);
-void copy_session_id(session_slot_t *s);
-void copy_invite(session_slot_t *s);
-
-// lock.c
-#define N_LOCK_AFTER 5
-#define N_LOCK_KEYS 5
-extern const char *const LOCK_AFTER_NAMES[N_LOCK_AFTER];
-extern const int LOCK_AFTER_SECONDS[N_LOCK_AFTER];
-extern const char *const LOCK_KEY_NAMES[N_LOCK_KEYS];
-int lock_by_passphrase(void);
-const char *lock_note(void);
-int lock_key_is(const tui_key_t *key);
-void lock_saw_key(void);
-void lock_screen(void);
-void lock_after_choose(int i);
-void lock_tick(void);
-void locked_key(const tui_key_t *key);
-void pin_key(const tui_key_t *key);
-void lock_forget(void);
-cmd_result_t app_lock(void *ctx, const char *arg);
-
-// history.c
-int history_possible(void);
-void history_add(session_slot_t *s, const char *text, const uint8_t *rgb, int mention, int color_len);
-void histories_write(void);
-void history_start(session_slot_t *s, int show);
-void history_stop(session_slot_t *s, int write);
-void history_sync(double now);
-void history_expire(session_slot_t *s, unsigned seconds);
-
-// torlink.c
-extern const char *const TOR_LAUNCH_NAMES[];
-extern tor_link_t g_tor;
-void sync_update_proxy(void);
-void tor_link_ensure(double now);
-void tor_link_step(double now);
-void tor_link_stop(void);
-// Whose tor Tor mode uses ("own" or "running", NULL until that's known), and how far it has got.
-const char *tor_link_whose(void);
-void tor_link_status(char *out, size_t cap);
-void tor_link_restart(void);
-// Bridge lines as typed (separated by ';'), as "LINE; LINE" in out, or -1 with why. How many there
-// are, and their transports in kinds ("obfs4, snowflake").
-int bridges_parse(const char *typed, char *out, size_t cap, char *why, size_t why_cap);
-int bridge_count(const char *text, char *kinds, size_t cap);
-// The transport programs bridges can need, found as chat's own tor would find them: their paths, and a
-// line for the settings page saying which are there.
-int transport_paths(char out[][TOR_PATH_MAX], int max);
-void transport_line(char *out, size_t cap);
-void tor_state_choose(int on);
-void tor_state_yes(void);
-void tor_state_no(void);
-cmd_result_t app_newtor(void *ctx, const char *arg);
-
-// browser.c
-int path_is_root(const char *p);
-void path_join(char *out, size_t cap, const char *dir, const char *name);
-void path_parent(char *p);
-int browser_load(browser_t *b, const char *path);
-void browser_select(browser_t *b, const char *name);
-void browser_entry_path(const browser_t *b, const dir_entry_t *e, char *out, size_t cap);
-void browser_key(const tui_key_t *key);
-void begin_send_browse(int asis);
-void send_browser_key(const tui_key_t *key);
-void begin_save_browse(int num, int anyway);
-void save_browser_key(const tui_key_t *key);
-void render_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar);
-void render_send_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar);
-void render_save_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar);
 
 // settings.c
 extern const setting_def_t SETTINGS[N_SETTING_IDS];
@@ -707,140 +579,8 @@ int pgp_key_made_here(void);
 void pgp_public_key(char armor[PGP_ARMOR_MAX], uint8_t fp[PGP_FP_LEN]);
 void show_identity_result(void);
 
-// pages.c
-list_key_t list_key(const tui_key_t *key);
-int section_digit(const tui_key_t *key);
-void list_move(list_key_t k, int *sel, int n);
-void settings_key(const tui_key_t *key);
-void sign_picker_key(const tui_key_t *key);
-void paste_key(const tui_key_t *key);
-void render_settings(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar);
-void render_sign_picker(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar);
-void begin_changelog(void);
-void render_changelog(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar);
-void changelog_key(const tui_key_t *key);
-int page_section_step(const tui_row_t *rows, int n, int sel, int dir);
-int page_section_nth(const tui_row_t *rows, int n, int nth);
-
-// files_page.c
-void file_ask(int what, const file_entry_t *f);
-int echo_fetch(session_slot_t *s, int num, int view, int anyway, const char *dir);
-void file_ask_yes(void);
-void file_ask_no(void);
-int file_ask_paras(tui_para_t *paras, const char **title, const char **keys);
-const char *files_hint(void);
-void begin_files(void);
-void render_files(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar);
-void files_key(const tui_key_t *key);
-void view_forget(const session_slot_t *s);
-void render_viewer(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar);
-void viewer_key(const tui_key_t *key);
-const char *viewer_hint(void);
-
-// saves/install.c
-void saved_note(const char *fmt, ...) PRINTF_LIKE(1, 2);
-void say_saved_notes(void);
-int key_saved_as_path(void);
-void save_verified(void);
-void autosave_changed(void);
-void factors_text(unsigned f, char *out, size_t cap);
-void save_detail(const install_save_t *sv, char *out, size_t cap);
-int save_to_pick(void);
-void unlock_at_start(int in_box);
-int key_in_use_saved(void);
-int is_current_save(const char *name);
-int save_exists(const char *name);
-void pick_random_save_name(void);
-int install_resaves(void);
-void cancel_install(void);
-void install_confirmed(void);
-void install_use_existing(void);
-void install_new_save(void);
-void back_from_install_name(void);
-void install_pick_key(const tui_key_t *key);
-void install_overwrite_yes(void);
-void back_from_install_unlock(void);
-void choice_key(const tui_key_t *key, void (*yes)(void), void (*no)(void), void (*esc)(void));
-void commit_install_name(void);
-void commit_install_pass(void);
-void commit_install_pass2(void);
-void commit_install_unlock(void);
-void uninstall_confirmed(void);
-void settle_start(void);
-void commit_unlock(void);
-void back_from_unlock(void);
-void saves_key(const tui_key_t *key);
-void cancel_uninstall(void);
-void install_first_yes(void);
-void install_first_no(void);
-void device_lock_choose(int on);
-void device_lock_yes(void);
-void device_lock_no(void);
-void factor_choose(unsigned factor, int on);
-void factor_yes(void);
-void factor_no(void);
-void destroy_choose(int limit);
-void shadow_off(void);
-void begin_shadow(void);
-void commit_shadow_pass(void);
-void commit_shadow_pass2(void);
-void cancel_shadow_pass(void);
-void commit_key_pin(void);
-void cancel_key_pin(void);
-void key_wait_key(const tui_key_t *key);
-void key_wait_tick(void);
-void unlock_go(key_purpose_t why);
-void commit_unlock_code(void);
-void back_from_unlock_code(void);
-void confirm_key(const tui_key_t *key, void (*yes)(void), void (*no)(void));
-void quit_key(const tui_key_t *key);
-void field_key(const tui_key_t *key, void (*enter)(void), void (*esc)(void));
-void code_setup_key(const tui_key_t *key);
-
-// commands.c
-extern const command_t APP_COMMANDS[];
-extern const command_t *const ALL_COMMANDS[];
-void begin_help(void);
-int begin_install(const char *arg);
-void move_yes(void);
-void move_no(void);
-void move_ask_key(const tui_key_t *key);
-void move_tick(double now);
-cmd_result_t app_help(void *ctx, const char *arg);
-cmd_result_t app_changelog(void *ctx, const char *arg);
-int file_arg(const char *arg, int *anyway);
-cmd_result_t app_show(void *ctx, const char *arg);
-cmd_result_t app_files(void *ctx, const char *arg);
-cmd_result_t app_saveto(void *ctx, const char *arg);
-cmd_result_t app_hide(void *ctx, const char *arg);
-void render_help(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar);
-void help_key(const tui_key_t *key);
-void run_command(const char *line);
-cmd_result_t app_quit(void *ctx, const char *arg);
-cmd_result_t app_quitall(void *ctx, const char *arg);
-cmd_result_t app_copyid(void *ctx, const char *arg);
-cmd_result_t app_invite(void *ctx, const char *arg);
-cmd_result_t app_update(void *ctx, const char *arg);
-void update_key(const tui_key_t *key);
-
-// cmdline.c
-int command_word(const char *word, int whole);
-const char *complete_mention(const char *typed);
-int suggest_command(const char *typed, int nth, tui_suggestion_t *out);
-
-// keys.c
-void handle_key(const tui_key_t *key);
-
-// screen.c
-int add_para(tui_para_t *p, int n, tui_para_kind_t kind, const char *text);
-int install_mode(app_mode_t m);
-// The page a mode shows: itself, for a page, or the one under its box (MODE_CHAT for the chat screen).
-app_mode_t page_of(app_mode_t m);
-int on_chat_screen(void);
-tui_session_state_t session_state(const session_slot_t *s);
-tui_view_t current_view(char *sub, size_t cap);
-void chat_input(tui_bar_t *b, const tui_input_t *in);
-void render_bar(void);
-void render(void);
+#include "app/sessions/sessions.h"
+#include "app/screen/screen.h"
+#include "app/saves/install.h"
 
 #endif

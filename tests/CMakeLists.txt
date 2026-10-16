@@ -41,7 +41,7 @@ chat_test_executable(engine_test engine/engine_test.c engine/harness.c engine/se
                      engine/platform_test.c engine/identity_test.c engine/saves_test.c engine/pictures_test.c
                      engine/files_test.c engine/move_test.c ${PROJECT_SOURCE_DIR}/src/app/saves/saves.c
                      ${PROJECT_SOURCE_DIR}/src/app/saves/spare.c ${PROJECT_SOURCE_DIR}/src/app/saves/factors.c
-                     ${PROJECT_SOURCE_DIR}/src/app/rooms.c)
+                     ${PROJECT_SOURCE_DIR}/src/app/sessions/rooms.c)
 add_test(NAME engine COMMAND engine_test)
 
 if(CHAT_FUZZ)

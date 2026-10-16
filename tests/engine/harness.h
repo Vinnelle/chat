@@ -22,7 +22,7 @@
 #include "common/qr.h"
 #include "common/bytewords.h"
 #include "app/saves/saves.h"
-#include "app/rooms.h"
+#include "app/sessions/rooms.h"
 #include "test_os.h"
 #include <sodium.h>
 #include <stdio.h>

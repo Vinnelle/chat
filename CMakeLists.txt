@@ -219,28 +219,28 @@ list(TRANSFORM CHAT_CORE_SOURCES PREPEND ${CMAKE_SOURCE_DIR}/)
 add_executable(chat
     ${CHAT_CORE_SOURCES}
     src/app/main.c
-    src/app/sessions.c
     src/app/plain.c
-    src/app/pics.c
-    src/app/clipboard.c
-    src/app/browser.c
-    src/app/history.c
-    src/app/torlink.c
     src/app/settings.c
     src/app/identity.c
-    src/app/pages.c
-    src/app/files_page.c
-    src/app/saves/install.c
-    src/app/commands.c
-    src/app/cmdline.c
-    src/app/keys.c
-    src/app/lock.c
-    src/app/rooms.c
-    src/app/screen.c
     src/app/update.c
+    src/app/sessions/sessions.c
+    src/app/sessions/rooms.c
+    src/app/sessions/history.c
+    src/app/sessions/pics.c
+    src/app/sessions/torlink.c
+    src/app/screen/screen.c
+    src/app/screen/keys.c
+    src/app/screen/commands.c
+    src/app/screen/cmdline.c
+    src/app/screen/pages.c
+    src/app/screen/files_page.c
+    src/app/screen/browser.c
+    src/app/screen/clipboard.c
+    src/app/screen/lock.c
     src/app/saves/saves.c
     src/app/saves/spare.c
     src/app/saves/factors.c
+    src/app/saves/install.c
     src/transport/torproc.c
     src/platform/${CHAT_OS_BASE}/net.c
     src/platform/${CHAT_OS}/device.c

@@ -57,26 +57,24 @@ to the time it's given. `chat_shutdown` and `chat_free` end it.
 
 The app's state is one `app_t`, `g_app` (`app.h`), grouped by what each part is for:
 `g_app.install`, `g_app.factor`, `g_app.lock`, and so on. Each screen is a mode: `MODE_KEYS`
-(`keys.c`) says how it takes keys, and `page_of` and `BOXES` (`screen.c`) which page it shows and
-what its box holds.
+(`screen/keys.c`) says how it takes keys, and `page_of` and `BOXES` (`screen/screen.c`) which page
+it shows and what its box holds.
+
+The files at the top of `src/app/` are the program as a whole: starting it, `--simple`, its
+settings, its signing identity and `:update`. The rest are in a folder for what they're for, each
+with a header of what the rest of the app uses from it (`sessions/sessions.h`, `screen/screen.h`,
+`saves/install.h`). `app.h` includes those, so each file only includes `app.h`.
 
 | File | What's there |
 | --- | --- |
 | `main.c` | Starting up, the full-screen UI's main loop, and the panic key |
-| `sessions.c` | Session slots, opening sessions, what the engine tells the app, the NEW and JOIN boxes, kept rooms, reopening and calls |
 | `plain.c` | `--simple` |
-| `commands.c` | The app's own commands, `:move`'s boxes, the help page, and running a command |
-| `cmdline.c` | The command line: completing commands, nicks and arguments, and the menu over the input box |
-| `keys.c` | What each key does, in each mode and on the chat screen |
-| `screen.c` | What goes on screen: each mode's box, which page it shows, the chat pane and its input, and the bottom row |
-| `pages.c` | The list pages' keys, the settings page and the signing identity's picker, and the changelog |
-| `files_page.c` | The files page, and a picture on a page of its own |
 | `settings.c` | The settings rows, `:set`, and the settings file |
 | `identity.c` | The signing identity: made from a password, or read from a key file or a paste |
+| `update.c` | `:update` |
+| `sessions/` | Session slots, opening sessions, what the engine tells the app, the NEW and JOIN boxes, kept rooms, reopening and calls (`sessions.c`, with the kept rooms' list in `rooms.c`), histories (`history.c`), pictures under the lines that offered them (`pics.c`), and which tor Tor mode uses, chat's own tor, and its bridges (`torlink.c`) |
+| `screen/` | What goes on screen (`screen.c`), what each key does (`keys.c`), the app's own commands, `:move`'s boxes and the help page (`commands.c`), the command line (`cmdline.c`), the list pages and the changelog (`pages.c`), the files page (`files_page.c`), the folder browser (`browser.c`), the clipboard (`clipboard.c`), and the lock screen (`lock.c`) |
 | `saves/` | The save files (`saves.c`), their spare, a decoy or chaff (`spare.c`), and their factors (`factors.c`), which share `store.h`: the rest of chat uses `saves.h`. `:install`'s boxes and unlocking (`install.c`) |
-| `torlink.c` | Which tor Tor mode uses, chat's own tor, and its bridges |
-| `lock.c`, `history.c`, `rooms.c`, `update.c` | The lock screen, histories, kept rooms, and `:update` |
-| `pics.c`, `clipboard.c`, `browser.c` | Pictures under the lines that offered them, the clipboard, and the folder browser and its pages |
 
 ## The platform
 
@@ -97,14 +95,14 @@ what its box holds.
 
 ## A message, end to end
 
-1. `Enter` in the input box: `handle_key` (`app/commands.c`) hands the line to `chat_send_text`,
+1. `Enter` in the input box: `handle_key` (`app/screen/keys.c`) hands the line to `chat_send_text`,
    which makes an `m` record for each peer and queues it (`queue_record`, `core/send.c`).
 2. At the peer's next slot, `run_slot` seals the queued records on the peer's chain, with padding
    to a fixed size, and sends the frame (`xmit`).
 3. On the other side, `chat_on_socket_readable` (`core/receive.c`) opens the frame on the sender's
    chain, and `on_session` reads each record: `on_message` acks it, shows it, and passes it on to
    the peers it's connected to.
-4. The engine's print callback (`session_print`, `app/sessions.c`) puts the line in the session's
+4. The engine's print callback (`session_print`, `app/sessions/sessions.c`) puts the line in the session's
    scrollback, and the next frame draws it.
 
 What goes on the wire, byte by byte, is in [Protocol](protocol.md).
