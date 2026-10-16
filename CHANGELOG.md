@@ -1,5 +1,8 @@
 # Changelog
 
+All notable changes to chat, newest first. Each beta (`X.Y.Z-beta.N`) has a section of its own until
+its release, which folds them into one. A release's notes on GitHub are its section here.
+
 ## Unreleased
 
 ### Added
@@ -20,15 +23,15 @@
   every session too, kept in the open save as verified keys are. The sidebar marks them `i`, and
   `:peers` says so.
 
-- A backup release key. A build made with `minisign-backup.pub` (`just keygen backup`) takes an
+- A backup release key. A build made with `keys/minisign-backup.pub` (`just keygen backup`) takes an
   update, and a peer's list of release builds, signed by either the release key or the backup,
   which is kept offline apart from it. If the release key is lost or stolen, the backup signs the
   next release, and that release can stop taking the old key.
 
-- `tests/interop.sh` (`just interop OLD`) runs this build and an older one as two peers in one room,
-  and checks what an older version is promised: messages both ways, a long one, a reply, a direct
-  message or its refusal, a file each way and a leave. GitHub Actions runs it on every push against
-  the latest release and the newest beta.
+- `tests/interop/interop.sh` (`just interop OLD`) runs this build and an older one as two peers in
+  one room, and checks what an older version is promised: messages both ways, a long one, a reply, a
+  direct message or its refusal, a file each way and a leave. GitHub Actions runs it on every push
+  against the latest release and the newest beta.
 
 ### Changed
 - Releases are meant to be reproducible. `just dist` stamps the binaries with their commit's time,
@@ -53,6 +56,8 @@
   instead of a kilobyte each, and peers no longer keep a key they never read. Under the usual 8 MiB
   limit on locked memory, about 11 sessions' keys and messages stay out of swap, where past about 5
   they quietly didn't.
+- The release keys are in `keys/` now (`keys/minisign.pub`, `keys/minisign-backup.pub`), and the
+  documentation in `docs/`, with the README an overview of it.
 
 ### Fixed
 - In a room you moved to (`:move`), someone who came along from a room where you'd compared verify

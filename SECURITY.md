@@ -1,4 +1,4 @@
-# Security
+# Security policy
 
 ## Reporting a vulnerability
 
@@ -19,8 +19,8 @@ how a fix reaches you.
 ## Threat model
 
 This section describes what chat is meant to protect, from whom, and where that protection stops.
-[PROTOCOL.md](PROTOCOL.md) describes what goes on the wire. The README describes each feature
-from a user's side.
+[Wire protocol](docs/protocol.md) describes what goes on the wire, and
+[Security and privacy](docs/security.md) how each feature works from a user's side.
 
 ### What's protected
 
@@ -141,9 +141,9 @@ session id and password, whether they were invited or the password leaked.
   signed comment has to name the release being installed, so an older release's signature can't be
   passed off as a newer one's.
 - **Over Tor.** In Tor mode, the update check and the download go through Tor.
-- **A backup key.** A build made with `minisign-backup.pub` also takes a release signed by the backup
-  key, kept offline apart from the release key. If the release key is lost, the backup signs the
-  next release; if it's stolen, that release also stops taking the stolen key. Builds older than
+- **A backup key.** A build made with `keys/minisign-backup.pub` also takes a release signed by the
+  backup key, kept offline apart from the release key. If the release key is lost, the backup signs
+  the next release; if it's stolen, that release also stops taking the stolen key. Builds older than
   that release still take a stolen key until they update, and a thief who has both keys has
   everything.
 

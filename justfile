@@ -161,7 +161,7 @@ test *flags:
     ./build/tests/engine_test "$@"
 
 # This build and OLD, another chat executable (an older release, say), as two peers in one room on
-# this computer, through what PROTOCOL.md promises older versions. CI runs it against the latest
+# this computer, through what docs/protocol.md promises older versions. CI runs it against the latest
 # release and beta.
 # Build, then check it against an older chat binary (tests/interop/interop.sh)
 [group('test')]
@@ -273,7 +273,7 @@ reproduce version:
     done
     test "$same" = 1
 
-# Peers send each other this list to check each other's builds with (README.md, "Modified
+# Peers send each other this list to check each other's builds with (docs/security.md, "Modified
 # clients"), so it may name 3 binaries at most. Chat reads it from its own end: the list, its
 # signature line, then the length of both in 8 digits and CHATBLD1.
 # Append BUILDS, signed (BUILDS.minisig), to the binaries in a folder

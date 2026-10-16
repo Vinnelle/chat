@@ -1,11 +1,11 @@
-# chat's wire protocol
+# Wire protocol
 
 This is what chat sends over the network as of 0.5.0. It's written for anyone reviewing chat's
-design or checking what it puts on the wire. The code is the reference: where this document and
-the code disagree, the document is wrong. The relevant code is in
-[src/core/](src/core/), [src/crypto/crypto.c](src/crypto/crypto.c) and
-[src/transport/](src/transport/). [SECURITY.md](SECURITY.md) describes what the protocol is meant
-to protect against, and what it doesn't.
+design or checking what it puts on the wire. The code is the reference: where this document and the
+code disagree, the document is wrong. The relevant code is in [src/core/](../src/core/),
+[src/crypto/crypto.c](../src/crypto/crypto.c) and [src/transport/](../src/transport/).
+[SECURITY.md](../SECURITY.md) describes what the protocol is meant to protect against, and what it
+doesn't.
 
 > Neither the protocol nor its implementation has been independently reviewed.
 
@@ -263,10 +263,9 @@ A → B   hi2  ID PUB KEM COOKIE
 - KEM is A's ML-KEM-768 public key (2368 hex digits).
 - In `ck`, ID is the id of the `hi`'s sender.
 
-COOKIE is 16 bytes in hex, made by B as
-`BLAKE2b(key: cookie secret, byte(len(addr)) ‖ addr ‖ A's id ‖ A's PUB)` with a 16-byte output,
-where addr is A's address as text. Only B ever checks the cookie, so its layout is B's own
-business.
+COOKIE is 16 bytes in hex, made by B as `BLAKE2b(key: cookie secret, byte(len(addr)) ‖ addr ‖ A's id
+‖ A's PUB)` with a 16-byte output, where addr is A's address as text. Only B ever checks the cookie,
+so its layout is B's own business.
 
 The cookie stops someone who recorded a `hi` from replaying it from another address. A `hi` is
 taken without a cookie only when it changes nothing: the peer is already known, with the same key,

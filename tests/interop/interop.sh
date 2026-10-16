@@ -3,7 +3,7 @@
 # Copyright (C) 2026 finlay@tuta.com
 #
 # Two chats on this computer, this build and an older one, in one room over UDP on 127.0.0.1, with
-# --simple. Checks what PROTOCOL.md section 10 promises an older version: messages both ways, a long
+# --simple. Checks what docs/protocol.md section 10 promises an older version: messages both ways, a long
 # one (in parts for a build that only reads short ones), a reply (a quoted message for one that
 # can't read replies), a direct message (refused for one that can't read them, never lost), a file
 # each way, and a leave.
