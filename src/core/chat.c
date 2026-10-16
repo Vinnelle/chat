@@ -252,16 +252,14 @@ static int relays_needed(chat_t *c, double now) {
 // The most slots a fast transfer runs in one tick, if ticks fall behind.
 #define FAST_BURST_MAX 64
 
-void chat_tick(chat_t *c, double now) {
+// Messages older than the timer go from the ones kept for replies.
+static void expire_recent(chat_t *c, double now) {
     unsigned timer = chat_timer(c, NULL, 0);
     for (int i = 0; timer && i < RECENT_MAX; i++)
         if (c->recent[i].used && now - c->recent[i].at > timer) crypto_wipe(&c->recent[i], sizeof c->recent[i]);
-    if (c->nostr) {
-        if (relays_needed(c, now)) c->relays_until = now + RELAY_LINGER;
-        nostr_set_active(c->nostr, now < c->relays_until);
-    }
-    transports_step(c, now);
-    if (c->tor) tor_tick(c, now);
+}
+
+static void portmap_tick(chat_t *c, double now) {
     if (c->pm) {
         portmap_step(c->pm, now);
         // With a mapping active, the DHT is given the router's forwarded port, not the source port it sees.
@@ -276,11 +274,17 @@ void chat_tick(chat_t *c, double now) {
             c->dht.my_port = c->port;
         }
     }
+}
+
+static void beacon_tick(chat_t *c, double now) {
     if (c->nostr && nostr_relays_up(c->nostr) > 0 && now >= c->next_beacon) {
         double every = live_count(c) > 0 ? NOSTR_BEACON_CONNECTED : NOSTR_BEACON_ALONE;
         c->next_beacon = now + every + jitter(every * BEACON_JITTER);
         send_beacon(c);
     }
+}
+
+static void dht_tick(chat_t *c, double now) {
     if (c->dht_on) {
         c->dht.peers_now = live_count(c) > 0;
         if (dht_step(&c->dht, now) && !c->dht_summary_printed) {
@@ -290,6 +294,9 @@ void chat_tick(chat_t *c, double now) {
                          dht_queried_count(&c->dht), dht_found_count(&c->dht));
         }
     }
+}
+
+static void try_candidates(chat_t *c, double now) {
     for (int i = 0; i < MAX_CANDS; i++) {
         cand_t *cd = &c->cands[i];
         if (!cd->used) continue;
@@ -307,9 +314,9 @@ void chat_tick(chat_t *c, double now) {
             if (cd->tries >= CAND_MAX_TRIES) cd->used = 0;
         }
     }
-    if (c->move_req.used && !c->move_req.asked) move_ask_now(c, now);
-    pass_move_keys(c);
-    files_tick(c, now);
+}
+
+static void resend_messages(chat_t *c, double now) {
     for (int i = 0; i < MAX_PENDING_MSGS; i++) {
         pending_msg_t *pm = &c->pending[i];
         if (!pm->used) continue;
@@ -319,6 +326,10 @@ void chat_tick(chat_t *c, double now) {
             else { send_peer(c, p, pm->text); pm->tries++; pm->next_retry = now + resend_delay(c, p); }
         }
     }
+}
+
+// A peer we have no session with yet gets our hi again, and our kx if we start the session.
+static void hello_pending(chat_t *c, double now) {
     for (int i = 0; i < c->peer_hi; i++) {
         peer_t *p = &c->peers[i];
         if (!p->used || p->ok) continue;
@@ -338,6 +349,9 @@ void chat_tick(chat_t *c, double now) {
             }
         }
     }
+}
+
+static void keep_paths(chat_t *c, double now) {
     for (int i = 0; i < c->peer_hi; i++) {
         peer_t *p = &c->peers[i];
         if (!p->used || !p->ok) continue;
@@ -364,11 +378,17 @@ void chat_tick(chat_t *c, double now) {
             if (c->net_verbose) ui_print(c, "* hi -> %s (%s)", p->nick, stuck ? "re-handshake" : "quiet");
         }
     }
+}
+
+static void alive_tick(chat_t *c, double now) {
     if (now >= c->next_alive) {
         c->next_alive = now + KEEPALIVE + jitter(KEEPALIVE_SPREAD);
         for (int i = 0; i < c->n_static; i++) add_candidate(c, c->static_peers[i]);
         if (c->tor) knock_room_slots(c, now);
     }
+}
+
+static void lan_tick(chat_t *c, double now) {
     if (c->lan_sock != SOCK_INVALID && now >= c->next_lan) {
         c->next_lan = now + LAN_EVERY + jitter(LAN_SPREAD);
         if (c->net_verbose) ui_print(c, "* lan beacon sent");
@@ -376,6 +396,9 @@ void chat_tick(chat_t *c, double now) {
         send_room(c, beacon, addr_broadcast_lan(c->lan_port), c->lan_sock);
         send_room(c, beacon, addr_loopback(c->lan_port), c->lan_sock);
     }
+}
+
+static void rekeys_and_timeouts(chat_t *c, double now) {
     for (int i = 0; i < c->peer_hi; i++) {
         peer_t *p = &c->peers[i];
         if (!p->used) continue;
@@ -395,7 +418,9 @@ void chat_tick(chat_t *c, double now) {
                        + (p->addr.kind == ADDR_NOSTR && rehandshaking_with(c, p) ? REKEY_OVERLAP : 0.0);
         if (p->ok && now - p->seen > timeout) drop_peer(c, p, "timed out");
     }
+}
 
+static void rekey_tick(chat_t *c, double now) {
     if (now >= c->next_rekey) {
         if (c->rekey_due == 0.0) c->rekey_due = now;
         double waited = now - c->rekey_due;
@@ -405,7 +430,9 @@ void chat_tick(chat_t *c, double now) {
             c->next_rekey = rekey_after(now);
         }
     }
+}
 
+static void run_slots(chat_t *c, double now) {
     for (int i = 0; i < c->peer_hi; i++) {
         peer_t *p = &c->peers[i];
         if (!p->used) continue;
@@ -433,6 +460,9 @@ void chat_tick(chat_t *c, double now) {
         if (c->fast_files && p->ok && p->serving && p->addr.kind == ADDR_NOSTR) iv = relay_fast_interval(c, iv);
         p->next_cover = now + jittered(iv);
     }
+}
+
+static void lonely_hint(chat_t *c, double now) {
     if (!c->created && !c->warned_lonely && !c->ever_connected && now - c->start > LONELY_HINT_AFTER) {
         c->warned_lonely = 1;
         ui_print(c, "* nobody has answered for this session yet - check the id and password with "
@@ -444,6 +474,32 @@ void chat_tick(chat_t *c, double now) {
                      c->route.mode == ROUTE_TOR ? "UDP" : "Tor", c->route.mode == ROUTE_TOR ? " (through Tor)" : "");
         net_report(c);
     }
+}
+
+void chat_tick(chat_t *c, double now) {
+    expire_recent(c, now);
+    if (c->nostr) {
+        if (relays_needed(c, now)) c->relays_until = now + RELAY_LINGER;
+        nostr_set_active(c->nostr, now < c->relays_until);
+    }
+    transports_step(c, now);
+    if (c->tor) tor_tick(c, now);
+    portmap_tick(c, now);
+    beacon_tick(c, now);
+    dht_tick(c, now);
+    try_candidates(c, now);
+    if (c->move_req.used && !c->move_req.asked) move_ask_now(c, now);
+    pass_move_keys(c);
+    files_tick(c, now);
+    resend_messages(c, now);
+    hello_pending(c, now);
+    keep_paths(c, now);
+    alive_tick(c, now);
+    lan_tick(c, now);
+    rekeys_and_timeouts(c, now);
+    rekey_tick(c, now);
+    run_slots(c, now);
+    lonely_hint(c, now);
 }
 
 void net_report(chat_t *c) {
