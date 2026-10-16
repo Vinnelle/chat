@@ -3121,8 +3121,10 @@ int main(int argc, char **argv) {
         int before = failures;
         double t0 = now_seconds();
         if (verbose) printf("\n== %s\n", tests[i].name);
-        // Rekeys come at random, so the test before may have left one going.
+        // Rekeys come at random, so the test before may have left one going. During a test, only the ones
+        // it asks for (next_rekey = 0) happen: re-handshakes are the rekey tests'.
         RUN_UNTIL(&t, 60, !rehandshaking_any());
+        for (int k = 0; k < N_ALL; k++) ALL[k]->next_rekey = t + 3600.0;
         tests[i].fn(&t);
         int ok = failures == before;
         if (!ok) failed[n_failed++] = (int)i;
