@@ -3,6 +3,7 @@
 // Sessions talking over fake_net: handshake, verify codes, delivery, loss, rekey, the traffic's
 // shape on the wire, junk, a third peer and a move to a new room.
 #include "core/chat.h"
+#include "core/engine.h"
 #include "core/trust.h"
 #include "fake_net.h"
 #include "common/json.h"
@@ -187,6 +188,18 @@ static void pump(int rounds, double t) {
     while (!(cond) && *(t) < end_) { *(t) += 0.1; pump(2, *(t)); } \
 } while (0)
 #define RUN_FOR(t, seconds) RUN_UNTIL(t, seconds, 0)
+
+// Whether a live session is re-handshaking with a peer. Until it's done, what goes to that peer waits
+// behind the handshake's pieces, which can take longer than a test gives it.
+static int rehandshaking_any(void) {
+    for (int i = 0; i < N_ALL; i++) {
+        if (!(live_mask & (1 << i))) continue;
+        const chat_t *c = ALL[i];
+        for (int k = 0; k < c->peer_hi; k++)
+            if (c->peers[k].used && c->peers[k].ok && rehandshaking_with(c, &c->peers[k])) return 1;
+    }
+    return 0;
+}
 
 static peer_t *peer_named(chat_t *c, const char *nick) {
     for (int i = 0; i < c->peer_hi; i++)
@@ -3108,6 +3121,8 @@ int main(int argc, char **argv) {
         int before = failures;
         double t0 = now_seconds();
         if (verbose) printf("\n== %s\n", tests[i].name);
+        // Rekeys come at random, so the test before may have left one going.
+        RUN_UNTIL(&t, 60, !rehandshaking_any());
         tests[i].fn(&t);
         int ok = failures == before;
         if (!ok) failed[n_failed++] = (int)i;
