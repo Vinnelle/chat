@@ -50,6 +50,11 @@
   it to none. The id is often passed around in the open, so the password is what stands in the way of
   guessing, and the box used to start empty.
 
+### Fixed
+- In a room you moved to (`:move`), someone who came along from a room where you'd compared verify
+  codes could be shown with a code to compare, until chat said a moment later that they'd come along.
+  Their join now waits for their proof of that, a few seconds at most.
+
 ## 0.5.1-beta.3
 
 ### Added

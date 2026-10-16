@@ -487,7 +487,10 @@ int on_frame(chat_t *c, uint8_t *data, size_t len, addr_t addr, double now) {
                 send_onion(c, p);
                 introduce(c, p);
             }
-            if (!p->announced && p->k_seen) announce_join(c, p);
+            // In a room we moved to, one who came along sends "mp" ahead of each k, but its first frame can
+            // go before we could read it. The join waits for it (or JOIN_WAIT), so it doesn't ask to compare
+            // codes compared already.
+            if (!p->announced && p->k_seen && (!c->moved || p->move_sig_set)) announce_join(c, p);
             return 1;
         }
     }

@@ -289,8 +289,9 @@ typedef struct {
     double seen, born, next_hello;
     int hello_tries;
     int ok;
-    // The join is announced once "k" has brought the nick and identity (k_seen), or JOIN_WAIT
-    // after the first frame opened (ok_since) if it never does, so nobody joins unannounced.
+    // The join is announced once "k" has brought the nick and identity (k_seen), and in a room we
+    // moved to, "mp" too, or JOIN_WAIT after the first frame opened (ok_since) if they never come,
+    // so nobody joins unannounced.
     double ok_since;
     int k_seen, announced;
     // Our own k is sent to a new peer K_SENDS times, a little apart, since nothing acks it and the
