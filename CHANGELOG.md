@@ -63,6 +63,8 @@ its release, which folds them into one. A release's notes on GitHub are its sect
 - In a room you moved to (`:move`), someone who came along from a room where you'd compared verify
   codes could be shown with a code to compare, until chat said a moment later that they'd come along.
   Their join now waits for their proof of that, a few seconds at most.
+- Closing a kept room just after a rekey could show peers that you'd left, not that you'd gone
+  offline.
 
 ## 0.5.1-beta.3
 

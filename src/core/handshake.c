@@ -238,6 +238,7 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
         slot->can_move = carry.can_move;
         slot->can_pm = carry.can_pm;
         slot->can_reply = carry.can_reply;
+        slot->can_offline = carry.can_offline;
         memcpy(slot->move_pub, carry.move_pub, ID_SIGN_PUB_LEN);
         slot->move_pub_set = carry.move_pub_set;
         slot->move_passed = carry.move_passed;
