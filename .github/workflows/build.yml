@@ -22,11 +22,11 @@ jobs:
           - asset: chat-linux-x86_64
             dir: build-static
             bin: chat
-            cmake_args: -DCMAKE_TOOLCHAIN_FILE=cmake/zig-linux-musl.cmake
+            cmake_args: -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/zig-linux-musl.cmake
           - asset: chat-windows-x86_64.exe
             dir: build-win
             bin: chat.exe
-            cmake_args: -DCMAKE_TOOLCHAIN_FILE=cmake/zig-windows.cmake
+            cmake_args: -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/zig-windows.cmake
     runs-on: ubuntu-24.04
     steps:
       # With the tags, so the build stamp names the release as `just dist` does (git describe).

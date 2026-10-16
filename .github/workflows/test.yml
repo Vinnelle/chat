@@ -90,7 +90,7 @@ jobs:
           echo "$RUNNER_TEMP/$name" >> "$GITHUB_PATH"
 
       - name: Configure
-        run: cmake -B build-win-test -DCMAKE_TOOLCHAIN_FILE=cmake/zig-windows.cmake -DCHAT_TESTS=ON
+        run: cmake -B build-win-test -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/zig-windows.cmake -DCHAT_TESTS=ON
 
       - name: Build
         run: cmake --build build-win-test -j "$(nproc)" --target engine_test chat
@@ -142,7 +142,7 @@ jobs:
           echo "$RUNNER_TEMP/$name" >> "$GITHUB_PATH"
 
       - name: Configure
-        run: cmake -B build-macos -DCMAKE_TOOLCHAIN_FILE=cmake/zig-macos-aarch64.cmake -DCHAT_TESTS=ON
+        run: cmake -B build-macos -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/zig-macos-aarch64.cmake -DCHAT_TESTS=ON
 
       - name: Build
         run: cmake --build build-macos -j "$(nproc)" --target engine_test chat

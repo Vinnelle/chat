@@ -30,16 +30,16 @@ build what="native" *args:
             cmake --build build -j {{num_cpus()}}
             ;;
         linux)
-            cmake -B build-static -DCMAKE_TOOLCHAIN_FILE=cmake/zig-linux-musl.cmake
+            cmake -B build-static -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/zig-linux-musl.cmake
             cmake --build build-static -j {{num_cpus()}}
             ;;
         windows|win)
-            cmake -B build-win -DCMAKE_TOOLCHAIN_FILE=cmake/zig-windows.cmake
+            cmake -B build-win -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/zig-windows.cmake
             cmake --build build-win -j {{num_cpus()}}
             ;;
         macos|mac)
             for arch in aarch64 x86_64; do
-                cmake -B build-macos-$arch -DCMAKE_TOOLCHAIN_FILE=cmake/zig-macos-$arch.cmake
+                cmake -B build-macos-$arch -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/zig-macos-$arch.cmake
                 cmake --build build-macos-$arch -j {{num_cpus()}}
             done
             ;;

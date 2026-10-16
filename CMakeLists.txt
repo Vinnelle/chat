@@ -286,7 +286,7 @@ target_link_libraries(chat PRIVATE ${SODIUM_STATIC_LIB} ${OQS_STATIC_LIB} ${MBED
 if(WIN32)
     # Version information and a manifest (src/platform/windows/chat.rc). Antivirus heuristics
     # count an exe without them against it. They're a target of their own, so chat's C compiler
-    # options don't reach the resource compiler. cmake/zig-rc writes a COFF object, which zig
+    # options don't reach the resource compiler. cmake/toolchains/zig-rc writes a COFF object, which zig
     # only links under an object's name.
     enable_language(RC)
     if(CMAKE_RC_COMPILER MATCHES "zig-rc$")
