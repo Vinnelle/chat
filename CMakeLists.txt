@@ -261,19 +261,28 @@ function(chat_read_pubkey file out)
     set(${out} "${key}" PARENT_SCOPE)
 endfunction()
 
-# /update installs only releases whose SHA256SUMS the key in minisign.pub signed (`just keygen`
+# /update installs only releases whose SHA256SUMS the key in keys/minisign.pub signed (`just keygen`
 # makes one). Without the file the build still works, but refuses every update.
-set(CHAT_PUBKEY_FILE ${CMAKE_SOURCE_DIR}/minisign.pub CACHE FILEPATH "minisign public key releases are checked with")
+set(CHAT_PUBKEY_FILE ${CMAKE_SOURCE_DIR}/keys/minisign.pub CACHE FILEPATH "minisign public key releases are checked with")
+set(CHAT_BACKUP_PUBKEY_FILE ${CMAKE_SOURCE_DIR}/keys/minisign-backup.pub CACHE FILEPATH "the release key's backup")
+# A build folder made before the keys moved into keys/ still has their old paths, which would
+# leave the key out without a word.
+foreach(var CHAT_PUBKEY_FILE CHAT_BACKUP_PUBKEY_FILE)
+    get_filename_component(name ${${var}} NAME)
+    if(${var} STREQUAL "${CMAKE_SOURCE_DIR}/${name}" AND NOT EXISTS ${${var}})
+        set_property(CACHE ${var} PROPERTY VALUE ${CMAKE_SOURCE_DIR}/keys/${name})
+        set(${var} ${CMAKE_SOURCE_DIR}/keys/${name})
+    endif()
+endforeach()
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CHAT_PUBKEY_FILE})
 if(EXISTS ${CHAT_PUBKEY_FILE})
     chat_read_pubkey(${CHAT_PUBKEY_FILE} CHAT_RELEASE_PUBKEY)
     target_compile_definitions(chat PRIVATE CHAT_RELEASE_PUBKEY="${CHAT_RELEASE_PUBKEY}")
 else()
-    message(WARNING "chat: no minisign.pub - this build will refuse every update (`just keygen` makes one)")
+    message(WARNING "chat: no keys/minisign.pub - this build will refuse every update (`just keygen` makes one)")
 endif()
 # A second key, kept offline apart from the first, for signing releases once that one is lost or
 # stolen (`just keygen backup`). Builds that have it take a release signed by either.
-set(CHAT_BACKUP_PUBKEY_FILE ${CMAKE_SOURCE_DIR}/minisign-backup.pub CACHE FILEPATH "the release key's backup")
 if(EXISTS ${CHAT_BACKUP_PUBKEY_FILE})
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CHAT_BACKUP_PUBKEY_FILE})
     chat_read_pubkey(${CHAT_BACKUP_PUBKEY_FILE} CHAT_RELEASE_BACKUP_PUBKEY)

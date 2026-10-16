@@ -42,8 +42,8 @@ jobs:
             mkdir -p "old/$tag"
             gh release download "$tag" --repo "$repo" --dir "old/$tag" --pattern chat-linux-x86_64 --pattern 'SHA256SUMS*'
             (cd "old/$tag"
-             minisign -Vqm SHA256SUMS -p "$GITHUB_WORKSPACE/minisign.pub" \
-               || { test -e "$GITHUB_WORKSPACE/minisign-backup.pub" && minisign -Vqm SHA256SUMS -p "$GITHUB_WORKSPACE/minisign-backup.pub"; }
+             minisign -Vqm SHA256SUMS -p "$GITHUB_WORKSPACE/keys/minisign.pub" \
+               || { test -e "$GITHUB_WORKSPACE/keys/minisign-backup.pub" && minisign -Vqm SHA256SUMS -p "$GITHUB_WORKSPACE/keys/minisign-backup.pub"; }
              sha256sum -c --ignore-missing SHA256SUMS
              chmod +x chat-linux-x86_64)
           done

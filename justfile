@@ -187,9 +187,9 @@ fuzz target="engine" seconds="300":
 # ---------------------------------------------------------------------------------------------
 # Release
 
-# minisign.pub gets committed; the password-protected secret key stays offline and backed up,
+# keys/minisign.pub gets committed; the password-protected secret key stays offline and backed up,
 # never in the repo. Set CHAT_SIGNING_KEY to keep it somewhere other than ~/.minisign.
-# `just keygen backup` makes the backup key, minisign-backup.pub and CHAT_BACKUP_SIGNING_KEY's
+# `just keygen backup` makes the backup key, keys/minisign-backup.pub and CHAT_BACKUP_SIGNING_KEY's
 # file: builds from then on take a release it signed too, for when the first is lost or stolen.
 # Its secret key goes somewhere apart from the first's, so one mishap can't take both.
 # Make the release signing key, or with backup its backup
@@ -198,23 +198,23 @@ keygen which="":
     #!/bin/sh
     set -eu
     case "${1:-}" in
-        "") pub=minisign.pub; key="${CHAT_SIGNING_KEY:-$HOME/.minisign/chat-release.key}" ;;
-        backup) pub=minisign-backup.pub; key="${CHAT_BACKUP_SIGNING_KEY:-$HOME/.minisign/chat-release-backup.key}" ;;
+        "") pub=keys/minisign.pub; key="${CHAT_SIGNING_KEY:-$HOME/.minisign/chat-release.key}" ;;
+        backup) pub=keys/minisign-backup.pub; key="${CHAT_BACKUP_SIGNING_KEY:-$HOME/.minisign/chat-release-backup.key}" ;;
         *) echo "just keygen takes nothing, or backup" >&2; exit 1 ;;
     esac
     if [ -e "$pub" ] || [ -e "$key" ]; then echo "$pub or $key already exists" >&2; exit 1; fi
-    mkdir -p "$(dirname "$key")"
+    mkdir -p "$(dirname "$key")" keys
     minisign -G -p "$pub" -s "$key"
     echo "commit $pub; back up $key somewhere safe${1:+, apart from the release key}"
 
-# Which public key signed file (minisign.pub, or minisign-backup.pub), or fails if neither did
+# Which public key signed file (keys/minisign.pub, or keys/minisign-backup.pub), or fails if neither did
 _signed-by file:
     #!/bin/sh
     set -eu
-    for pub in minisign.pub minisign-backup.pub; do
+    for pub in keys/minisign.pub keys/minisign-backup.pub; do
         if [ -e "$pub" ] && minisign -Vq -p "$pub" -m "$1" >/dev/null 2>&1; then echo "$pub"; exit 0; fi
     done
-    echo "$1 isn't signed with minisign.pub's key or minisign-backup.pub's" >&2
+    echo "$1 isn't signed with keys/minisign.pub's key or keys/minisign-backup.pub's" >&2
     exit 1
 
 # The build stamp says when the commit was made, not when it was built (SOURCE_DATE_EPOCH), so
@@ -292,7 +292,7 @@ _append-list dir:
 _can-release:
     #!/bin/sh
     set -eu
-    test -e minisign.pub || { echo "no minisign.pub - run just keygen" >&2; exit 1; }
+    test -e keys/minisign.pub || { echo "no keys/minisign.pub - run just keygen" >&2; exit 1; }
     test -z "$(git status --porcelain)" || { echo "working tree not clean" >&2; exit 1; }
     gh auth status >/dev/null 2>&1 || { echo "gh isn't logged in - run gh auth login" >&2; exit 1; }
 

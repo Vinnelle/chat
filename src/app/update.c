@@ -361,7 +361,7 @@ static int signed_by(const char *key, const char *msg, size_t msg_len, const cha
          ? 0 : -1;
 }
 
-// The key built in from minisign.pub, or its backup from minisign-backup.pub.
+// The key built in from keys/minisign.pub, or its backup from keys/minisign-backup.pub.
 static int minisign_ok(const char *msg, size_t msg_len, const char *sig_text, const char *tag) {
     if (signed_by(RELEASE_PUBKEY, msg, msg_len, sig_text, tag) == 0) return 0;
     return RELEASE_BACKUP_PUBKEY[0] ? signed_by(RELEASE_BACKUP_PUBKEY, msg, msg_len, sig_text, tag) : -1;
@@ -436,7 +436,7 @@ static void update_thread(void *unused) {
     finish(UPDATE_PREFIX "no release builds exist for this CPU architecture");
 #else
     if (!RELEASE_PUBKEY[0]) {
-        finish(UPDATE_PREFIX "this build has no release signing key (minisign.pub), so it can't check a release");
+        finish(UPDATE_PREFIX "this build has no release signing key (keys/minisign.pub), so it can't check a release");
         return;
     }
     char exe[EXE_PATH_MAX], tmp_json[EXE_TMP_MAX], tmp_sums[EXE_TMP_MAX], tmp_sig[EXE_TMP_MAX], tmp_bin[EXE_TMP_MAX];

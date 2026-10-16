@@ -61,7 +61,7 @@ void update_helper_enable(int on);
 // The updater: runs each update chat asks for on link, until chat goes.
 int update_helper(int link);
 
-// The release key (minisign, base64) built in from minisign.pub, or "" if there was none.
+// The release key (minisign, base64) built in from keys/minisign.pub, or "" if there was none.
 const char *update_release_key(void);
 // Its backup, or "" if this build has none.
 const char *update_release_backup_key(void);
