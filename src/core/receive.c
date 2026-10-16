@@ -503,6 +503,7 @@ void transports_step(chat_t *c, double now) {
 #define RECV_BATCH 64
 
 void chat_on_socket_readable(chat_t *c, sock_t which, double now) {
+    c->now = now;
     if (which == SOCK_INVALID) return;
     if (which != c->sock && which != c->lan_sock) { transports_step(c, now); return; }
     uint8_t buf[FRAME_BUF_LEN];

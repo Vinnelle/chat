@@ -148,6 +148,9 @@ static void base_opts(chat_opts_t *o, const char *nick, uint16_t port, const uin
     o->notify_mode = NOTIFY_NONE;
 }
 
+// The time the sessions last ran at, which new ones start at, and filters note.
+static double g_now;
+
 static void start(chat_t *c, log_t *l, const char *nick, uint16_t port, const uint16_t *peer_ports, int n, int created,
                   const uint8_t build[BUILD_HASH_LEN], int released) {
     chat_opts_t o;
@@ -160,7 +163,7 @@ static void start(chat_t *c, log_t *l, const char *nick, uint16_t port, const ui
         copy_str(o.build.list_sig, release_sig, sizeof o.build.list_sig);
     }
     copy_str(o.release_key, release_pub, sizeof o.release_key);
-    chat_init(c, &o, on_print, NULL, l);
+    chat_init(c, &o, on_print, NULL, l, g_now);
 }
 
 static chat_t *const ALL[] = { &A, &B, &C, &A2, &B2 };
@@ -168,7 +171,6 @@ static const log_t *const ALL_LOGS[] = { &log_a, &log_b, &log_c };
 #define N_ALL ((int)(sizeof ALL / sizeof ALL[0]))
 static int n_live = 2;
 static int live_mask = 0x3;   // which of ALL run
-static double g_now;          // the time the sessions last ran at, for filters that note when
 
 // Delivers everything queued and ticks every session, `rounds` times, at time t.
 static void pump(int rounds, double t) {
@@ -2975,7 +2977,7 @@ static void start_moved(chat_t *c, log_t *l, const char *nick, uint16_t port, co
     copy_str(o.password, to->password, sizeof o.password);
     o.moved = 1;
     o.moved_key = to->key;
-    chat_init(c, &o, on_print, NULL, l);
+    chat_init(c, &o, on_print, NULL, l, g_now);
 }
 
 // Whether x waits for y's ack of a record that starts with prefix.
@@ -3079,9 +3081,10 @@ int main(int argc, char **argv) {
     uint16_t to_b[1] = { 40002 }, to_a[1] = { 40001 };
     printf("deriving session keys (Argon2id, 512 MiB each)...\n");
     make_release();
+    // The sessions keep to this clock, which runs as the tests say, not as the computer's does.
+    double t = g_now = now_seconds();
     start(&A, &log_a, "alice", 40001, to_b, 1, 1, BUILD_ALICE, 1);
     start(&B, &log_b, "bob", 40002, to_a, 1, 0, BUILD_BOB, 1);
-    double t = now_seconds();
 
     struct { const char *name; void (*fn)(double *); } tests[] = {
         { "connect", test_connect }, { "verify gate", test_verify_gate }, { "message", test_message },

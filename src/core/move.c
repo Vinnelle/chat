@@ -274,6 +274,7 @@ int chat_move_staged(chat_t *c, chat_move_to_t *to) {
 }
 
 void chat_move_go(chat_t *c, const chat_move_to_t *to, chat_t *moved_to, double now) {
+    c->now = now;
     if (to->created) {
         // Everyone asked gets the whole list, and names the others from it as it knows them.
         char coming[MOVE_COMING_LEN] = "", keyhex[ID_SIGN_PUB_LEN * 2 + 1];

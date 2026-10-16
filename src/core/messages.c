@@ -287,9 +287,13 @@ void send_text(chat_t *c, const char *text_in, const recent_msg_t *reply, double
     else if (!sent) ui_print(c, "* nobody else is here yet, message not delivered");
 }
 
-void chat_send_text(chat_t *c, const char *text_in, double now) { send_text(c, text_in, NULL, now); }
+void chat_send_text(chat_t *c, const char *text_in, double now) {
+    c->now = now;
+    send_text(c, text_in, NULL, now);
+}
 
 int chat_submit_line(chat_t *c, const char *line_in, double now) {
+    c->now = now;
     char line[MAX_TEXT + 1];
     clean_text(line_in, line, MAX_TEXT);
     if (line[0] == ':') return chat_run_command(c, line + 1) != CMD_QUIT;

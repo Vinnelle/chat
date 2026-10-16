@@ -18,10 +18,10 @@ void dht_out(void *ctx, const void *data, size_t len, const addr_t *to, const ch
 void xmit(chat_t *c, sock_t sock, const void *data, size_t len, addr_t to) {
     switch (to.kind) {
         case ADDR_NOSTR:
-            if (c->nostr) nostr_send(c->nostr, to, data, len, now_seconds());
+            if (c->nostr) nostr_send(c->nostr, to, data, len, c->now);
             return;
         case ADDR_TOR:
-            if (c->tor) tor_send(c->tor, to, data, len, now_seconds());
+            if (c->tor) tor_send(c->tor, to, data, len, c->now);
             return;
         default: {
             if (c->route.mode == ROUTE_TOR || sock == SOCK_INVALID) return;

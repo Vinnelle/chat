@@ -660,6 +660,9 @@ typedef struct chat_s {
     dht_state_t dht;
 
     double start, next_alive, next_lan;
+    // The time the caller gave with its latest call (chat_tick and the like), for what isn't given one,
+    // such as commands: a session keeps to its caller's clock.
+    double now;
     uint32_t keygen;
     double next_rekey;
     double rekey_due;
@@ -751,7 +754,7 @@ typedef struct {
     identity_keypair_t moved_key;
 } chat_opts_t;
 
-void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify_fn notify, void *ui);
+void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify_fn notify, void *ui, double now);
 void chat_shutdown(chat_t *c);
 
 void chat_tick(chat_t *c, double now);

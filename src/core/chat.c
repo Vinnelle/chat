@@ -123,7 +123,7 @@ void drop_peer(chat_t *c, peer_t *p, const char *why) {
     if (was_ok) ui_print(c, "* %s %s (%d online)", name, why, live_count(c) + 1);
     // The peer who left may have been the latest publisher of the room onion, so point it back at us.
     if (was_ok && c->tor && c->tor_hosting && c->tor_republish_at == 0.0)
-        c->tor_republish_at = now_seconds() + REPUBLISH_WAIT + jitter(REPUBLISH_SPREAD);
+        c->tor_republish_at = c->now + REPUBLISH_WAIT + jitter(REPUBLISH_SPREAD);
 }
 
 int chat_sockets(chat_t *c, sock_t out[CHAT_MAX_SOCKS]) {
@@ -477,6 +477,7 @@ static void lonely_hint(chat_t *c, double now) {
 }
 
 void chat_tick(chat_t *c, double now) {
+    c->now = now;
     expire_recent(c, now);
     if (c->nostr) {
         if (relays_needed(c, now)) c->relays_until = now + RELAY_LINGER;
@@ -759,8 +760,9 @@ void chat_tor_refresh(chat_t *c) {
     if (c->nostr) nostr_reconnect(c->nostr);
 }
 
-void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify_fn notify, void *ui) {
+void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify_fn notify, void *ui, double now) {
     memset(c, 0, sizeof *c);
+    c->now = now;
     // Locked before any key is stored there. Best effort: a low RLIMIT_MEMLOCK only means they may be
     // swapped. The peers hold their chain keys.
     crypto_lock((uint8_t *)c + SECRETS_OFFSET, SECRETS_LEN);
@@ -825,7 +827,7 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
         c->started = c->tor != NULL;
         if (!c->started) c->start_error = "could not set up Tor";
         if (c->tor && c->created) { tor_host_room(c->tor, 0); c->tor_hosting = 1; }
-        if (c->tor) { knock_room_slots(c, now_seconds()); start_nostr(c); }
+        if (c->tor) { knock_room_slots(c, now); start_nostr(c); }
     } else {
         // Without the main socket the caller abandons this session, so nothing else is started.
         c->sock = net_udp_open(o->port, NET_DUAL, &c->port);
@@ -841,7 +843,7 @@ void chat_init(chat_t *c, const chat_opts_t *o, chat_print_fn print, chat_notify
     c->n_static = n_static;
 
     c->persist = o->persist;
-    c->start = now_seconds();
+    c->start = now;
     c->next_rekey = rekey_after(c->start);
     c->probe_tokens = PROBE_BURST;
     c->probe_at = c->start;

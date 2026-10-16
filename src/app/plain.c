@@ -105,7 +105,7 @@ static chat_t *plain_move(chat_t *c, chat_t **left, chat_t engines[2], const cha
     o.moved = 1;
     o.moved_key = to->key;
     push_log("* moving to a new room - deriving its keys...");
-    chat_init(n, &o, plain_print, plain_notify, NULL);
+    chat_init(n, &o, plain_print, plain_notify, NULL, now_seconds());
     crypto_wipe(&o, sizeof o);
     if (!chat_started(n)) {
         push_log("* couldn't open the new room: %s", chat_start_error(n));
@@ -243,7 +243,7 @@ int run_plain(const char *session_name, const char *password, uint16_t port,
     // Two, so a room :move left can close while the new one runs.
     static chat_t engines[2];
     chat_t *c = &engines[0], *left = NULL;
-    chat_init(c, &o, plain_print, plain_notify, NULL);
+    chat_init(c, &o, plain_print, plain_notify, NULL, now_seconds());
     c->file_view = plain_file_view;
     c->delivery = plain_delivery;
     g_plain_engine = c;

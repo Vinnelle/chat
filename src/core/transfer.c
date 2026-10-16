@@ -164,7 +164,7 @@ static void file_send_offer(chat_t *c, peer_t *p, const file_entry_t *e, double 
 void file_offer_all(chat_t *c, peer_t *p) {
     if (!p->ok || !peer_trusted(c, p)) return;
     for (int i = 0; i < FILE_OFFERS_MAX; i++)
-        if (c->files[i].used && c->files[i].mine && c->files[i].fp) file_send_offer(c, p, &c->files[i], now_seconds());
+        if (c->files[i].used && c->files[i].mine && c->files[i].fp) file_send_offer(c, p, &c->files[i], c->now);
 }
 
 // A path typed in a command: trailing spaces and the quotes file managers copy paths with are
@@ -337,7 +337,7 @@ void chat_send_file(chat_t *c, const char *path, int asis) {
         peer_t *p = &c->peers[i];
         if (!p->used || !p->ok) continue;
         if (!peer_trusted(c, p)) { held++; continue; }
-        file_send_offer(c, p, e, now_seconds());
+        file_send_offer(c, p, e, c->now);
         sent++;
     }
     if (held) ui_print(c, "* not offered to %d peer%s whose verify code you haven't compared", held, held == 1 ? "" : "s");
@@ -574,7 +574,7 @@ static void file_finish(chat_t *c, file_entry_t *e) {
         file_stop_download(e, DL_DONE);
         return;
     }
-    char took[48]; file_format_duration(now_seconds() - e->since, took, sizeof took);
+    char took[48]; file_format_duration(c->now - e->since, took, sizeof took);
     int ok = e->out && fflush(e->out) == 0;
     if (e->out) { if (fclose(e->out) != 0) ok = 0; e->out = NULL; }
     if (!ok || file_save_as(e) != 0) {
@@ -623,7 +623,7 @@ static int file_start(chat_t *c, file_entry_t *e, peer_t *p) {
     }
     sha256_init(&e->hash);
     e->dl = DL_ACTIVE;
-    e->since = now_seconds();
+    e->since = c->now;
     if (e->size == 0) { file_finish(c, e); return 0; }
     file_request(c, e, p, e->since);
     // How long it takes depends on the sender. Fast transfers only speed up what you send.
@@ -802,7 +802,7 @@ cmd_result_t cmd_files(void *ctx, const char *arg) {
         char state[1024] = "";
         if (e->mine) {
             char name[CHAT_NAME_LEN], to[CHAT_NAME_LEN * 2 + 16];
-            int pm, fetching = chat_file_sending(c, e, now_seconds(), name, &pm);
+            int pm, fetching = chat_file_sending(c, e, c->now, name, &pm);
             chat_file_sent_to(e, to, sizeof to);
             if (fetching) snprintf(state, sizeof state, "sending to %s%s, %d%%", name, fetching > 1 ? " and others" : "", pm / 10);
             else if (to[0]) snprintf(state, sizeof state, "sent to %s%s", to, e->fp ? "" : ", no longer offered");
@@ -810,7 +810,7 @@ cmd_result_t cmd_files(void *ctx, const char *arg) {
         }
         else if (e->dl == DL_ACTIVE) {
             uint64_t got = chat_file_got(e);
-            double s = chat_file_eta(c, e, now_seconds());
+            double s = chat_file_eta(c, e, c->now);
             char gs[32], eta[48];
             file_format_size(got, gs, sizeof gs);
             if (s >= 0.0) { file_format_duration(s, eta, sizeof eta); strcat(eta, " left"); }

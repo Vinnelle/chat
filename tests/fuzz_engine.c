@@ -31,7 +31,7 @@ static void start(chat_t *c, const char *nick, uint16_t port, uint16_t peer_port
     o.peers[0] = fake_net_addr(peer_port);
     o.n_peers = 1;
     o.created = created;
-    chat_init(c, &o, quiet, NULL, NULL);
+    chat_init(c, &o, quiet, NULL, NULL, t0);
 }
 
 static peer_t *bobs_view_of_alice(void) {
@@ -42,9 +42,9 @@ static peer_t *bobs_view_of_alice(void) {
 int LLVMFuzzerInitialize(int *argc, char ***argv) {
     (void)argc; (void)argv;
     crypto_setup();
+    t0 = now_seconds();
     start(&A, "alice", 41001, 41002, 1);
     start(&B, "bob", 41002, 41001, 0);
-    t0 = now_seconds();
     // Frames go out in slots, a second and a half apart: the clock has to move for the handshake.
     for (int i = 0; i < 600 && !(chat_online_count(&A) && chat_online_count(&B)); i++) {
         t0 += 0.1;

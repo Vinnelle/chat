@@ -411,7 +411,7 @@ static cmd_result_t cmd_msg(void *ctx, const char *arg) {
     snprintf(record, sizeof record, "pm\t%s\t%s", mid, line);
     if (send_peer(c, p, record) != 0) { ui_print(c, "* couldn't send that to %s", name); return CMD_OK; }
     unsigned own = ++c->own_seq;
-    track_message(c, p, mid, record, own, now_seconds());
+    track_message(c, p, mid, record, own, c->now);
     snprintf(shown, sizeof shown, "%s (" DM_ARROW " %s) (you)", c->nick, name);
     ui_direct(c, c->my_color, 0, shown, line);
     return CMD_OK;
@@ -466,7 +466,7 @@ static cmd_result_t cmd_reply(void *ctx, const char *arg) {
         return CMD_OK;
     }
     recent_msg_t answered = *r;
-    send_text(c, rest, &answered, now_seconds());
+    send_text(c, rest, &answered, c->now);
     crypto_wipe(&answered, sizeof answered);
     return CMD_OK;
 }

@@ -66,7 +66,7 @@ static session_slot_t *open_session(const char *session_name, const char *passwo
     app_session_opts(&o);
     if (move) { o.moved = 1; o.moved_key = move->key; }
 
-    chat_init(&s->engine, &o, session_print, session_notify, s);
+    chat_init(&s->engine, &o, session_print, session_notify, s, now_seconds());
     s->engine.file_view = session_file_view;
     s->engine.delivery = session_delivery;
     crypto_wipe(&o, sizeof o);
