@@ -35,11 +35,11 @@ cmake -B build-macos-aarch64 -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/zig-macos-a
 cmake --build build-macos-aarch64
 ```
 
-The platform code is the Linux code, which is POSIX apart from what it keeps to Linux. GitHub
-Actions runs the engine test and starts chat on a Mac on every push, but it hasn't been used on
-one beyond that, and releases don't include it yet. What doesn't work there yet, since it needs
-Apple's frameworks: locking a save to the device (the Secure Enclave), security keys, desktop
-notifications, and asking the router for a port over PCP or NAT-PMP (UPnP still works). The
+It builds the platform code Linux uses too (`src/platform/posix/`), which keeps to POSIX apart from
+what it guards. GitHub Actions runs the engine test and starts chat on a Mac on every push, but it
+hasn't been used on one beyond that, and releases don't include it yet. What doesn't work there yet,
+since it needs Apple's frameworks: locking a save to the device (the Secure Enclave), security keys,
+desktop notifications, and asking the router for a port over PCP or NAT-PMP (UPnP still works). The
 settings page greys the first two out and says why. A debugger can't attach to chat there
 (`PT_DENY_ATTACH`), and the machine id a native signing key is made with is the Mac's hardware UUID.
 

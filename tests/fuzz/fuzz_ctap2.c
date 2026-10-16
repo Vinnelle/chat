@@ -2,7 +2,7 @@
 // Copyright (C) 2026 finlay@tuta.com
 // What a security key answers, as anything plugged in could: getInfo, then makeCredential, a probe
 // or getAssertion with hmac-secret, each answer the next piece of the input.
-#include "ctap2.h"
+#include "platform/linux/ctap2.h"
 #include "crypto/crypto.h"
 #include <stdio.h>
 #include <stdlib.h>

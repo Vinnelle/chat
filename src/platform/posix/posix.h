@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
-// What the POSIX platform files share: process.c, term.c, notify.c, files.c and sandbox.c (Linux's,
-// which macOS builds too). Each includes it first, since it sets the feature test macros the system
-// headers read.
+// What the POSIX platform files share, on Linux and macOS: process.c, term.c, notify.c, files.c and
+// sandbox.c. Each includes it first, since it sets the feature test macros the system headers read.
 #ifndef CHAT_POSIX_H
 #define CHAT_POSIX_H
 

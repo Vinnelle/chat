@@ -16,7 +16,7 @@ function(chat_test_executable name)
     add_dependencies(${name} libsodium_ext liboqs_ext mbedtls_ext secp256k1_ext)
     target_compile_definitions(${name} PRIVATE CHAT_VERSION="test" MBEDTLS_USER_CONFIG_FILE="${CHAT_MBEDTLS_CONFIG}")
     target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/support ${PROJECT_SOURCE_DIR}/src
-                               ${PROJECT_SOURCE_DIR}/src/platform/${CHAT_OS} ${SODIUM_INCLUDE_DIRS} ${OQS_INCLUDE_DIRS}
+                               ${PROJECT_SOURCE_DIR}/src/platform/${CHAT_OS_BASE} ${SODIUM_INCLUDE_DIRS} ${OQS_INCLUDE_DIRS}
                                ${MBEDTLS_INCLUDE_DIRS} ${SECP256K1_INCLUDE_DIRS})
     target_link_libraries(${name} PRIVATE ${SODIUM_STATIC_LIB} ${OQS_STATIC_LIB} ${MBEDTLS_STATIC_LIBS}
                           ${SECP256K1_STATIC_LIB})

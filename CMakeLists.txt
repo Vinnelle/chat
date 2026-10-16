@@ -13,19 +13,19 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# CHAT_OS names the folder with os.h and the device lock and security key code. macOS shares the
-# rest (process.c, term.c, notify.c, files.c, sandbox.c, net.c) with Linux, which is POSIX apart
-# from what it guards.
+# CHAT_OS names the folder with the device lock and security key code. CHAT_OS_BASE names the one
+# with os.h and the rest (process.c, term.c, notify.c, files.c, sandbox.c, net.c), which Linux and
+# macOS share: POSIX, apart from what it guards.
 if(WIN32)
     set(CHAT_OS windows)
-    set(CHAT_POSIX_OS windows)
+    set(CHAT_OS_BASE windows)
 elseif(APPLE)
     set(CHAT_OS macos)
-    set(CHAT_POSIX_OS linux)
+    set(CHAT_OS_BASE posix)
     add_compile_definitions(_POSIX_C_SOURCE=200809L _DARWIN_C_SOURCE)
 else()
     set(CHAT_OS linux)
-    set(CHAT_POSIX_OS linux)
+    set(CHAT_OS_BASE posix)
     add_compile_definitions(_POSIX_C_SOURCE=200809L)
 endif()
 
@@ -208,11 +208,11 @@ set(CHAT_CORE_SOURCES
     src/common/clean.c
     src/common/qr.c
     src/common/bytewords.c
-    src/platform/${CHAT_POSIX_OS}/process.c
-    src/platform/${CHAT_POSIX_OS}/term.c
-    src/platform/${CHAT_POSIX_OS}/notify.c
-    src/platform/${CHAT_POSIX_OS}/files.c
-    src/platform/${CHAT_POSIX_OS}/sandbox.c
+    src/platform/${CHAT_OS_BASE}/process.c
+    src/platform/${CHAT_OS_BASE}/term.c
+    src/platform/${CHAT_OS_BASE}/notify.c
+    src/platform/${CHAT_OS_BASE}/files.c
+    src/platform/${CHAT_OS_BASE}/sandbox.c
 )
 list(TRANSFORM CHAT_CORE_SOURCES PREPEND ${CMAKE_SOURCE_DIR}/)
 
@@ -240,7 +240,7 @@ add_executable(chat
     src/app/update.c
     src/app/install.c
     src/transport/torproc.c
-    src/platform/${CHAT_POSIX_OS}/net.c
+    src/platform/${CHAT_OS_BASE}/net.c
     src/platform/${CHAT_OS}/device.c
     src/platform/${CHAT_OS}/seckey.c
 )
@@ -301,7 +301,7 @@ if(EXISTS ${CHAT_BACKUP_PUBKEY_FILE})
     chat_read_pubkey(${CHAT_BACKUP_PUBKEY_FILE} CHAT_RELEASE_BACKUP_PUBKEY)
     target_compile_definitions(chat PRIVATE CHAT_RELEASE_BACKUP_PUBKEY="${CHAT_RELEASE_BACKUP_PUBKEY}")
 endif()
-target_include_directories(chat PRIVATE src src/platform/${CHAT_OS} ${CMAKE_BINARY_DIR} ${SODIUM_INCLUDE_DIRS} ${OQS_INCLUDE_DIRS}
+target_include_directories(chat PRIVATE src src/platform/${CHAT_OS_BASE} ${CMAKE_BINARY_DIR} ${SODIUM_INCLUDE_DIRS} ${OQS_INCLUDE_DIRS}
                            ${MBEDTLS_INCLUDE_DIRS} ${SECP256K1_INCLUDE_DIRS})
 target_link_libraries(chat PRIVATE ${SODIUM_STATIC_LIB} ${OQS_STATIC_LIB} ${MBEDTLS_STATIC_LIBS} ${SECP256K1_STATIC_LIB})
 

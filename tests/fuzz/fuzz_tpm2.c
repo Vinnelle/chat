@@ -3,7 +3,7 @@
 // What a TPM answers, as anything at /dev/tpmrm0 could, and a sealed form as anyone who can write to
 // a save's folder could leave its device file: tpm2_unseal of the sealed form the input starts with,
 // or tpm2_seal, each answer the next piece of the input.
-#include "tpm2.h"
+#include "platform/linux/tpm2.h"
 #include "crypto/crypto.h"
 #include <stdlib.h>
 #include <string.h>

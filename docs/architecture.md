@@ -13,7 +13,7 @@ files through `platform/`.
 | --- | --- |
 | [`src/common/`](../src/common/) | Code with no I/O: text and UTF-8 (`util.c`), the JSON, TOML and bencode parsers, chat's own PNG, JPEG and GIF readers (`image.c`, over `png.c`, `jpeg.c` and `gif.c`), pictures cleaned before they're sent (`clean.c`), QR codes, Bytewords, and lookups on a thread (`job.h`) |
 | [`src/crypto/`](../src/crypto/) | Keys, sealing, ratchets, Argon2id, signatures and save locks (`crypto.c`), and AGE and PGP keys (`age.c`, `pgp.c`) |
-| [`src/platform/`](../src/platform/) | The operating system, behind `platform.h` (terminal, files, processes, notifications, the sandbox, the device lock, security keys) and `net.h` (sockets): `linux/`, `windows/`, and `macos/`, which shares the rest with the Linux code |
+| [`src/platform/`](../src/platform/) | The operating system, behind `platform.h` (terminal, files, processes, notifications, the sandbox, the device lock, security keys) and `net.h` (sockets): `posix/` for Linux and macOS, `windows/`, and `linux/` and `macos/` for the device lock and security keys |
 | [`src/transport/`](../src/transport/) | How sessions reach each other: the BitTorrent DHT (`dht.c`), Nostr relays (`nostr.c`, over `tls.c`), Tor's control port, SOCKS and onion services (`tor.c`), chat's own tor (`torproc.c`), and router port mapping (`portmap.c`) |
 | [`src/core/`](../src/core/) | The engine: one session, from the first hello to messages, files and `:move`, with no terminal in it. `chat.h` is what the app uses |
 | [`src/tui/`](../src/tui/) | The full-screen UI's drawing and keys, a library the app hands what to show (`tui.h`) |
@@ -80,8 +80,9 @@ what its box holds.
 
 ## The platform
 
-`linux/` and `windows/` have the same files, each with its part of `platform.h` and `net.h`. macOS
-builds the Linux ones, apart from `device.c` and `seckey.c`, which it has its own of.
+`posix/` and `windows/` have the same files, each with its part of `platform.h` and `net.h`, and
+`os.h`. Linux and macOS both build `posix/`, which guards what only one of them has. `linux/` and
+`macos/` have the rest: `device.c` and `seckey.c`.
 
 | File | What's there |
 | --- | --- |

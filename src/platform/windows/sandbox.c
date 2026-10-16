@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
-// The sandbox, and the child pictures are decoded in, which are Linux only (linux/sandbox.c): here,
+// The sandbox, and the child pictures are decoded in, which are Linux only (posix/sandbox.c): here,
 // stubs that say so.
 #include "win.h"
 
