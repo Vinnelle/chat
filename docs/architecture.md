@@ -109,7 +109,7 @@ What goes on the wire, byte by byte, is in [Protocol](protocol.md).
 
 | Folder | What's there |
 | --- | --- |
-| [`tests/engine/`](../tests/engine/) | The engine test: real sessions against each other over an in-memory network, and the parsers, saves and pictures |
+| [`tests/engine/`](../tests/engine/) | The engine test: real sessions against each other over an in-memory network (`harness.c`), with a file for each area. `engine_test.c` runs them in order |
 | [`tests/fuzz/`](../tests/fuzz/) | libFuzzer targets, with their seeds and dictionary |
 | [`tests/interop/`](../tests/interop/) | This build and an older release as two peers in one room |
 | [`tests/support/`](../tests/support/) | The in-memory network and the fakes the tests share |

@@ -35,8 +35,11 @@ function(chat_test_executable name)
     endif()
 endfunction()
 
-# The saves' code, with a device and a security key of the test's own in engine_test.c.
-chat_test_executable(engine_test engine/engine_test.c ${PROJECT_SOURCE_DIR}/src/app/install.c
+# The engine test runs its files' tests in the order engine_test.c lists them. It builds the saves'
+# code too, with a device and a security key of the test's own in engine/saves_test.c.
+chat_test_executable(engine_test engine/engine_test.c engine/harness.c engine/sessions_test.c engine/parsers_test.c
+                     engine/platform_test.c engine/identity_test.c engine/saves_test.c engine/pictures_test.c
+                     engine/files_test.c engine/move_test.c ${PROJECT_SOURCE_DIR}/src/app/install.c
                      ${PROJECT_SOURCE_DIR}/src/app/rooms.c)
 add_test(NAME engine COMMAND engine_test)
 
