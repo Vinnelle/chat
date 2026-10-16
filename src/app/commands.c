@@ -1094,17 +1094,71 @@ static void scroll_console(int dir) {
 }
 
 // The boxes that take text, where a paste can go.
-static int field_mode(app_mode_t m) {
-    switch (m) {
-        case MODE_SIGN_PASSWORD: case MODE_SIGN_PATH: case MODE_SETTINGS_EDIT: case MODE_NEW_PASSWORD:
-        case MODE_JOIN_ID: case MODE_JOIN_PASSWORD: case MODE_INSTALL_PASS: case MODE_INSTALL_PASS2:
-        case MODE_INSTALL_UNLOCK: case MODE_INSTALL_NAME: case MODE_UNLOCK: case MODE_KEY_PIN:
-        case MODE_UNLOCK_CODE: case MODE_SHADOW_PASS: case MODE_SHADOW_PASS2: case MODE_CODE_SETUP:
-            return 1;
-        default:
-            return 0;
-    }
-}
+// How each mode takes keys: with a function of its own, or as a field (Enter, Esc), a question (y, n)
+// or a choice (y, n, Esc), and what each of those does. field: text is typed there, so a paste goes in.
+// The chat's keys are handle_key's own.
+typedef enum { KEYS_CHAT = 0, KEYS_OWN, KEYS_FIELD, KEYS_QUESTION, KEYS_CHOICE } keys_kind_t;
+typedef struct {
+    keys_kind_t kind;
+    void (*own)(const tui_key_t *key);
+    void (*yes)(void), (*no)(void), (*esc)(void);
+    int field;
+} mode_keys_t;
+
+#define OWN(f) { KEYS_OWN, f, NULL, NULL, NULL, 0 }
+#define OWN_FIELD(f) { KEYS_OWN, f, NULL, NULL, NULL, 1 }
+#define FIELD(enter, esc) { KEYS_FIELD, NULL, enter, esc, NULL, 1 }
+#define QUESTION(y, n) { KEYS_QUESTION, NULL, y, n, NULL, 0 }
+#define CHOICE(y, n, esc) { KEYS_CHOICE, NULL, y, n, esc, 0 }
+
+static const mode_keys_t MODE_KEYS[] = {
+    [MODE_HELP]              = OWN(help_key),
+    [MODE_CHANGELOG]         = OWN(changelog_key),
+    [MODE_SETTINGS]          = OWN(settings_key),
+    [MODE_SETTINGS_EDIT]     = FIELD(commit_setting_edit, end_setting_edit),
+    [MODE_SIGN_CHOICE]       = OWN(sign_picker_key),
+    [MODE_SIGN_BROWSE]       = OWN(browser_key),
+    [MODE_SEND_BROWSE]       = OWN(send_browser_key),
+    [MODE_SAVE_BROWSE]       = OWN(save_browser_key),
+    [MODE_FILES]             = OWN(files_key),
+    [MODE_FILE_VIEW]         = OWN(viewer_key),
+    [MODE_FILE_ASK]          = QUESTION(file_ask_yes, file_ask_no),
+    [MODE_SIGN_PASTE]        = OWN(paste_key),
+    [MODE_SIGN_PASSWORD]     = FIELD(commit_sign_password, end_sign_password),
+    [MODE_SIGN_PATH]         = FIELD(commit_key_path, end_key_path),
+    [MODE_CHAT]              = { KEYS_CHAT, NULL, NULL, NULL, NULL, 0 },
+    [MODE_NEW_PASSWORD]      = OWN_FIELD(new_password_key),
+    [MODE_JOIN_ID]           = FIELD(submit_prompt, end_prompt),
+    [MODE_JOIN_PASSWORD]     = FIELD(submit_prompt, end_prompt),
+    [MODE_INSTALL]           = QUESTION(install_confirmed, cancel_install),
+    [MODE_INSTALL_PASS]      = FIELD(commit_install_pass, cancel_install),
+    [MODE_INSTALL_PASS2]     = FIELD(commit_install_pass2, cancel_install),
+    [MODE_INSTALL_UNLOCK]    = FIELD(commit_install_unlock, back_from_install_unlock),
+    [MODE_INSTALL_EXISTING]  = CHOICE(install_use_existing, install_new_save, cancel_install),
+    [MODE_INSTALL_PICK]      = OWN(install_pick_key),
+    [MODE_INSTALL_OVERWRITE] = QUESTION(install_overwrite_yes, cancel_install),
+    [MODE_INSTALL_NAME]      = FIELD(commit_install_name, back_from_install_name),
+    [MODE_INSTALL_FIRST]     = QUESTION(install_first_yes, install_first_no),
+    [MODE_UNINSTALL]         = QUESTION(uninstall_confirmed, cancel_uninstall),
+    [MODE_SAVES]             = OWN(saves_key),
+    [MODE_UNLOCK]            = FIELD(commit_unlock, back_from_unlock),
+    [MODE_DEVICE_LOCK]       = QUESTION(device_lock_yes, device_lock_no),
+    [MODE_FACTOR]            = QUESTION(factor_yes, factor_no),
+    [MODE_CODE_SETUP]        = OWN_FIELD(code_setup_key),
+    [MODE_KEY_WAIT]          = OWN(key_wait_key),
+    [MODE_KEY_PIN]           = FIELD(commit_key_pin, cancel_key_pin),
+    [MODE_UNLOCK_CODE]       = FIELD(commit_unlock_code, back_from_unlock_code),
+    [MODE_SHADOW_PASS]       = FIELD(commit_shadow_pass, cancel_shadow_pass),
+    [MODE_SHADOW_PASS2]      = FIELD(commit_shadow_pass2, cancel_shadow_pass),
+    [MODE_UPDATE]            = OWN(update_key),
+    [MODE_MOVE]              = QUESTION(move_yes, move_no),
+    [MODE_MOVE_ASK]          = OWN(move_ask_key),
+    [MODE_TOR_STATE]         = QUESTION(tor_state_yes, tor_state_no),
+    [MODE_ROOMS]             = OWN(rooms_key),
+};
+_Static_assert(COUNT_OF(MODE_KEYS) == MODE_ROOMS + 1, "every mode says how it takes keys");
+
+static int field_mode(app_mode_t m) { return MODE_KEYS[m].field; }
 
 // A paste only goes where text is typed. Anywhere else, its letters would be keys: a y answering a
 // question, or q closing a page. A line's end in it only goes to the chat's input, as a space, and to
@@ -1166,51 +1220,13 @@ void handle_key(const tui_key_t *key) {
     if (key->pasted && key->type == TUI_KEY_ENTER && g_app.mode == MODE_SETTINGS_EDIT) { paste_separator(); return; }
 
     // The pages draw their fields in their rows, so a key there redraws the page.
-    switch (g_app.mode) {
-        case MODE_HELP:            help_key(key); return;
-        case MODE_CHANGELOG:       changelog_key(key); return;
-        case MODE_SETTINGS:        settings_key(key); return;
-        case MODE_SIGN_CHOICE:     sign_picker_key(key); return;
-        case MODE_SIGN_BROWSE: browser_key(key); return;
-        case MODE_SEND_BROWSE: send_browser_key(key); return;
-        case MODE_SAVE_BROWSE: save_browser_key(key); return;
-        case MODE_FILES:       files_key(key); return;
-        case MODE_FILE_VIEW:   viewer_key(key); return;
-        case MODE_FILE_ASK:    confirm_key(key, file_ask_yes, file_ask_no); return;
-        case MODE_SIGN_PASTE:  paste_key(key); return;
-        case MODE_SIGN_PASSWORD:  field_key(key, commit_sign_password, end_sign_password); return;
-        case MODE_SIGN_PATH:      field_key(key, commit_key_path, end_key_path); return;
-        case MODE_SETTINGS_EDIT:  field_key(key, commit_setting_edit, end_setting_edit); return;
-        case MODE_NEW_PASSWORD:   new_password_key(key); return;
-        case MODE_JOIN_ID:
-        case MODE_JOIN_PASSWORD:  field_key(key, submit_prompt, end_prompt); return;
-        case MODE_INSTALL:        confirm_key(key, install_confirmed, cancel_install); return;
-        case MODE_INSTALL_PASS:   field_key(key, commit_install_pass, cancel_install); return;
-        case MODE_INSTALL_PASS2:  field_key(key, commit_install_pass2, cancel_install); return;
-        case MODE_INSTALL_UNLOCK: field_key(key, commit_install_unlock, back_from_install_unlock); return;
-        case MODE_INSTALL_EXISTING:  choice_key(key, install_use_existing, install_new_save, cancel_install); return;
-        case MODE_INSTALL_PICK:      install_pick_key(key); return;
-        case MODE_INSTALL_OVERWRITE: confirm_key(key, install_overwrite_yes, cancel_install); return;
-        case MODE_INSTALL_NAME:   field_key(key, commit_install_name, back_from_install_name); return;
-        case MODE_INSTALL_FIRST:  confirm_key(key, install_first_yes, install_first_no); return;
-        case MODE_UNINSTALL:      confirm_key(key, uninstall_confirmed, cancel_uninstall); return;
-        case MODE_SAVES:          saves_key(key); return;
-        case MODE_UNLOCK:         field_key(key, commit_unlock, back_from_unlock); return;
-        case MODE_DEVICE_LOCK:    confirm_key(key, device_lock_yes, device_lock_no); return;
-        case MODE_FACTOR:         confirm_key(key, factor_yes, factor_no); return;
-        case MODE_CODE_SETUP:     code_setup_key(key); return;
-        case MODE_KEY_WAIT:       key_wait_key(key); return;
-        case MODE_KEY_PIN:        field_key(key, commit_key_pin, cancel_key_pin); return;
-        case MODE_UNLOCK_CODE:    field_key(key, commit_unlock_code, back_from_unlock_code); return;
-        case MODE_SHADOW_PASS:    field_key(key, commit_shadow_pass, cancel_shadow_pass); return;
-        case MODE_SHADOW_PASS2:   field_key(key, commit_shadow_pass2, cancel_shadow_pass); return;
-        case MODE_UPDATE:         update_key(key); return;
-        case MODE_MOVE:           confirm_key(key, move_yes, move_no); return;
-        case MODE_TOR_STATE:      confirm_key(key, tor_state_yes, tor_state_no); return;
-        case MODE_ROOMS:          rooms_key(key); return;
-        case MODE_MOVE_ASK:       move_ask_key(key); return;
-        default:
-            break;
+    const mode_keys_t *k = &MODE_KEYS[g_app.mode];
+    switch (k->kind) {
+        case KEYS_OWN:      k->own(key); return;
+        case KEYS_FIELD:    field_key(key, k->yes, k->no); return;
+        case KEYS_QUESTION: confirm_key(key, k->yes, k->no); return;
+        case KEYS_CHOICE:   choice_key(key, k->yes, k->no, k->esc); return;
+        case KEYS_CHAT:     break;
     }
 
     // The wheel scrolls the console, or the sessions or peers while they don't all fit, if it's over
@@ -1294,24 +1310,36 @@ int install_mode(app_mode_t m) {
     }
 }
 
-int on_chat_screen(void) {
-    if (install_mode(g_app.mode)) return g_app.install_back == MODE_CHAT;
-    switch (g_app.mode) {
-        case MODE_CHAT: case MODE_NEW_PASSWORD: case MODE_JOIN_ID: case MODE_JOIN_PASSWORD:
-        case MODE_UNINSTALL: case MODE_SAVES: case MODE_UNLOCK: case MODE_UPDATE: case MODE_UNLOCK_CODE:
-        case MODE_MOVE: case MODE_MOVE_ASK: case MODE_ROOMS:
-            return 1;
+// A box opened from the settings page goes back there, and one opened anywhere else to the chat.
+static app_mode_t back_to(app_mode_t back) { return back == MODE_SETTINGS ? MODE_SETTINGS : MODE_CHAT; }
+
+app_mode_t page_of(app_mode_t m) {
+    if (install_mode(m)) return back_to(g_app.install_back);
+    switch (m) {
+        case MODE_HELP: case MODE_CHANGELOG: case MODE_SETTINGS: case MODE_SIGN_CHOICE: case MODE_SIGN_BROWSE:
+        case MODE_SEND_BROWSE: case MODE_SAVE_BROWSE: case MODE_FILES: case MODE_FILE_VIEW:
+            return m;
+        case MODE_SETTINGS_EDIT:
+            return MODE_SETTINGS;
+        case MODE_SIGN_PASTE: case MODE_SIGN_PASSWORD:
+            return MODE_SIGN_CHOICE;
+        case MODE_SIGN_PATH:
+            return g_app.path_from_browser ? MODE_SIGN_BROWSE : MODE_SIGN_CHOICE;
+        case MODE_FILE_ASK:
+            return g_app.file_back == MODE_FILE_VIEW ? MODE_FILE_VIEW : MODE_FILES;
         case MODE_DEVICE_LOCK:
-            return g_app.device_back == MODE_CHAT;
+            return back_to(g_app.device_back);
         case MODE_TOR_STATE:
-            return g_app.tor_state_back == MODE_CHAT;
+            return back_to(g_app.tor_state_back);
         case MODE_FACTOR: case MODE_CODE_SETUP: case MODE_KEY_WAIT: case MODE_KEY_PIN:
         case MODE_SHADOW_PASS: case MODE_SHADOW_PASS2:
-            return g_app.factor_back == MODE_CHAT;
+            return back_to(g_app.factor_back);
         default:
-            return 0;
+            return MODE_CHAT;
     }
 }
+
+int on_chat_screen(void) { return page_of(g_app.mode) == MODE_CHAT; }
 
 static int session_count(void) {
     int n = 0;

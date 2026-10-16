@@ -510,376 +510,429 @@ static const tui_dialog_t *pin_dialog(void) {
     return &d;
 }
 
-// Its field is the input line, saved meanwhile by begin_prompt and similar.
+static void new_password_box(tui_dialog_t *d, tui_para_t *paras) {
+    (void)paras;
+    d->title = "NEW SESSION";
+    d->mask = 0;
+    d->placeholder = "password";
+    d->note = g_app.pw_suggested
+        ? "A random password, filled in for you. Type to use your own instead. Blank still encrypts, but "
+          "then the session's id alone lets anyone in."
+        : "Whoever you invite needs the password and the session's id. Blank still encrypts, but then the "
+          "id alone lets anyone in.";
+    d->keys = "enter create" DOT_SEP "esc cancel";
+}
+
+static void join_id_box(tui_dialog_t *d, tui_para_t *paras) {
+    (void)paras;
+    d->title = "JOIN SESSION";
+    // An invite holds the password.
+    d->mask = chat_is_invite(g_app.input.buf);
+    d->placeholder = "session id, or an invite";
+    d->note = "The id you were given, and its password comes next. Or a whole invite (chat:...), which "
+             "has the password in it.";
+    d->keys = "enter next" DOT_SEP "esc cancel";
+}
+
+static void join_password_box(tui_dialog_t *d, tui_para_t *paras) {
+    (void)paras;
+    static char note_text[MAX_SESSION_NAME + 64];
+    d->title = "JOIN SESSION";
+    d->placeholder = "password";
+    snprintf(note_text, sizeof note_text, "The password for %s, as you were given it.", g_app.pending_session_id);
+    d->note = note_text;
+    d->keys = "enter join" DOT_SEP "esc cancel";
+}
+
+static void sign_password_box(tui_dialog_t *d, tui_para_t *paras) {
+    d->title = g_app.load_kind == IDENT_AGE ? "NATIVE AGE KEY" : "NATIVE PGP KEY";
+    d->n_text = add_para(paras, 0, TUI_P_TEXT, SIGN_PASSWORD_HELP);
+    d->placeholder = "password (blank: a new key until chat exits)";
+    d->keys = "enter make the key" DOT_SEP "esc back";
+}
+
+static void sign_path_box(tui_dialog_t *d, tui_para_t *paras) {
+    int age = g_app.load_kind == IDENT_AGE;
+    d->title = age ? "AGE KEY FILE" : "PGP KEY FILE";
+    int n = add_para(paras, 0, TUI_P_TEXT, age ? AGE_PATH_HELP : PGP_PATH_HELP);
+    n = add_para(paras, n, TUI_P_BLANK, "");
+    n = add_para(paras, n, TUI_P_TEXT, KEY_WHY);
+    n = add_para(paras, n, TUI_P_BLANK, "");
+    d->n_text = add_para(paras, n, TUI_P_TEXT, KEY_FILE_SAVED);
+    d->mask = 0;
+    d->placeholder = age ? "~/.config/age/key.txt" : "~/key.asc";
+    d->keys = "enter use this key" DOT_SEP "esc back";
+}
+
+static void sign_paste_box(tui_dialog_t *d, tui_para_t *paras) {
+    int n = add_para(paras, 0, TUI_P_TEXT, g_app.load_kind == IDENT_AGE ? AGE_PASTE_HELP : PGP_PASTE_HELP);
+    n = add_para(paras, n, TUI_P_BLANK, "");
+    n = add_para(paras, n, TUI_P_TEXT, KEY_WHY);
+    n = add_para(paras, n, TUI_P_BLANK, "");
+    d->n_text = add_para(paras, n, TUI_P_TEXT, KEY_PASTE_SAVED);
+    d->title = g_app.load_kind == IDENT_AGE ? "PASTE AN AGE KEY" : "PASTE A PGP KEY";
+    d->input = NULL;
+    d->status = g_app.paste_status;
+    d->keys = "esc back";
+}
+
+static void setting_edit_box(tui_dialog_t *d, tui_para_t *paras) {
+    (void)paras;
+    static char title[64];
+    const setting_def_t *sd = setting_def(g_edit_id);
+    size_t i = 0;
+    for (; sd->label[i] && i < sizeof title - 1; i++) title[i] = (char)toupper((unsigned char)sd->label[i]);
+    title[i] = '\0';
+    d->title = title;
+    d->mask = sd->kind == K_SECRET;
+    d->placeholder = sd->values;
+    d->note = sd->help;
+    d->keys = "enter save" DOT_SEP "esc cancel";
+}
+
+static void install_box(tui_dialog_t *d, tui_para_t *paras) {
+    d->title = install_resaves() ? "SAVE" : "INSTALL";
+    d->n_text = install_paras(paras);
+    d->input = NULL;
+    d->keys = install_resaves() ? "y save" DOT_SEP "n cancel" : "y install" DOT_SEP "n cancel";
+}
+
+static void install_first_box(tui_dialog_t *d, tui_para_t *paras) {
+    d->title = g_app.install_for == INSTALL_FACTOR_DEVICE ? "DEVICE LOCK"
+            : g_app.install_for == INSTALL_FACTOR_KEY ? "SECURITY KEY" : "AUTHENTICATOR APP";
+    d->n_text = install_first_paras(paras);
+    d->input = NULL;
+    d->keys = "y install" DOT_SEP "n cancel";
+}
+
+static void install_pass_box(tui_dialog_t *d, tui_para_t *paras) {
+    int first = g_app.mode == MODE_INSTALL_PASS;
+    d->title = "INSTALL" DOT_SEP "PASSPHRASE";
+    d->n_text = add_para(paras, 0, TUI_P_TEXT, !first ? "Type it again, to be sure of it."
+        : g_app.identity_source != IDENT_NONE && g_app.device_lock
+        ? "Your settings and signing key are sealed with this passphrase, which chat asks for when it starts. "
+          "Make it long: anyone who gets onto this device can try passphrases against them. Forget it, and "
+          "they're lost."
+        : g_app.device_lock
+        ? "Your settings are sealed with this passphrase, which chat asks for when it starts, and so is a "
+          "signing key you `:install` later. Make it long: anyone who gets onto this device can try passphrases "
+          "against them. Forget it, and they're lost."
+        : g_app.identity_source != IDENT_NONE
+        ? "Your settings and signing key are sealed with this passphrase, which chat asks for when it starts. "
+          "Make it long: anyone who gets the files can try passphrases against them. Forget it, and they're lost."
+        : "Your settings are sealed with this passphrase, which chat asks for when it starts, and so is a "
+          "signing key you `:install` later. Make it long: anyone who gets the files can try passphrases "
+          "against them. Forget it, and they're lost.");
+    d->placeholder = first ? "passphrase" : "the same passphrase";
+    d->keys = first ? "enter next" DOT_SEP "esc cancel" : "enter install" DOT_SEP "esc cancel";
+}
+
+static void install_save_box(tui_dialog_t *d, tui_para_t *paras) {
+    static char text[900];
+    static const char *names[INSTALL_SAVES_MAX], *details[INSTALL_SAVES_MAX];
+    static char detail_text[INSTALL_SAVES_MAX][112];
+    char where[APP_PATH_MAX] = "";
+    const char *shown = install_shown_name(g_app.save_target);
+    install_where(g_app.save_target, where, sizeof where);
+    d->title = "INSTALL";
+    if (g_app.mode == MODE_INSTALL_EXISTING) {
+        if (g_app.install_pick)
+            snprintf(text, sizeof text, "There are %d saves here already, each sealed with its own passphrase, "
+                     "and none is open in this run. Use one of them? Yes lists them to pick one, then asks for "
+                     "its passphrase, and what's saved there is used from then on. No makes a new save, with a "
+                     "name and a passphrase of its own.", g_app.n_saves);
+        else
+            snprintf(text, sizeof text, "There's a save here already: `%s`, in `%s`, sealed with its own "
+                     "passphrase and not open in this run. Use it? Yes asks for its passphrase, and what's "
+                     "saved there is used from then on. No makes a new save, with a name and a passphrase of "
+                     "its own.", shown, where);
+        d->input = NULL;
+        d->keys = "y use it" DOT_SEP "n new save" DOT_SEP "esc cancel";
+    } else if (g_app.mode == MODE_INSTALL_PICK) {
+        for (int i = 0; i < g_app.n_saves; i++) {
+            names[i] = install_shown_name(g_app.saves[i].name);
+            save_detail(&g_app.saves[i], detail_text[i], sizeof detail_text[i]);
+            details[i] = detail_text[i];
+        }
+        copy_str(text, "Pick the save to use. Its passphrase is asked for next.", sizeof text);
+        d->input = NULL;
+        d->items = names;
+        d->details = details;
+        d->n_items = g_app.n_saves;
+        d->sel = g_app.save_sel;
+        d->keys = "enter choose" DOT_SEP "j/k move" DOT_SEP "esc back";
+    } else if (g_app.mode == MODE_INSTALL_OVERWRITE) {
+        snprintf(text, sizeof text, "`%s` is another save, in `%s`, sealed with its own passphrase. Save what's "
+                 "in use now over it? That's your settings, %s and the keys you verified, which are added to "
+                 "the ones saved there. Its passphrase is asked for next, and from then on `%s` is the save in "
+                 "use. To use what's saved there as it is, start chat with `--save %s`. `:install NEWNAME` "
+                 "makes a new save instead.", shown, where,
+                 g_app.identity_source == IDENT_NONE ? "not your signing key (signing is off),"
+                 : !install_has_key(g_app.save_target)
+                 ? (key_saved_as_path() ? "the path to your signing key's file," : "your signing key,")
+                 : key_saved_as_path() ? "the path to your signing key's file in place of the key saved there,"
+                 : "your signing key in place of the one saved there,", shown, shown);
+        d->input = NULL;
+        d->keys = "y overwrite" DOT_SEP "n cancel";
+    } else if (g_app.mode == MODE_INSTALL_UNLOCK) {
+        snprintf(text, sizeof text, "Its passphrase opens `%s`, %s Forgot it? Esc goes back%s, and "
+                 "`:uninstall %s` deletes it.", shown, g_app.install_overwrite
+                 ? "and what's in use now is saved over it under the same one."
+                 : "and what's saved there is used from now on.",
+                 g_app.install_overwrite ? "" : g_app.install_pick ? " to the list"
+                 : ", where n makes a new save instead", shown);
+        d->title = "INSTALL" DOT_SEP "PASSPHRASE";
+        d->placeholder = "passphrase";
+        d->keys = g_app.install_overwrite ? "enter install" DOT_SEP "esc back" : "enter open" DOT_SEP "esc back";
+    } else {
+        snprintf(text, sizeof text, "A name for the new save: 1 to %d letters, digits, - and _, or blank for "
+                 "`%s`, picked at random. It goes in `saves/NAME` in chat's folder (`default` is the folder "
+                 "itself), and anyone who can read the disk can see the folder's name. What it leaves on disk "
+                 "is shown next.", INSTALL_NAME_MAX, g_app.save_random);
+        d->title = "INSTALL" DOT_SEP "NEW SAVE";
+        d->mask = 0;
+        d->placeholder = g_app.save_random;
+        d->keys = g_app.n_saves > 0 ? "enter next" DOT_SEP "esc back" : "enter next" DOT_SEP "esc cancel";
+    }
+    d->n_text = add_para(paras, 0, TUI_P_TEXT, text);
+}
+
+static void uninstall_box(tui_dialog_t *d, tui_para_t *paras) {
+    d->title = "UNINSTALL";
+    d->n_text = uninstall_paras(paras);
+    d->input = NULL;
+    d->keys = "y delete" DOT_SEP "n cancel";
+}
+
+static void device_lock_box(tui_dialog_t *d, tui_para_t *paras) {
+    d->title = "DEVICE LOCK";
+    d->n_text = device_lock_paras(paras);
+    d->input = NULL;
+    d->keys = g_app.device_new ? "y lock it" DOT_SEP "n cancel"
+           : g_app.device_want ? "y lock" DOT_SEP "n cancel" : "y unlock" DOT_SEP "n cancel";
+}
+
+static void file_ask_box(tui_dialog_t *d, tui_para_t *paras) {
+    d->n_text = file_ask_paras(paras, &d->title, &d->keys);
+    d->input = NULL;
+}
+
+static void rooms_box(tui_dialog_t *d, tui_para_t *paras) {
+    static const char *names[ROOMS_MAX + 1], *details[ROOMS_MAX + 1];
+    static char text[160];
+    int n = rooms_count();
+    for (int i = 0; i < n; i++) {
+        names[i] = room_at(i)->label;
+        details[i] = room_at(i)->at_start ? "joined at start" : "";
+    }
+    names[n] = "another room...";
+    details[n] = "type its id";
+    d->title = "JOIN SESSION";
+    d->input = NULL;
+    if (g_app.rooms_forgetting && g_app.rooms_sel < n) {
+        snprintf(text, sizeof text, "Forget `%s`? Its id and password go from the save.",
+                 room_at(g_app.rooms_sel)->label);
+        d->keys = "y forget" DOT_SEP "n keep";
+    } else {
+        copy_str(text, "The rooms kept in the save, by label. Enter joins one.", sizeof text);
+        d->items = names;
+        d->details = details;
+        d->n_items = n + 1;
+        d->sel = g_app.rooms_sel;
+        d->keys = g_app.rooms_sel < n ? "enter join" DOT_SEP "s at start" DOT_SEP "d forget" DOT_SEP "esc close"
+                                     : "enter type an id" DOT_SEP "esc close";
+    }
+    d->n_text = add_para(paras, 0, TUI_P_TEXT, text);
+}
+
+static void tor_state_box(tui_dialog_t *d, tui_para_t *paras) {
+    d->title = "TOR GUARDS";
+    d->n_text = tor_state_paras(paras);
+    d->input = NULL;
+    d->keys = "y keep them" DOT_SEP "n cancel";
+}
+
+static void move_box(tui_dialog_t *d, tui_para_t *paras) {
+    d->title = "MOVE";
+    d->n_text = move_paras(paras);
+    d->input = NULL;
+    d->keys = "y move" DOT_SEP "n cancel";
+}
+
+static void move_ask_box(tui_dialog_t *d, tui_para_t *paras) {
+    d->title = "MOVE";
+    d->n_text = move_ask_paras(paras);
+    d->input = NULL;
+    d->keys = "y go" DOT_SEP "n stay" DOT_SEP "esc later";
+}
+
+static void update_box(tui_dialog_t *d, tui_para_t *paras) {
+    (void)paras;
+    static update_view_t v;
+    static const char *lines[UPDATE_LOG_MAX];
+    static tui_progress_t pg;
+    update_view(&v);
+    for (int i = 0; i < v.n_log; i++) lines[i] = v.log[i];
+    pg.permille = v.permille;
+    copy_str(pg.text, v.amount, sizeof pg.text);
+    d->title = "UPDATE";
+    d->console = 1;
+    d->log = lines;
+    d->log_kind = v.kind;
+    d->n_log = v.n_log;
+    d->progress = &pg;
+    d->step = v.step;
+    d->step_kind = v.running ? TUI_LOG_INFO : v.ok ? TUI_LOG_GOOD : TUI_LOG_BAD;
+    d->input = NULL;
+    d->keys = v.running ? "esc hide" : "enter close";
+}
+
+static void saves_box(tui_dialog_t *d, tui_para_t *paras) {
+    static const char *names[INSTALL_SAVES_MAX], *details[INSTALL_SAVES_MAX];
+    static char detail_text[INSTALL_SAVES_MAX][112];
+    for (int i = 0; i < g_app.n_saves; i++) {
+        names[i] = install_shown_name(g_app.saves[i].name);
+        save_detail(&g_app.saves[i], detail_text[i], sizeof detail_text[i]);
+        details[i] = detail_text[i];
+    }
+    d->title = "UNLOCK";
+    d->n_text = add_para(paras, 0, TUI_P_TEXT, "`:install` made more than one save here, each sealed with its "
+                        "own passphrase. Pick the one to open; Esc starts without any, from chat's defaults, "
+                        "and saves nothing until `:install` opens a save or makes a new one.");
+    d->input = NULL;
+    d->items = names;
+    d->details = details;
+    d->n_items = g_app.n_saves;
+    d->sel = g_app.save_sel;
+    d->keys = "enter open" DOT_SEP "j/k move" DOT_SEP "esc skip";
+}
+
+static void unlock_box(tui_dialog_t *d, tui_para_t *paras) {
+    static char text[500];
+    const char *name = install_current();
+    int key = install_has_key(name);
+    unsigned f = install_factors(name);
+    const char *here = f & INSTALL_FACTOR_DEVICE ? " and locked to this device" : "";
+    char more[120] = "", then[96];
+    factors_text(f & (INSTALL_FACTOR_KEY | INSTALL_FACTOR_CODE), then, sizeof then);
+    if (then[0]) snprintf(more, sizeof more, ", then %s", then);
+    if (g_app.n_saves > 1 || name[0])
+        snprintf(text, sizeof text, "`:install` saved your settings%s here as `%s`, sealed%s. Its passphrase "
+                 "opens it%s; Esc %s.", key ? " and signing key" : "", install_shown_name(name), here, more,
+                 save_to_pick() ? "goes back to the list"
+                                : "starts without it, from chat's defaults, and saves nothing until `:install` opens a "
+                                  "save or makes a new one");
+    else
+        snprintf(text, sizeof text, "`:install` saved your settings%s here, sealed%s. Their passphrase opens "
+                 "them%s; Esc starts without them, from chat's defaults, and saves nothing until `:install` opens a "
+                 "save or makes a new one.",
+                 key ? " and signing key" : "", here, more);
+    d->n_text = add_para(paras, 0, TUI_P_TEXT, text);
+    d->title = "UNLOCK";
+    d->placeholder = "passphrase";
+    d->keys = save_to_pick() ? "enter open" DOT_SEP "esc back" : "enter open" DOT_SEP "esc skip";
+}
+
+static void factor_box(tui_dialog_t *d, tui_para_t *paras) {
+    d->title = g_app.factor == INSTALL_FACTOR_KEY ? "SECURITY KEY" : "AUTHENTICATOR APP";
+    d->n_text = factor_paras(paras);
+    d->input = NULL;
+    d->keys = g_app.factor_want ? "y register" DOT_SEP "n cancel" : "y turn off" DOT_SEP "n cancel";
+}
+
+static void code_setup_box(tui_dialog_t *d, tui_para_t *paras) {
+    d->title = "AUTHENTICATOR APP";
+    d->mask = 0;
+    d->placeholder = "6-digit code";
+    code_setup_dialog(d, paras);
+}
+
+static void key_wait_box(tui_dialog_t *d, tui_para_t *paras) {
+    d->title = "SECURITY KEY";
+    d->n_text = key_wait_paras(paras);
+    d->input = NULL;
+    d->keys = "esc cancel";
+}
+
+static void key_pin_box(tui_dialog_t *d, tui_para_t *paras) {
+    d->title = "SECURITY KEY" DOT_SEP "PIN";
+    d->n_text = add_para(paras, 0, TUI_P_TEXT, "Your security key wants its PIN for this. chat sends it to the key "
+                        "encrypted, and doesn't keep it.");
+    d->note = install_key_why();
+    d->placeholder = "PIN";
+    d->keys = "enter send" DOT_SEP "esc cancel";
+}
+
+static void unlock_code_box(tui_dialog_t *d, tui_para_t *paras) {
+    static char text[300];
+    const char *shown = install_shown_name(g_app.key_purpose == KP_INSTALL_UNLOCK ? g_app.save_target : install_current());
+    snprintf(text, sizeof text, "The save `%s` also asks for the 6-digit code your authenticator app shows for "
+             "`chat:%s`.", shown, shown);
+    d->n_text = add_para(paras, 0, TUI_P_TEXT, text);
+    d->title = g_app.key_purpose == KP_INSTALL_UNLOCK ? "INSTALL" DOT_SEP "CODE" : "UNLOCK" DOT_SEP "CODE";
+    d->mask = 0;
+    d->placeholder = "6-digit code";
+    d->keys = "enter open" DOT_SEP "esc back";
+}
+
+static void shadow_pass_box(tui_dialog_t *d, tui_para_t *paras) {
+    int first = g_app.mode == MODE_SHADOW_PASS;
+    d->title = "SHADOW PASSWORD";
+    d->n_text = add_para(paras, 0, TUI_P_TEXT, first
+        ? "A second passphrase for this save. Opening the save with it puts a decoy in the real save's place "
+          "and deletes the real save's files - a clean, empty account that needs the same security key, "
+          "device and code. Make it different from the real one, and don't forget which is which."
+        : "Type the shadow passphrase again, to be sure of it.");
+    d->placeholder = first ? "shadow passphrase" : "the same passphrase";
+    d->keys = first ? "enter next" DOT_SEP "esc cancel" : "enter set" DOT_SEP "esc cancel";
+}
+
+// Each box, filled in over the defaults current_dialog gives it: the input line (saved meanwhile by
+// begin_prompt and similar) as its field, masked.
+typedef void (*box_fn)(tui_dialog_t *d, tui_para_t *paras);
+static const box_fn BOXES[] = {
+    [MODE_NEW_PASSWORD] = new_password_box,
+    [MODE_JOIN_ID] = join_id_box,
+    [MODE_JOIN_PASSWORD] = join_password_box,
+    [MODE_SIGN_PASSWORD] = sign_password_box,
+    [MODE_SIGN_PATH] = sign_path_box,
+    [MODE_SIGN_PASTE] = sign_paste_box,
+    [MODE_SETTINGS_EDIT] = setting_edit_box,
+    [MODE_INSTALL] = install_box,
+    [MODE_INSTALL_FIRST] = install_first_box,
+    [MODE_INSTALL_PASS] = install_pass_box,
+    [MODE_INSTALL_PASS2] = install_pass_box,
+    [MODE_INSTALL_EXISTING] = install_save_box,
+    [MODE_INSTALL_PICK] = install_save_box,
+    [MODE_INSTALL_OVERWRITE] = install_save_box,
+    [MODE_INSTALL_UNLOCK] = install_save_box,
+    [MODE_INSTALL_NAME] = install_save_box,
+    [MODE_UNINSTALL] = uninstall_box,
+    [MODE_DEVICE_LOCK] = device_lock_box,
+    [MODE_FILE_ASK] = file_ask_box,
+    [MODE_ROOMS] = rooms_box,
+    [MODE_TOR_STATE] = tor_state_box,
+    [MODE_MOVE] = move_box,
+    [MODE_MOVE_ASK] = move_ask_box,
+    [MODE_UPDATE] = update_box,
+    [MODE_SAVES] = saves_box,
+    [MODE_UNLOCK] = unlock_box,
+    [MODE_FACTOR] = factor_box,
+    [MODE_CODE_SETUP] = code_setup_box,
+    [MODE_KEY_WAIT] = key_wait_box,
+    [MODE_KEY_PIN] = key_pin_box,
+    [MODE_UNLOCK_CODE] = unlock_code_box,
+    [MODE_SHADOW_PASS] = shadow_pass_box,
+    [MODE_SHADOW_PASS2] = shadow_pass_box,
+};
+
 static const tui_dialog_t *current_dialog(void) {
     static tui_dialog_t d;
     static tui_para_t paras[MAX_DIALOG_PARAS];
-    static char title[64], note_text[MAX_SESSION_NAME + 64];
+    box_fn box = (size_t)g_app.mode < COUNT_OF(BOXES) ? BOXES[g_app.mode] : NULL;
+    if (!box) return NULL;
     d = (tui_dialog_t){ .input = &g_app.input, .mask = 1, .text = paras };
-    switch (g_app.mode) {
-        case MODE_NEW_PASSWORD:
-            d.title = "NEW SESSION";
-            d.mask = 0;
-            d.placeholder = "password";
-            d.note = g_app.pw_suggested
-                ? "A random password, filled in for you. Type to use your own instead. Blank still encrypts, but "
-                  "then the session's id alone lets anyone in."
-                : "Whoever you invite needs the password and the session's id. Blank still encrypts, but then the "
-                  "id alone lets anyone in.";
-            d.keys = "enter create" DOT_SEP "esc cancel";
-            break;
-        case MODE_JOIN_ID:
-            d.title = "JOIN SESSION";
-            // An invite holds the password.
-            d.mask = chat_is_invite(g_app.input.buf);
-            d.placeholder = "session id, or an invite";
-            d.note = "The id you were given, and its password comes next. Or a whole invite (chat:...), which "
-                     "has the password in it.";
-            d.keys = "enter next" DOT_SEP "esc cancel";
-            break;
-        case MODE_JOIN_PASSWORD:
-            d.title = "JOIN SESSION";
-            d.placeholder = "password";
-            snprintf(note_text, sizeof note_text, "The password for %s, as you were given it.", g_app.pending_session_id);
-            d.note = note_text;
-            d.keys = "enter join" DOT_SEP "esc cancel";
-            break;
-        case MODE_SIGN_PASSWORD:
-            d.title = g_app.load_kind == IDENT_AGE ? "NATIVE AGE KEY" : "NATIVE PGP KEY";
-            d.n_text = add_para(paras, 0, TUI_P_TEXT, SIGN_PASSWORD_HELP);
-            d.placeholder = "password (blank: a new key until chat exits)";
-            d.keys = "enter make the key" DOT_SEP "esc back";
-            break;
-        case MODE_SIGN_PATH: {
-            int age = g_app.load_kind == IDENT_AGE;
-            d.title = age ? "AGE KEY FILE" : "PGP KEY FILE";
-            int n = add_para(paras, 0, TUI_P_TEXT, age ? AGE_PATH_HELP : PGP_PATH_HELP);
-            n = add_para(paras, n, TUI_P_BLANK, "");
-            n = add_para(paras, n, TUI_P_TEXT, KEY_WHY);
-            n = add_para(paras, n, TUI_P_BLANK, "");
-            d.n_text = add_para(paras, n, TUI_P_TEXT, KEY_FILE_SAVED);
-            d.mask = 0;
-            d.placeholder = age ? "~/.config/age/key.txt" : "~/key.asc";
-            d.keys = "enter use this key" DOT_SEP "esc back";
-            break;
-        }
-        case MODE_SIGN_PASTE: {
-            int n = add_para(paras, 0, TUI_P_TEXT, g_app.load_kind == IDENT_AGE ? AGE_PASTE_HELP : PGP_PASTE_HELP);
-            n = add_para(paras, n, TUI_P_BLANK, "");
-            n = add_para(paras, n, TUI_P_TEXT, KEY_WHY);
-            n = add_para(paras, n, TUI_P_BLANK, "");
-            d.n_text = add_para(paras, n, TUI_P_TEXT, KEY_PASTE_SAVED);
-            d.title = g_app.load_kind == IDENT_AGE ? "PASTE AN AGE KEY" : "PASTE A PGP KEY";
-            d.input = NULL;
-            d.status = g_app.paste_status;
-            d.keys = "esc back";
-            break;
-        }
-        case MODE_SETTINGS_EDIT: {
-            const setting_def_t *sd = setting_def(g_edit_id);
-            size_t i = 0;
-            for (; sd->label[i] && i < sizeof title - 1; i++) title[i] = (char)toupper((unsigned char)sd->label[i]);
-            title[i] = '\0';
-            d.title = title;
-            d.mask = sd->kind == K_SECRET;
-            d.placeholder = sd->values;
-            d.note = sd->help;
-            d.keys = "enter save" DOT_SEP "esc cancel";
-            break;
-        }
-        case MODE_INSTALL:
-            d.title = install_resaves() ? "SAVE" : "INSTALL";
-            d.n_text = install_paras(paras);
-            d.input = NULL;
-            d.keys = install_resaves() ? "y save" DOT_SEP "n cancel" : "y install" DOT_SEP "n cancel";
-            break;
-        case MODE_INSTALL_FIRST:
-            d.title = g_app.install_for == INSTALL_FACTOR_DEVICE ? "DEVICE LOCK"
-                    : g_app.install_for == INSTALL_FACTOR_KEY ? "SECURITY KEY" : "AUTHENTICATOR APP";
-            d.n_text = install_first_paras(paras);
-            d.input = NULL;
-            d.keys = "y install" DOT_SEP "n cancel";
-            break;
-        case MODE_INSTALL_PASS:
-        case MODE_INSTALL_PASS2: {
-            int first = g_app.mode == MODE_INSTALL_PASS;
-            d.title = "INSTALL" DOT_SEP "PASSPHRASE";
-            d.n_text = add_para(paras, 0, TUI_P_TEXT, !first ? "Type it again, to be sure of it."
-                : g_app.identity_source != IDENT_NONE && g_app.device_lock
-                ? "Your settings and signing key are sealed with this passphrase, which chat asks for when it starts. "
-                  "Make it long: anyone who gets onto this device can try passphrases against them. Forget it, and "
-                  "they're lost."
-                : g_app.device_lock
-                ? "Your settings are sealed with this passphrase, which chat asks for when it starts, and so is a "
-                  "signing key you `:install` later. Make it long: anyone who gets onto this device can try passphrases "
-                  "against them. Forget it, and they're lost."
-                : g_app.identity_source != IDENT_NONE
-                ? "Your settings and signing key are sealed with this passphrase, which chat asks for when it starts. "
-                  "Make it long: anyone who gets the files can try passphrases against them. Forget it, and they're lost."
-                : "Your settings are sealed with this passphrase, which chat asks for when it starts, and so is a "
-                  "signing key you `:install` later. Make it long: anyone who gets the files can try passphrases "
-                  "against them. Forget it, and they're lost.");
-            d.placeholder = first ? "passphrase" : "the same passphrase";
-            d.keys = first ? "enter next" DOT_SEP "esc cancel" : "enter install" DOT_SEP "esc cancel";
-            break;
-        }
-        case MODE_INSTALL_EXISTING:
-        case MODE_INSTALL_PICK:
-        case MODE_INSTALL_OVERWRITE:
-        case MODE_INSTALL_UNLOCK:
-        case MODE_INSTALL_NAME: {
-            static char text[900];
-            static const char *names[INSTALL_SAVES_MAX], *details[INSTALL_SAVES_MAX];
-            static char detail_text[INSTALL_SAVES_MAX][112];
-            char where[APP_PATH_MAX] = "";
-            const char *shown = install_shown_name(g_app.save_target);
-            install_where(g_app.save_target, where, sizeof where);
-            d.title = "INSTALL";
-            if (g_app.mode == MODE_INSTALL_EXISTING) {
-                if (g_app.install_pick)
-                    snprintf(text, sizeof text, "There are %d saves here already, each sealed with its own passphrase, "
-                             "and none is open in this run. Use one of them? Yes lists them to pick one, then asks for "
-                             "its passphrase, and what's saved there is used from then on. No makes a new save, with a "
-                             "name and a passphrase of its own.", g_app.n_saves);
-                else
-                    snprintf(text, sizeof text, "There's a save here already: `%s`, in `%s`, sealed with its own "
-                             "passphrase and not open in this run. Use it? Yes asks for its passphrase, and what's "
-                             "saved there is used from then on. No makes a new save, with a name and a passphrase of "
-                             "its own.", shown, where);
-                d.input = NULL;
-                d.keys = "y use it" DOT_SEP "n new save" DOT_SEP "esc cancel";
-            } else if (g_app.mode == MODE_INSTALL_PICK) {
-                for (int i = 0; i < g_app.n_saves; i++) {
-                    names[i] = install_shown_name(g_app.saves[i].name);
-                    save_detail(&g_app.saves[i], detail_text[i], sizeof detail_text[i]);
-                    details[i] = detail_text[i];
-                }
-                copy_str(text, "Pick the save to use. Its passphrase is asked for next.", sizeof text);
-                d.input = NULL;
-                d.items = names;
-                d.details = details;
-                d.n_items = g_app.n_saves;
-                d.sel = g_app.save_sel;
-                d.keys = "enter choose" DOT_SEP "j/k move" DOT_SEP "esc back";
-            } else if (g_app.mode == MODE_INSTALL_OVERWRITE) {
-                snprintf(text, sizeof text, "`%s` is another save, in `%s`, sealed with its own passphrase. Save what's "
-                         "in use now over it? That's your settings, %s and the keys you verified, which are added to "
-                         "the ones saved there. Its passphrase is asked for next, and from then on `%s` is the save in "
-                         "use. To use what's saved there as it is, start chat with `--save %s`. `:install NEWNAME` "
-                         "makes a new save instead.", shown, where,
-                         g_app.identity_source == IDENT_NONE ? "not your signing key (signing is off),"
-                         : !install_has_key(g_app.save_target)
-                         ? (key_saved_as_path() ? "the path to your signing key's file," : "your signing key,")
-                         : key_saved_as_path() ? "the path to your signing key's file in place of the key saved there,"
-                         : "your signing key in place of the one saved there,", shown, shown);
-                d.input = NULL;
-                d.keys = "y overwrite" DOT_SEP "n cancel";
-            } else if (g_app.mode == MODE_INSTALL_UNLOCK) {
-                snprintf(text, sizeof text, "Its passphrase opens `%s`, %s Forgot it? Esc goes back%s, and "
-                         "`:uninstall %s` deletes it.", shown, g_app.install_overwrite
-                         ? "and what's in use now is saved over it under the same one."
-                         : "and what's saved there is used from now on.",
-                         g_app.install_overwrite ? "" : g_app.install_pick ? " to the list"
-                         : ", where n makes a new save instead", shown);
-                d.title = "INSTALL" DOT_SEP "PASSPHRASE";
-                d.placeholder = "passphrase";
-                d.keys = g_app.install_overwrite ? "enter install" DOT_SEP "esc back" : "enter open" DOT_SEP "esc back";
-            } else {
-                snprintf(text, sizeof text, "A name for the new save: 1 to %d letters, digits, - and _, or blank for "
-                         "`%s`, picked at random. It goes in `saves/NAME` in chat's folder (`default` is the folder "
-                         "itself), and anyone who can read the disk can see the folder's name. What it leaves on disk "
-                         "is shown next.", INSTALL_NAME_MAX, g_app.save_random);
-                d.title = "INSTALL" DOT_SEP "NEW SAVE";
-                d.mask = 0;
-                d.placeholder = g_app.save_random;
-                d.keys = g_app.n_saves > 0 ? "enter next" DOT_SEP "esc back" : "enter next" DOT_SEP "esc cancel";
-            }
-            d.n_text = add_para(paras, 0, TUI_P_TEXT, text);
-            break;
-        }
-        case MODE_UNINSTALL:
-            d.title = "UNINSTALL";
-            d.n_text = uninstall_paras(paras);
-            d.input = NULL;
-            d.keys = "y delete" DOT_SEP "n cancel";
-            break;
-        case MODE_DEVICE_LOCK:
-            d.title = "DEVICE LOCK";
-            d.n_text = device_lock_paras(paras);
-            d.input = NULL;
-            d.keys = g_app.device_new ? "y lock it" DOT_SEP "n cancel"
-                   : g_app.device_want ? "y lock" DOT_SEP "n cancel" : "y unlock" DOT_SEP "n cancel";
-            break;
-        case MODE_FILE_ASK:
-            d.n_text = file_ask_paras(paras, &d.title, &d.keys);
-            d.input = NULL;
-            break;
-        case MODE_ROOMS: {
-            static const char *names[ROOMS_MAX + 1], *details[ROOMS_MAX + 1];
-            static char text[160];
-            int n = rooms_count();
-            for (int i = 0; i < n; i++) {
-                names[i] = room_at(i)->label;
-                details[i] = room_at(i)->at_start ? "joined at start" : "";
-            }
-            names[n] = "another room...";
-            details[n] = "type its id";
-            d.title = "JOIN SESSION";
-            d.input = NULL;
-            if (g_app.rooms_forgetting && g_app.rooms_sel < n) {
-                snprintf(text, sizeof text, "Forget `%s`? Its id and password go from the save.",
-                         room_at(g_app.rooms_sel)->label);
-                d.keys = "y forget" DOT_SEP "n keep";
-            } else {
-                copy_str(text, "The rooms kept in the save, by label. Enter joins one.", sizeof text);
-                d.items = names;
-                d.details = details;
-                d.n_items = n + 1;
-                d.sel = g_app.rooms_sel;
-                d.keys = g_app.rooms_sel < n ? "enter join" DOT_SEP "s at start" DOT_SEP "d forget" DOT_SEP "esc close"
-                                             : "enter type an id" DOT_SEP "esc close";
-            }
-            d.n_text = add_para(paras, 0, TUI_P_TEXT, text);
-            break;
-        }
-        case MODE_TOR_STATE:
-            d.title = "TOR GUARDS";
-            d.n_text = tor_state_paras(paras);
-            d.input = NULL;
-            d.keys = "y keep them" DOT_SEP "n cancel";
-            break;
-        case MODE_MOVE:
-            d.title = "MOVE";
-            d.n_text = move_paras(paras);
-            d.input = NULL;
-            d.keys = "y move" DOT_SEP "n cancel";
-            break;
-        case MODE_MOVE_ASK:
-            d.title = "MOVE";
-            d.n_text = move_ask_paras(paras);
-            d.input = NULL;
-            d.keys = "y go" DOT_SEP "n stay" DOT_SEP "esc later";
-            break;
-        case MODE_UPDATE: {
-            static update_view_t v;
-            static const char *lines[UPDATE_LOG_MAX];
-            static tui_progress_t pg;
-            update_view(&v);
-            for (int i = 0; i < v.n_log; i++) lines[i] = v.log[i];
-            pg.permille = v.permille;
-            copy_str(pg.text, v.amount, sizeof pg.text);
-            d.title = "UPDATE";
-            d.console = 1;
-            d.log = lines;
-            d.log_kind = v.kind;
-            d.n_log = v.n_log;
-            d.progress = &pg;
-            d.step = v.step;
-            d.step_kind = v.running ? TUI_LOG_INFO : v.ok ? TUI_LOG_GOOD : TUI_LOG_BAD;
-            d.input = NULL;
-            d.keys = v.running ? "esc hide" : "enter close";
-            break;
-        }
-        case MODE_SAVES: {
-            static const char *names[INSTALL_SAVES_MAX], *details[INSTALL_SAVES_MAX];
-            static char detail_text[INSTALL_SAVES_MAX][112];
-            for (int i = 0; i < g_app.n_saves; i++) {
-                names[i] = install_shown_name(g_app.saves[i].name);
-                save_detail(&g_app.saves[i], detail_text[i], sizeof detail_text[i]);
-                details[i] = detail_text[i];
-            }
-            d.title = "UNLOCK";
-            d.n_text = add_para(paras, 0, TUI_P_TEXT, "`:install` made more than one save here, each sealed with its "
-                                "own passphrase. Pick the one to open; Esc starts without any, from chat's defaults, "
-                                "and saves nothing until `:install` opens a save or makes a new one.");
-            d.input = NULL;
-            d.items = names;
-            d.details = details;
-            d.n_items = g_app.n_saves;
-            d.sel = g_app.save_sel;
-            d.keys = "enter open" DOT_SEP "j/k move" DOT_SEP "esc skip";
-            break;
-        }
-        case MODE_UNLOCK: {
-            static char text[500];
-            const char *name = install_current();
-            int key = install_has_key(name);
-            unsigned f = install_factors(name);
-            const char *here = f & INSTALL_FACTOR_DEVICE ? " and locked to this device" : "";
-            char more[120] = "", then[96];
-            factors_text(f & (INSTALL_FACTOR_KEY | INSTALL_FACTOR_CODE), then, sizeof then);
-            if (then[0]) snprintf(more, sizeof more, ", then %s", then);
-            if (g_app.n_saves > 1 || name[0])
-                snprintf(text, sizeof text, "`:install` saved your settings%s here as `%s`, sealed%s. Its passphrase "
-                         "opens it%s; Esc %s.", key ? " and signing key" : "", install_shown_name(name), here, more,
-                         save_to_pick() ? "goes back to the list"
-                                        : "starts without it, from chat's defaults, and saves nothing until `:install` opens a "
-                                          "save or makes a new one");
-            else
-                snprintf(text, sizeof text, "`:install` saved your settings%s here, sealed%s. Their passphrase opens "
-                         "them%s; Esc starts without them, from chat's defaults, and saves nothing until `:install` opens a "
-                         "save or makes a new one.",
-                         key ? " and signing key" : "", here, more);
-            d.n_text = add_para(paras, 0, TUI_P_TEXT, text);
-            d.title = "UNLOCK";
-            d.placeholder = "passphrase";
-            d.keys = save_to_pick() ? "enter open" DOT_SEP "esc back" : "enter open" DOT_SEP "esc skip";
-            break;
-        }
-        case MODE_FACTOR:
-            d.title = g_app.factor == INSTALL_FACTOR_KEY ? "SECURITY KEY" : "AUTHENTICATOR APP";
-            d.n_text = factor_paras(paras);
-            d.input = NULL;
-            d.keys = g_app.factor_want ? "y register" DOT_SEP "n cancel" : "y turn off" DOT_SEP "n cancel";
-            break;
-        case MODE_CODE_SETUP:
-            d.title = "AUTHENTICATOR APP";
-            d.mask = 0;
-            d.placeholder = "6-digit code";
-            code_setup_dialog(&d, paras);
-            break;
-        case MODE_KEY_WAIT:
-            d.title = "SECURITY KEY";
-            d.n_text = key_wait_paras(paras);
-            d.input = NULL;
-            d.keys = "esc cancel";
-            break;
-        case MODE_KEY_PIN:
-            d.title = "SECURITY KEY" DOT_SEP "PIN";
-            d.n_text = add_para(paras, 0, TUI_P_TEXT, "Your security key wants its PIN for this. chat sends it to the key "
-                                "encrypted, and doesn't keep it.");
-            d.note = install_key_why();
-            d.placeholder = "PIN";
-            d.keys = "enter send" DOT_SEP "esc cancel";
-            break;
-        case MODE_UNLOCK_CODE: {
-            static char text[300];
-            const char *shown = install_shown_name(g_app.key_purpose == KP_INSTALL_UNLOCK ? g_app.save_target : install_current());
-            snprintf(text, sizeof text, "The save `%s` also asks for the 6-digit code your authenticator app shows for "
-                     "`chat:%s`.", shown, shown);
-            d.n_text = add_para(paras, 0, TUI_P_TEXT, text);
-            d.title = g_app.key_purpose == KP_INSTALL_UNLOCK ? "INSTALL" DOT_SEP "CODE" : "UNLOCK" DOT_SEP "CODE";
-            d.mask = 0;
-            d.placeholder = "6-digit code";
-            d.keys = "enter open" DOT_SEP "esc back";
-            break;
-        }
-        case MODE_SHADOW_PASS:
-        case MODE_SHADOW_PASS2: {
-            int first = g_app.mode == MODE_SHADOW_PASS;
-            d.title = "SHADOW PASSWORD";
-            d.n_text = add_para(paras, 0, TUI_P_TEXT, first
-                ? "A second passphrase for this save. Opening the save with it puts a decoy in the real save's place "
-                  "and deletes the real save's files - a clean, empty account that needs the same security key, "
-                  "device and code. Make it different from the real one, and don't forget which is which."
-                : "Type the shadow passphrase again, to be sure of it.");
-            d.placeholder = first ? "shadow passphrase" : "the same passphrase";
-            d.keys = first ? "enter next" DOT_SEP "esc cancel" : "enter set" DOT_SEP "esc cancel";
-            break;
-        }
-        default:
-            return NULL;
-    }
+    box(&d, paras);
     return &d;
 }
 
@@ -893,7 +946,12 @@ static tui_bar_t current_bar(void) {
         .nick = g_app.nick,
         .nick_color = g_app.color,
     };
-    switch (g_app.mode) {
+    app_mode_t m = g_app.mode;
+    // Under a box, the chat's input is the one begin_prompt put aside. The move boxes don't take the
+    // line, so theirs is still in input.
+    if (page_of(m) == MODE_CHAT)
+        chat_input(&b, m == MODE_CHAT || m == MODE_MOVE || m == MODE_MOVE_ASK ? &g_app.input : &g_app.saved_input);
+    switch (m) {
         case MODE_CHANGELOG:
             b.chip = "CHANGELOG";
             b.hint = "j/k scroll" DOT_SEP "space/b page" DOT_SEP "g/G top/bottom" DOT_SEP "q close";
@@ -928,12 +986,10 @@ static tui_bar_t current_bar(void) {
             b.tone = TUI_TONE_PROMPT;
             break;
         case MODE_DEVICE_LOCK:
-            if (g_app.device_back == MODE_CHAT) chat_input(&b, &g_app.saved_input);
             b.chip = g_app.device_new ? "INSTALL" : "SETTINGS";
             b.tone = TUI_TONE_PROMPT;
             break;
         case MODE_TOR_STATE:
-            if (g_app.tor_state_back == MODE_CHAT) chat_input(&b, &g_app.saved_input);
             b.chip = "SETTINGS";
             b.tone = TUI_TONE_PROMPT;
             break;
@@ -942,30 +998,23 @@ static tui_bar_t current_bar(void) {
         case MODE_KEY_WAIT:
         case MODE_KEY_PIN:
         case MODE_UNLOCK_CODE: {
-            int unlocking = g_app.mode == MODE_UNLOCK_CODE || g_app.mode == MODE_KEY_WAIT || g_app.mode == MODE_KEY_PIN;
+            int unlocking = m == MODE_UNLOCK_CODE || m == MODE_KEY_WAIT || m == MODE_KEY_PIN;
             key_purpose_t why = unlocking ? g_app.key_purpose : g_app.factor_new ? KP_NEW_SAVE : KP_FACTOR;
-            if (on_chat_screen()) chat_input(&b, &g_app.saved_input);
             b.chip = why == KP_UNLOCK ? "UNLOCK" : why == KP_FACTOR ? "SETTINGS" : "INSTALL";
             b.tone = TUI_TONE_PROMPT;
             break;
         }
         case MODE_SHADOW_PASS:
         case MODE_SHADOW_PASS2:
-            if (g_app.factor_back == MODE_CHAT) chat_input(&b, &g_app.saved_input);
             b.chip = g_app.factor_back == MODE_CHAT ? "CHAT" : "SETTINGS";
             b.tone = TUI_TONE_PROMPT;
             break;
-        case MODE_CHAT:
-            chat_input(&b, &g_app.input);
-            break;
         case MODE_MOVE:
         case MODE_MOVE_ASK:
-            chat_input(&b, &g_app.input);
             b.chip = "MOVE";
             b.tone = TUI_TONE_PROMPT;
             break;
         case MODE_ROOMS:
-            chat_input(&b, &g_app.saved_input);
             b.chip = "JOIN";
             b.tone = TUI_TONE_PROMPT;
             break;
@@ -985,13 +1034,12 @@ static tui_bar_t current_bar(void) {
         case MODE_INSTALL_FIRST:
         case MODE_UNINSTALL:
         case MODE_UPDATE:
-            if (on_chat_screen()) chat_input(&b, &g_app.saved_input);
-            b.chip = g_app.mode == MODE_NEW_PASSWORD ? "NEW"
-                   : g_app.mode == MODE_JOIN_ID || g_app.mode == MODE_JOIN_PASSWORD ? "JOIN"
-                   : g_app.mode == MODE_UNLOCK || g_app.mode == MODE_SAVES ? "UNLOCK"
-                   : g_app.mode == MODE_UNINSTALL ? "UNINSTALL"
-                   : g_app.mode == MODE_UPDATE ? "UPDATE"
-                   : g_app.mode == MODE_INSTALL && install_resaves() ? "SAVE" : "INSTALL";
+            b.chip = m == MODE_NEW_PASSWORD ? "NEW"
+                   : m == MODE_JOIN_ID || m == MODE_JOIN_PASSWORD ? "JOIN"
+                   : m == MODE_UNLOCK || m == MODE_SAVES ? "UNLOCK"
+                   : m == MODE_UNINSTALL ? "UNINSTALL"
+                   : m == MODE_UPDATE ? "UPDATE"
+                   : m == MODE_INSTALL && install_resaves() ? "SAVE" : "INSTALL";
             b.tone = TUI_TONE_PROMPT;
             break;
         default:
@@ -1093,42 +1141,16 @@ void render(void) {
     tui_bar_t bar = current_bar();
     char hhmm[HHMM_LEN]; current_hhmm(hhmm);
 
-    if (install_mode(g_app.mode) && g_app.install_back == MODE_SETTINGS) { render_settings(rows_n, cols_n, hhmm, &bar); return; }
-    switch (g_app.mode) {
-        case MODE_HELP:            render_help(rows_n, cols_n, hhmm, &bar); return;
-        case MODE_CHANGELOG:       render_changelog(rows_n, cols_n, hhmm, &bar); return;
-        case MODE_SETTINGS:
-        case MODE_SETTINGS_EDIT:   render_settings(rows_n, cols_n, hhmm, &bar); return;
-        case MODE_DEVICE_LOCK:
-            if (g_app.device_back == MODE_SETTINGS) { render_settings(rows_n, cols_n, hhmm, &bar); return; }
-            break;
-        case MODE_TOR_STATE:
-            if (g_app.tor_state_back == MODE_SETTINGS) { render_settings(rows_n, cols_n, hhmm, &bar); return; }
-            break;
-        case MODE_FACTOR:
-        case MODE_CODE_SETUP:
-        case MODE_KEY_WAIT:
-        case MODE_KEY_PIN:
-        case MODE_SHADOW_PASS:
-        case MODE_SHADOW_PASS2:
-            if (g_app.factor_back == MODE_SETTINGS) { render_settings(rows_n, cols_n, hhmm, &bar); return; }
-            break;
-        case MODE_SIGN_CHOICE:
-        case MODE_SIGN_PASTE:
-        case MODE_SIGN_PASSWORD:   render_sign_picker(rows_n, cols_n, hhmm, &bar); return;
-        case MODE_SIGN_PATH:
-            if (g_app.path_from_browser) render_browser(rows_n, cols_n, hhmm, &bar);
-            else render_sign_picker(rows_n, cols_n, hhmm, &bar);
-            return;
-        case MODE_SIGN_BROWSE:     render_browser(rows_n, cols_n, hhmm, &bar); return;
-        case MODE_SEND_BROWSE:     render_send_browser(rows_n, cols_n, hhmm, &bar); return;
-        case MODE_SAVE_BROWSE:     render_save_browser(rows_n, cols_n, hhmm, &bar); return;
-        case MODE_FILES:           render_files(rows_n, cols_n, hhmm, &bar); return;
-        case MODE_FILE_VIEW:       render_viewer(rows_n, cols_n, hhmm, &bar); return;
-        case MODE_FILE_ASK:
-            if (g_app.file_back == MODE_FILE_VIEW) render_viewer(rows_n, cols_n, hhmm, &bar);
-            else render_files(rows_n, cols_n, hhmm, &bar);
-            return;
+    switch (page_of(g_app.mode)) {
+        case MODE_HELP:        render_help(rows_n, cols_n, hhmm, &bar); return;
+        case MODE_CHANGELOG:   render_changelog(rows_n, cols_n, hhmm, &bar); return;
+        case MODE_SETTINGS:    render_settings(rows_n, cols_n, hhmm, &bar); return;
+        case MODE_SIGN_CHOICE: render_sign_picker(rows_n, cols_n, hhmm, &bar); return;
+        case MODE_SIGN_BROWSE: render_browser(rows_n, cols_n, hhmm, &bar); return;
+        case MODE_SEND_BROWSE: render_send_browser(rows_n, cols_n, hhmm, &bar); return;
+        case MODE_SAVE_BROWSE: render_save_browser(rows_n, cols_n, hhmm, &bar); return;
+        case MODE_FILES:       render_files(rows_n, cols_n, hhmm, &bar); return;
+        case MODE_FILE_VIEW:   render_viewer(rows_n, cols_n, hhmm, &bar); return;
         default: break;
     }
 

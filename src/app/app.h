@@ -784,6 +784,8 @@ const char *complete_mention(const char *typed);
 int suggest_command(const char *typed, int nth, tui_suggestion_t *out);
 void handle_key(const tui_key_t *key);
 int install_mode(app_mode_t m);
+// The page a mode shows: itself, for a page, or the one under its box (MODE_CHAT for the chat screen).
+app_mode_t page_of(app_mode_t m);
 int on_chat_screen(void);
 tui_session_state_t session_state(const session_slot_t *s);
 tui_view_t current_view(char *sub, size_t cap);
