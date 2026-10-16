@@ -224,7 +224,7 @@ int identity_from_password(const char *password, const char *device_id, identity
 // header's format says which, and its key is then the passphrase's key mixed with the device's
 // secret and the security key's, for those it needs. Without them the passphrase opens nothing, and
 // since the header is associated data, it can't be changed to say otherwise. The code adds no
-// secret: chat checks it once the files are open (see app/install.h).
+// secret: chat checks it once the files are open (see app/saves/saves.h).
 #define PASS_HEADER_LEN 32
 #define PASS_SEAL_OVERHEAD (PASS_HEADER_LEN + AEAD_NONCE_LEN + AEAD_TAG_LEN)
 #define PASS_WRONG  -1   // or sealed under another lock, or changed since it was sealed

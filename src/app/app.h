@@ -14,7 +14,7 @@
 #include "tui/tui.h"
 #include "common/util.h"
 #include "app/update.h"
-#include "app/install.h"
+#include "app/saves/saves.h"
 #include "app/rooms.h"
 #include "transport/torproc.h"
 #include "common/image/image.h"
@@ -737,7 +737,7 @@ void render_viewer(int rows_n, int cols_n, const char *clock, const tui_bar_t *b
 void viewer_key(const tui_key_t *key);
 const char *viewer_hint(void);
 
-// saves.c
+// saves/install.c
 void saved_note(const char *fmt, ...) PRINTF_LIKE(1, 2);
 void say_saved_notes(void);
 int key_saved_as_path(void);

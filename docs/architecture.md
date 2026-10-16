@@ -73,7 +73,7 @@ what its box holds.
 | `files_page.c` | The files page, and a picture on a page of its own |
 | `settings.c` | The settings rows, `:set`, and the settings file |
 | `identity.c` | The signing identity: made from a password, or read from a key file or a paste |
-| `saves.c`, `install.c` | `:install`'s boxes and unlocking (`saves.c`), and the save files themselves (`install.c`) |
+| `saves/` | The save files (`saves.c`), their spare, a decoy or chaff (`spare.c`), and their factors (`factors.c`), which share `store.h`: the rest of chat uses `saves.h`. `:install`'s boxes and unlocking (`install.c`) |
 | `torlink.c` | Which tor Tor mode uses, chat's own tor, and its bridges |
 | `lock.c`, `history.c`, `rooms.c`, `update.c` | The lock screen, histories, kept rooms, and `:update` |
 | `pics.c`, `clipboard.c`, `browser.c` | Pictures under the lines that offered them, the clipboard, and the folder browser and its pages |

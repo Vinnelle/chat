@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
-#ifndef CHAT_INSTALL_H
-#define CHAT_INSTALL_H
+#ifndef CHAT_SAVES_H
+#define CHAT_SAVES_H
 
 #include <stddef.h>
 #include "platform/platform.h"

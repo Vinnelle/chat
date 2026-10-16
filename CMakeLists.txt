@@ -230,7 +230,7 @@ add_executable(chat
     src/app/identity.c
     src/app/pages.c
     src/app/files_page.c
-    src/app/saves.c
+    src/app/saves/install.c
     src/app/commands.c
     src/app/cmdline.c
     src/app/keys.c
@@ -238,7 +238,9 @@ add_executable(chat
     src/app/rooms.c
     src/app/screen.c
     src/app/update.c
-    src/app/install.c
+    src/app/saves/saves.c
+    src/app/saves/spare.c
+    src/app/saves/factors.c
     src/transport/torproc.c
     src/platform/${CHAT_OS_BASE}/net.c
     src/platform/${CHAT_OS}/device.c

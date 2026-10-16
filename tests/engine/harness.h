@@ -21,7 +21,7 @@
 #include "platform/platform.h"
 #include "common/qr.h"
 #include "common/bytewords.h"
-#include "app/install.h"
+#include "app/saves/saves.h"
 #include "app/rooms.h"
 #include "test_os.h"
 #include <sodium.h>

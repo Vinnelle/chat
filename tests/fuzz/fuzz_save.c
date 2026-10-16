@@ -3,13 +3,15 @@
 // A save's files as anyone who can write to its folder could leave them: a securitykey file, which
 // has to read back the same once written out again, and a sealed file's header, which says what
 // Argon2id it takes, and what else it needs, before anything is opened.
-#include "app/install.c"
+#include "app/saves/saves.c"
+#include "app/saves/spare.c"
+#include "app/saves/factors.c"
 
 static void check(int ok) { if (!ok) abort(); }
 
 static uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
 
-// No device or security key here: what install.c asks of them fails.
+// No device or security key here: what the save files ask of them fails.
 device_kind_t platform_device_sealed_kind(const uint8_t *sealed, size_t len) { (void)sealed; (void)len; return DEVICE_NONE; }
 long platform_device_seal(const uint8_t secret[DEVICE_SECRET_LEN], uint8_t *out, size_t cap, char *why, size_t why_cap) {
     (void)secret; (void)out; (void)cap; (void)why; (void)why_cap;

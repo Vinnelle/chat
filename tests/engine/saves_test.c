@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
-// Saves, through app/install.c: sealing them, device locks, security keys and authenticator codes,
+// Saves, through app/saves/: sealing them, device locks, security keys and authenticator codes,
 // the shadow passphrase, the lock screen, histories, tor's state and kept rooms.
 #include "harness.h"
 
-// ---- a device and a security key of the test's own, for app/install.c ----
+// ---- a device and a security key of the test's own, for app/saves/ ----
 
 static uint8_t g_fake_key[32];
 
@@ -279,7 +279,7 @@ static int save_file_exists(const char *config, const char *file) {
     return stat(path, &st) == 0;
 }
 
-// A save end to end, through app/install.c: the security key before anything opens, the code
+// A save end to end, through app/saves/: the security key before anything opens, the code
 // before the save is used, factors taken away leaving no files behind, and a save left part way
 // through a change finished with everything any of its files needs.
 void test_save_factors(double *t) {
@@ -370,7 +370,7 @@ static long read_save_file(const char *config, const char *save, const char *fil
     return platform_read_file(path, buf, cap);
 }
 
-// The shadow passphrase and self-destruct, through app/install.c: every save has a spare of one
+// The shadow passphrase and self-destruct, through app/saves/: every save has a spare of one
 // shape, decoy or chaff; every passphrase runs Argon2id for the save and its spare; the shadow
 // passphrase puts the decoy in the save's place, needing the same factors, which it follows when
 // they change; a passphrase tried on every save neither counts nor opens a decoy; too many wrong
@@ -467,7 +467,7 @@ void test_duress(double *t) {
     CHECK(install_remove("o") == 0, "it wasn't uninstalled");
 }
 
-// The lock screen's passphrase, through app/install.c: the open save's own unlocks it, checked against
+// The lock screen's passphrase, through app/saves/: the open save's own unlocks it, checked against
 // the lock held rather than its files; a wrong one counts toward self-destruct, which its own starts
 // again; every try runs Argon2id for the save and its spare; the shadow passphrase closes the save
 // with the decoy in its place; one wrong too many deletes it. And the PIN's check, without a save.
