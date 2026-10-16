@@ -201,6 +201,10 @@ set(CHAT_CORE_SOURCES
     src/common/json.c
     src/common/toml.c
     src/common/image.c
+    src/common/inflate.c
+    src/common/png.c
+    src/common/jpeg.c
+    src/common/gif.c
     src/common/clean.c
     src/common/qr.c
     src/common/bytewords.c
