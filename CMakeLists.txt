@@ -172,6 +172,14 @@ set(SECP256K1_STATIC_LIB ${SECP256K1_PREFIX}/install/lib/libsecp256k1.a)
 set(CHAT_CORE_SOURCES
     src/app/tui.c
     src/core/chat.c
+    src/core/names.c
+    src/core/messages.c
+    src/core/send.c
+    src/core/handshake.c
+    src/core/receive.c
+    src/core/move.c
+    src/core/transfer.c
+    src/core/commands.c
     src/core/cmd.c
     src/core/files.c
     src/core/trust.c

@@ -3,7 +3,7 @@
 This is what chat sends over the network as of 0.5.0. It's written for anyone reviewing chat's
 design or checking what it puts on the wire. The code is the reference: where this document and
 the code disagree, the document is wrong. The relevant code is in
-[src/core/chat.c](src/core/chat.c), [src/crypto/crypto.c](src/crypto/crypto.c) and
+[src/core/](src/core/), [src/crypto/crypto.c](src/crypto/crypto.c) and
 [src/transport/](src/transport/). [SECURITY.md](SECURITY.md) describes what the protocol is meant
 to protect against, and what it doesn't.
 
