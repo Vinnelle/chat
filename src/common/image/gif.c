@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
 // GIF: the first frame.
-#include "common/image_decode.h"
+#include "common/image/decode.h"
 #include <stdlib.h>
 
 // The signature and the screen's width, height and flags (then two bytes not needed here), and an

@@ -139,7 +139,7 @@ typedef struct {
     char name[FILE_NAME_MAX + 1];
     int image;                   // offered as a PNG, JPEG or GIF (only decoding it says it is one)
     FILE *fp;                    // ours: open for its chunks, so the file offered is the one sent
-    uint8_t *clean;              // ours, cleaned (common/clean.h): the bytes offered, from memory in fp's place
+    uint8_t *clean;              // ours, cleaned (common/image/clean.h): the bytes offered, from memory in fp's place
 
     dl_state_t dl;
     int view;                    // fetched to show (into mem), not to save (to out)
@@ -301,7 +301,7 @@ int chat_submit_line(chat_t *c, const char *line, double now);
 cmd_result_t chat_run_command(chat_t *c, const char *line);
 void chat_send_text(chat_t *c, const char *text, double now);
 // Offers the file at path (used as is: ~ and quotes aren't expanded) to everyone here, like :send.
-// A picture offered is cleaned first (common/clean.h), unless asis.
+// A picture offered is cleaned first (common/image/clean.h), unless asis.
 void chat_send_file(chat_t *c, const char *path, int asis);
 
 extern const command_t CHAT_COMMANDS[];

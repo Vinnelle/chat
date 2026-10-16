@@ -200,12 +200,12 @@ set(CHAT_CORE_SOURCES
     src/common/bencode.c
     src/common/json.c
     src/common/toml.c
-    src/common/image.c
-    src/common/inflate.c
-    src/common/png.c
-    src/common/jpeg.c
-    src/common/gif.c
-    src/common/clean.c
+    src/common/image/image.c
+    src/common/image/inflate.c
+    src/common/image/png.c
+    src/common/image/jpeg.c
+    src/common/image/gif.c
+    src/common/image/clean.c
     src/common/qr.c
     src/common/bytewords.c
     src/platform/${CHAT_OS_BASE}/process.c

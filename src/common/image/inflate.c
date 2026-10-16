@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
 // Inflate (RFC 1950 and 1951), for PNG, into a buffer of exactly the size expected.
-#include "common/image_decode.h"
+#include "common/image/decode.h"
 #include <string.h>
 
 #define MAXBITS 15

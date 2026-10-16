@@ -11,7 +11,7 @@ files through `platform/`.
 
 | Folder | What's there |
 | --- | --- |
-| [`src/common/`](../src/common/) | Code with no I/O: text and UTF-8 (`util.c`), the JSON, TOML and bencode parsers, chat's own PNG, JPEG and GIF readers (`image.c`, over `png.c`, `jpeg.c` and `gif.c`), pictures cleaned before they're sent (`clean.c`), QR codes, Bytewords, and lookups on a thread (`job.h`) |
+| [`src/common/`](../src/common/) | Code with no I/O: text and UTF-8 (`util.c`), the JSON, TOML and bencode parsers, QR codes, Bytewords, and lookups on a thread (`job.h`). In `image/`, chat's own PNG, JPEG and GIF readers (`image.c`, over `png.c`, `jpeg.c` and `gif.c`), and pictures cleaned before they're sent (`clean.c`) |
 | [`src/crypto/`](../src/crypto/) | Keys, sealing, ratchets, Argon2id, signatures and save locks (`crypto.c`), and AGE and PGP keys (`age.c`, `pgp.c`) |
 | [`src/platform/`](../src/platform/) | The operating system, behind `platform.h` (terminal, files, processes, notifications, the sandbox, the device lock, security keys) and `net.h` (sockets): `posix/` for Linux and macOS, `windows/`, and `linux/` and `macos/` for the device lock and security keys |
 | [`src/transport/`](../src/transport/) | How sessions reach each other: the BitTorrent DHT (`dht.c`), Nostr relays (`nostr.c`, over `tls.c`), Tor's control port, SOCKS and onion services (`tor.c`), chat's own tor (`torproc.c`), and router port mapping (`portmap.c`) |

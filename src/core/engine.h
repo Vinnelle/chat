@@ -11,8 +11,8 @@
 #include "common/util.h"
 #include "common/bytewords.h"
 #include "platform/platform.h"
-#include "common/image.h"
-#include "common/clean.h"
+#include "common/image/image.h"
+#include "common/image/clean.h"
 #include <ctype.h>
 #include <stddef.h>
 #include <string.h>

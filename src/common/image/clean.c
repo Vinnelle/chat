@@ -3,8 +3,8 @@
 // Pictures cleaned before they're offered. Whatever is in them is the sender's own, but it's still
 // read as untrusted: every length is checked before it's used, and anything that doesn't add up
 // fails the clean rather than being copied through.
-#include "common/clean.h"
-#include "common/image.h"
+#include "common/image/clean.h"
+#include "common/image/image.h"
 #include <stdlib.h>
 #include <string.h>
 

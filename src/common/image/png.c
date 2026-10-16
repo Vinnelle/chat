@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
 // PNG: every colour type and bit depth, interlaced or not.
-#include "common/image_decode.h"
+#include "common/image/decode.h"
 #include <stdlib.h>
 #include <string.h>
 

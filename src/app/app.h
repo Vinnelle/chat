@@ -17,7 +17,7 @@
 #include "app/install.h"
 #include "app/rooms.h"
 #include "transport/torproc.h"
-#include "common/image.h"
+#include "common/image/image.h"
 #include "common/qr.h"
 #include "common/toml.h"
 #include <stdio.h>
@@ -213,7 +213,7 @@ typedef struct {
     struct { int sel, forgetting; } rooms;
     uint64_t file_cap;   // 0: the default
     int fast_files;
-    int picture_noise;   // a JPEG sent gets noise nobody can see (common/clean.h)
+    int picture_noise;   // a JPEG sent gets noise nobody can see (common/image/clean.h)
     int betas;
     int history;    // keep each session's history, sealed in the save open
     // Keep the sessions open in the save open, to open again as chat starts. reopen_due: a save was

@@ -4,8 +4,8 @@
 // refusal with a reason. And the cleaner, which either refuses or gives back a picture of the same
 // kind that it can clean again. Built with FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION, which lets damaged
 // checksums through so mutations reach the inflater and the decoders behind them.
-#include "common/image.h"
-#include "common/clean.h"
+#include "common/image/image.h"
+#include "common/image/clean.h"
 #include <stdlib.h>
 #include <string.h>
 

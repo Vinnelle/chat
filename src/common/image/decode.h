@@ -5,7 +5,7 @@
 #ifndef CHAT_IMAGE_DECODE_H
 #define CHAT_IMAGE_DECODE_H
 
-#include "common/image.h"
+#include "common/image/image.h"
 #include "common/util.h"
 #include <stddef.h>
 #include <stdint.h>

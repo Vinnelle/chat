@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
 // image.h's functions, and the thumbnail the decoders add their pixels to.
-#include "common/image_decode.h"
+#include "common/image/decode.h"
 #include <stdlib.h>
 #include <string.h>
 

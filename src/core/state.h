@@ -480,7 +480,7 @@ struct chat_s {
     int file_seq;
     uint64_t file_cap;      // offers bigger than this need "anyway" to fetch
     int fast_files;         // our slots speed up while a transfer runs
-    int picture_noise;      // a JPEG offered gets noise nobody can see (common/clean.h)
+    int picture_noise;      // a JPEG offered gets noise nobody can see (common/image/clean.h)
     chat_file_fn file_view;
     unsigned own_seq;
     chat_delivery_fn delivery;
