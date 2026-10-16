@@ -52,7 +52,7 @@ jobs:
         run: |
           for dir in old/*/; do
             echo "== against $(basename "$dir")"
-            tests/interop.sh build-test/chat "$dir/chat-linux-x86_64"
+            tests/interop/interop.sh build-test/chat "$dir/chat-linux-x86_64"
           done
 
   engine-sanitized:
@@ -208,8 +208,8 @@ jobs:
         run: |
           mkdir -p corpus crashes
           seeds=""
-          if [ -d tests/seeds/${{ matrix.target }} ]; then seeds=tests/seeds/${{ matrix.target }}; fi
-          ./build-fuzz/tests/fuzz_${{ matrix.target }} corpus $seeds -dict=tests/fuzz.dict \
+          if [ -d tests/fuzz/seeds/${{ matrix.target }} ]; then seeds=tests/fuzz/seeds/${{ matrix.target }}; fi
+          ./build-fuzz/tests/fuzz_${{ matrix.target }} corpus $seeds -dict=tests/fuzz/fuzz.dict \
             -max_total_time=60 -artifact_prefix=crashes/
 
       - uses: actions/upload-artifact@v7

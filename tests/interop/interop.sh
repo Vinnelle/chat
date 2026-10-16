@@ -8,7 +8,7 @@
 # can't read replies), a direct message (refused for one that can't read them, never lost), a file
 # each way, and a leave.
 #
-#   tests/interop.sh NEW OLD     two chat executables; NEW is the one being tested
+#   tests/interop/interop.sh NEW OLD     two chat executables; NEW is the one being tested
 #
 # Each gets a HOME of its own in a temporary folder, so nothing of yours is read or written.
 set -euo pipefail

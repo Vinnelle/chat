@@ -8,7 +8,7 @@
 //   4  from bob's address, a datagram that unmasks to the rest as it is: pieces of room frames,
 //      and anything else a room member could put under the mask
 // 2 to 4 are masked, as everything is over UDP. Both sessions go back to the connected snapshot
-// before every input. tests/seeds/engine holds one input per message type.
+// before every input. tests/fuzz/seeds/engine holds one input per message type.
 #include "core/chat.h"
 #include "fake_net.h"
 #include "common/util.h"

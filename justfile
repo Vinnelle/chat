@@ -163,10 +163,10 @@ test *flags:
 # This build and OLD, another chat executable (an older release, say), as two peers in one room on
 # this computer, through what PROTOCOL.md promises older versions. CI runs it against the latest
 # release and beta.
-# Build, then check it against an older chat binary (tests/interop.sh)
+# Build, then check it against an older chat binary (tests/interop/interop.sh)
 [group('test')]
 interop old: (build "native")
-    tests/interop.sh build/chat "$1"
+    tests/interop/interop.sh build/chat "$1"
 
 # Build and run the engine test under AddressSanitizer and UndefinedBehaviorSanitizer (needs clang)
 [group('test')]
@@ -182,7 +182,7 @@ fuzz target="engine" seconds="300":
     cmake --build build-fuzz -j {{num_cpus()}} --target fuzz_{{target}}
     mkdir -p fuzz-corpus/{{target}}
     ASAN_OPTIONS=detect_leaks=0 ./build-fuzz/tests/fuzz_{{target}} fuzz-corpus/{{target}} \
-        $(test -d tests/seeds/{{target}} && echo tests/seeds/{{target}}) -dict=tests/fuzz.dict -max_total_time={{seconds}}
+        $(test -d tests/fuzz/seeds/{{target}} && echo tests/fuzz/seeds/{{target}}) -dict=tests/fuzz/fuzz.dict -max_total_time={{seconds}}
 
 # ---------------------------------------------------------------------------------------------
 # Release
