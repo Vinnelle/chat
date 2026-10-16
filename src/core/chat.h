@@ -322,7 +322,6 @@ typedef struct {
     double path_seen[ADDR_KINDS];
     char onion[TOR_ADDR_LEN + 1];
 
-    uint8_t kem_pub[KEM_PUB_LEN];
     uint8_t prk_partial[PRK_LEN];
     uint8_t kem_ct[KEM_CT_LEN];
 

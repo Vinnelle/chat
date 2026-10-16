@@ -194,7 +194,6 @@ static peer_t *do_hello(chat_t *c, const uint8_t peer_id[ID_LEN], addr_t addr,
     slot->keygen = c->keygen;
     memcpy(slot->pub, their_pub, PUB_LEN);
     memcpy(slot->my_pub, c->keys.pub, PUB_LEN);
-    memcpy(slot->kem_pub, their_kem_pub, KEM_PUB_LEN);
     if (rejoin) {
         memcpy(slot->prev_pub, carry.pub, PUB_LEN);
         memcpy(slot->prev_my_pub, carry.my_pub, PUB_LEN);
