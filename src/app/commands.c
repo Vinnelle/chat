@@ -1436,3 +1436,62 @@ void chat_input(tui_bar_t *b, const tui_input_t *in) {
              !s->initialising && s->engine.file_seq > 0 ? DOT_SEP "ctrl+f files" : "");
     b->hint = hint;
 }
+
+cmd_result_t app_quit(void *ctx, const char *arg) {
+    (void)ctx; (void)arg;
+    if (g_app.selected) close_session(g_app.selected);
+    else g_interrupted = 1;
+    return CMD_OK;
+}
+
+cmd_result_t app_quitall(void *ctx, const char *arg) {
+    (void)ctx; (void)arg;
+    g_app.quit_leaving = 1;
+    g_interrupted = 1;
+    return CMD_OK;
+}
+
+cmd_result_t app_copyid(void *ctx, const char *arg) {
+    (void)ctx; (void)arg;
+    copy_session_id(g_app.selected);
+    return CMD_OK;
+}
+
+cmd_result_t app_invite(void *ctx, const char *arg) {
+    (void)ctx; (void)arg;
+    copy_invite(g_app.selected);
+    return CMD_OK;
+}
+
+cmd_result_t app_update(void *ctx, const char *arg) {
+    (void)ctx; (void)arg;
+    if ((g_app.sandboxed & PLATFORM_SANDBOX_FILES) && !update_helper_running()) {
+        if (g_app.updater)
+            note("the sandbox keeps chat from replacing itself, and the updater isn't running - quit and run chat "
+                 "--update");
+        else
+            note("the sandbox keeps chat from replacing itself, and the updater is off - quit and run chat --update, "
+                 "or :set updater on for the next start");
+        return CMD_OK;
+    }
+    if (g_app.route.mode == ROUTE_TOR && g_tor.state != TL_READY) {
+        push_log(UPDATE_PREFIX "Tor mode downloads through Tor, and there's no tor yet - try again once it's connected");
+        return CMD_OK;
+    }
+    // If an update is already running, its box is shown again.
+    if (update_start(g_app.betas) == 0)
+        push_log(UPDATE_PREFIX "checking GitHub for a newer release%s (v" CHAT_VERSION " here)...", g_app.betas ? " or beta" : "");
+    begin_prompt(MODE_UPDATE);
+    return CMD_OK;
+}
+
+// The box only shows the update. Closing it leaves the update running, and the result goes to the
+// console either way.
+void update_key(const tui_key_t *key) {
+    char ch = key->type == TUI_KEY_CHAR && key->ch_len == 1 ? key->ch[0] : 0;
+    if (key->type != TUI_KEY_ESCAPE && key->type != TUI_KEY_ENTER && ch != 'q') return;
+    update_view_t v;
+    update_view(&v);
+    end_prompt();
+    if (v.running) note("the update keeps running - :update shows it again");
+}

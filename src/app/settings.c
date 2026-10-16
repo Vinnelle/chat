@@ -1403,3 +1403,61 @@ void copy_pgp_public_key(void) {
     osc52_copy(armor);
     note("PGP public key copied to the clipboard (OSC 52)");
 }
+
+int pgp_key_made_here(void) {
+    return g_app.identity_source == IDENT_PGP && (g_app.key_origin == KEY_MADE || g_app.key_origin == KEY_DERIVED);
+}
+
+// The PGP key made here, armored, with the nick as it is now in its user id.
+void pgp_public_key(char armor[PGP_ARMOR_MAX], uint8_t fp[PGP_FP_LEN]) {
+    pgp_export_public_key(&g_app.identity, g_app.nick[0] ? g_app.nick : "chat", g_app.pgp_created,
+                          armor, PGP_ARMOR_MAX, fp);
+}
+
+void show_identity_result(void) {
+    if (g_app.identity_source == IDENT_NONE) return;
+    uint8_t fp[ID_FP_LEN]; identity_fingerprint(g_app.identity.pub, fp);
+    char fphex[HEX_GROUPS_LEN(ID_FP_LEN)]; hex_groups(fp, ID_FP_LEN, fphex);
+    push_log("your identity fingerprint: %s - compare it with peers over another channel", fphex);
+    if (g_app.identity_source == IDENT_AGE) {
+        char recipient[AGE_RECIPIENT_STRLEN + 1];
+        age_export_recipient(&g_app.identity, recipient);
+        push_log("AGE recipient (others can `age -r` encrypt files to you): %s", recipient);
+    }
+    if (pgp_key_made_here()) {
+        char armor[PGP_ARMOR_MAX]; uint8_t pgp_fp[PGP_FP_LEN];
+        pgp_public_key(armor, pgp_fp);
+        push_log("PGP public key (others can `gpg --import` it; Enter on it in the settings copies it):");
+        // Line by line, including the blank one after BEGIN, which gpg needs.
+        for (char *line = armor, *nl; *line; line = nl + 1) {
+            nl = strchr(line, '\n');
+            if (!nl) { push_log("%s", line); break; }
+            *nl = '\0';
+            push_log("%s", line);
+        }
+    }
+}
+
+void finish_onboarding(void) {
+    g_app.mode = MODE_CHAT;
+
+    if (g_app.pending_auto_session[0]) {
+        addr_t peers[MAX_PEER_ARGS];
+        int n_peers = 0;
+        if (g_app.pending_auto_n_peers > 0 && g_app.route.mode == ROUTE_TOR) {
+            // Looking a name up here would go around Tor.
+            push_log("* --peer left out: Tor mode never reaches peers over UDP, so their addresses aren't looked up");
+        } else {
+            for (int i = 0; i < g_app.pending_auto_n_peers; i++) {
+                if (addr_parse_hostport(g_app.pending_auto_peer_args[i], &peers[n_peers]) == 0) n_peers++;
+                else push_log("* --peer %s left out: can't find that address", g_app.pending_auto_peer_args[i]);
+            }
+        }
+        start_session(g_app.pending_auto_session, g_app.pending_auto_password, 0,
+                      g_app.pending_auto_port, peers, n_peers);
+        crypto_wipe(g_app.pending_auto_password, sizeof g_app.pending_auto_password);
+        g_app.pending_auto_session[0] = '\0';
+    }
+    rooms_join_at_start();
+    g_app.dirty = 1;
+}

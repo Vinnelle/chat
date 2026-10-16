@@ -210,6 +210,11 @@ list(TRANSFORM CHAT_CORE_SOURCES PREPEND ${CMAKE_SOURCE_DIR}/)
 add_executable(chat
     ${CHAT_CORE_SOURCES}
     src/app/main.c
+    src/app/sessions.c
+    src/app/plain.c
+    src/app/pics.c
+    src/app/clipboard.c
+    src/app/browser.c
     src/app/history.c
     src/app/torlink.c
     src/app/settings.c

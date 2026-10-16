@@ -433,19 +433,37 @@ typedef enum {
 extern app_t g_app;
 extern options_t g_opts;
 extern volatile sig_atomic_t g_interrupted;
+extern volatile sig_atomic_t g_ctrl_c;
+extern volatile sig_atomic_t g_sigquit;
 extern int g_plain;
 extern int g_echo;
+// The longest the main loops wait for a socket or a key before doing their timed work.
+#define WAIT_MS 200
+void catch_quit_signals(void);
+void push_console(tui_scrollback_t *sb, int *scroll, const char *hhmm, const char *text, const uint8_t *rgb);
 void push_log(const char *fmt, ...);
-void session_delivery(void *ui, unsigned own, chat_delivery_t what, const char *name);
+void note(const char *fmt, ...);
+void choose_route(route_mode_t m);
+const char *route_label(void);
+void reapply_options(void);
+// Why the main loop is ending at once, with no frame after: the panic key (or SIGQUIT), or on the lock
+// screen, the shadow passphrase or the wrong passphrase that set off self-destruct.
+typedef enum { PANIC_NONE, PANIC_KEY, PANIC_DECOY, PANIC_DESTROYED } panic_t;
+extern panic_t g_panic;
+void panic(panic_t why);
+void panic_saves(void);
+void sandbox_up(void);
+#define N_PANIC_KEYS 5
+extern const char *const PANIC_KEY_NAMES[N_PANIC_KEYS];
+int panic_key_is(const tui_key_t *key);
+
+// sessions.c
 void session_print(void *ui, const char *hhmm, const char *text, const uint8_t *rgb, unsigned flags, int color_len,
                    int file);
+void session_delivery(void *ui, unsigned own, chat_delivery_t what, const char *name);
 int session_ready(const session_slot_t *s);
-pic_t *pic_find(session_slot_t *s, int num);
-const tui_image_t *pic_for(const void *ctx, int file);
-const char *pic_why(const session_slot_t *s, int num);
-int fetch_progress(const chat_t *e, const file_entry_t *f, char *text, size_t cap);
-const tui_progress_t *progress_for(const void *ctx, int file);
-void session_file_view(void *ui, int num, const char *name, const uint8_t *data, size_t len);
+void timers_tick(double now);
+void send_notification(const char *nick, const char *text, int mentioned);
 void session_notify(void *ui, const char *nick, const char *text, int mentioned);
 int slot_index(session_slot_t *s);
 session_slot_t *find_free_slot(void);
@@ -456,7 +474,46 @@ session_slot_t *first_session(void);
 void close_session(session_slot_t *s);
 void select_step(int dir);
 void console_note(session_slot_t *s, const char *fmt, ...);
-void note(const char *fmt, ...);
+extern chat_build_t g_self_build;
+void app_session_opts(chat_opts_t *o);
+session_slot_t *start_session(const char *session_name, const char *password, int created, uint16_t port,
+                              const addr_t *peers, int n_peers);
+session_slot_t *start_moved_session(const chat_move_to_t *to);
+void begin_prompt(app_mode_t mode);
+void begin_new_session(void);
+void end_prompt(void);
+cmd_result_t app_new(void *ctx, const char *arg);
+cmd_result_t app_join(void *ctx, const char *arg);
+cmd_result_t app_keep(void *ctx, const char *arg);
+void begin_rooms(void);
+void rooms_key(const tui_key_t *key);
+void rooms_join_at_start(void);
+// Kept in the open save to open again (Reopen sessions), so it goes offline rather than leaving.
+int session_kept(const session_slot_t *s);
+void reopen_tick(void);
+void keep_sessions_saved(void);
+cmd_result_t app_call(void *ctx, const char *arg);
+void contacts_tick(void);
+
+// plain.c
+extern chat_t *g_plain_engine;
+int run_plain(const char *session_name, const char *password, uint16_t port,
+              const char peer_args[][PEER_ARG_LEN], int n_peer_args);
+
+// pics.c
+pic_t *pic_find(session_slot_t *s, int num);
+void pic_free(pic_t *p);
+void pics_free(session_slot_t *s);
+const tui_image_t *pic_for(const void *ctx, int file);
+const char *pic_why(const session_slot_t *s, int num);
+int fetch_progress(const chat_t *e, const file_entry_t *f, char *text, size_t cap);
+const tui_progress_t *progress_for(const void *ctx, int file);
+// image_thumbnail, in a child process of its own where the platform can do that.
+int thumb_decode(const uint8_t *data, size_t len, int max_w, int max_h, const uint8_t bg[3], image_thumb_t *out,
+                 char *why, size_t why_cap);
+void session_file_view(void *ui, int num, const char *name, const uint8_t *data, size_t len);
+
+// clipboard.c
 // Public text goes on the clipboard with osc52_copy. A secret goes with copy_secret, and comes off
 // again after CLIPBOARD_CLEAR_SECONDS, or as soon as chat quits, locks or panics.
 #define CLIPBOARD_CLEAR_SECONDS 30
@@ -465,21 +522,7 @@ void copy_secret(const char *text);
 void clipboard_clear_now(void);
 void clipboard_tick(double now);
 void copy_session_id(session_slot_t *s);
-// image_thumbnail, in a child process of its own where the platform can do that.
-int thumb_decode(const uint8_t *data, size_t len, int max_w, int max_h, const uint8_t bg[3], image_thumb_t *out,
-                 char *why, size_t why_cap);
 void copy_invite(session_slot_t *s);
-const char *route_label(void);
-void reapply_options(void);
-// Why the main loop is ending at once, with no frame after: the panic key (or SIGQUIT), or on the lock
-// screen, the shadow passphrase or the wrong passphrase that set off self-destruct.
-typedef enum { PANIC_NONE, PANIC_KEY, PANIC_DECOY, PANIC_DESTROYED } panic_t;
-extern panic_t g_panic;
-void panic(panic_t why);
-void sandbox_up(void);
-#define N_PANIC_KEYS 5
-extern const char *const PANIC_KEY_NAMES[N_PANIC_KEYS];
-int panic_key_is(const tui_key_t *key);
 
 // lock.c
 #define N_LOCK_AFTER 5
@@ -507,13 +550,10 @@ void history_start(session_slot_t *s, int show);
 void history_stop(session_slot_t *s, int write);
 void history_sync(double now);
 void history_expire(session_slot_t *s, unsigned seconds);
-void timers_tick(double now);
 
 // torlink.c
 extern const char *const TOR_LAUNCH_NAMES[];
-extern chat_t *g_plain_engine;
 extern tor_link_t g_tor;
-extern chat_build_t g_self_build;
 void sync_update_proxy(void);
 void tor_link_ensure(double now);
 void tor_link_step(double now);
@@ -533,42 +573,15 @@ void transport_line(char *out, size_t cap);
 void tor_state_choose(int on);
 void tor_state_yes(void);
 void tor_state_no(void);
-void app_session_opts(chat_opts_t *o);
-session_slot_t *start_session(const char *session_name, const char *password, int created, uint16_t port,
-                              const addr_t *peers, int n_peers);
-session_slot_t *start_moved_session(const chat_move_to_t *to);
-int pgp_key_made_here(void);
-void pgp_public_key(char armor[PGP_ARMOR_MAX], uint8_t fp[PGP_FP_LEN]);
-void show_identity_result(void);
-void finish_onboarding(void);
+cmd_result_t app_newtor(void *ctx, const char *arg);
+
+// browser.c
 int path_is_root(const char *p);
 void path_join(char *out, size_t cap, const char *dir, const char *name);
 void path_parent(char *p);
 int browser_load(browser_t *b, const char *path);
 void browser_select(browser_t *b, const char *name);
 void browser_entry_path(const browser_t *b, const dir_entry_t *e, char *out, size_t cap);
-void begin_prompt(app_mode_t mode);
-void begin_new_session(void);
-void end_prompt(void);
-cmd_result_t app_new(void *ctx, const char *arg);
-cmd_result_t app_join(void *ctx, const char *arg);
-cmd_result_t app_keep(void *ctx, const char *arg);
-cmd_result_t app_call(void *ctx, const char *arg);
-void contacts_tick(void);
-void begin_rooms(void);
-void rooms_key(const tui_key_t *key);
-void rooms_join_at_start(void);
-void reopen_tick(void);
-void keep_sessions_saved(void);
-// Kept in the open save to open again (Reopen sessions), so it goes offline rather than leaving.
-int session_kept(const session_slot_t *s);
-cmd_result_t app_quit(void *ctx, const char *arg);
-cmd_result_t app_quitall(void *ctx, const char *arg);
-cmd_result_t app_copyid(void *ctx, const char *arg);
-cmd_result_t app_invite(void *ctx, const char *arg);
-cmd_result_t app_newtor(void *ctx, const char *arg);
-cmd_result_t app_update(void *ctx, const char *arg);
-void update_key(const tui_key_t *key);
 
 // settings.c
 extern const setting_def_t SETTINGS[N_SETTING_IDS];
@@ -656,6 +669,10 @@ void sign_pick(int pick);
 void copy_age_recipient(void);
 void copy_pgp_public_key(void);
 
+int pgp_key_made_here(void);
+void pgp_public_key(char armor[PGP_ARMOR_MAX], uint8_t fp[PGP_FP_LEN]);
+void show_identity_result(void);
+void finish_onboarding(void);
 // pages.c
 list_key_t list_key(const tui_key_t *key);
 int section_digit(const tui_key_t *key);
@@ -773,6 +790,12 @@ tui_view_t current_view(char *sub, size_t cap);
 void chat_input(tui_bar_t *b, const tui_input_t *in);
 void move_tick(double now);
 
+cmd_result_t app_quit(void *ctx, const char *arg);
+cmd_result_t app_quitall(void *ctx, const char *arg);
+cmd_result_t app_copyid(void *ctx, const char *arg);
+cmd_result_t app_invite(void *ctx, const char *arg);
+cmd_result_t app_update(void *ctx, const char *arg);
+void update_key(const tui_key_t *key);
 // screen.c
 int add_para(tui_para_t *p, int n, tui_para_kind_t kind, const char *text);
 void render_bar(void);
