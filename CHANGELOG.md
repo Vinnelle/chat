@@ -49,6 +49,10 @@
   can pass it on. The first key you type replaces it with a password of your own, and `Ctrl+U` clears
   it to none. The id is often passed around in the open, so the password is what stands in the way of
   guessing, and the box used to start empty.
+- A session takes half the locked memory it did: a scrollback's lines share one 96 KB ring of text
+  instead of a kilobyte each, and peers no longer keep a key they never read. Under the usual 8 MiB
+  limit on locked memory, about 11 sessions' keys and messages stay out of swap, where past about 5
+  they quietly didn't.
 
 ### Fixed
 - In a room you moved to (`:move`), someone who came along from a room where you'd compared verify
