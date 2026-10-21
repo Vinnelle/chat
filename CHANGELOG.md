@@ -3,142 +3,7 @@
 All notable changes to chat, newest first. Each beta (`X.Y.Z-beta.N`) has a section of its own until
 its release, which folds them into one. A release's notes on GitHub are its section here.
 
-## Unreleased
-
-### Added
-- `:invite` copies the session's id and password to the clipboard as one invite,
-  `chat:ID:PASSWORD:CHECK`, and the JOIN box (`Ctrl+J`) takes one in place of the id. The check
-  catches an invite that was mistyped or cut off, which used to leave you alone in a room nobody
-  else was in. An invite is never shown, only copied, since it holds the password. A call has none,
-  and nor does a session whose id has a `:` in it.
-- A session id or an invite you copy comes off the clipboard again after 30 seconds, or as soon as
-  chat quits, locks its screen or panics. On Windows chat sets the clipboard itself for these,
-  marked to stay out of clipboard history, the cloud clipboard and clipboard managers, and leaves it
-  alone if something else was copied since. Elsewhere the terminal clears it (OSC 52), and that also
-  takes off anything copied since.
-
-- `:ignore NICK` hides what a peer says, sends you directly or offers, without notifying you, and
-  `:ignore NICK off` shows it again. It's only on your screen: nothing is sent, and what they say
-  still goes on to peers who only reach them through you. A peer that signs has its key ignored in
-  every session too, kept in the open save as verified keys are. The sidebar marks them `i`, and
-  `:peers` says so.
-
-- A backup release key. A build made with `keys/minisign-backup.pub` (`just keygen backup`) takes an
-  update, and a peer's list of release builds, signed by either the release key or the backup,
-  which is kept offline apart from it. If the release key is lost or stolen, the backup signs the
-  next release, and that release can stop taking the old key.
-
-- `tests/interop/interop.sh` (`just interop OLD`) runs this build and an older one as two peers in
-  one room, and checks what an older version is promised: messages both ways, a long one, a reply, a
-  direct message or its refusal, a file each way and a leave. GitHub Actions runs it on every push
-  against the latest release and the newest beta.
-
-### Changed
-- Releases are meant to be reproducible. `just dist` stamps the binaries with their commit's time,
-  not when they were built, so a release's `--version` says when its commit was made, and they no
-  longer name the folders they were built in, nor (on Windows) when they were linked. When a release
-  is published, GitHub Actions builds it again and compares it with the published binaries, and
-  `just reproduce VERSION` does the same on any computer with zig.
-- On Linux, a picture shown is decoded in a child process that seccomp lets do nothing but allocate
-  memory, write the thumbnail back and exit, so a bug in chat's picture readers can't reach a file,
-  the network or chat's keys. chat checks the thumbnail it gets back, and a child that takes more
-  than 10 seconds is killed.
-- A paste is only text. chat turns on bracketed paste, so the terminal marks where a paste starts
-  and ends: it goes into the input box, from NORMAL too, with its lines run together, and waits for
-  `Enter`. Before, each line of a paste was sent as it came, a line starting with `/` ran as a
-  command, a paste in NORMAL ran its letters as keys, and one could answer a y/n box. In a box a
-  paste only goes into the field, and anywhere else it's ignored.
-- The NEW SESSION box (`Ctrl+N`) starts with a random password, eight words (64 bits), shown so you
-  can pass it on. The first key you type replaces it with a password of your own, and `Ctrl+U` clears
-  it to none. The id is often passed around in the open, so the password is what stands in the way of
-  guessing, and the box used to start empty.
-- A session takes half the locked memory it did: a scrollback's lines share one 96 KB ring of text
-  instead of a kilobyte each, and peers no longer keep a key they never read. Under the usual 8 MiB
-  limit on locked memory, about 11 sessions' keys and messages stay out of swap, where past about 5
-  they quietly didn't.
-- The release keys are in `keys/` now (`keys/minisign.pub`, `keys/minisign-backup.pub`), and the
-  documentation in `docs/`, with the README an overview of it.
-
-### Fixed
-- In a room you moved to (`:move`), someone who came along from a room where you'd compared verify
-  codes could be shown with a code to compare, until chat said a moment later that they'd come along.
-  Their join now waits for their proof of that, a few seconds at most.
-- Closing a kept room just after a rekey could show peers that you'd left, not that you'd gone
-  offline.
-
-## 0.5.1-beta.3
-
-### Added
-- The mouse wheel scrolls the console when it's over it, a line at a time, and the chat anywhere
-  else. While it's scrolled back, the console's title says how many newer lines are below, and it
-  stays on the lines in view as new ones come. `G` in NORMAL goes back to the newest line as well
-  as the newest message.
-- The sidebar's sessions and peers scroll when there are more than fit, with the mouse wheel over
-  them, and a row says how many more are above or below. The sessions follow the selected one as
-  `Tab`, `Shift+Tab` and `j`/`k` switch, and the network section stays at the bottom instead of
-  being pushed off.
-
-### Changed
-- chat has the terminal report the mouse (modes 1000 and 1006) instead of sending the wheel as Up
-  and Down (mode 1007), since that's the only way to know which pane the wheel is over. Plain
-  clicks don't reach the terminal any more: hold Shift to select text, as in other full-screen
-  programs. A key's sequence split between two reads (Windows passes input on a few dozen
-  characters at a time) waits for the rest instead of ending up as text.
-
-### Fixed
-- A peer whose key you verified could be warned about as signing "with a key with an invalid
-  signature" for a moment around a rekey, and show as verified again soon after. Its key hadn't
-  changed: the signature it sends with it was checked against our newest session key, not the one
-  of the session it came in. It's checked against the session it was made for now, or the one just
-  before a re-handshake, and signed for the session it goes out in.
-
-## 0.5.1-beta.2
-
-### Added
-- The mouse wheel scrolls the chat, and the lists on pages and in boxes. chat asks the terminal to
-  send the wheel as Up and Down (mode 1007), and gives back the terminal's own setting when it
-  leaves. On the chat screen Up and Down scroll the chat by a message. Selecting text with the
-  mouse works as before.
-- `:newtor` gives every session in Tor mode new circuits and a new onion address. It closes the
-  streams to peers' onion services and the connections to the Nostr relays, which open again with
-  new SOCKS logins, so on new circuits and through new exits. Each session then publishes a new
-  onion address, sends it to its peers and removes the old one. Streams peers opened to you, the
-  room's onion services and tor's entry guards stay the same. It works in `--simple` too.
-- `:set reopen on` (**Reopen sessions**) keeps the sessions you have open in the open save, sealed
-  like the rooms `:keep` keeps, and opens them again when chat starts. The save follows what's
-  open: `:quit` takes a session out, and turning the setting off empties the list. With it on,
-  `Ctrl+C` closes chat without leaving: peers see you go offline, through a new `off` record (`o`
-  in `k`), and older versions get a bye as before. `:quitall` still leaves every session.
-- `:set net off` (**Network log**: off) keeps the network's news out of the console: lookups,
-  relays dropping and coming back, port mapping, and Tor starting up and connecting. Problems that
-  keep a session from connecting, such as a tor that won't start, still show.
-
-### Changed
-- Routing is two settings, named the same on the settings page, with `:set` and on the command
-  line. **Routing** (`routing`, `--routing`) is `udp` (`dht` before) or `tor`. **Nostr relays**
-  (`nostr`, `--nostr`) is `fallback` (`on` before), `always` or `off`, and means the same with
-  either: a Tor session now leaves the relays a minute after it last needed them, as a UDP one
-  does, so `always` is what keeps it findable by UDP members of a room whose Tor members already
-  reach each other. `--routing dht+nostr` and `dht`, `--nonostr` and `--nostr-always` are gone,
-  and `--simple` asks only UDP or Tor. Saves are unaffected: the old names were the defaults,
-  which a save never holds.
-- `:update` works with the sandbox up. Just before the sandbox goes up, chat starts itself again
-  as the updater, a second process `:update` asks to do the update, shown as `chat-updater` in the
-  process list. It holds none of chat's keys, saves, messages or passwords, and has a sandbox of
-  its own that only lets it write in the executable's folder and run curl. It still installs only
-  what the release key signed. `:set updater off` stops it and keeps it from starting. Before, the
-  sandbox kept chat from replacing itself, and `:update` sent you to `chat --update`.
-- `just release patch`, `minor` and `major` release the next patch, minor or major version after
-  the last published release, and `just release beta patch`, `minor` or `major` a beta of it.
-  `just release` and `just release beta` still release the version in `CMakeLists.txt` (the
-  betas' own) or the patch after it. A release folds in, and deletes the GitHub releases of, the
-  betas of any version up to it, so a cycle of `0.5.1` betas can come out as `0.6.0`.
-- A second `Ctrl+C` quits from the QUIT box, as `y` does.
-- The sidebar's NETWORK box says whose tor the route uses (`tor (own)` or `tor (running)`) and how
-  far it has got (`Connecting (24%)`, then `Connected`). In UDP mode the route carries the port
-  (`udp/PORT`) and the DHT says `Connecting` until a node answers, then `Connected`.
-
-## 0.5.1-beta.1
+## 0.5.1
 
 ### Added
 - `:move` moves the room. With no server, nobody can be put out of a room and a leaked password
@@ -224,12 +89,127 @@ its release, which folds them into one. A release's notes on GitHub are its sect
   seconds), every chat that keeps to timers takes the shortest one asked for by someone whose code it
   compared, and the chat's title says so. It's a request: a modified chat, or a screenshot, can keep
   anything.
+- The mouse wheel scrolls the chat, and the lists on pages and in boxes. chat asks the terminal to
+  send the wheel as Up and Down (mode 1007), and gives back the terminal's own setting when it
+  leaves. On the chat screen Up and Down scroll the chat by a message. Selecting text with the
+  mouse works as before.
+- `:newtor` gives every session in Tor mode new circuits and a new onion address. It closes the
+  streams to peers' onion services and the connections to the Nostr relays, which open again with
+  new SOCKS logins, so on new circuits and through new exits. Each session then publishes a new
+  onion address, sends it to its peers and removes the old one. Streams peers opened to you, the
+  room's onion services and tor's entry guards stay the same. It works in `--simple` too.
+- `:set reopen on` (**Reopen sessions**) keeps the sessions you have open in the open save, sealed
+  like the rooms `:keep` keeps, and opens them again when chat starts. The save follows what's
+  open: `:quit` takes a session out, and turning the setting off empties the list. With it on,
+  `Ctrl+C` closes chat without leaving: peers see you go offline, through a new `off` record (`o`
+  in `k`), and older versions get a bye as before. `:quitall` still leaves every session.
+- `:set net off` (**Network log**: off) keeps the network's news out of the console: lookups,
+  relays dropping and coming back, port mapping, and Tor starting up and connecting. Problems that
+  keep a session from connecting, such as a tor that won't start, still show.
+- The mouse wheel scrolls the console when it's over it, a line at a time, and the chat anywhere
+  else. While it's scrolled back, the console's title says how many newer lines are below, and it
+  stays on the lines in view as new ones come. `G` in NORMAL goes back to the newest line as well
+  as the newest message.
+- The sidebar's sessions and peers scroll when there are more than fit, with the mouse wheel over
+  them, and a row says how many more are above or below. The sessions follow the selected one as
+  `Tab`, `Shift+Tab` and `j`/`k` switch, and the network section stays at the bottom instead of
+  being pushed off.
+- `:invite` copies the session's id and password to the clipboard as one invite,
+  `chat:ID:PASSWORD:CHECK`, and the JOIN box (`Ctrl+J`) takes one in place of the id. The check
+  catches an invite that was mistyped or cut off, which used to leave you alone in a room nobody
+  else was in. An invite is never shown, only copied, since it holds the password. A call has none,
+  and nor does a session whose id has a `:` in it.
+- A session id or an invite you copy comes off the clipboard again after 30 seconds, or as soon as
+  chat quits, locks its screen or panics. On Windows chat sets the clipboard itself for these,
+  marked to stay out of clipboard history, the cloud clipboard and clipboard managers, and leaves it
+  alone if something else was copied since. Elsewhere the terminal clears it (OSC 52), and that also
+  takes off anything copied since.
+
+- `:ignore NICK` hides what a peer says, sends you directly or offers, without notifying you, and
+  `:ignore NICK off` shows it again. It's only on your screen: nothing is sent, and what they say
+  still goes on to peers who only reach them through you. A peer that signs has its key ignored in
+  every session too, kept in the open save as verified keys are. The sidebar marks them `i`, and
+  `:peers` says so.
+
+- A backup release key. A build made with `keys/minisign-backup.pub` (`just keygen backup`) takes an
+  update, and a peer's list of release builds, signed by either the release key or the backup,
+  which is kept offline apart from it. If the release key is lost or stolen, the backup signs the
+  next release, and that release can stop taking the old key.
+
+- `tests/interop/interop.sh` (`just interop OLD`) runs this build and an older one as two peers in
+  one room, and checks what an older version is promised: messages both ways, a long one, a reply, a
+  direct message or its refusal, a file each way and a leave. GitHub Actions runs it on every push
+  against the latest release and the newest beta.
+
+### Changed
+- Routing is two settings, named the same on the settings page, with `:set` and on the command
+  line. **Routing** (`routing`, `--routing`) is `udp` (`dht` before) or `tor`. **Nostr relays**
+  (`nostr`, `--nostr`) is `fallback` (`on` before), `always` or `off`, and means the same with
+  either: a Tor session now leaves the relays a minute after it last needed them, as a UDP one
+  does, so `always` is what keeps it findable by UDP members of a room whose Tor members already
+  reach each other. `--routing dht+nostr` and `dht`, `--nonostr` and `--nostr-always` are gone,
+  and `--simple` asks only UDP or Tor. Saves are unaffected: the old names were the defaults,
+  which a save never holds.
+- `:update` works with the sandbox up. Just before the sandbox goes up, chat starts itself again
+  as the updater, a second process `:update` asks to do the update, shown as `chat-updater` in the
+  process list. It holds none of chat's keys, saves, messages or passwords, and has a sandbox of
+  its own that only lets it write in the executable's folder and run curl. It still installs only
+  what the release key signed. `:set updater off` stops it and keeps it from starting. Before, the
+  sandbox kept chat from replacing itself, and `:update` sent you to `chat --update`.
+- `just release patch`, `minor` and `major` release the next patch, minor or major version after
+  the last published release, and `just release beta patch`, `minor` or `major` a beta of it.
+  `just release` and `just release beta` still release the version in `CMakeLists.txt` (the
+  betas' own) or the patch after it. A release folds in, and deletes the GitHub releases of, the
+  betas of any version up to it, so a cycle of `0.5.1` betas can come out as `0.6.0`.
+- A second `Ctrl+C` quits from the QUIT box, as `y` does.
+- The sidebar's NETWORK box says whose tor the route uses (`tor (own)` or `tor (running)`) and how
+  far it has got (`Connecting (24%)`, then `Connected`). In UDP mode the route carries the port
+  (`udp/PORT`) and the DHT says `Connecting` until a node answers, then `Connected`.
+- chat has the terminal report the mouse (modes 1000 and 1006) instead of sending the wheel as Up
+  and Down (mode 1007), since that's the only way to know which pane the wheel is over. Plain
+  clicks don't reach the terminal any more: hold Shift to select text, as in other full-screen
+  programs. A key's sequence split between two reads (Windows passes input on a few dozen
+  characters at a time) waits for the rest instead of ending up as text.
+- Releases are meant to be reproducible. `just dist` stamps the binaries with their commit's time,
+  not when they were built, so a release's `--version` says when its commit was made, and they no
+  longer name the folders they were built in, nor (on Windows) when they were linked. When a release
+  is published, GitHub Actions builds it again and compares it with the published binaries, and
+  `just reproduce VERSION` does the same on any computer with zig.
+- On Linux, a picture shown is decoded in a child process that seccomp lets do nothing but allocate
+  memory, write the thumbnail back and exit, so a bug in chat's picture readers can't reach a file,
+  the network or chat's keys. chat checks the thumbnail it gets back, and a child that takes more
+  than 10 seconds is killed.
+- A paste is only text. chat turns on bracketed paste, so the terminal marks where a paste starts
+  and ends: it goes into the input box, from NORMAL too, with its lines run together, and waits for
+  `Enter`. Before, each line of a paste was sent as it came, a line starting with `/` ran as a
+  command, a paste in NORMAL ran its letters as keys, and one could answer a y/n box. In a box a
+  paste only goes into the field, and anywhere else it's ignored.
+- The NEW SESSION box (`Ctrl+N`) starts with a random password, eight words (64 bits), shown so you
+  can pass it on. The first key you type replaces it with a password of your own, and `Ctrl+U` clears
+  it to none. The id is often passed around in the open, so the password is what stands in the way of
+  guessing, and the box used to start empty.
+- A session takes half the locked memory it did: a scrollback's lines share one 96 KB ring of text
+  instead of a kilobyte each, and peers no longer keep a key they never read. Under the usual 8 MiB
+  limit on locked memory, about 11 sessions' keys and messages stay out of swap, where past about 5
+  they quietly didn't.
+- The release keys are in `keys/` now (`keys/minisign.pub`, `keys/minisign-backup.pub`), and the
+  documentation in `docs/`, with the README an overview of it.
 
 ### Fixed
 - The help for **Start chat's own tor** said its tor takes a cookie login. It never has: its
   control port only takes a password made at random each run that only chat knows, with only its
   hash on tor's command line, and no cookie file another program could read. The help says so now,
   and so does the console as chat starts it.
+- A peer whose key you verified could be warned about as signing "with a key with an invalid
+  signature" for a moment around a rekey, and show as verified again soon after. Its key hadn't
+  changed: the signature it sends with it was checked against our newest session key, not the one
+  of the session it came in. It's checked against the session it was made for now, or the one just
+  before a re-handshake, and signed for the session it goes out in.
+- In a room you moved to (`:move`), someone who came along from a room where you'd compared verify
+  codes could be shown with a code to compare, until chat said a moment later that they'd come along.
+  Their join now waits for their proof of that, a few seconds at most.
+- Closing a kept room just after a rekey could show peers that you'd left, not that you'd gone
+  offline.
 
 ## 0.5.0
 
