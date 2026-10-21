@@ -27,8 +27,11 @@ build what="native" *args:
     # A build dir remembers its toolchain file; if that moved or went away, configuring it fails
     drop_stale() {
         [ -f "$1/CMakeCache.txt" ] || return 0
-        tc=$(sed -n 's/^CMAKE_TOOLCHAIN_FILE:[A-Z]*=//p' "$1/CMakeCache.txt")
-        if [ -n "$tc" ] && [ ! -f "$tc" ]; then
+        # CMakeSystem.cmake keeps its own copy of the path, which can outlive the cache entry
+        tc=$(cat "$1/CMakeCache.txt" "$1"/CMakeFiles/*/CMakeSystem.cmake 2>/dev/null |
+            sed -n -e 's/^CMAKE_TOOLCHAIN_FILE:[A-Z]*=//p' -e 's/^include("\(.*\)")$/\1/p' |
+            while read -r f; do [ -f "$f" ] || { echo "$f"; break; }; done)
+        if [ -n "$tc" ]; then
             echo "removing stale $1 (toolchain $tc is gone)"
             rm -rf "$1"
         fi
