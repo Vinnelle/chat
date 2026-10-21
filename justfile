@@ -24,21 +24,33 @@ build what="native" *args:
     shift
     just={{quote(just_executable())}}
     if [ "$what" != test ] && [ $# -gt 0 ]; then echo "just build $what takes no further arguments" >&2; exit 1; fi
+    # A build dir remembers its toolchain file; if that moved or went away, configuring it fails
+    drop_stale() {
+        [ -f "$1/CMakeCache.txt" ] || return 0
+        tc=$(sed -n 's/^CMAKE_TOOLCHAIN_FILE:[A-Z]*=//p' "$1/CMakeCache.txt")
+        if [ -n "$tc" ] && [ ! -f "$tc" ]; then
+            echo "removing stale $1 (toolchain $tc is gone)"
+            rm -rf "$1"
+        fi
+    }
     case "$what" in
         native)
             cmake -B build
             cmake --build build -j {{num_cpus()}}
             ;;
         linux)
+            drop_stale build-static
             cmake -B build-static -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/zig-linux-musl.cmake
             cmake --build build-static -j {{num_cpus()}}
             ;;
         windows|win)
+            drop_stale build-win
             cmake -B build-win -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/zig-windows.cmake
             cmake --build build-win -j {{num_cpus()}}
             ;;
         macos|mac)
             for arch in aarch64 x86_64; do
+                drop_stale build-macos-$arch
                 cmake -B build-macos-$arch -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/zig-macos-$arch.cmake
                 cmake --build build-macos-$arch -j {{num_cpus()}}
             done
