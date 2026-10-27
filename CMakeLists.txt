@@ -57,6 +57,10 @@ ProcessorCount(DEP_JOBS)
 if(DEP_JOBS EQUAL 0)
     set(DEP_JOBS 2)
 endif()
+# A dependency's own warnings aren't chat's to fix: each step's output goes to a log in
+# <prefix>/src/<name>-stamp/, and only a step that fails shows it.
+set(DEP_LOG LOG_DOWNLOAD 1 LOG_CONFIGURE 1 LOG_BUILD 1 LOG_INSTALL 1
+            LOG_MERGED_STDOUTERR 1 LOG_OUTPUT_ON_FAILURE 1)
 ExternalProject_Add(libsodium_ext
     URL https://download.libsodium.org/libsodium/releases/libsodium-${SODIUM_VERSION}.tar.gz
     URL_HASH SHA256=b6b1d2a8802cd8bfa611638c0e9ce31d14ef324e16062c39a76854091cba6d7f
@@ -68,6 +72,7 @@ ExternalProject_Add(libsodium_ext
                        --prefix=${SODIUM_PREFIX}/install ${DEP_CC_ARGS} "CFLAGS=-O3 ${DEP_SECTION_FLAGS}"
     BUILD_COMMAND ${CMAKE_MAKE_PROGRAM} -j${DEP_JOBS}
     INSTALL_COMMAND ${CMAKE_MAKE_PROGRAM} install
+    ${DEP_LOG}
     BUILD_BYPRODUCTS ${SODIUM_PREFIX}/install/lib/libsodium.a
 )
 set(SODIUM_INCLUDE_DIRS ${SODIUM_PREFIX}/install/include)
@@ -99,6 +104,7 @@ ExternalProject_Add(liboqs_ext
         -DOQS_DIST_BUILD=${OQS_DIST}
         "-DCMAKE_C_FLAGS=${DEP_SECTION_FLAGS}"
         ${OQS_CROSS_ARGS}
+    ${DEP_LOG}
     BUILD_BYPRODUCTS ${OQS_PREFIX}/install/lib/liboqs.a
 )
 set(OQS_INCLUDE_DIRS ${OQS_PREFIX}/install/include)
@@ -126,6 +132,7 @@ ExternalProject_Add(mbedtls_ext
         -DMBEDTLS_USER_CONFIG_FILE=${CHAT_MBEDTLS_CONFIG}
         "-DCMAKE_C_FLAGS=${DEP_SECTION_FLAGS}"
         ${OQS_CROSS_ARGS}
+    ${DEP_LOG}
     BUILD_BYPRODUCTS ${MBEDTLS_PREFIX}/install/lib/libmbedtls.a ${MBEDTLS_PREFIX}/install/lib/libmbedx509.a
                      ${MBEDTLS_PREFIX}/install/lib/libmbedcrypto.a
 )
@@ -163,6 +170,7 @@ ExternalProject_Add(secp256k1_ext
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON
         "-DCMAKE_C_FLAGS=${DEP_SECTION_FLAGS}"
         ${OQS_CROSS_ARGS}
+    ${DEP_LOG}
     BUILD_BYPRODUCTS ${SECP256K1_PREFIX}/install/lib/libsecp256k1.a
 )
 set(SECP256K1_INCLUDE_DIRS ${SECP256K1_PREFIX}/install/include)
@@ -442,10 +450,10 @@ endif()
 
 if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
     include(CheckIPOSupported)
-    check_ipo_supported(RESULT CHAT_IPO_OK OUTPUT CHAT_IPO_WHY LANGUAGES C)
+    check_ipo_supported(RESULT CHAT_IPO_OK LANGUAGES C)
     if(CHAT_IPO_OK)
         set_property(TARGET chat PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
     else()
-        message(STATUS "chat: link-time optimisation unavailable (${CHAT_IPO_WHY})")
+        message(STATUS "chat: link-time optimisation unavailable (why is in CMakeFiles/CMakeConfigureLog.yaml)")
     endif()
 endif()

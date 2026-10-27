@@ -399,7 +399,7 @@ static const char *shown_url(const char *url) { return url + sizeof "https://" -
 
 // The message goes to the console log and into the box. A failure replaces the step it failed
 // at, and leaves the bar where it stopped.
-static void finish_v(const char *fmt, va_list ap) {
+PRINTF_LIKE(1, 0) static void finish_v(const char *fmt, va_list ap) {
     vsnprintf(g_msg, sizeof g_msg, fmt, ap);
     const char *text = starts_with(g_msg, UPDATE_PREFIX) ? g_msg + sizeof UPDATE_PREFIX - 1 : g_msg;
     say(g_ok ? UPDATE_LINE_GOOD : UPDATE_LINE_BAD, "%s", text);

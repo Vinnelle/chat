@@ -951,7 +951,7 @@ static void emit(chat_t *c, const char *text, const uint8_t *rgb, unsigned flags
     c->print(c->ui, hhmm, text, rgb, flags, color_len, file);
 }
 
-static void ui_vprint(chat_t *c, const uint8_t *rgb, unsigned flags, const char *fmt, va_list ap) {
+PRINTF_LIKE(4, 0) static void ui_vprint(chat_t *c, const uint8_t *rgb, unsigned flags, const char *fmt, va_list ap) {
     char msg[UI_LINE_MAX];
     vsnprintf(msg, sizeof msg, fmt, ap);
     emit(c, msg, rgb, flags, 0, 0);
