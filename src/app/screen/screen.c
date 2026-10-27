@@ -721,6 +721,31 @@ static void file_ask_box(tui_dialog_t *d, tui_para_t *paras) {
     d->input = NULL;
 }
 
+static int export_paras(tui_para_t *p) {
+    static char where[KEY_PATH_MAX + 120], load[200];
+    char shown[KEY_PATH_MAX];
+    tilde_path(g_app.key.export_path, shown, sizeof shown);
+    int age = g_app.identity_source == IDENT_AGE;
+    snprintf(where, sizeof where, "This writes your signing key, **unencrypted**, to `%s`, a new file only you can "
+             "open.", shown);
+    int n = add_para(p, 0, TUI_P_TEXT, where);
+    n = add_para(p, n, TUI_P_BLANK, "");
+    n = add_para(p, n, TUI_P_TEXT, "**Anyone who reads it can sign as you**, and peers who verified you would take "
+                                   "them for you. Deleting it later isn't erasing: the disk, its snapshots and its "
+                                   "backups can keep traces.");
+    n = add_para(p, n, TUI_P_BLANK, "");
+    snprintf(load, sizeof load, "It's the same key, with the same fingerprint: `:set sign %s:PATH` loads it on "
+             "another device, and `%s` takes it too.", age ? "age" : "pgp", age ? "age -d -i" : "gpg --import");
+    return add_para(p, n, TUI_P_TEXT, load);
+}
+
+static void export_box(tui_dialog_t *d, tui_para_t *paras) {
+    d->title = "EXPORT SIGNING KEY";
+    d->n_text = export_paras(paras);
+    d->input = NULL;
+    d->keys = "y write" DOT_SEP "n back";
+}
+
 static void rooms_box(tui_dialog_t *d, tui_para_t *paras) {
     static const char *names[ROOMS_MAX + 1], *details[ROOMS_MAX + 1];
     static char text[160];
@@ -914,6 +939,7 @@ static const box_fn BOXES[] = {
     [MODE_UNINSTALL] = uninstall_box,
     [MODE_DEVICE_LOCK] = device_lock_box,
     [MODE_FILE_ASK] = file_ask_box,
+    [MODE_EXPORT_ASK] = export_box,
     [MODE_ROOMS] = rooms_box,
     [MODE_TOR_STATE] = tor_state_box,
     [MODE_MOVE] = move_box,
@@ -963,8 +989,10 @@ app_mode_t page_of(app_mode_t m) {
     if (install_mode(m)) return back_to(g_app.install.back);
     switch (m) {
         case MODE_HELP: case MODE_CHANGELOG: case MODE_SETTINGS: case MODE_SIGN_CHOICE: case MODE_SIGN_BROWSE:
-        case MODE_SEND_BROWSE: case MODE_SAVE_BROWSE: case MODE_FILES: case MODE_FILE_VIEW:
+        case MODE_SEND_BROWSE: case MODE_SAVE_BROWSE: case MODE_EXPORT_BROWSE: case MODE_FILES: case MODE_FILE_VIEW:
             return m;
+        case MODE_EXPORT_ASK:
+            return MODE_EXPORT_BROWSE;
         case MODE_SETTINGS_EDIT:
             return MODE_SETTINGS;
         case MODE_SIGN_PASTE: case MODE_SIGN_PASSWORD:
@@ -1149,6 +1177,14 @@ static tui_bar_t current_bar(void) {
             b.chip = "SAVE";
             b.hint = "s save here" DOT_SEP "enter open" DOT_SEP "h up" DOT_SEP "~ home" DOT_SEP "j/k move" DOT_SEP "esc close";
             break;
+        case MODE_EXPORT_BROWSE:
+            b.chip = "EXPORT";
+            b.hint = "s write here" DOT_SEP "enter open" DOT_SEP "h up" DOT_SEP "~ home" DOT_SEP "j/k move" DOT_SEP "esc close";
+            break;
+        case MODE_EXPORT_ASK:
+            b.chip = "EXPORT";
+            b.tone = TUI_TONE_PROMPT;
+            break;
         case MODE_FILES:
             b.chip = "FILES";
             b.hint = files_hint();
@@ -1327,6 +1363,7 @@ void render(void) {
         case MODE_SIGN_BROWSE: render_browser(rows_n, cols_n, hhmm, &bar); return;
         case MODE_SEND_BROWSE: render_send_browser(rows_n, cols_n, hhmm, &bar); return;
         case MODE_SAVE_BROWSE: render_save_browser(rows_n, cols_n, hhmm, &bar); return;
+        case MODE_EXPORT_BROWSE: render_export_browser(rows_n, cols_n, hhmm, &bar); return;
         case MODE_FILES:       render_files(rows_n, cols_n, hhmm, &bar); return;
         case MODE_FILE_VIEW:   render_viewer(rows_n, cols_n, hhmm, &bar); return;
         default: break;

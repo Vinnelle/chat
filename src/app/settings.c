@@ -80,6 +80,10 @@ const setting_def_t SETTINGS[] = {
     { SET_PGP_PUBKEY, NULL, NULL, "pgpkey", "PGP public key", K_ACTION, NULL,
       "The public half of the PGP key made here, shown by its fingerprint, for others to gpg --import. Enter "
       "copies it to the clipboard. It's in the console too." },
+    { SET_EXPORT_KEY, NULL, NULL, "exportkey", "Export signing key", K_ACTION, NULL,
+      "Writes your signing key, unencrypted, to a new file in a folder you pick, after asking: to load it on "
+      "another device, or keep a key made here. An AGE key comes out as age-keygen writes one, a PGP key made here "
+      "armored, as gpg --export-secret-keys writes it. Anyone who reads the file can sign as you." },
     { SET_AUTOSAVE, "Security", NULL, "autosave", "Autosave", K_TOGGLE, "on|off",
       "Once chat is installed: on saves a setting you change, and a key you verify or forget, as you change it. "
       "off keeps changes until chat exits, unless :save saves them. The signing key is only saved by :save or "
@@ -234,8 +238,8 @@ static int tor_only_setting(setting_id_t id) {
 }
 
 // Settings that don't apply right now aren't listed: the UDP ones in Tor mode, the Tor ones in
-// UDP mode, the relay list with relays off, the AGE recipient without an AGE identity, and the
-// PGP public key without a PGP key made here.
+// UDP mode, the relay list with relays off, the AGE recipient without an AGE identity, the PGP
+// public key without a PGP key made here, and the export without a key it can write.
 int setting_shown(setting_id_t id) {
     route_mode_t m = g_app.route.mode;
     if (m != ROUTE_UDP && udp_routing_only_setting(id)) return 0;
@@ -244,6 +248,7 @@ int setting_shown(setting_id_t id) {
     if (id == SET_RELAYS && !g_app.route.nostr) return 0;
     if (id == SET_AGE_RECIPIENT && g_app.identity_source != IDENT_AGE) return 0;
     if (id == SET_PGP_PUBKEY && !pgp_key_made_here()) return 0;
+    if (id == SET_EXPORT_KEY && key_export_refusal()) return 0;
 #ifndef __linux__
     if (id == SET_SANDBOX || id == SET_UPDATER) return 0;
 #endif
@@ -257,6 +262,7 @@ static const char *setting_hidden_why(setting_id_t id) {
     if (tor_only_setting(id)) return "it only applies with tor routing";
     if (id == SET_RELAYS) return "it only applies with the Nostr relays on";
     if (id == SET_PGP_PUBKEY) return "it needs a PGP signing key made here";
+    if (id == SET_EXPORT_KEY) return "it needs an AGE signing key, or a PGP key made here";
 #ifndef __linux__
     if (id == SET_SANDBOX || id == SET_UPDATER) return "the sandbox is only on Linux";
 #endif
@@ -331,7 +337,7 @@ tui_value_kind_t setting_kind(const setting_def_t *d) {
     int n, cur = setting_options(d->id, &names, &n);
     if (d->kind == K_TOGGLE) return cur > 0 ? TUI_V_ON : TUI_V_OFF;
     if (d->kind == K_CHOICE) return TUI_V_CHOICE;
-    if (d->id == SET_SIGN || d->id == SET_SHADOW) return TUI_V_LINK;
+    if (d->id == SET_SIGN || d->id == SET_SHADOW || d->id == SET_EXPORT_KEY) return TUI_V_LINK;
     if (d->kind == K_SECRET) return TUI_V_MUTED;
     return TUI_V_TEXT;
 }
@@ -399,6 +405,7 @@ void setting_value(setting_id_t id, char *out, size_t cap) {
             snprintf(out, cap, "%s", fphex);
             break;
         }
+        case SET_EXPORT_KEY:   snprintf(out, cap, "%s", key_export_refusal() ? "none" : key_export_name()); break;
         case SET_PORT:
             if (g_app.default_port) snprintf(out, cap, "%u", (unsigned)g_app.default_port);
             else snprintf(out, cap, "0 (a free one)");
@@ -1074,6 +1081,7 @@ const char *settings_hint(void) {
     else if (d->id == SET_SIGN) act = "enter choose";
     else if (d->id == SET_SHADOW) act = "enter set";
     else if (d->id == SET_AGE_RECIPIENT || d->id == SET_PGP_PUBKEY) act = "enter copy";
+    else if (d->id == SET_EXPORT_KEY) act = "enter export";
     else if (row_greyed(d->id)) act = NULL;
     else act = "h/l change";
     static char hint[160];

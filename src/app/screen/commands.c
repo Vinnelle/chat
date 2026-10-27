@@ -139,7 +139,16 @@ static cmd_result_t app_set(void *ctx, const char *arg) {
         return CMD_OK;
     }
     settings_open_at(d->id);
-    if (setting_shown(d->id)) note("%s comes from your signing key and can't be set - Enter copies it", d->label);
+    if (!setting_shown(d->id)) return CMD_OK;
+    if (d->id == SET_EXPORT_KEY)
+        note("%s takes no value - Enter on it, or :exportkey, writes your key to a file", d->label);
+    else note("%s comes from your signing key and can't be set - Enter copies it", d->label);
+    return CMD_OK;
+}
+
+static cmd_result_t app_exportkey(void *ctx, const char *arg) {
+    (void)ctx; (void)arg;
+    begin_key_export();
     return CMD_OK;
 }
 
@@ -385,6 +394,7 @@ const command_t APP_COMMANDS[] = {
     { "install", NULL,                  "[NAME]", "save your settings and signing key on this computer (NAME: as a save of that name)", app_install },
     { "save",    NULL,                  NULL,     "save what's in use now to the open save, after asking (or :install it)", app_save },
     { "uninstall", NULL,                "[NAME]", "delete what :install saved (NAME: that save)",    app_uninstall },
+    { "exportkey", NULL,                NULL,     "write your signing key, unencrypted, to a new file in a folder you pick", app_exportkey },
     { "history", NULL,                  "[forget [all]]", "whether this session's history is kept; forget deletes it (all: every session's)", app_history },
     { "changelog", "news",              NULL,     "show changelog",                    app_changelog },
     { "files",   NULL,                  NULL,     "the files offered here: show, save or stop them (Ctrl+F)", app_files },

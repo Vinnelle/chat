@@ -46,21 +46,18 @@ static size_t hrp_expand(const char *hrp, size_t len, uint8_t *out) {
     return p;
 }
 
-void age_export_recipient(const identity_keypair_t *idkp, char out[AGE_RECIPIENT_STRLEN + 1]) {
-    uint8_t x25519_pub[PUB_LEN];
-    if (crypto_sign_ed25519_pk_to_curve25519(x25519_pub, idkp->pub) != 0) {
-        fprintf(stderr, "chat: identity key not convertible to AGE format\n");
-        exit(1);
-    }
+static const char RECIPIENT_HRP[] = "age";
+static const char SECRET_HRP[] = "age-secret-key-";
+#define HRP_MAX (sizeof SECRET_HRP - 1)
 
+// hrp, the separator, a 32-byte key in five-bit groups, then the checksum, into out with its NUL.
+static void bech32_encode(const char *hrp, const uint8_t key[PUB_LEN], char *out) {
+    size_t hrp_len = strlen(hrp);
     uint8_t data5[KEY_GROUPS];
-    size_t n = convert_8_to_5(x25519_pub, sizeof x25519_pub, data5);
+    size_t n = convert_8_to_5(key, PUB_LEN, data5);
 
-    static const char HRP[] = "age";
-    enum { HRP_LEN = sizeof HRP - 1 };
-
-    uint8_t polymod_input[2 * HRP_LEN + 1 + KEY_GROUPS + BECH32_CHECKSUM];
-    size_t p = hrp_expand(HRP, HRP_LEN, polymod_input);
+    uint8_t polymod_input[2 * HRP_MAX + 1 + KEY_GROUPS + BECH32_CHECKSUM];
+    size_t p = hrp_expand(hrp, hrp_len, polymod_input);
     memcpy(polymod_input + p, data5, n);
     p += n;
     memset(polymod_input + p, 0, BECH32_CHECKSUM);
@@ -68,11 +65,32 @@ void age_export_recipient(const identity_keypair_t *idkp, char out[AGE_RECIPIENT
     uint32_t polymod = bech32_polymod(polymod_input, p) ^ BECH32_CONST;
 
     size_t o = 0;
-    memcpy(out, HRP, HRP_LEN); o += HRP_LEN;
+    memcpy(out, hrp, hrp_len); o += hrp_len;
     out[o++] = BECH32_SEPARATOR;
     for (size_t i = 0; i < n; i++) out[o++] = CHARSET[data5[i]];
     for (int i = 0; i < BECH32_CHECKSUM; i++) out[o++] = CHARSET[(polymod >> (5 * (BECH32_CHECKSUM - 1 - i))) & 0x1f];
     out[o] = '\0';
+    sodium_memzero(data5, sizeof data5);
+    sodium_memzero(polymod_input, sizeof polymod_input);
+}
+
+void age_export_recipient(const identity_keypair_t *idkp, char out[AGE_RECIPIENT_STRLEN + 1]) {
+    uint8_t x25519_pub[PUB_LEN];
+    if (crypto_sign_ed25519_pk_to_curve25519(x25519_pub, idkp->pub) != 0) {
+        fprintf(stderr, "chat: identity key not convertible to AGE format\n");
+        exit(1);
+    }
+    bech32_encode(RECIPIENT_HRP, x25519_pub, out);
+}
+
+// The checksum is over the lower-case form, as bech32 has it, and age-keygen writes it in upper case.
+void age_export_secret_key(const identity_keypair_t *idkp, char out[AGE_SECRET_KEY_STRLEN + 1]) {
+    uint8_t secret[PRIV_LEN];
+    identity_to_x25519(idkp, secret);
+    bech32_encode(SECRET_HRP, secret, out);
+    sodium_memzero(secret, sizeof secret);
+    for (char *c = out; *c; c++)
+        if (*c >= 'a' && *c <= 'z') *c = (char)(*c - 'a' + 'A');
 }
 
 // A character's 5-bit value, or -1. Upper case only, since age-keygen writes the key that way and
@@ -85,15 +103,14 @@ static int bech32_upper_value(char c) {
 
 int age_import_secret_key_text(const char *text, identity_keypair_t *idkp) {
     static const char PREFIX[] = AGE_SECRET_KEY_PREFIX;
-    static const char HRP[] = "age-secret-key-";
-    enum { HRP_LEN = sizeof HRP - 1, DATA_LEN = AGE_SECRET_KEY_STRLEN - (sizeof PREFIX - 1) };
+    enum { HRP_LEN = sizeof SECRET_HRP - 1, DATA_LEN = AGE_SECRET_KEY_STRLEN - (sizeof PREFIX - 1) };
     const char *at = strstr(text, PREFIX);
     if (!at) return -1;
     at += sizeof PREFIX - 1;
 
     // The checksum runs over the HRP spread into high and low bits, then the data and checksum.
     uint8_t values[2 * HRP_LEN + 1 + DATA_LEN];
-    size_t p = hrp_expand(HRP, HRP_LEN, values);
+    size_t p = hrp_expand(SECRET_HRP, HRP_LEN, values);
     for (size_t i = 0; i < DATA_LEN; i++) {
         int v = bech32_upper_value(at[i]);
         if (v < 0) { sodium_memzero(values, sizeof values); return -1; }

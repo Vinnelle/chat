@@ -16,6 +16,11 @@
 void pgp_export_public_key(const identity_keypair_t *idkp, const char *nick, uint32_t created,
                             char *out, size_t out_cap, uint8_t fingerprint[PGP_FP_LEN]);
 
+// The same key with its secret, unencrypted, as gpg --export-secret-keys writes a key with no
+// passphrase. -1 for a key with no seed to write (an AGE key's).
+int pgp_export_secret_key(const identity_keypair_t *idkp, const char *nick, uint32_t created,
+                          char *out, size_t out_cap, uint8_t fingerprint[PGP_FP_LEN]);
+
 int pgp_import_secret_key(const char *path, identity_keypair_t *idkp);
 
 int pgp_import_secret_key_text(const char *armored, identity_keypair_t *idkp);

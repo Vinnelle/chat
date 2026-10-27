@@ -110,8 +110,10 @@ static uint32_t crc24(const uint8_t *data, size_t n) {
     return crc & 0xFFFFFFu;
 }
 
-void pgp_export_public_key(const identity_keypair_t *idkp, const char *nick, uint32_t created,
-                            char *out, size_t out_cap, uint8_t fingerprint[PGP_FP_LEN]) {
+// The key, its user id and its self-signature, armored. With secret, the key's packet is the secret
+// one, unencrypted.
+static void export_key(const identity_keypair_t *idkp, const char *nick, uint32_t created, int secret,
+                       char *out, size_t out_cap, uint8_t fingerprint[PGP_FP_LEN]) {
     uint32_t ctime = created;
     uint8_t pubkey_body[64];
     size_t pubkey_body_len = build_pubkey_body(idkp->pub, ctime, pubkey_body, sizeof pubkey_body);
@@ -162,7 +164,23 @@ void pgp_export_public_key(const identity_keypair_t *idkp, const char *nick, uin
 
     uint8_t doc[512];
     bb_t db = { doc, 0, sizeof doc };
-    bb_packet_header(&db, TAG_PUBLIC_KEY, pubkey_body_len); bb_bytes(&db, pubkey_body, pubkey_body_len);
+    if (secret) {
+        // After the public part: S2K usage 0 (in the clear), the seed as an MPI, and the two-byte sum
+        // of the MPI's bytes.
+        uint8_t mpi[2 + crypto_sign_SEEDBYTES];
+        bb_t kb = { mpi, 0, sizeof mpi };
+        bb_mpi(&kb, idkp->priv, crypto_sign_SEEDBYTES);
+        uint16_t sum = 0;
+        for (size_t i = 0; i < kb.len; i++) sum = (uint16_t)(sum + mpi[i]);
+        bb_packet_header(&db, TAG_SECRET_KEY, pubkey_body_len + 1 + kb.len + 2);
+        bb_bytes(&db, pubkey_body, pubkey_body_len);
+        bb_u8(&db, 0);
+        bb_bytes(&db, mpi, kb.len);
+        bb_u16(&db, sum);
+        sodium_memzero(mpi, sizeof mpi);
+    } else {
+        bb_packet_header(&db, TAG_PUBLIC_KEY, pubkey_body_len); bb_bytes(&db, pubkey_body, pubkey_body_len);
+    }
     bb_packet_header(&db, TAG_USER_ID, (size_t)uid_len); bb_bytes(&db, uid, (size_t)uid_len);
     bb_packet_header(&db, TAG_SIGNATURE, sb.len); bb_bytes(&db, sigbody, sb.len);
 
@@ -173,14 +191,30 @@ void pgp_export_public_key(const identity_keypair_t *idkp, const char *nick, uin
     char crc64[BASE64_LEN(CRC24_LEN) + 1]; base64_encode(crcbytes, CRC24_LEN, crc64);
 
     size_t o = 0;
-    o += (size_t)snprintf(out + o, out_cap - o, "-----BEGIN PGP PUBLIC KEY BLOCK-----\n\n");
+    o += (size_t)snprintf(out + o, out_cap - o, "%s\n\n",
+                          secret ? PGP_PRIVATE_BEGIN : "-----BEGIN PGP PUBLIC KEY BLOCK-----");
     for (size_t i = 0; i < b64len && o < out_cap; i += ARMOR_LINE) {
         size_t chunk = b64len - i < ARMOR_LINE ? b64len - i : ARMOR_LINE;
         if (o + chunk + 1 >= out_cap) break;
         memcpy(out + o, b64 + i, chunk); o += chunk;
         out[o++] = '\n';
     }
-    o += (size_t)snprintf(out + o, out_cap - o, "=%s\n-----END PGP PUBLIC KEY BLOCK-----\n", crc64);
+    o += (size_t)snprintf(out + o, out_cap - o, "=%s\n%s\n", crc64,
+                          secret ? PGP_PRIVATE_END : "-----END PGP PUBLIC KEY BLOCK-----");
+    sodium_memzero(doc, sizeof doc);
+    sodium_memzero(b64, sizeof b64);
+}
+
+void pgp_export_public_key(const identity_keypair_t *idkp, const char *nick, uint32_t created,
+                            char *out, size_t out_cap, uint8_t fingerprint[PGP_FP_LEN]) {
+    export_key(idkp, nick, created, 0, out, out_cap, fingerprint);
+}
+
+int pgp_export_secret_key(const identity_keypair_t *idkp, const char *nick, uint32_t created,
+                          char *out, size_t out_cap, uint8_t fingerprint[PGP_FP_LEN]) {
+    if (idkp->scalar) return -1;
+    export_key(idkp, nick, created, 1, out, out_cap, fingerprint);
+    return 0;
 }
 
 // Appends the base64 in one armor line to out, carrying a partial quartet in q/nq across lines.

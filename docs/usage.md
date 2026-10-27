@@ -138,6 +138,7 @@ puts it on the command line.
 | `:install [NAME]` | save your settings and signing key on this computer, after telling you what that leaves on disk; a new save asks for its name (blank picks a random one), and with NAME it's a save of that name (see [Installing](saves.md)) |
 | `:save` | save what's in use now to the save that's open, after asking (`:install` if none is) |
 | `:uninstall [NAME]` | delete what `:install` saved (the save in use, or the one called NAME) |
+| `:exportkey` | write your signing key, unencrypted, to a new file in a folder you pick, after asking, to load it on another device (see [Signing identities](security.md#signing-identities)) |
 | `:history [forget [all]]` | whether this session's history is kept; `forget` deletes it, `forget all` every session's (see [History](saves.md#history)) |
 | `:changelog` | show changelog (`:news`); built in, so it works offline |
 | `:send [asis] [PATH]` | offer a file, or pick one in a file browser without PATH; a picture goes without what could tell where, when or with what it was made, unless `asis` (see [Files and pictures](files.md)) |

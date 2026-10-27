@@ -163,6 +163,20 @@ only thing protecting the key. Someone with your machine id can brute force pass
 the public key you show peers, so use a long one. A blank password gives a random key that only
 lasts until chat exits.
 
+`:exportkey`, or **Export signing key** under it in settings, writes the key in use to a new file
+in a folder you pick, after asking. An AGE key comes out as `age-keygen` writes one
+(`age-secret-key.txt`), and a PGP key made here armored, as `gpg --export-secret-keys` writes a
+key with no passphrase (`pgp-secret-key.asc`). It's the same key, with the same fingerprint, so
+peers who verified you still see you as verified when another device picks the file
+(`:set sign age:PATH`). That's how a **Native** key, which only comes back from its password on
+the same device and OS, or a random one, outlives the run. An AGE key of your own comes out the
+way age uses it, so its text can differ from your file's while the key is the same. A PGP key
+from a file or a paste isn't exported: chat keeps only its secret part, not its user ids and
+signatures, so `gpg --export-secret-keys` gives the whole key.
+**The file isn't encrypted.** Anyone who reads it can sign as you. Only you can open it, and chat
+never writes over a file that's already there. With the sandbox up, it can only go in the folders
+in your home that aren't hidden (see [Sandbox](#sandbox-linux)).
+
 ## What a verify code looks like
 
 `:verify NICK` shows a peer's verify code and identity fingerprint to compare out of band.

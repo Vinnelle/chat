@@ -227,6 +227,45 @@ void save_browser_key(const tui_key_t *key) {
     g_app.dirty = 1;
 }
 
+// :exportkey: the folder to write the signing key to is picked here, starting in Downloads.
+void begin_key_export(void) {
+    if (g_app.mode != MODE_CHAT && g_app.mode != MODE_SETTINGS) return;
+    const char *why = key_export_refusal();
+    if (why) { note("%s", why); return; }
+    char dl[600];
+    const char *home = platform_home_dir();
+    if ((platform_downloads_dir(dl, sizeof dl) != 0 || browser_load(&g_app.browser, dl) != 0)
+        && (!home || browser_load(&g_app.browser, home) != 0))
+        browser_load(&g_app.browser, "/");
+    g_app.key.export_back = g_app.mode;
+    g_app.mode = MODE_EXPORT_BROWSE;
+    g_app.dirty = 1;
+}
+
+// Enter opens the selected folder and s asks to write the key in the one shown.
+void export_browser_key(const tui_key_t *key) {
+    browser_t *b = &g_app.browser;
+    if (key->type == TUI_KEY_CHAR && key->ch_len == 1 && key->ch[0] == '~') { browser_home(); g_app.dirty = 1; return; }
+    if (key->type == TUI_KEY_CHAR && key->ch_len == 1 && key->ch[0] == 's') { begin_export_ask(b->path); return; }
+    list_key_t k = list_key(key);
+    switch (k) {
+        case LIST_LEFT: browser_up(); break;
+        case LIST_CHOOSE:
+        case LIST_RIGHT: {
+            if (b->n_items == 0) break;
+            const dir_entry_t *sel = &b->items[b->selected];
+            if (!sel->is_dir) break;
+            char full[1200]; browser_entry_path(b, sel, full, sizeof full);
+            browser_load(b, full);
+            break;
+        }
+        case LIST_BACK:
+        case LIST_CLOSE: g_app.mode = g_app.key.export_back; break;
+        default: list_move(k, &b->selected, b->n_items); break;
+    }
+    g_app.dirty = 1;
+}
+
 // ---- drawing its pages ----
 
 // The browser as a tree: the folder shown and the folders above it, one level per row, then its
@@ -543,4 +582,15 @@ void render_save_browser(int rows_n, int cols_n, const char *clock, const tui_ba
     if (b->n_items > 0 && b->items[b->selected].is_dir) browser_folder_help(b, open_help, sizeof open_help);
     snprintf(help, sizeof help, "s saves %s in %s.%s%s", what, b->path, open_help[0] ? " " : "", open_help);
     browser_render(&v, rows_n, cols_n, title, clock, help, NULL, bar);
+}
+
+void render_export_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar) {
+    const browser_t *b = &g_app.browser;
+    static browser_page_t v;
+    browser_lay_out(&v, rows_n, cols_n, IDENT_NONE);
+    char help[1400], open_help[700] = "";
+    if (b->n_items > 0 && b->items[b->selected].is_dir) browser_folder_help(b, open_help, sizeof open_help);
+    snprintf(help, sizeof help, "s writes your signing key to a new %s in %s, after asking.%s%s", key_export_name(),
+             b->path, open_help[0] ? " " : "", open_help);
+    browser_render(&v, rows_n, cols_n, "Export signing key", clock, help, NULL, bar);
 }

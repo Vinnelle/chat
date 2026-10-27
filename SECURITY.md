@@ -81,6 +81,9 @@ session id and password, whether they were invited or the password leaked.
   work out the room of every call between the two of you (`:call`), past and future, and wait there
   posing as the key's owner. They can't read what was said before: the sessions' keys are
   ephemeral.
+- **An exported signing key isn't encrypted.** `:exportkey` writes it the way age and gpg read it,
+  to a file only you can open. Anyone who reads that file, or a backup of it, can sign as you and
+  find your calls. Delete it once it's loaded where it's needed, though deleting isn't erasing.
 - **A kept room is as safe as the save.** Anyone who can open the save can join the rooms it keeps
   (`:keep`), with their ids and passwords. The save's passphrase then guards every one of them.
   With **Reopen sessions** on, that's every session you have open, and `Ctrl+C` doesn't leave them:

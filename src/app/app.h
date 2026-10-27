@@ -103,9 +103,11 @@ typedef enum {
     MODE_SIGN_BROWSE,
     MODE_SEND_BROWSE,
     MODE_SAVE_BROWSE,
+    MODE_EXPORT_BROWSE,
     MODE_FILES,
     MODE_FILE_VIEW,
     MODE_FILE_ASK,
+    MODE_EXPORT_ASK,
     MODE_SIGN_PASTE,
     MODE_SIGN_PASSWORD,
     MODE_SIGN_PATH,
@@ -198,6 +200,8 @@ typedef struct {
         identity_source_t load_kind;   // AGE or PGP: what the key file browser, the path field or the paste page takes
         char path[KEY_PATH_MAX];       // a key from a file (KEY_FILE): the file's full path, or "" if it isn't known
         int path_from_browser;         // the path field was opened from the browser, so Esc goes back there
+        app_mode_t export_back;        // where :exportkey's browser goes back to
+        char export_path[KEY_PATH_MAX]; // the new file its box asks to write the key to
     } key;
     struct {
         int launch;
@@ -402,7 +406,7 @@ typedef enum {
     SET_TOR_LAUNCH, SET_TOR_PATH, SET_TOR_SOCKS, SET_TOR_CONTROL, SET_TOR_PASSWORD, SET_BRIDGES, SET_TRANSPORTS,
     SET_TOR_STATE,
     SET_NOSTR, SET_RELAYS,
-    SET_NICK, SET_COLOUR, SET_SIGN, SET_AGE_RECIPIENT, SET_PGP_PUBKEY, SET_AUTOSAVE, SET_DEVICE_LOCK,
+    SET_NICK, SET_COLOUR, SET_SIGN, SET_AGE_RECIPIENT, SET_PGP_PUBKEY, SET_EXPORT_KEY, SET_AUTOSAVE, SET_DEVICE_LOCK,
     SET_SECURITY_KEY, SET_AUTHENTICATOR, SET_DESTROY, SET_SHADOW,
     SET_LOCK, SET_LOCK_KEY, SET_PANIC_KEY, SET_PANIC_WIPE, SET_PANIC_HISTORY, SET_SANDBOX, SET_UPDATER,
     SET_VERIFY, SET_FILE_LIMIT, SET_FAST_FILES, SET_NOISE, SET_NOTIFY, SET_PREVIEW, SET_HISTORY, SET_REOPEN, SET_NET, SET_PORT,
@@ -578,6 +582,11 @@ void copy_pgp_public_key(void);
 int pgp_key_made_here(void);
 void pgp_public_key(char armor[PGP_ARMOR_MAX], uint8_t fp[PGP_FP_LEN]);
 void show_identity_result(void);
+const char *key_export_refusal(void);
+const char *key_export_name(void);
+void begin_export_ask(const char *dir);
+void export_key_yes(void);
+void export_key_no(void);
 
 #include "app/sessions/sessions.h"
 #include "app/screen/screen.h"

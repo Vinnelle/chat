@@ -332,10 +332,11 @@ int pgp_key_made_here(void) {
     return g_app.identity_source == IDENT_PGP && (g_app.key.origin == KEY_MADE || g_app.key.origin == KEY_DERIVED);
 }
 
+static const char *pgp_uid_nick(void) { return g_app.nick[0] ? g_app.nick : "chat"; }
+
 // The PGP key made here, armored, with the nick as it is now in its user id.
 void pgp_public_key(char armor[PGP_ARMOR_MAX], uint8_t fp[PGP_FP_LEN]) {
-    pgp_export_public_key(&g_app.identity, g_app.nick[0] ? g_app.nick : "chat", g_app.key.pgp_created,
-                          armor, PGP_ARMOR_MAX, fp);
+    pgp_export_public_key(&g_app.identity, pgp_uid_nick(), g_app.key.pgp_created, armor, PGP_ARMOR_MAX, fp);
 }
 
 void show_identity_result(void) {
@@ -360,4 +361,89 @@ void show_identity_result(void) {
             push_log("%s", line);
         }
     }
+}
+
+// ---- :exportkey ----
+
+// A PGP key from a file or a paste came with user ids and signatures chat doesn't keep, so only where
+// it came from has the whole key.
+const char *key_export_refusal(void) {
+    if (g_app.identity_source == IDENT_NONE) return "no signing key in use - :set sign picks or makes one";
+    if (g_app.identity_source == IDENT_PGP && !pgp_key_made_here())
+        return "only a PGP key made here is exported - gpg --export-secret-keys gives one from a file or a paste";
+    return NULL;
+}
+
+const char *key_export_name(void) {
+    return g_app.identity_source == IDENT_AGE ? "age-secret-key.txt" : "pgp-secret-key.asc";
+}
+
+// The first of the name, "name (2).ext" and so on that nothing in dir has, as a saved file is named.
+#define EXPORT_NAME_TRIES 100
+static int export_free_path(const char *dir, char *out, size_t cap) {
+    const char *name = key_export_name(), *dot = strrchr(name, '.');
+    file_info_t info;
+    for (int k = 1; k < EXPORT_NAME_TRIES; k++) {
+        char file[64];
+        if (k == 1) copy_str(file, name, sizeof file);
+        else snprintf(file, sizeof file, "%.*s (%d)%s", (int)(dot - name), name, k, dot);
+        path_join(out, cap, dir, file);
+        if (platform_file_info(out, &info) != 0) return 0;
+    }
+    return -1;
+}
+
+// s on :exportkey's browser: the box asks before anything is written.
+void begin_export_ask(const char *dir) {
+    if (export_free_path(dir, g_app.key.export_path, sizeof g_app.key.export_path) != 0) {
+        note("%.120s has no free name for the key - pick another folder", dir);
+        return;
+    }
+    g_app.mode = MODE_EXPORT_ASK;
+    g_app.dirty = 1;
+}
+
+// An AGE key as age-keygen writes it, with its recipient as a comment, or the PGP key made here with
+// its secret.
+static int export_key_text(char *out, size_t cap) {
+    if (g_app.identity_source == IDENT_AGE) {
+        char recipient[AGE_RECIPIENT_STRLEN + 1], key[AGE_SECRET_KEY_STRLEN + 1];
+        age_export_recipient(&g_app.identity, recipient);
+        age_export_secret_key(&g_app.identity, key);
+        snprintf(out, cap, "# public key: %s\n%s\n", recipient, key);
+        crypto_wipe(key, sizeof key);
+        return 0;
+    }
+    uint8_t fp[PGP_FP_LEN];
+    return pgp_export_secret_key(&g_app.identity, pgp_uid_nick(), g_app.key.pgp_created, out, cap, fp);
+}
+
+// Unbuffered, so stdio's buffer never holds a copy of the key. A file only partly written is removed.
+void export_key_yes(void) {
+    char shown[KEY_PATH_MAX], text[PGP_ARMOR_MAX];
+    tilde_path(g_app.key.export_path, shown, sizeof shown);
+    FILE *f = export_key_text(text, sizeof text) == 0 ? platform_create_new(g_app.key.export_path) : NULL;
+    int ok = f != NULL;
+    if (f) {
+        size_t n = strlen(text);
+        ok = setvbuf(f, NULL, _IONBF, 0) == 0 && fwrite(text, 1, n, f) == n;
+        ok = fclose(f) == 0 && ok;
+        if (!ok) platform_remove(g_app.key.export_path);
+    }
+    crypto_wipe(text, sizeof text);
+    g_app.dirty = 1;
+    if (!ok) {
+        g_app.mode = MODE_EXPORT_BROWSE;
+        note("couldn't write %.100s%s", shown, g_app.sandboxed & PLATFORM_SANDBOX_FILES
+             ? " - the sandbox only lets chat write in the folders in your home that aren't hidden" : "");
+        return;
+    }
+    g_app.mode = g_app.key.export_back;
+    note("your signing key is in %.100s, which only you can open - :set sign %s:PATH loads it elsewhere", shown,
+         g_app.identity_source == IDENT_AGE ? "age" : "pgp");
+}
+
+void export_key_no(void) {
+    g_app.mode = MODE_EXPORT_BROWSE;
+    g_app.dirty = 1;
 }

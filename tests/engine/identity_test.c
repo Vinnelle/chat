@@ -118,6 +118,31 @@ void test_identity_keys(double *t) {
     CHECK(memcmp(fp, fp2, sizeof fp) == 0, "the same PGP key exported twice changed fingerprint");
     CHECK(strstr(armor, "-----END PGP PUBLIC KEY BLOCK-----") != NULL, "the PGP public key has no END line");
 
+    // :exportkey's keys read back as the same key, an AGE key in either form.
+    uint8_t x_seed[PRIV_LEN], x_split[PRIV_LEN];
+    identity_to_x25519(&seeded, x_seed);
+    identity_to_x25519(&split, x_split);
+    CHECK(memcmp(x_seed, x_split, sizeof x_seed) == 0, "a key's scalar form didn't give back its X25519 secret");
+    char age_key[AGE_SECRET_KEY_STRLEN + 1];
+    identity_keypair_t back;
+    age_export_secret_key(&seeded, age_key);
+    CHECK(strlen(age_key) == AGE_SECRET_KEY_STRLEN && age_import_secret_key_text(age_key, &back) == 0
+          && memcmp(back.pub, seeded.pub, sizeof back.pub) == 0, "a key from a seed didn't come back as an AGE key");
+    age_export_secret_key(&id, age_key);
+    CHECK(age_import_secret_key_text(age_key, &back) == 0 && memcmp(back.pub, id.pub, sizeof back.pub) == 0,
+          "an age-keygen key didn't come back as an AGE key");
+    CHECK(pgp_export_secret_key(&seeded, "alice", 1790000000u, armor, sizeof armor, fp2) == 0
+          && memcmp(fp, fp2, sizeof fp) == 0, "the PGP secret key's fingerprint isn't its public key's");
+    CHECK(strstr(armor, PGP_PRIVATE_END) != NULL && pgp_import_secret_key_text(armor, &back) == 0
+          && memcmp(&back, &seeded, sizeof back) == 0, "the PGP secret key didn't come back");
+    CHECK(pgp_export_secret_key(&split, "alice", 1790000000u, armor, sizeof armor, fp2) != 0,
+          "a key with no seed was written as a PGP secret key");
+    sodium_memzero(x_seed, sizeof x_seed);
+    sodium_memzero(x_split, sizeof x_split);
+    sodium_memzero(age_key, sizeof age_key);
+    sodium_memzero(&back, sizeof back);
+    sodium_memzero(armor, sizeof armor);
+
     // A key made from a password has to come out the same on every run and in every version, or
     // everyone's established identity changes. The answer is from Python's cryptography package:
     // Argon2id (4 passes, 512 MiB, one lane) over a BLAKE2b-128 salt of the label and device id.

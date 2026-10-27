@@ -95,9 +95,12 @@ void begin_send_browse(int asis);
 void send_browser_key(const tui_key_t *key);
 void begin_save_browse(int num, int anyway);
 void save_browser_key(const tui_key_t *key);
+void begin_key_export(void);
+void export_browser_key(const tui_key_t *key);
 void render_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar);
 void render_send_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar);
 void render_save_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar);
+void render_export_browser(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar);
 
 // clipboard.c
 // Public text goes on the clipboard with osc52_copy. A secret goes with copy_secret, and comes off

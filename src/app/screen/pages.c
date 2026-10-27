@@ -76,6 +76,7 @@ void settings_key(const tui_key_t *key) {
             if (steps) setting_step(d->id, 1);
             else if (d && d->id == SET_SIGN) begin_sign();
             else if (d && d->id == SET_SHADOW) begin_shadow();
+            else if (d && d->id == SET_EXPORT_KEY) begin_key_export();
             break;
         case LIST_CHOOSE:
             if (!d) settings_done();
@@ -85,6 +86,7 @@ void settings_key(const tui_key_t *key) {
             else if (d->id == SET_SHADOW) begin_shadow();
             else if (d->id == SET_AGE_RECIPIENT) copy_age_recipient();
             else if (d->id == SET_PGP_PUBKEY) copy_pgp_public_key();
+            else if (d->id == SET_EXPORT_KEY) begin_key_export();
             break;
         case LIST_BACK:
         case LIST_CLOSE: settings_done(); break;
@@ -224,6 +226,7 @@ void render_settings(int rows_n, int cols_n, const char *clock, const tui_bar_t 
             snprintf(help, sizeof help, "%s%s", recipient, d->help);
         if (d->values && !greyed) snprintf(usage, sizeof usage, ":set %s %s", d->key, d->values);
         else if (d->kind == K_SECRET) snprintf(usage, sizeof usage, ":set %s", d->key);
+        else if (d->id == SET_EXPORT_KEY) copy_str(usage, ":exportkey", sizeof usage);
     }
     const char *nav[8];
     char title[64];

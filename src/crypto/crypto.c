@@ -665,6 +665,33 @@ int identity_from_x25519(const uint8_t secret[PRIV_LEN], identity_keypair_t *idk
     return rc;
 }
 
+// L, the order of the base point, little-endian.
+static const uint8_t ED25519_L[SCALAR_LEN] = {
+    0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
+};
+
+void identity_to_x25519(const identity_keypair_t *idkp, uint8_t secret[PRIV_LEN]) {
+    if (!idkp->scalar) { crypto_sign_ed25519_sk_to_curve25519(secret, idkp->priv); return; }
+    // The clamped secret is the scalar plus a multiple of L below 8L, and the only one of those that's
+    // a multiple of 8 from 2^254 up to 2^255. All eight are tried, so the time doesn't tell which.
+    uint8_t k[SCALAR_LEN];
+    memcpy(k, idkp->priv, SCALAR_LEN);
+    memset(secret, 0, PRIV_LEN);
+    for (int m = 0; m < 8; m++) {
+        unsigned ok = ((k[0] & 7) == 0) & ((k[SCALAR_LEN - 1] >> 6) == 1);
+        uint8_t mask = (uint8_t)(0u - ok);
+        for (int i = 0; i < SCALAR_LEN; i++) secret[i] |= k[i] & mask;
+        unsigned carry = 0;
+        for (int i = 0; i < SCALAR_LEN; i++) {
+            carry += (unsigned)k[i] + ED25519_L[i];
+            k[i] = (uint8_t)carry;
+            carry >>= 8;
+        }
+    }
+    sodium_memzero(k, sizeof k);
+}
+
 // RFC 8032's signing, from the scalar and nonce key where libsodium would derive both from a seed.
 static void sign_with_scalar(const identity_keypair_t *idkp, const uint8_t *msg, size_t len,
                              uint8_t sig[ID_SIGN_LEN]) {

@@ -3,6 +3,16 @@
 All notable changes to chat, newest first. Each beta (`X.Y.Z-beta.N`) has a section of its own until
 its release, which folds them into one. A release's notes on GitHub are its section here.
 
+## Unreleased
+
+### Added
+- `:exportkey`, or **Export signing key** in settings, writes your signing key to a new file in a
+  folder you pick, after a box warns that it isn't encrypted: an AGE key as `age-keygen` writes
+  one, a PGP key made here armored, as `gpg --export-secret-keys` writes it. It's the same key and
+  fingerprint, so another device can pick the file and peers who verified you still see you as
+  verified. The file is only yours to open, and nothing already there is written over. A PGP key
+  from a file or a paste isn't exported, since chat doesn't keep its user ids and signatures.
+
 ## 0.5.1
 
 ### Added

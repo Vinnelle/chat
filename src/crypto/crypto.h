@@ -285,6 +285,9 @@ uint32_t totp_code(const uint8_t *secret, size_t len, uint64_t step);
 // An X25519 secret (an AGE key's) as an Ed25519 identity. The public key converts back to the same
 // X25519 public key, so the AGE recipient shown is the key's own. idkp is only changed on success.
 int identity_from_x25519(const uint8_t secret[PRIV_LEN], identity_keypair_t *idkp);
+// The other way: the X25519 secret that gives idkp back, clamped. From a seed, it's the one
+// crypto_sign_ed25519_sk_to_curve25519 gives.
+void identity_to_x25519(const identity_keypair_t *idkp, uint8_t secret[PRIV_LEN]);
 
 // Ed25519 over msg, from either form of key.
 void identity_sign_bytes(const identity_keypair_t *idkp, const uint8_t *msg, size_t len, uint8_t sig[ID_SIGN_LEN]);

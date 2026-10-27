@@ -15,6 +15,9 @@
 
 void age_export_recipient(const identity_keypair_t *idkp, char out[AGE_RECIPIENT_STRLEN + 1]);
 
+// idkp as an AGE secret key, which age_import_secret_key_text reads back to the same public key.
+void age_export_secret_key(const identity_keypair_t *idkp, char out[AGE_SECRET_KEY_STRLEN + 1]);
+
 // The first AGE secret key in text (an identity file, comments and all), or in the file at path.
 // idkp is only changed on success.
 int age_import_secret_key_text(const char *text, identity_keypair_t *idkp);
