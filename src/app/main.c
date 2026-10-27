@@ -3,8 +3,8 @@
 #include "app/app.h"
 
 static const char *USAGE =
-    "usage: chat [--nick NAME] [--colour NAME|#HEX] [--identity age|pgp[:KEYFILE]] [--simple]\n"
-    "            [--save NAME]\n"
+    "usage: chat [--nick NAME] [--colour NAME|#HEX] [--identity age|pgp[-nonick|:KEYFILE]]\n"
+    "            [--simple] [--save NAME]\n"
     "            [--routing udp|tor] [--nodht] [--noipv6] [--nolan] [--noportmap]\n"
     "            [--nostr off|fallback|always] [--relay wss://HOST ...]\n"
     "            [--tor-launch auto|always|never] [--tor-path PATH] [--tor-socks HOST:PORT]\n"
@@ -153,10 +153,12 @@ static const char *USAGE =
     "              AGE recipient (age1...) others can `age -r` encrypt files to.\n"
     "              pgp: the same key as PGP, whose public key others can import.\n"
     "              Both ask for a password (or read CHAT_SIGN_PASSWORD) and make the key\n"
-    "              from it and this device's machine id. The same password on the same\n"
-    "              device and OS always gives the same key, so use the same password every\n"
-    "              time to keep your signing identity. A blank password gives a new key\n"
-    "              each run.\n"
+    "              from it, your nick and this device's machine id. The same password\n"
+    "              and nick on the same device and OS always give the same key, so keep\n"
+    "              both to keep your signing identity; a new nick asks for the password\n"
+    "              again. A blank password gives a new key each run.\n"
+    "              age-nonick, pgp-nonick: the key from the password and machine id\n"
+    "              alone, as earlier versions made it, whatever your nick.\n"
     "              age:KEYFILE, pgp:KEYFILE: sign with your own key instead, either an\n"
     "              identity file from age-keygen or an UNENCRYPTED armored EdDSA secret key\n"
     "              from gpg. chat needs the secret key because it signs with it; it stays\n"
@@ -596,6 +598,7 @@ static int run_tui(const char *explicit_session, char *explicit_password, uint16
         fprintf(stderr, "chat: this terminal can't do the full-screen UI, using --simple instead\n");
         if (g_app.install.unlock_at_start) unlock_at_start(0);
         if (!g_app.nick[0]) random_nickname(g_app.nick, sizeof g_app.nick);
+        start_identity(0);
         return run_plain(explicit_session, explicit_password, explicit_port, peer_args, n_peer_args);
     }
     open_tui(explicit_session, explicit_password, explicit_port, peer_args, n_peer_args);
@@ -709,8 +712,9 @@ static int read_options(int argc, char **argv, options_t *o) {
             o->has_color = 1;
         } else if (strcmp(key, "identity") == 0 && i + 1 < argc) {
             const char *v = argv[++i];
-            if ((strncmp(v, "age", 3) != 0 && strncmp(v, "pgp", 3) != 0) || (v[3] != '\0' && v[3] != ':')) {
-                fprintf(stderr, "chat: --identity takes age, pgp, age:KEYFILE or pgp:KEYFILE\n");
+            if ((strncmp(v, "age", 3) != 0 && strncmp(v, "pgp", 3) != 0)
+                || (v[3] != '\0' && v[3] != ':' && strcmp(v + 3, "-nonick") != 0)) {
+                fprintf(stderr, "chat: --identity takes age, pgp, age-nonick, pgp-nonick, age:KEYFILE or pgp:KEYFILE\n");
                 return 1;
             }
             copy_str(o->identity, v, sizeof o->identity);
@@ -762,6 +766,7 @@ static void lock_app_secrets(void) {
     crypto_lock(&g_app.lock.input, sizeof g_app.lock.input);
     crypto_lock(g_app.autostart.password, sizeof g_app.autostart.password);
     crypto_lock(g_app.install.pass, sizeof g_app.install.pass);
+    crypto_lock(g_app.key.start_password, sizeof g_app.key.start_password);
 }
 
 static int pick_save(const options_t *o) {
@@ -822,13 +827,14 @@ static void identity_from_options(const options_t *o) {
         const char *path = o->identity[3] == ':' ? o->identity + 4 : NULL;
         if (!path) {
             // Like a session's password: from the environment, otherwise asked for, otherwise blank.
-            char pw[MAX_PASSWORD + 1] = "";
-            if (platform_env_take("CHAT_SIGN_PASSWORD", pw, sizeof pw) != 0 && term_is_tty())
-                term_read_password("signing key password (always the same one keeps the same key; blank for a "
-                                   "new key): ", pw, sizeof pw);
-            const char *why = make_identity(kind, pw);
-            crypto_wipe(pw, sizeof pw);
-            if (why) fprintf(stderr, "chat: %s\n", why);
+            char *pw = g_app.key.start_password;
+            size_t cap = sizeof g_app.key.start_password;
+            const char *prompt = o->identity[3]
+                ? "signing key password (always the same one keeps the same key; blank for a new key): "
+                : "signing key password (always the same one, with the same nick, keeps the same key; blank for a "
+                  "new key): ";
+            if (platform_env_take("CHAT_SIGN_PASSWORD", pw, cap) != 0 && term_is_tty()) term_read_password(prompt, pw, cap);
+            g_app.key.start_pending = 1;
         } else if (!path[0] || load_key_file(kind, path) != 0)
             fprintf(stderr, "chat: could not load %s identity from %s\n", kind == IDENT_AGE ? "an AGE" : "a PGP",
                     path[0] ? path : "(no path given)");
@@ -897,6 +903,7 @@ int main(int argc, char **argv) {
 
     if (!interactive) {
         if (!g_app.nick[0]) random_nickname(g_app.nick, sizeof g_app.nick);
+        start_identity(0);
         return run_plain(o->session[0] ? o->session : NULL, NULL, o->port, o->peers, o->n_peers);
     }
 

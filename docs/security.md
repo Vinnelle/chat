@@ -134,42 +134,53 @@ so that's cleared too.
 Identity signing is optional, and lets peers check who they're talking to. Pick it under
 **Signing identity** on the settings page (or `:set sign`), or with `--identity`:
 
-- `age`: an Ed25519 identity made from a password, with an `age1...` recipient others can
-  `age -r` encrypt files to (settings shows it and copies it to the clipboard)
+- `age`: an Ed25519 identity made from a password and your nick, with an `age1...` recipient
+  others can `age -r` encrypt files to (settings shows it and copies it to the clipboard)
 - `pgp`: the same key as PGP. Settings copies the public key for others to `gpg --import`
+- `age-nonick`, `pgp-nonick`: the same, made from the password without your nick, as earlier
+  versions made them
 - `age:KEYFILE`: sign with your own AGE key, as `age-keygen` writes it. Your `age1...` recipient
   doesn't change
 - `pgp:KEYFILE`: sign with an unencrypted armored EdDSA secret key exported from gpg
 
 The picker in settings lists **Off**, **AGE** and **PGP**. Each has **Native** (a key made
-there), a key file (picked in a file browser, or its path typed) and a pasted key. chat needs
+there), **Native, without nick**, a key file (picked in a file browser, or its path typed) and a pasted key. chat needs
 the secret key of your own key because it signs your handshakes with it, and only the secret key
 can make a signature. It stays in memory and is never sent: peers get the public key and the
 signatures. For a key file, `:install` saves the file's path, not the key. A pasted key is only
 written to disk by `:install`, sealed (see [Installing](saves.md)).
 
 A **Native** key asks for a password. `--identity age` or `pgp` asks at startup, or reads
-`CHAT_SIGN_PASSWORD`. The key comes from Argon2id over that password and the OS install's
-machine id (`/etc/machine-id`, or `MachineGuid` on Windows). So the same password on the same
-device and OS always gives the same key and fingerprint, and nothing is stored unless you
-`:install`.
-**Use the same password every time if you want to keep your signing identity.** A different
-password, or a typo, gives a different key and peers see a new fingerprint. AGE and PGP give the
-same key for the same password. Reinstalling the OS changes the machine id, so it changes the
-key too.
+`CHAT_SIGN_PASSWORD`, and makes the key once your nick is settled: `--nick`, the one `:install`
+saved, or else a random one. The key comes from Argon2id over that password, your nick and the
+OS install's machine id (`/etc/machine-id`, or `MachineGuid` on Windows). So the same password
+and nick on the same device and OS always give the same key and fingerprint, and nothing is
+stored unless you `:install`.
+**Use the same password and nick every time if you want to keep your signing identity.** A
+different password or nick, or a typo, gives a different key and peers see a new fingerprint.
+The nick counts exactly as shown, so `Alice` and `alice` give different keys. Changing your nick
+opens a box that asks for the password, to make the key again with the new nick; `Esc` keeps
+the key you have, which the password then only gives back with the old nick. AGE and PGP give
+the same key for the same password and nick. Reinstalling the OS changes the machine id, so it
+changes the key too.
 
-The machine id isn't secret, any program on the device can read it, so the password is the
-only thing protecting the key. Someone with your machine id can brute force passwords against
-the public key you show peers, so use a long one. A blank password gives a random key that only
-lasts until chat exits.
+**Native, without nick** (`age-nonick`, `pgp-nonick`) makes the key from the password and
+machine id alone, as earlier versions of chat made every **Native** key. The same password gives
+back a key made with one of those, whatever your nick is now, and changing your nick doesn't ask
+for anything.
+
+The machine id and your nick aren't secret: any program on the device can read the machine id,
+and peers see your nick. So the password is the only thing protecting the key. Someone with your
+machine id can brute force passwords against the public key you show peers, so use a long one. A
+blank password gives a random key that only lasts until chat exits.
 
 `:exportkey`, or **Export signing key** under it in settings, writes the key in use to a new file
 in a folder you pick, after asking. An AGE key comes out as `age-keygen` writes one
 (`age-secret-key.txt`), and a PGP key made here armored, as `gpg --export-secret-keys` writes a
 key with no passphrase (`pgp-secret-key.asc`). It's the same key, with the same fingerprint, so
 peers who verified you still see you as verified when another device picks the file
-(`:set sign age:PATH`). That's how a **Native** key, which only comes back from its password on
-the same device and OS, or a random one, outlives the run. An AGE key of your own comes out the
+(`:set sign age:PATH`). That's how a **Native** key, which only comes back from its password (and
+nick) on the same device and OS, or a random one, outlives the run. An AGE key of your own comes out the
 way age uses it, so its text can differ from your file's while the key is the same. A PGP key
 from a file or a paste isn't exported: chat keeps only its secret part, not its user ids and
 signatures, so `gpg --export-secret-keys` gives the whole key.

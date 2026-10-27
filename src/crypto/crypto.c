@@ -430,9 +430,21 @@ void gen_identity_keypair(identity_keypair_t *kp) {
     kp->scalar = 0;
 }
 
-int identity_from_password(const char *password, const char *device_id, identity_keypair_t *idkp) {
+// The device id's NUL goes in too, so no other device id and nick give the same salt.
+static void identity_salt(const char *device_id, const char *nick, uint8_t salt[crypto_pwhash_SALTBYTES]) {
+    if (!nick) { pwhash_salt(ID_KDF_LABEL, device_id, salt); return; }
+    crypto_generichash_state st;
+    crypto_generichash_init(&st, NULL, 0, crypto_pwhash_SALTBYTES);
+    hash_str(&st, ID_NICK_KDF_LABEL);
+    crypto_generichash_update(&st, (const unsigned char *)device_id, strlen(device_id) + 1);
+    hash_str(&st, nick);
+    crypto_generichash_final(&st, salt, crypto_pwhash_SALTBYTES);
+    sodium_memzero(&st, sizeof st);
+}
+
+int identity_from_password(const char *password, const char *device_id, const char *nick, identity_keypair_t *idkp) {
     uint8_t salt[crypto_pwhash_SALTBYTES];
-    pwhash_salt(ID_KDF_LABEL, device_id, salt);
+    identity_salt(device_id, nick, salt);
 
     uint8_t seed[crypto_sign_SEEDBYTES];
     if (pwhash(seed, sizeof seed, password, salt) != 0) return -1;

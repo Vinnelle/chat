@@ -116,6 +116,7 @@ static cmd_result_t app_set(void *ctx, const char *arg) {
     if (d->id == SET_SIGN) {
         static const struct { const char *name; sign_pick_t pick; } SIGN_VALUES[] = {
             { "off", PICK_OFF }, { "age", PICK_AGE_MADE }, { "pgp", PICK_PGP_MADE },
+            { "age-nonick", PICK_AGE_NO_NICK }, { "pgp-nonick", PICK_PGP_NO_NICK },
         };
         int pick = -1;
         for (size_t i = 0; i < COUNT_OF(SIGN_VALUES); i++)
@@ -132,7 +133,10 @@ static cmd_result_t app_set(void *ctx, const char *arg) {
         }
         settings_open_at(SET_SIGN);
         begin_sign();
-        if (pick < 0) { note("sign takes off, age, pgp, age:PATH or pgp:PATH - a pasted key is chosen here"); return CMD_OK; }
+        if (pick < 0) {
+            note("sign takes off, age, pgp, age-nonick, pgp-nonick, age:PATH or pgp:PATH - a pasted key is chosen here");
+            return CMD_OK;
+        }
         // The password is typed on the page, where it's hidden.
         g_app.key.sel = pick;
         sign_pick(pick);

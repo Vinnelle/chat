@@ -13,6 +13,16 @@ its release, which folds them into one. A release's notes on GitHub are its sect
   verified. The file is only yours to open, and nothing already there is written over. A PGP key
   from a file or a paste isn't exported, since chat doesn't keep its user ids and signatures.
 
+### Changed
+- A **Native** signing key is made from your nick too, as well as the password and the machine id,
+  so the same password gives a different key for each nick. `--identity age` and `pgp` make the
+  key once the nick is settled, so a saved nick counts. Changing your nick opens a box that asks
+  for the password to make the key again with the new one, and `Esc` keeps the key you have.
+  A Native key made by an earlier version comes out differently now: pick **Native, without
+  nick** (`:set sign age-nonick` or `pgp-nonick`, `--identity age-nonick` or `pgp-nonick`) to
+  make it from the password alone, as before. A key `:install` saved stays as it was saved, but
+  one made with the nick can't be opened by earlier versions.
+
 ## 0.5.1
 
 ### Added

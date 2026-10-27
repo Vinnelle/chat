@@ -550,9 +550,9 @@ static void join_password_box(tui_dialog_t *d, tui_para_t *paras) {
 
 static void sign_password_box(tui_dialog_t *d, tui_para_t *paras) {
     d->title = g_app.key.load_kind == IDENT_AGE ? "NATIVE AGE KEY" : "NATIVE PGP KEY";
-    d->n_text = add_para(paras, 0, TUI_P_TEXT, SIGN_PASSWORD_HELP);
-    d->placeholder = "password (blank: a new key until chat exits)";
-    d->keys = "enter make the key" DOT_SEP "esc back";
+    d->n_text = add_para(paras, 0, TUI_P_TEXT, sign_password_help());
+    d->placeholder = g_app.key.remake ? "password" : "password (blank: a new key until chat exits)";
+    d->keys = g_app.key.remake ? "enter make the key" DOT_SEP "esc keep it" : "enter make the key" DOT_SEP "esc back";
 }
 
 static void sign_path_box(tui_dialog_t *d, tui_para_t *paras) {

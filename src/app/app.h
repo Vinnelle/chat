@@ -146,8 +146,9 @@ typedef enum {
 // :install is making, or to open a save, at the start or for :install.
 typedef enum { KP_FACTOR, KP_NEW_SAVE, KP_UNLOCK, KP_INSTALL_UNLOCK } key_purpose_t;
 
-// KEY_MADE is a new random key, KEY_DERIVED one made from a password on this device.
-typedef enum { KEY_MADE, KEY_DERIVED, KEY_FILE, KEY_PASTED } key_origin_t;
+// KEY_MADE is a new random key, KEY_DERIVED one made from a password on this device, and
+// KEY_DERIVED_NICK from a password and the nick. A save keeps the number, so new ones go last.
+typedef enum { KEY_MADE, KEY_DERIVED, KEY_FILE, KEY_PASTED, KEY_DERIVED_NICK } key_origin_t;
 
 // A PGP key's fingerprint covers its creation time, so a key made from a password always
 // gets this one (2026-01-01) to keep its fingerprint.
@@ -198,6 +199,12 @@ typedef struct {
         key_origin_t origin;           // where the identity in use came from
         uint32_t pgp_created;          // a PGP key made here: its creation time, which its fingerprint covers
         identity_source_t load_kind;   // AGE or PGP: what the key file browser, the path field or the paste page takes
+        int load_nick;                 // the password box makes a key with the nick
+        int remake;                    // the password box asks again because the nick changed, and Esc keeps the key
+        app_mode_t remake_back;        // where it goes back to then
+        char nick[MAX_NICK + 1];       // a key made with the nick (KEY_DERIVED_NICK): that nick
+        int start_pending;             // --identity's password waits for the nick (start_identity)
+        char start_password[MAX_PASSWORD + 1];
         char path[KEY_PATH_MAX];       // a key from a file (KEY_FILE): the file's full path, or "" if it isn't known
         int path_from_browser;         // the path field was opened from the browser, so Esc goes back there
         app_mode_t export_back;        // where :exportkey's browser goes back to
@@ -435,12 +442,12 @@ typedef struct {
 
 // ---- the signing identity, chosen on a page under the settings ----
 
-// Off, then for each of AGE and PGP: a key made here, a key file picked in the browser, a key file
-// whose path is typed, and a key pasted in.
+// Off, then for each of AGE and PGP: a key made here (with the nick, then without), a key file
+// picked in the browser, a key file whose path is typed, and a key pasted in.
 typedef enum {
     PICK_OFF,
-    PICK_AGE_MADE, PICK_AGE_FILE, PICK_AGE_PATH, PICK_AGE_PASTE,
-    PICK_PGP_MADE, PICK_PGP_FILE, PICK_PGP_PATH, PICK_PGP_PASTE,
+    PICK_AGE_MADE, PICK_AGE_NO_NICK, PICK_AGE_FILE, PICK_AGE_PATH, PICK_AGE_PASTE,
+    PICK_PGP_MADE, PICK_PGP_NO_NICK, PICK_PGP_FILE, PICK_PGP_PATH, PICK_PGP_PASTE,
     N_PICKS
 } sign_pick_t;
 
@@ -560,12 +567,14 @@ extern const char AGE_PASTE_HELP[];
 extern const char PGP_PASTE_HELP[];
 extern const char AGE_PATH_HELP[];
 extern const char PGP_PATH_HELP[];
-extern const char SIGN_PASSWORD_HELP[];
 int sign_row_in_use(void);
 void begin_sign(void);
 void identity_chosen(void);
 void say_key_saved_state(void);
-const char *make_identity(identity_source_t kind, const char *password);
+const char *make_identity(identity_source_t kind, const char *password, int with_nick);
+void start_identity(int on_screen);
+void nick_changed(void);
+const char *sign_password_help(void);
 void end_sign_password(void);
 void commit_sign_password(void);
 void tilde_path(const char *path, char *out, size_t cap);

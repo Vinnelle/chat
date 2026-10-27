@@ -71,7 +71,7 @@ const setting_def_t SETTINGS[] = {
     { SET_NICK, "Profile", NULL, "nick", "Nickname", K_TEXT, "NAME", "Your name in every session." },
     { SET_COLOUR, NULL, NULL, "colour", "Colour", K_TEXT, "NAME|#RRGGBB",
       "Your colour in every session. h/l step through the palette, and Enter takes a name or #RRGGBB." },
-    { SET_SIGN, NULL, "Keys", "sign", "Signing identity", K_ACTION, "off|age|pgp|age:PATH|pgp:PATH",
+    { SET_SIGN, NULL, "Keys", "sign", "Signing identity", K_ACTION, "off|age|pgp|age-nonick|pgp-nonick|age:PATH|pgp:PATH",
       "A key that signs your handshakes so peers can check it's you. Either an AGE or PGP key made here from a "
       "password, or your own key from a file or pasted in. Enter picks one, replaces it or turns signing off. "
       "Kept in memory only, unless :install saves it: a key file's path, or any other key sealed to disk." },
@@ -318,7 +318,7 @@ int setting_options(setting_id_t id, const char *const **names, int *n) {
     }
 }
 
-static const char *const SIGN_NAMES[] = { "off", "age", "pgp" };
+static const char *const SIGN_NAMES[] = { "off", "age", "pgp", "age-nonick", "pgp-nonick" };
 
 // What :set takes for a row, for the command line's menu: its values, and the signing identity's
 // kinds (age:PATH and pgp:PATH, for a key file, are typed in full, and a pasted key is only chosen on
@@ -326,8 +326,11 @@ static const char *const SIGN_NAMES[] = { "off", "age", "pgp" };
 int setting_choices(setting_id_t id, const char *const **names, int *n) {
     if (id != SET_SIGN) return setting_options(id, names, n);
     *names = SIGN_NAMES;
-    *n = 3;
-    return g_app.identity_source == IDENT_AGE ? 1 : g_app.identity_source == IDENT_PGP ? 2 : 0;
+    *n = (int)COUNT_OF(SIGN_NAMES);
+    if (g_app.identity_source == IDENT_NONE) return 0;
+    int age = g_app.identity_source == IDENT_AGE;
+    if (g_app.key.origin == KEY_DERIVED) return age ? 3 : 4;
+    return age ? 1 : 2;
 }
 
 // How the page draws a row's value: a switch, a choice h/l steps through, a way into another
@@ -386,8 +389,11 @@ void setting_value(setting_id_t id, char *out, size_t cap) {
             if (g_app.identity_source == IDENT_NONE) { snprintf(out, cap, "off"); break; }
             uint8_t fp[ID_FP_LEN]; identity_fingerprint(g_app.identity.pub, fp);
             char fphex[HEX_GROUPS_LEN(ID_FP_LEN)]; hex_groups(fp, ID_FP_LEN, fphex);
-            snprintf(out, cap, "%s%s, fingerprint %s", g_app.identity_source == IDENT_AGE ? "age" : "pgp",
-                     g_app.key.origin == KEY_DERIVED ? " from password" : "", fphex);
+            char from[MAX_NICK + 32] = "";
+            if (g_app.key.origin == KEY_DERIVED) copy_str(from, " from password, without nick", sizeof from);
+            else if (g_app.key.origin == KEY_DERIVED_NICK)
+                snprintf(from, sizeof from, " from password and nick %s", g_app.key.nick);
+            snprintf(out, cap, "%s%s, fingerprint %s", g_app.identity_source == IDENT_AGE ? "age" : "pgp", from, fphex);
             break;
         }
         case SET_AGE_RECIPIENT: {
@@ -920,6 +926,7 @@ void setting_apply_text(setting_id_t id, const char *typed) {
             for (int i = 0; i < MAX_SESSIONS; i++)
                 if (takes_settings(i)) chat_set_nick(g_app.sessions[i].engine, g_app.nick);
             note("Nickname: %s", g_app.nick);
+            if (!g_loading_settings) nick_changed();
             return;
         case SET_COLOUR: {
             uint8_t rgb[3];

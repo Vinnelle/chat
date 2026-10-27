@@ -144,18 +144,26 @@ void test_identity_keys(double *t) {
     sodium_memzero(armor, sizeof armor);
 
     // A key made from a password has to come out the same on every run and in every version, or
-    // everyone's established identity changes. The answer is from Python's cryptography package:
-    // Argon2id (4 passes, 512 MiB, one lane) over a BLAKE2b-128 salt of the label and device id.
+    // everyone's established identity changes. The answers are from Python's cryptography package:
+    // Argon2id (4 passes, 512 MiB, one lane) over a BLAKE2b-128 salt of the label and device id, and
+    // with a nick, of the nick's label, the device id, a NUL and the nick.
     static const char device[] = "0123456789abcdef0123456789abcdef";
-    identity_keypair_t derived, other;
-    CHECK(identity_from_password("correct horse battery staple", device, &derived) == 0 && !derived.scalar,
+    identity_keypair_t derived, other, nicked;
+    CHECK(identity_from_password("correct horse battery staple", device, NULL, &derived) == 0 && !derived.scalar,
           "no key came from a password");
     char pubhex[ID_SIGN_PUB_LEN * 2 + 1];
     hex_encode(derived.pub, ID_SIGN_PUB_LEN, pubhex);
     CHECK(strcmp(pubhex, "044354ed8bd36257adf234b893510d040769ba720f4e886431c27211e3b5dec2") == 0,
           "the key from a password came out as %s", pubhex);
-    CHECK(identity_from_password("correct horse battery staple", "0123456789abcdef0123456789abcdee", &other) == 0
+    CHECK(identity_from_password("correct horse battery staple", "0123456789abcdef0123456789abcdee", NULL, &other) == 0
           && memcmp(derived.pub, other.pub, sizeof derived.pub) != 0, "another device made the same key");
+    CHECK(identity_from_password("correct horse battery staple", device, "alice", &nicked) == 0 && !nicked.scalar,
+          "no key came from a password and a nick");
+    hex_encode(nicked.pub, ID_SIGN_PUB_LEN, pubhex);
+    CHECK(strcmp(pubhex, "d40cacd97fd54f890a1ec92813c6c8b98bc8dc175f300f60d84714532e0dbdec") == 0,
+          "the key from a password and a nick came out as %s", pubhex);
+    CHECK(identity_from_password("correct horse battery staple", device, "alicf", &other) == 0
+          && memcmp(nicked.pub, other.pub, sizeof nicked.pub) != 0, "another nick made the same key");
     identity_sign_bytes(&derived, msg, sizeof msg, got);
     CHECK(crypto_sign_verify_detached(got, msg, sizeof msg, derived.pub) == 0, "the key from a password can't sign");
 }

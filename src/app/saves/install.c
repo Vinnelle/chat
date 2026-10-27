@@ -128,9 +128,10 @@ static void load_saved_settings(void) {
 }
 
 // Format, kind, origin, scalar flag, and the creation time a PGP key made here has (its
-// fingerprint covers it), then the public key. Format 1 follows it with the secret key. Format 2,
-// for a key from a file, with the file's full path instead, so the secret key isn't copied: the
-// file is read again when it's opened. The public key tells whether the file still holds that key.
+// fingerprint covers it), then the public key. Format 1 follows it with the secret key, and for a
+// key made with the nick, that nick. Format 2, for a key from a file, with the file's full path
+// instead, so the secret key isn't copied: the file is read again when it's opened. The public key
+// tells whether the file still holds that key.
 enum { KB_FORMAT_AT, KB_SOURCE_AT, KB_ORIGIN_AT, KB_SCALAR_AT, KB_CREATED_AT, KB_PUB_AT = KB_CREATED_AT + 4 };
 enum { KEY_FORMAT_KEY = 1, KEY_FORMAT_PATH = 2 };
 #define KEY_BLOB_HEAD (KB_PUB_AT + ID_SIGN_PUB_LEN)
@@ -156,7 +157,10 @@ static size_t identity_pack(uint8_t out[KEY_BLOB_MAX]) {
     memcpy(out + KB_PUB_AT, g_app.identity.pub, ID_SIGN_PUB_LEN);
     if (!path) {
         memcpy(out + KEY_BLOB_HEAD, g_app.identity.priv, ID_SIGN_PRIV_LEN);
-        return KEY_BLOB_LEN;
+        if (g_app.key.origin != KEY_DERIVED_NICK) return KEY_BLOB_LEN;
+        size_t n = strlen(g_app.key.nick);
+        memcpy(out + KEY_BLOB_LEN, g_app.key.nick, n);
+        return KEY_BLOB_LEN + n;
     }
     size_t n = strlen(g_app.key.path);
     memcpy(out + KEY_BLOB_HEAD, g_app.key.path, n);
@@ -167,16 +171,23 @@ static size_t identity_pack(uint8_t out[KEY_BLOB_MAX]) {
 // in use is the same one. A key file that's gone or changed is said why with saved_note.
 static int identity_unpack(const uint8_t *in, size_t len, int use) {
     if (len < KEY_BLOB_HEAD || (in[KB_FORMAT_AT] != KEY_FORMAT_KEY && in[KB_FORMAT_AT] != KEY_FORMAT_PATH)
-        || (in[KB_SOURCE_AT] != IDENT_AGE && in[KB_SOURCE_AT] != IDENT_PGP) || in[KB_ORIGIN_AT] > KEY_PASTED
+        || (in[KB_SOURCE_AT] != IDENT_AGE && in[KB_SOURCE_AT] != IDENT_PGP) || in[KB_ORIGIN_AT] > KEY_DERIVED_NICK
         || in[KB_SCALAR_AT] > 1)
         return -1;
-    int path = in[KB_FORMAT_AT] == KEY_FORMAT_PATH;
-    if (path ? in[KB_ORIGIN_AT] != KEY_FILE || len == KEY_BLOB_HEAD || len >= KEY_BLOB_MAX : len != KEY_BLOB_LEN) return -1;
-    char saved_path[KEY_PATH_MAX] = "";
+    int path = in[KB_FORMAT_AT] == KEY_FORMAT_PATH, nick = in[KB_ORIGIN_AT] == KEY_DERIVED_NICK;
+    if (path ? in[KB_ORIGIN_AT] != KEY_FILE || len == KEY_BLOB_HEAD || len >= KEY_BLOB_MAX
+        : nick ? len <= KEY_BLOB_LEN || len > KEY_BLOB_LEN + MAX_NICK : len != KEY_BLOB_LEN)
+        return -1;
+    char saved_path[KEY_PATH_MAX] = "", saved_nick[MAX_NICK + 1] = "";
     if (path) {
         memcpy(saved_path, in + KEY_BLOB_HEAD, len - KEY_BLOB_HEAD);
         saved_path[len - KEY_BLOB_HEAD] = '\0';
         if (strlen(saved_path) != len - KEY_BLOB_HEAD) return -1;
+    }
+    if (nick) {
+        memcpy(saved_nick, in + KEY_BLOB_LEN, len - KEY_BLOB_LEN);
+        saved_nick[len - KEY_BLOB_LEN] = '\0';
+        if (strlen(saved_nick) != len - KEY_BLOB_LEN) return -1;
     }
     memcpy(g_app.install.key_pub, in + KB_PUB_AT, ID_SIGN_PUB_LEN);
     copy_str(g_app.install.key_path, saved_path, sizeof g_app.install.key_path);
@@ -209,6 +220,7 @@ static int identity_unpack(const uint8_t *in, size_t len, int use) {
     g_app.key.pgp_created = load_be32(in + KB_CREATED_AT);
     // A key file saved as the key itself, before :install saved paths, has no path to show.
     copy_str(g_app.key.path, saved_path, sizeof g_app.key.path);
+    copy_str(g_app.key.nick, saved_nick, sizeof g_app.key.nick);
     return 0;
 }
 
@@ -994,6 +1006,7 @@ void settle_start(void) {
         push_log("welcome to chat. you're %s for now - :set nick NAME renames you anytime",
                  g_app.nick);
     }
+    start_identity(1);
     note_settings_seen();
     say_saved_notes();
 }

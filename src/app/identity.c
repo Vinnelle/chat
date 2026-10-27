@@ -7,9 +7,12 @@
 const sign_pick_row_t SIGN_PICKS[N_PICKS] = {
     { NULL, "Off", "Don't sign. Peers see you as unverified." },
     { "AGE", "Native", "A key made here, with an age1... recipient others can encrypt files to you with "
-                       "(age -r). Enter asks for a password: the same password on this device and OS always makes "
-                       "the same key, so always use the same one to keep an established signing identity. Blank "
-                       "makes a new key that lasts until chat exits." },
+                       "(age -r). Enter asks for a password: it and your nick always make the same key on this "
+                       "device and OS, so keep both to keep an established signing identity. A new nick asks for "
+                       "the password again. Blank makes a new key that lasts until chat exits." },
+    { NULL, "Native, without nick", "A key made here from a password alone, as earlier versions made it, so the "
+                                    "same password on this device and OS gives back the key you had then, "
+                                    "whatever your nick. Blank makes a new key that lasts until chat exits." },
     { NULL, "Pick a key file", "Your own AGE key, picked in a file browser: the file age-keygen writes. "
                                WHY_SECRET "It stays in memory and isn't sent. :install saves the file's path, not "
                                "the key." },
@@ -18,9 +21,12 @@ const sign_pick_row_t SIGN_PICKS[N_PICKS] = {
     { NULL, "Paste a key", "Your own AGE key pasted in: the AGE-SECRET-KEY-1... line. " WHY_SECRET "There's no "
                            "file to point to, so :install seals the key itself to disk." },
     { "PGP", "Native", "A PGP key made here, whose public key is in the settings and the console for others "
-                       "to import. Enter asks for a password: the same password on this device and OS always makes "
-                       "the same key, so always use the same one to keep an established signing identity. Blank "
-                       "makes a new key that lasts until chat exits." },
+                       "to import. Enter asks for a password: it and your nick always make the same key on this "
+                       "device and OS, so keep both to keep an established signing identity. A new nick asks for "
+                       "the password again. Blank makes a new key that lasts until chat exits." },
+    { NULL, "Native, without nick", "A PGP key made here from a password alone, as earlier versions made it, so "
+                                    "the same password on this device and OS gives back the key you had then, "
+                                    "whatever your nick. Blank makes a new key that lasts until chat exits." },
     { NULL, "Pick a key file", "Your own key, picked in a file browser: an unencrypted EdDSA/Ed25519 secret key, "
                                "armored, as gpg --export-secret-keys --armor writes it. " WHY_SECRET ":install "
                                "saves the file's path, not the key." },
@@ -60,19 +66,37 @@ const char PGP_PATH_HELP[] =
     "Type the path to your PGP key file: an unencrypted, armored EdDSA/Ed25519 secret key, as gpg "
     "--export-secret-keys --armor writes it from a key with no passphrase. ~ is your home folder.";
 
-const char SIGN_PASSWORD_HELP[] =
-    "Type the password to make your key from. The same password on this device and OS always makes the same "
-    "key and fingerprint, so always use the same password to keep an established signing identity: a different "
-    "one, or a typo, makes a different key. Make it long, since anyone who learns this device's id can guess at "
-    "it. Blank makes a new key that lasts until chat exits. Nothing is written to disk unless you :install.";
+const char *sign_password_help(void) {
+    static char text[600];
+    if (g_app.key.remake)
+        snprintf(text, sizeof text, "Your key was made with the nick %s, and you're %s now. Type its password to "
+                 "make it again with the new nick. That's a new key, so peers who verified the old one compare "
+                 "codes with you again. Esc keeps the key you have: the password only gives it back with the nick "
+                 "%s.", g_app.key.nick, g_app.nick, g_app.key.nick);
+    else if (g_app.key.load_nick)
+        snprintf(text, sizeof text, "Type the password to make your key from, with your nick, %s. The same "
+                 "password and nick on this device and OS always make the same key and fingerprint, so always use "
+                 "the same ones to keep an established signing identity: a different password or nick, or a typo, "
+                 "makes a different key. Make the password long, since anyone who learns this device's id and your "
+                 "nick can guess at it. Blank makes a new key that lasts until chat exits. Nothing is written to "
+                 "disk unless you :install.", g_app.nick);
+    else
+        return "Type the password to make your key from. The same password on this device and OS always makes the "
+               "same key and fingerprint, whatever your nick, so always use the same password to keep an "
+               "established signing identity: a different one, or a typo, makes a different key. Make it long, "
+               "since anyone who learns this device's id can guess at it. Blank makes a new key that lasts until "
+               "chat exits. Nothing is written to disk unless you :install.";
+    return text;
+}
 
 int sign_row_in_use(void) {
     int age = g_app.identity_source == IDENT_AGE;
     if (!age && g_app.identity_source != IDENT_PGP) return PICK_OFF;
     switch (g_app.key.origin) {
-        case KEY_FILE:   return age ? PICK_AGE_FILE : PICK_PGP_FILE;
-        case KEY_PASTED: return age ? PICK_AGE_PASTE : PICK_PGP_PASTE;
-        default:         return age ? PICK_AGE_MADE : PICK_PGP_MADE;
+        case KEY_FILE:    return age ? PICK_AGE_FILE : PICK_PGP_FILE;
+        case KEY_PASTED:  return age ? PICK_AGE_PASTE : PICK_PGP_PASTE;
+        case KEY_DERIVED: return age ? PICK_AGE_NO_NICK : PICK_PGP_NO_NICK;
+        default:          return age ? PICK_AGE_MADE : PICK_PGP_MADE;
     }
 }
 
@@ -107,10 +131,10 @@ void say_key_saved_state(void) {
         push_log("* the saved signing key stays saved, and signs again the next time chat starts");
 }
 
-// A key of kind (AGE or PGP) made here: from password and this device's id, the same every time,
-// or a new random one if password is empty. Returns NULL once it's the identity in use, otherwise
-// the reason it isn't, and the current identity stays.
-const char *make_identity(identity_source_t kind, const char *password) {
+// A key of kind (AGE or PGP) made here: from password and this device's id, and the nick if
+// with_nick, the same every time, or a new random one if password is empty. Returns NULL once it's
+// the identity in use, otherwise the reason it isn't, and the current identity stays.
+const char *make_identity(identity_source_t kind, const char *password, int with_nick) {
     if (!password[0]) {
         gen_identity_keypair(&g_app.identity);
         g_app.key.origin = KEY_MADE;
@@ -119,18 +143,37 @@ const char *make_identity(identity_source_t kind, const char *password) {
         char device[128];
         if (platform_machine_id(device, sizeof device) != 0)
             return "this system has no machine id to make the key with - leave the password blank for a new key";
-        if (identity_from_password(password, device, &g_app.identity) != 0)
+        if (identity_from_password(password, device, with_nick ? g_app.nick : NULL, &g_app.identity) != 0)
             return "couldn't make the key - it needs 512 MiB of free memory for a moment";
-        g_app.key.origin = KEY_DERIVED;
+        g_app.key.origin = with_nick ? KEY_DERIVED_NICK : KEY_DERIVED;
         g_app.key.pgp_created = DERIVED_PGP_CREATED;
+        copy_str(g_app.key.nick, with_nick ? g_app.nick : "", sizeof g_app.key.nick);
     }
     g_app.identity_source = kind;
     return NULL;
 }
 
+// --identity age or pgp: the key is made once the nick it may be made with is settled, after a save's
+// settings or as a random one.
+void start_identity(int on_screen) {
+    if (!g_app.key.start_pending) return;
+    g_app.key.start_pending = 0;
+    char *pw = g_app.key.start_password;
+    if (pw[0] && on_screen) {
+        note("making your key from the password...");
+        render();
+    }
+    const char *why = make_identity(g_opts.identity[0] == 'a' ? IDENT_AGE : IDENT_PGP, pw, !g_opts.identity[3]);
+    crypto_wipe(pw, sizeof g_app.key.start_password);
+    if (!why) return;
+    if (on_screen) push_log("* signing key: %s", why);
+    else fprintf(stderr, "chat: %s\n", why);
+}
+
 // The password a native key is made from, typed on the bottom bar with the picker still up.
-static void begin_sign_password(identity_source_t kind) {
+static void begin_sign_password(identity_source_t kind, int with_nick) {
     g_app.key.load_kind = kind;
+    g_app.key.load_nick = with_nick;
     g_app.saved_input = g_app.input;
     tui_input_clear(&g_app.input);
     g_app.input.modal = 0;
@@ -138,15 +181,32 @@ static void begin_sign_password(identity_source_t kind) {
     g_app.dirty = 1;
 }
 
+// A key made with the nick asks for its password again once the nick is another one, to make it with that.
+void nick_changed(void) {
+    if (g_app.identity_source == IDENT_NONE || g_app.key.origin != KEY_DERIVED_NICK
+        || strcmp(g_app.key.nick, g_app.nick) == 0 || g_app.mode == MODE_SIGN_PASSWORD)
+        return;
+    g_app.key.remake = 1;
+    g_app.key.remake_back = g_app.mode;
+    begin_sign_password(g_app.identity_source, 1);
+}
+
 void end_sign_password(void) {
     crypto_wipe(g_app.input.buf, sizeof g_app.input.buf);
     g_app.input = g_app.saved_input;
     crypto_wipe(&g_app.saved_input, sizeof g_app.saved_input);
-    g_app.mode = MODE_SIGN_CHOICE;
+    g_app.mode = g_app.key.remake ? g_app.key.remake_back : MODE_SIGN_CHOICE;
+    g_app.key.remake = 0;
     g_app.dirty = 1;
 }
 
+// Asked again after a nick change, a blank password would swap the key for a random one, so it doesn't.
 void commit_sign_password(void) {
+    int remake = g_app.key.remake;
+    if (remake && !g_app.input.buf[0]) {
+        note("type the password - or Esc to keep the key made with %s", g_app.key.nick);
+        return;
+    }
     char pw[sizeof g_app.input.buf];
     copy_str(pw, g_app.input.buf, sizeof pw);
     end_sign_password();
@@ -155,11 +215,11 @@ void commit_sign_password(void) {
         note("making your key from the password...");
         render();
     }
-    const char *why = make_identity(g_app.key.load_kind, pw);
+    const char *why = make_identity(g_app.key.load_kind, pw, g_app.key.load_nick);
     crypto_wipe(pw, sizeof pw);
     if (why) { note("%s", why); return; }
     identity_chosen();
-    g_app.mode = MODE_SETTINGS;
+    if (!remake) g_app.mode = MODE_SETTINGS;
 }
 
 // A typed path with a leading ~ (alone, or followed by /) as the home folder.
@@ -300,14 +360,16 @@ void sign_pick(int pick) {
             crypto_wipe(&g_app.identity, sizeof g_app.identity);
             identity_chosen();
             return;
-        case PICK_AGE_MADE:  begin_sign_password(IDENT_AGE); return;
-        case PICK_PGP_MADE:  begin_sign_password(IDENT_PGP); return;
-        case PICK_AGE_FILE:  begin_key_browse(IDENT_AGE); return;
-        case PICK_AGE_PATH:  begin_key_path(IDENT_AGE, key_path_of(IDENT_AGE), 0); return;
-        case PICK_AGE_PASTE: begin_key_paste(IDENT_AGE); return;
-        case PICK_PGP_FILE:  begin_key_browse(IDENT_PGP); return;
-        case PICK_PGP_PATH:  begin_key_path(IDENT_PGP, key_path_of(IDENT_PGP), 0); return;
-        case PICK_PGP_PASTE: begin_key_paste(IDENT_PGP); return;
+        case PICK_AGE_MADE:    begin_sign_password(IDENT_AGE, 1); return;
+        case PICK_AGE_NO_NICK: begin_sign_password(IDENT_AGE, 0); return;
+        case PICK_PGP_MADE:    begin_sign_password(IDENT_PGP, 1); return;
+        case PICK_PGP_NO_NICK: begin_sign_password(IDENT_PGP, 0); return;
+        case PICK_AGE_FILE:    begin_key_browse(IDENT_AGE); return;
+        case PICK_AGE_PATH:    begin_key_path(IDENT_AGE, key_path_of(IDENT_AGE), 0); return;
+        case PICK_AGE_PASTE:   begin_key_paste(IDENT_AGE); return;
+        case PICK_PGP_FILE:    begin_key_browse(IDENT_PGP); return;
+        case PICK_PGP_PATH:    begin_key_path(IDENT_PGP, key_path_of(IDENT_PGP), 0); return;
+        case PICK_PGP_PASTE:   begin_key_paste(IDENT_PGP); return;
         default: return;
     }
 }
@@ -329,7 +391,8 @@ void copy_pgp_public_key(void) {
 }
 
 int pgp_key_made_here(void) {
-    return g_app.identity_source == IDENT_PGP && (g_app.key.origin == KEY_MADE || g_app.key.origin == KEY_DERIVED);
+    return g_app.identity_source == IDENT_PGP && (g_app.key.origin == KEY_MADE || g_app.key.origin == KEY_DERIVED
+                                                  || g_app.key.origin == KEY_DERIVED_NICK);
 }
 
 static const char *pgp_uid_nick(void) { return g_app.nick[0] ? g_app.nick : "chat"; }

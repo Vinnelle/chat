@@ -1,7 +1,7 @@
 # Usage
 
 ```
-chat [--nick NAME] [--colour NAME|#HEX] [--identity age|pgp[:KEYFILE]] [--simple]
+chat [--nick NAME] [--colour NAME|#HEX] [--identity age|pgp[-nonick|:KEYFILE]] [--simple]
      [--routing udp|tor] [--nodht] [--noipv6] [--nolan] [--noportmap]
      [--nostr off|fallback|always] [--relay wss://HOST ...]
      [--tor-launch auto|always|never] [--tor-path PATH] [--tor-socks HOST:PORT]
@@ -168,7 +168,7 @@ after a name. Under each row's help, the page shows the `:set` command that does
 | `transports` | the folder with lyrebird and snowflake-client, or empty to look next to tor and on `PATH` |
 | `torguards` | `on` (chat's own tor keeps its guards and directory in the save), `off` |
 | `nick`, `colour` | a name; a colour name or `#RRGGBB` |
-| `sign` | `off`, an `age` or `pgp` key made from a password typed on the page, or `age:PATH` / `pgp:PATH` for a key file; a pasted key is picked on the page |
+| `sign` | `off`, an `age` or `pgp` key made from a password typed on the page and your nick, `age-nonick` / `pgp-nonick` for one made from the password alone, or `age:PATH` / `pgp:PATH` for a key file; a pasted key is picked on the page |
 | `autosave` | `on` (once installed, a setting or verified key you change is saved straight away), `off` (it's kept until `:save`) |
 | `devicelock` | `on` (the save only opens on this device), `off` |
 | `securitykey` | `on` (the save needs your FIDO2 security key too), `off` |
@@ -246,7 +246,7 @@ Options given here override what `:install` saved, for that run.
 | `--tor-launch auto\|always\|never` | Which tor Tor mode uses: a running one if there is one, otherwise chat's own (`auto`); always chat's own; or only a running one |
 | `--tor-path PATH` | The tor program chat starts (default: `tor` on `PATH` or in the usual folders) |
 | `--tor-socks`, `--tor-control` | Where to look for a running tor's SOCKS and control ports (`HOST:PORT`) |
-| `--identity ...` | `age` or `pgp` for a key made from a password (asked for, or `CHAT_SIGN_PASSWORD`), or `age:KEYFILE` or `pgp:KEYFILE` for your own (see [Security](security.md#signing-identities)); for that run, instead of a key `:install` saved |
+| `--identity ...` | `age` or `pgp` for a key made from a password (asked for, or `CHAT_SIGN_PASSWORD`) and your nick, `age-nonick` or `pgp-nonick` for one made from the password alone, or `age:KEYFILE` or `pgp:KEYFILE` for your own (see [Security](security.md#signing-identities)); for that run, instead of a key `:install` saved |
 | `--save NAME` | Open the save called NAME, without the list of saves (`default` is the one in `~/.config/chat` itself); if there isn't one, start from the defaults and let `:install` make it (see [Installing](saves.md)) |
 | `--simple` | Plain `[HH:MM] ...` lines, one session, stdin, `:name` runs a command. Used automatically when stdout isn't a tty |
 | `--nosandbox` | Don't put the sandbox up for that run (Linux; `:set sandbox off` keeps it down) |

@@ -256,7 +256,9 @@ void render_sign_picker(int rows_n, int cols_n, const char *clock, const tui_bar
     char help[600], usage[32] = "";
     char now[160]; setting_value(SET_SIGN, now, sizeof now);
     snprintf(help, sizeof help, "%s Now: %s.", SIGN_PICKS[g_app.key.sel].help, now);
-    static const char *const SET[N_PICKS] = { "off", "age", "age:PATH", "age:PATH", NULL, "pgp", "pgp:PATH", "pgp:PATH", NULL };
+    static const char *const SET[N_PICKS] = {
+        "off", "age", "age-nonick", "age:PATH", "age:PATH", NULL, "pgp", "pgp-nonick", "pgp:PATH", "pgp:PATH", NULL,
+    };
     if (SET[g_app.key.sel]) snprintf(usage, sizeof usage, ":set sign %s", SET[g_app.key.sel]);
     const char *nav[8];
     tui_page_t page = {

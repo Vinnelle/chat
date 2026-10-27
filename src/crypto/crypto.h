@@ -208,12 +208,14 @@ typedef struct {
 
 void gen_identity_keypair(identity_keypair_t *kp);
 
-// The identity a password gives on one device. The same password and device id always give the
-// same key, and changing either gives a different one. The device id isn't secret (any program
-// can read it), so the password is the only protection. Argon2id, as for a session, makes each
-// guess slow. idkp is only changed on success. -1 if there isn't enough free memory.
+// The identity a password gives on one device, and with a nick unless nick is NULL. The same
+// password, device id and nick always give the same key, and changing any of them gives a different
+// one. The device id and nick aren't secret (any program can read the device id), so the password
+// is the only protection. Argon2id, as for a session, makes each guess slow. idkp is only changed on
+// success. -1 if there isn't enough free memory.
 #define ID_KDF_LABEL "chat-identity-v1"
-int identity_from_password(const char *password, const char *device_id, identity_keypair_t *idkp);
+#define ID_NICK_KDF_LABEL "chat-identity-nick-v1"
+int identity_from_password(const char *password, const char *device_id, const char *nick, identity_keypair_t *idkp);
 
 // Secrets kept on disk under one passphrase. A lock is the key Argon2id makes from it with a
 // salt, plus its header (format, limits, salt). XChaCha20-Poly1305 seals each secret under that
