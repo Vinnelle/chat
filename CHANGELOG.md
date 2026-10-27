@@ -3,7 +3,7 @@
 All notable changes to chat, newest first. Each beta (`X.Y.Z-beta.N`) has a section of its own until
 its release, which folds them into one. A release's notes on GitHub are its section here.
 
-## Unreleased
+## 0.5.2
 
 ### Added
 - `:exportkey`, or **Export signing key** in settings, writes your signing key to a new file in a
