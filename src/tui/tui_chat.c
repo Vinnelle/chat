@@ -438,7 +438,7 @@ int split_lines(const char *text, const char **lines, size_t *lens, int max) {
 }
 
 // Where n rows start to sit a little above the middle of nrows rows from first.
-static int center_top(int first, int nrows, int n) {
+int center_top(int first, int nrows, int n) {
     int top = first + (nrows - n) / 2 - nrows / 10;
     return top < first ? first : top;
 }

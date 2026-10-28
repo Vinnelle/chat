@@ -145,6 +145,7 @@ int wrap_rows(const char *text, int first_w, int rest_w, size_t *off, size_t *le
 void draw_image_row(pen_t *p, const tui_image_t *im, int cols, int r);
 void draw_bar(pen_t *p, int permille, int width);
 int split_lines(const char *text, const char **lines, size_t *lens, int max);
+int center_top(int first, int nrows, int n);
 void pointer(pen_t *p, int on);
 
 // tui_bar.c

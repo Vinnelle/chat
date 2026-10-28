@@ -249,6 +249,38 @@ static void draw_side(wbuf_t *w, int top, int left, int width, int nrows, const 
     }
 }
 
+// A page with no rows: its empty text in the middle of nrows rows from top, each line wrapped, the
+// first bold and the rest faint, like the chat's before its first message.
+#define EMPTY_ROWS 12
+
+static void draw_empty(wbuf_t *w, int top, int left, int iw, int nrows, const char *text) {
+    const char *lines[EMPTY_ROWS];
+    size_t lens[EMPTY_ROWS], off[EMPTY_ROWS], len[EMPTY_ROWS];
+    static char piece[EMPTY_ROWS][TUI_LINE_MAX];
+    int bold[EMPTY_ROWS], n = 0, tw = iw - 6;
+    int nl = split_lines(text, lines, lens, EMPTY_ROWS);
+    for (int i = 0; i < nl && n < EMPTY_ROWS; i++) {
+        char line[TUI_LINE_MAX];
+        copy_slice(line, sizeof line, lines[i], lens[i]);
+        int k = wrap_rows(line, tw, tw, off, len, EMPTY_ROWS - n);
+        for (int j = 0; j < k; j++, n++) {
+            copy_slice(piece[n], sizeof piece[n], line + off[j], len[j]);
+            bold[n] = i == 0;
+        }
+    }
+    int first = center_top(top, nrows, n);
+    for (int r = top; r < top + nrows; r++) {
+        int k = r - first;
+        pen_t p;
+        inner_begin(w, &p, r, left, iw);
+        if (k >= 0 && k < n) {
+            pspace(&p, (p.room - utf8_str_cols(piece[k])) / 2);
+            pell(&p, bold[k] ? S_BOLD : S_FAINT, piece[k], p.room - p.used);
+        }
+        inner_end(&p);
+    }
+}
+
 // The most sections the nav takes from a page's rows, and the most rows of help and of intro.
 #define ROW_SECTIONS_MAX 32
 #define HELP_ROWS 5
@@ -271,7 +303,7 @@ void tui_render_page(int rows, int cols, const tui_page_t *page, const tui_bar_t
         }
     }
     int boxed = rows >= BOXED_ROWS && cols >= BOXED_COLS;
-    int navw = boxed && n_nav > 0 ? nav_width(cols) : 0;
+    int navw = boxed && (n_nav > 0 || page->nav) ? nav_width(cols) : 0;
 
     begin_frame(&w);
     if (navw) draw_nav(&w, (rect_t){ 1, 1, rows - 1, navw }, nav, n_nav, nav_sel);
@@ -328,7 +360,8 @@ void tui_render_page(int rows, int cols, const tui_page_t *page, const tui_bar_t
     if (shown < 0) shown = 0;
     int sidew = page->side ? side_width(iw) : 0;
     if (sidew) draw_side(&w, row, left, sidew, shown, page);
-    draw_list(&w, row, left + sidew, iw - sidew, view, shown, page);
+    if (page->n_rows == 0 && !page->button && page->empty) draw_empty(&w, row, left + sidew, iw - sidew, shown, page->empty);
+    else draw_list(&w, row, left + sidew, iw - sidew, view, shown, page);
     row += shown;
     if (hl + ul && row < end) {
         span_t about;

@@ -424,10 +424,12 @@ typedef struct {
 // A list page (settings, the pages under it, and help): rows grouped by section with one selected,
 // a button after the rows if button is set (selected == n_rows selects it), and the selected row's
 // help and usage at the bottom. nav lists the sections on the left, with nav_sel highlighted.
-// Without it they come from the rows. title goes in the page's border, showing where the page is,
-// with clock at the right end. keys draws the labels as keys. side, if set, is a list in a column
-// left of the rows, inside the page (a file browser's parent folder): n_side entries, side_sel
-// highlighted, under side_title. It's left out when the page is too narrow for it (tui_side_width).
+// Without it they come from the rows. A page that gives nav keeps its column while it's empty. title
+// goes in the page's border, showing where the page is, with clock at the right end. keys draws the
+// labels as keys. side, if set, is a list in a column left of the rows, inside the page (a file
+// browser's parent folder): n_side entries, side_sel highlighted, under side_title. It's left out
+// when the page is too narrow for it (tui_side_width). empty is shown in the middle while there are
+// no rows (lines split by '\n', the first bold).
 typedef struct {
     const char *title;
     const char *clock;
@@ -446,6 +448,7 @@ typedef struct {
     const char *usage;
     const char *button;
     int keys;
+    const char *empty;
 } tui_page_t;
 
 void tui_render_page(int rows, int cols, const tui_page_t *page, const tui_bar_t *bar, int color_enabled);

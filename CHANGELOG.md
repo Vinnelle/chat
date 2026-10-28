@@ -9,6 +9,8 @@ its release, which folds them into one. A release's notes on GitHub are its sect
 - The sidebar and the left column of the settings, help and files pages are one width, so the line
   beside them stays put going from the chat to a page and back. A box over the screen keeps inside
   the frame on a narrow terminal, where its margin used to cover the frame's sides.
+- The files page keeps its shape while nothing's been offered, and says so in the middle, as the
+  chat does before its first message. A folder browser in an empty folder keeps its left column too.
 
 ## 0.5.2
 

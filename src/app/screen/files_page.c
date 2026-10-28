@@ -484,26 +484,24 @@ void render_files(int rows_n, int cols_n, const char *clock, const tui_bar_t *ba
     if (theirs) snprintf(parts[np++], sizeof parts[0], "%d offered to you", theirs);
     if (coming) snprintf(parts[np++], sizeof parts[0], "%d on the way", coming);
     if (n - theirs) snprintf(parts[np++], sizeof parts[0], "%d yours", n - theirs);
-    if (!n) snprintf(intro, sizeof intro, "Nothing's been offered here yet.");
-    else snprintf(intro, sizeof intro, "%s%s%s%s%s", parts[0], np > 1 ? DOT_SEP : "", np > 1 ? parts[1] : "",
-                  np > 2 ? DOT_SEP : "", np > 2 ? parts[2] : "");
+    snprintf(intro, sizeof intro, "%s%s%s%s%s", np > 0 ? parts[0] : "", np > 1 ? DOT_SEP : "", np > 1 ? parts[1] : "",
+             np > 2 ? DOT_SEP : "", np > 2 ? parts[2] : "");
     const char *nav[DETAIL_LINES];
     int n_nav = 0;
-    usage[0] = '\0';
+    usage[0] = help[0] = '\0';
     if (n) {
         n_nav = file_details(s, l[sel], tui_nav_text_cols(cols_n), nav);
         file_help(s, l[sel], help, sizeof help, usage, sizeof usage);
-    } else {
-        snprintf(help, sizeof help, "n picks a file to send, or :send PATH. What others offer shows up here, and nothing is "
-                 "fetched until you ask.");
     }
     tui_page_t page = {
         .title = title,
         .clock = clock,
         .intro = intro,
-        .nav = n_nav ? nav : NULL, .n_nav = n_nav, .nav_sel = 0,
+        .nav = nav, .n_nav = n_nav, .nav_sel = 0,
         .rows = rows, .n_rows = n, .selected = sel,
-        .help = help, .usage = usage[0] ? usage : NULL,
+        .help = help[0] ? help : NULL, .usage = usage[0] ? usage : NULL,
+        .empty = "Nothing's been offered here yet\nWhat peers offer shows up here, and nothing is fetched until you ask.\n"
+                 "n sends a file of yours, or :send PATH",
     };
     tui_render_page(rows_n, cols_n, &page, bar, g_app.color_enabled);
 }
