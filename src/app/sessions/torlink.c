@@ -504,16 +504,16 @@ const char *tor_link_whose(void) {
 
 void tor_link_status(char *out, size_t cap) {
     switch (g_tor.state) {
-        case TL_PROBING:  snprintf(out, cap, "Looking"); break;
-        case TL_STARTING: snprintf(out, cap, "Starting"); break;
-        case TL_FAILED:   snprintf(out, cap, "Failed"); break;
+        case TL_PROBING:  snprintf(out, cap, "looking"); break;
+        case TL_STARTING: snprintf(out, cap, "starting"); break;
+        case TL_FAILED:   snprintf(out, cap, "failed"); break;
         case TL_READY: {
             // A running tor isn't asked how far it has got: it's taken to be connected.
             int b = g_tor.proc ? torproc_bootstrap(g_tor.proc) : 0;
-            if (g_tor.proc && g_tor.boot_told < BOOT_DONE) snprintf(out, cap, "Connecting (%d%%)", b < 0 ? 0 : b);
-            else snprintf(out, cap, "Connected");
+            if (g_tor.proc && g_tor.boot_told < BOOT_DONE) snprintf(out, cap, "connecting (%d%%)", b < 0 ? 0 : b);
+            else snprintf(out, cap, "connected");
             break;
         }
-        default: snprintf(out, cap, "Off"); break;
+        default: snprintf(out, cap, "off"); break;
     }
 }

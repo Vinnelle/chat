@@ -428,9 +428,11 @@ static const tui_dialog_t *quit_dialog(void) {
     static tui_para_t paras[MAX_DIALOG_PARAS];
     static char what[320], files[120], unsaved[200];
     int n_sessions = 0, online = 0, downloads = 0, kept = 0;
+    const char *only = "";
     for (int i = 0; i < MAX_SESSIONS; i++) {
         if (!g_app.used[i] || g_app.sessions[i].leaving) continue;
         n_sessions++;
+        only = g_app.sessions[i].name;
         kept += session_kept(&g_app.sessions[i]);
         if (g_app.sessions[i].initialising) continue;
         const chat_t *e = g_app.sessions[i].engine;
@@ -452,10 +454,15 @@ static const tui_dialog_t *quit_dialog(void) {
                  "peers see you go offline until then.%s Keys are wiped from memory.%s", which,
                  install_shown_name(install_current()), kept == 1 ? "it opens" : "they open",
                  kept < n_sessions ? " Calls say bye." : "", tor);
-    } else
-        snprintf(what, sizeof what, "Quitting leaves %d session%s, with %d peer%s online: each says bye, then closes, "
-                 "and its keys are wiped from memory.%s", n_sessions, n_sessions == 1 ? "" : "s",
-                 online, online == 1 ? "" : "s", tor);
+    } else {
+        char which[MAX_SESSION_NAME + 16], peers[32];
+        if (n_sessions == 1) copy_str(which, only, sizeof which);
+        else snprintf(which, sizeof which, "%d sessions", n_sessions);
+        if (online) snprintf(peers, sizeof peers, "%d peer%s", online, online == 1 ? "" : "s");
+        else copy_str(peers, "nobody else", sizeof peers);
+        snprintf(what, sizeof what, "Quitting leaves %s, with %s online: %s %s, and its keys are wiped from memory.%s",
+                 which, peers, n_sessions == 1 ? "it" : "each", online ? "says bye, then closes" : "closes", tor);
+    }
     int n = add_para(paras, 0, TUI_P_TEXT, what);
 
     const char *lost[3];
@@ -1310,10 +1317,10 @@ static int build_net(tui_kv_t kv[MAX_NET], char vals[MAX_NET][NET_VALUE_MAX]) {
     else KV("relays", "off");
     if (chat_route_mode(e) != ROUTE_TOR) {
         if (net.dht != CHAT_NET_OFF) {
-            KV("dht", "%s", net.dht ? "Connected" : "Connecting");
+            KV("dht", "%s", net.dht ? "connected" : "connecting");
             KV("found", "%d peers", net.dht_found);
         } else {
-            KV("dht", "Off");
+            KV("dht", "off");
         }
     }
     KV("cands", "%d", chat_candidate_count(e));

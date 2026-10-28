@@ -15,6 +15,9 @@ its release, which folds them into one. A release's notes on GitHub are its sect
   in the list. A setting's help that's longer than its pane ends in `…` instead of mid-sentence.
 - When the bottom row's keys don't all fit, the last one stays (the way out, such as `esc start` on
   the first settings page, or `? help`) and the ones before it go first.
+- The sidebar's NETWORK values are all lowercase (`dht off`, `tor connected`), the files page no
+  longer offers `d download` next to `enter download`, and the quit box names the session it
+  leaves and says nobody else is online rather than `0 peers`.
 
 ## 0.5.2
 

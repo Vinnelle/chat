@@ -440,9 +440,10 @@ const char *files_hint(void) {
     if (!f) return "n send a file" DOT_SEP "esc close";
     const char *enter = file_enter(s, f);
     file_state_t st = file_state(s, f);
-    snprintf(hint, sizeof hint, "%s%s%s%s%s%sn send" DOT_SEP "esc close", enter ? "enter " : "", enter ? enter : "",
-             enter ? DOT_SEP : "", f->saved[0] ? "y copy path" DOT_SEP : "",
-             f->mine ? "" : "d download" DOT_SEP "s save in" DOT_SEP,
+    int d = !f->mine && !(enter && strcmp(enter, "download") == 0);
+    snprintf(hint, sizeof hint, "%s%s%s%s%s%s%sn send" DOT_SEP "esc close", enter ? "enter " : "", enter ? enter : "",
+             enter ? DOT_SEP : "", f->saved[0] ? "y copy path" DOT_SEP : "", d ? "d download" DOT_SEP : "",
+             f->mine ? "" : "s save in" DOT_SEP,
              (f->mine && f->fp) || st == FS_COMING || st == FS_QUEUED ? "x stop" DOT_SEP : "");
     return hint;
 }
