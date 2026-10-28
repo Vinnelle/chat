@@ -962,10 +962,73 @@ void commit_setting_edit(void) {
     crypto_wipe(text, sizeof text);
 }
 
-// The settings' sections, for the list on the left of the pages.
+// Where setting i is on the page: its section, and the group it's in, if any.
+void setting_place(int i, char *out, size_t cap) {
+    const char *section = "", *group = NULL;
+    for (int k = 0; k <= i && k < N_SETTINGS; k++) {
+        if (SETTINGS[k].section) { section = SETTINGS[k].section; group = NULL; }
+        if (SETTINGS[k].group) group = SETTINGS[k].group;
+    }
+    if (group) snprintf(out, cap, "%s" CRUMB "%s", section, group);
+    else copy_str(out, section, cap);
+}
+
+static int starts_a_word(const char *s, const char *word, size_t n) {
+    for (const char *p = s; *p; p++)
+        if ((p == s || !isalnum((unsigned char)p[-1])) && strncasecmp(p, word, n) == 0) return 1;
+    return 0;
+}
+
+static int has_nocase(const char *s, const char *word, size_t n) {
+    for (; s && *s; s++) if (strncasecmp(s, word, n) == 0) return 1;
+    return 0;
+}
+
+// How well setting i matches a word of a search, lower being better, or -1: its label starting with
+// it, then a word of its label or its :set name starting with it, either holding it, its place on
+// the page holding it, and last its help.
+static int word_rank(int i, const char *word, size_t n) {
+    const setting_def_t *d = &SETTINGS[i];
+    char place[96];
+    setting_place(i, place, sizeof place);
+    if (strncasecmp(d->label, word, n) == 0) return 0;
+    if (starts_a_word(d->label, word, n) || strncasecmp(d->key, word, n) == 0) return 1;
+    if (has_nocase(d->label, word, n) || has_nocase(d->key, word, n)) return 2;
+    if (has_nocase(place, word, n)) return 3;
+    return has_nocase(d->help, word, n) ? 4 : -1;
+}
+
+// The settings that match every word of query, best first and otherwise in the page's order, with
+// the ones that aren't listed right now after the rest. An empty query matches them all.
+int settings_search(const char *query, int *out, int cap) {
+    int idx[N_SETTINGS], rank[N_SETTINGS], n = 0;
+    for (int i = 0; i < N_SETTINGS; i++) {
+        int r = setting_shown(SETTINGS[i].id) ? 0 : 100;
+        for (const char *w = query; r >= 0 && *w; ) {
+            while (*w == ' ') w++;
+            size_t len = strcspn(w, " ");
+            if (len) {
+                int k = word_rank(i, w, len);
+                r = k < 0 ? -1 : r + k;
+            }
+            w += len;
+        }
+        if (r < 0) continue;
+        int j = n++;
+        for (; j > 0 && rank[j - 1] > r; j--) { idx[j] = idx[j - 1]; rank[j] = rank[j - 1]; }
+        idx[j] = i;
+        rank[j] = r;
+    }
+    if (n > cap) n = cap;
+    memcpy(out, idx, (size_t)n * sizeof *out);
+    return n;
+}
+
+// The settings' sections and the Done page after them, for the list on the left of the pages.
 int settings_sections(const char **out, int cap) {
     int n = 0;
     for (int i = 0; i < N_SETTINGS && n < cap; i++) if (SETTINGS[i].section) out[n++] = SETTINGS[i].section;
+    if (n < cap) out[n++] = g_app.onboarding ? "Start" : "Done";
     return n;
 }
 
@@ -993,48 +1056,71 @@ int section_row(int s, int dir) {
     return SETTINGS_DONE;
 }
 
+// The sections, and the Done page.
 int settings_n_sections(void) {
     int n = 0;
     while (section_begin(n) < N_SETTINGS) n++;
-    return n;
+    return n + 1;
 }
 
+int settings_done_page(void) { return settings_n_sections() - 1; }
+
+// Selects a row on its section's page, or the Done button on the Done page.
 void settings_select(int sel) {
     g_app.settings.sel = sel;
-    if (sel >= N_SETTINGS) return;
+    if (sel >= N_SETTINGS) { g_app.settings.page = settings_done_page(); return; }
     g_app.settings.page = settings_section_index(SETTINGS[sel].id);
     g_app.settings.rows[g_app.settings.page] = sel;
 }
 
-// Section s, on the row selected there last if it's still listed, otherwise its first.
+// Section s, on the row selected there last if it's still listed, otherwise its first. The Done
+// page always opens on its button, so Tab then Enter leaves.
 void settings_go_section(int s) {
+    if (s == settings_done_page()) { settings_select(SETTINGS_DONE); return; }
     int i = g_app.settings.rows[s];
     if (i < section_begin(s) || i >= section_begin(s + 1) || !setting_shown(SETTINGS[i].id)) i = section_row(s, 1);
     g_app.settings.page = s;
     settings_select(i);
 }
 
-// j/k go through the sections in turn, each one's listed rows and then its Done button.
+// The Done page's next listed row after sel, or before it for dir < 0, or -1 if there isn't one.
+static int done_page_row(int sel, int dir) {
+    for (int i = sel + dir; i >= 0 && i < N_SETTINGS; i += dir)
+        if (setting_shown(SETTINGS[i].id)) return i;
+    return -1;
+}
+
+// j/k go through the sections' listed rows in turn, then the Done page's button and its rows.
 void settings_step(int dir) {
     int sel = g_app.settings.sel, s = g_app.settings.page;
-    int a = section_begin(s), b = section_begin(s + 1);
-    if (sel == SETTINGS_DONE) {
-        if (dir < 0) settings_select(section_row(s, -1));
-        else if (b < N_SETTINGS) settings_select(section_row(s + 1, 1));
+    if (s == settings_done_page()) {
+        int i = sel == SETTINGS_DONE ? (dir > 0 ? done_page_row(-1, 1) : -1) : done_page_row(sel, dir);
+        if (i >= 0) g_app.settings.sel = i;
+        else if (sel == SETTINGS_DONE && dir < 0) settings_select(section_row(s - 1, -1));
+        else if (dir < 0) g_app.settings.sel = SETTINGS_DONE;
         return;
     }
+    int a = section_begin(s), b = section_begin(s + 1);
     for (int i = sel + dir; i >= a && i < b; i += dir)
         if (setting_shown(SETTINGS[i].id)) { settings_select(i); return; }
-    if (dir < 0 && s == 0) return;
-    if (dir < 0) g_app.settings.page = s - 1;
-    g_app.settings.sel = SETTINGS_DONE;
+    if (dir > 0) settings_select(section_row(s + 1, 1));
+    else if (s > 0) settings_select(section_row(s - 1, -1));
+}
+
+// g and G: the page's first or last row, the Done page's button being its first.
+void settings_go_end(int last) {
+    int s = g_app.settings.page;
+    if (s != settings_done_page()) settings_select(section_row(s, last ? -1 : 1));
+    else if (!last || done_page_row(N_SETTINGS, -1) < 0) g_app.settings.sel = SETTINGS_DONE;
+    else g_app.settings.sel = done_page_row(N_SETTINGS, -1);
 }
 
 // Moves the selection off a row that stopped being listed, to the next one up in its section, or
-// down.
+// down. On the Done page, back to the button.
 void settings_fix_sel(void) {
     int sel = g_app.settings.sel;
     if (sel >= N_SETTINGS || setting_shown(SETTINGS[sel].id)) return;
+    if (g_app.settings.page == settings_done_page()) { g_app.settings.sel = SETTINGS_DONE; return; }
     int s = settings_section_index(SETTINGS[sel].id), a = section_begin(s), b = section_begin(s + 1), i = sel - 1;
     while (i >= a && !setting_shown(SETTINGS[i].id)) i--;
     if (i < a) for (i = sel + 1; i < b && !setting_shown(SETTINGS[i].id); i++) {}
@@ -1051,7 +1137,7 @@ void begin_settings(void) {
     if (g_app.mode != MODE_CHAT) return;
     device_check();
     g_app.mode = MODE_SETTINGS;
-    if (g_app.settings.sel == SETTINGS_DONE) settings_go_section(g_app.settings.page);
+    if (g_app.settings.page == settings_done_page()) settings_go_section(0);
     settings_fix_sel();
     g_app.dirty = 1;
 }
@@ -1083,6 +1169,7 @@ const char *settings_hint(void) {
     const setting_def_t *d = g_app.settings.sel < N_SETTINGS ? &SETTINGS[g_app.settings.sel] : NULL;
     const char *act;
     if (!d) act = g_app.onboarding ? "enter start" : "enter done";
+    else if (g_app.settings.page == settings_done_page()) act = "enter open";
     else if (d->id == SET_COLOUR) act = "h/l step" DOT_SEP "enter type one";
     else if (d->kind == K_TEXT || d->kind == K_SECRET) act = "enter edit";
     else if (d->id == SET_SIGN) act = "enter choose";
@@ -1092,8 +1179,8 @@ const char *settings_hint(void) {
     else if (row_greyed(d->id)) act = NULL;
     else act = "h/l change";
     static char hint[160];
-    snprintf(hint, sizeof hint, "%s%sj/k move" DOT_SEP "tab/1-%d section" DOT_SEP "esc %s", act ? act : "",
-             act ? DOT_SEP : "", settings_n_sections(), g_app.onboarding ? "start" : "done");
+    snprintf(hint, sizeof hint, "%s%sj/k move" DOT_SEP "tab/1-%d section" DOT_SEP "/ search" DOT_SEP "esc %s",
+             act ? act : "", act ? DOT_SEP : "", settings_n_sections(), g_app.onboarding ? "start" : "done");
     return hint;
 }
 

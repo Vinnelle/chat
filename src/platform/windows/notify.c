@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
-// Notifications, and the clipboard.
+// Notifications, the clipboard, and opening links.
 #include "win.h"
 #include "crypto/crypto.h"
 #include <stdlib.h>
@@ -170,4 +170,12 @@ int platform_clipboard_clear(void) {
     EmptyClipboard();
     CloseClipboard();
     return 1;
+}
+
+int platform_open_url(const char *url, char *why, size_t cap) {
+    wchar_t w[LINK_MAX];
+    if (!to_wide(url, w, COUNT_OF(w))) { copy_str(why, "Windows couldn't read it", cap); return -1; }
+    if ((INT_PTR)ShellExecuteW(NULL, L"open", w, NULL, NULL, SW_SHOWNORMAL) > 32) return 0;
+    copy_str(why, "Windows has no browser set to open it with", cap);
+    return -1;
 }

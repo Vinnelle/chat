@@ -423,6 +423,29 @@ static int move_ask_paras(tui_para_t *p) {
                                       "later. Codes you compared here count there.");
 }
 
+// The address in full, as it opens, since what a message shows can differ from it.
+static int open_link_paras(tui_para_t *p) {
+    static char addr[LINK_MAX + 2], who[sizeof g_app.links.shown.from * 2 + 40], failed[sizeof g_app.links.why + 64];
+    const tui_link_t *l = &g_app.links.shown;
+    snprintf(addr, sizeof addr, "`%s`", g_app.links.target);
+    int n = add_para(p, 0, TUI_P_TEXT, addr);
+    if (g_app.links.nth >= 0) {
+        char from[sizeof l->from * 2];
+        md_escape(l->from, from, sizeof from);
+        if (l->own) snprintf(who, sizeof who, "You sent it at %s.", l->hhmm);
+        else snprintf(who, sizeof who, "**%s** sent it at %s.", from, l->hhmm);
+        n = add_para(p, n, TUI_P_BLANK, "");
+        n = add_para(p, n, TUI_P_TEXT, who);
+    }
+    n = add_para(p, n, TUI_P_BLANK, "");
+    n = add_para(p, n, TUI_P_TEXT, "Your browser opens it directly, not through chat, so the site sees your IP address "
+                                   "and when you opened it.");
+    if (!g_app.links.why[0]) return n;
+    snprintf(failed, sizeof failed, "**chat couldn't open it:** %s. `c` copies it instead.", g_app.links.why);
+    n = add_para(p, n, TUI_P_BLANK, "");
+    return add_para(p, n, TUI_P_TEXT, failed);
+}
+
 static const tui_dialog_t *quit_dialog(void) {
     static tui_dialog_t d;
     static tui_para_t paras[MAX_DIALOG_PARAS];
@@ -802,6 +825,17 @@ static void move_ask_box(tui_dialog_t *d, tui_para_t *paras) {
     d->keys = "y go" DOT_SEP "n stay" DOT_SEP "esc later";
 }
 
+static void open_link_box(tui_dialog_t *d, tui_para_t *paras) {
+    static char title[48];
+    int more = g_app.links.n > 1;
+    if (more) snprintf(title, sizeof title, "OPEN LINK" DOT_SEP "%d OF %d", g_app.links.nth + 1, g_app.links.n);
+    d->title = more ? title : "OPEN LINK";
+    d->n_text = open_link_paras(paras);
+    d->input = NULL;
+    d->keys = more ? "y open" DOT_SEP "c copy" DOT_SEP "j/k older/newer" DOT_SEP "n cancel"
+                   : "y open" DOT_SEP "c copy" DOT_SEP "n cancel";
+}
+
 static void update_box(tui_dialog_t *d, tui_para_t *paras) {
     (void)paras;
     static update_view_t v;
@@ -934,6 +968,7 @@ static const box_fn BOXES[] = {
     [MODE_SIGN_PATH] = sign_path_box,
     [MODE_SIGN_PASTE] = sign_paste_box,
     [MODE_SETTINGS_EDIT] = setting_edit_box,
+    [MODE_SETTINGS_SEARCH] = settings_search_box,
     [MODE_INSTALL] = install_box,
     [MODE_INSTALL_FIRST] = install_first_box,
     [MODE_INSTALL_PASS] = install_pass_box,
@@ -951,6 +986,7 @@ static const box_fn BOXES[] = {
     [MODE_TOR_STATE] = tor_state_box,
     [MODE_MOVE] = move_box,
     [MODE_MOVE_ASK] = move_ask_box,
+    [MODE_OPEN_LINK] = open_link_box,
     [MODE_UPDATE] = update_box,
     [MODE_SAVES] = saves_box,
     [MODE_UNLOCK] = unlock_box,
@@ -1000,7 +1036,7 @@ app_mode_t page_of(app_mode_t m) {
             return m;
         case MODE_EXPORT_ASK:
             return MODE_EXPORT_BROWSE;
-        case MODE_SETTINGS_EDIT:
+        case MODE_SETTINGS_EDIT: case MODE_SETTINGS_SEARCH:
             return MODE_SETTINGS;
         case MODE_SIGN_PASTE: case MODE_SIGN_PASSWORD:
             return MODE_SIGN_CHOICE;
@@ -1231,6 +1267,10 @@ static tui_bar_t current_bar(void) {
         case MODE_MOVE:
         case MODE_MOVE_ASK:
             b.chip = "MOVE";
+            b.tone = TUI_TONE_PROMPT;
+            break;
+        case MODE_OPEN_LINK:
+            b.chip = "LINK";
             b.tone = TUI_TONE_PROMPT;
             break;
         case MODE_ROOMS:

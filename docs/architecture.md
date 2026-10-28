@@ -11,7 +11,7 @@ files through `platform/`.
 
 | Folder | What's there |
 | --- | --- |
-| [`src/common/`](../src/common/) | Code with no I/O: text and UTF-8 (`util.c`), the JSON, TOML and bencode parsers, QR codes, Bytewords, and lookups on a thread (`job.h`). In `image/`, chat's own PNG, JPEG and GIF readers (`image.c`, over `png.c`, `jpeg.c` and `gif.c`), and pictures cleaned before they're sent (`clean.c`) |
+| [`src/common/`](../src/common/) | Code with no I/O: text, UTF-8 and the links in it (`util.c`), the JSON, TOML and bencode parsers, QR codes, Bytewords, and lookups on a thread (`job.h`). In `image/`, chat's own PNG, JPEG and GIF readers (`image.c`, over `png.c`, `jpeg.c` and `gif.c`), and pictures cleaned before they're sent (`clean.c`) |
 | [`src/crypto/`](../src/crypto/) | Keys, sealing, ratchets, Argon2id, signatures and save locks (`crypto.c`), and AGE and PGP keys (`age.c`, `pgp.c`) |
 | [`src/platform/`](../src/platform/) | The operating system, behind `platform.h` (terminal, files, processes, notifications, the sandbox, the device lock, security keys) and `net.h` (sockets): `posix/` for Linux and macOS, `windows/`, and `linux/` and `macos/` for the device lock and security keys |
 | [`src/transport/`](../src/transport/) | How sessions reach each other: the BitTorrent DHT (`dht.c`), Nostr relays (`nostr.c`, over `tls.c`), Tor's control port, SOCKS and onion services (`tor.c`), chat's own tor (`torproc.c`), and router port mapping (`portmap.c`) |
@@ -48,7 +48,7 @@ to the time it's given. `chat_shutdown` and `chat_free` end it.
 | --- | --- |
 | `tui.c` | Scrollbacks, and what every screen is drawn with: styles, boxes, the grid and the frame |
 | `tui_input.c` | Keys as the terminal sends them, and the input line they edit |
-| `tui_chat.c` | The chat screen: the messages, the console, the sidebar |
+| `tui_chat.c` | The chat screen: the messages and their links, the console, the sidebar |
 | `tui_bar.c` | The input box, the command menu over it, the bottom row, and the box drawn over the screen |
 | `tui_pages.c` | List pages (settings, help), a page of text, a picture, and the empty screen under a box |
 | `tui_draw.h` | What those files share |
@@ -73,7 +73,7 @@ with a header of what the rest of the app uses from it (`sessions/sessions.h`, `
 | `identity.c` | The signing identity: made from a password, or read from a key file or a paste |
 | `update.c` | `:update` |
 | `sessions/` | Session slots, opening sessions, what the engine tells the app, the NEW and JOIN boxes, kept rooms, reopening and calls (`sessions.c`, with the kept rooms' list in `rooms.c`), histories (`history.c`), pictures under the lines that offered them (`pics.c`), and which tor Tor mode uses, chat's own tor, and its bridges (`torlink.c`) |
-| `screen/` | What goes on screen (`screen.c`), what each key does (`keys.c`), the app's own commands, `:move`'s boxes and the help page (`commands.c`), the command line (`cmdline.c`), the list pages and the changelog (`pages.c`), the files page (`files_page.c`), the folder browser (`browser.c`), the clipboard (`clipboard.c`), and the lock screen (`lock.c`) |
+| `screen/` | What goes on screen (`screen.c`), what each key does (`keys.c`), the app's own commands, `:move`'s boxes and the help page (`commands.c`), the command line (`cmdline.c`), the list pages and the changelog (`pages.c`), the files page (`files_page.c`), the folder browser (`browser.c`), the clipboard (`clipboard.c`), `:open`'s box (`links.c`), and the lock screen (`lock.c`) |
 | `saves/` | The save files (`saves.c`), their spare, a decoy or chaff (`spare.c`), and their factors (`factors.c`), which share `store.h`: the rest of chat uses `saves.h`. `:install`'s boxes and unlocking (`install.c`) |
 
 ## The platform
@@ -86,7 +86,7 @@ with a header of what the rest of the app uses from it (`sessions/sessions.h`, `
 | --- | --- |
 | `process.c` | Hardening the process, the secrets in its environment, its arguments, the clock, threads, the executable, and the programs and processes it starts |
 | `term.c` | The terminal: raw mode, its size, keys and lines, writing to it, and waiting on it and the sockets together |
-| `notify.c` | Notifications, and the clipboard |
+| `notify.c` | Notifications, the clipboard, and opening links |
 | `files.c` | Files and folders, temporary folders, and what chat reads from the system: the machine id, the default gateway, the CA roots |
 | `sandbox.c` | Landlock and seccomp, and the child pictures are decoded in: Linux only, stubs elsewhere |
 | `net.c` | Sockets (`net.h`) |

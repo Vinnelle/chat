@@ -33,6 +33,8 @@ struct platform_proc { pid_t pid; int exited, code; };
 
 // process.c
 int spawn_grouped(pid_t *pid, const char *path, const char *const argv[], const posix_spawn_file_actions_t *fa);
+// Starts the program at path with arg, and doesn't wait for it to end. 0, or an errno.
+int posix_run_detached(const char *path, const char *arg);
 
 // files.c
 const char *tempdir_base(void);

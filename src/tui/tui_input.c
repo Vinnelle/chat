@@ -391,9 +391,9 @@ static int normal_feed(tui_input_t *in, const tui_key_t *key) {
         switch (key->ch[0]) {
             case 'h': in->cursor = step_left(in, in->cursor); return 1;
             case 'l': in->cursor = step_right(in, in->cursor); normal_clamp(in); return 1;
-            // Handled by the caller: switching sessions, jumping to the newest message, opening the help
-            // or the files, and showing or hiding the console, the chat and the sidebar.
-            case 'j': case 'k': case 'G': case '?': case 'f': case 'c': case 'C': case 's': return 0;
+            // Handled by the caller: switching sessions, jumping to the newest message, opening the help,
+            // the files or a link, and showing or hiding the console, the chat and the sidebar.
+            case 'j': case 'k': case 'G': case '?': case 'f': case 'o': case 'c': case 'C': case 's': return 0;
             case 'i': in->mode = TUI_IMODE_INSERT; return 1;
             case 'a': in->cursor = step_right(in, in->cursor); in->mode = TUI_IMODE_INSERT; return 1;
             case 'I': in->cursor = 0; in->mode = TUI_IMODE_INSERT; return 1;

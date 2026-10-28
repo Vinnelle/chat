@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
-// The list pages' keys, the settings page and the signing identity's picker, the key paste box, and
-// :changelog.
+// The list pages' keys, the settings page with its search box, the signing identity's picker, the
+// key paste box, and :changelog.
 #include "app/app.h"
 #include "changelog.h"
 
@@ -55,31 +55,117 @@ void list_move(list_key_t k, int *sel, int n) {
     else if (k == LIST_LAST) *sel = n > 0 ? n - 1 : 0;
 }
 
-// Left/right on a row changes its value. On the Signing identity row, right opens the picker.
+// ---- the settings' search box ----
+
+// It takes the input line for its field, like a setting's edit, and gives it back after.
+static void begin_settings_search(void) {
+    g_app.saved_input = g_app.input;
+    tui_input_clear(&g_app.input);
+    g_app.input.modal = 0;
+    g_app.settings.found = 0;
+    g_app.mode = MODE_SETTINGS_SEARCH;
+    g_app.dirty = 1;
+}
+
+static void end_settings_search(void) {
+    crypto_wipe(g_app.input.buf, sizeof g_app.input.buf);
+    g_app.input = g_app.saved_input;
+    crypto_wipe(&g_app.saved_input, sizeof g_app.saved_input);
+    g_app.mode = MODE_SETTINGS;
+    g_app.dirty = 1;
+}
+
+// Up/Down or Tab/Shift+Tab go through the matches, Enter opens the selected one on its section's
+// page (or says why it isn't there), and Esc goes back.
+void settings_search_key(const tui_key_t *key) {
+    int found[N_SETTINGS], n = settings_search(g_app.input.buf, found, N_SETTINGS);
+    int *sel = &g_app.settings.found;
+    switch (key->type) {
+        case TUI_KEY_ESCAPE: end_settings_search(); return;
+        case TUI_KEY_ENTER: {
+            if (n == 0) return;
+            setting_id_t id = SETTINGS[found[*sel < n ? *sel : n - 1]].id;
+            end_settings_search();
+            settings_open_at(id);
+            return;
+        }
+        case TUI_KEY_UP:
+        case TUI_KEY_BACKTAB: if (*sel > 0) (*sel)--; break;
+        case TUI_KEY_DOWN:
+        case TUI_KEY_TAB:     if (*sel < n - 1) (*sel)++; break;
+        default: {
+            char was[sizeof g_app.input.buf];
+            copy_str(was, g_app.input.buf, sizeof was);
+            if (!tui_input_feed(&g_app.input, key)) return;
+            if (strcmp(was, g_app.input.buf) != 0) *sel = 0;
+            break;
+        }
+    }
+    g_app.dirty = 1;
+}
+
+#define SEARCH_ROWS 8
+
+// The matches above the field, SEARCH_ROWS at a time so the box keeps its height as they change,
+// each with its place on the page.
+void settings_search_box(tui_dialog_t *d, tui_para_t *paras) {
+    (void)paras;
+    static const char *items[SEARCH_ROWS], *details[SEARCH_ROWS];
+    static char places[SEARCH_ROWS][112];
+    int found[N_SETTINGS], n = settings_search(g_app.input.buf, found, N_SETTINGS);
+    int sel = g_app.settings.found < n ? g_app.settings.found : n - 1;
+    int first = sel >= SEARCH_ROWS ? sel - SEARCH_ROWS + 1 : 0;
+    for (int r = 0; r < SEARCH_ROWS; r++) {
+        int k = first + r;
+        items[r] = details[r] = "";
+        if (k >= n) continue;
+        char place[96];
+        setting_place(found[k], place, sizeof place);
+        snprintf(places[r], sizeof places[r], "%s%s", place, setting_shown(SETTINGS[found[k]].id) ? "" : " (hidden)");
+        items[r] = SETTINGS[found[k]].label;
+        details[r] = places[r];
+    }
+    if (n == 0) items[0] = "No setting matches";
+    d->title = "SEARCH SETTINGS";
+    d->mask = 0;
+    d->placeholder = "a setting's name or :set name, or a word in its help";
+    d->items = items;
+    d->details = details;
+    d->n_items = SEARCH_ROWS;
+    d->sel = n > 0 ? sel - first : -1;
+    d->keys = n > 0 ? "enter open" DOT_SEP "up/down move" DOT_SEP "esc back" : "esc back";
+}
+
+// Left/right on a row changes its value. On the Signing identity row, right opens the picker. On
+// the Done page, Enter or right on a row opens it on its section's page. / searches every section.
 void settings_key(const tui_key_t *key) {
+    if (key->type == TUI_KEY_CHAR && key->ch_len == 1 && key->ch[0] == '/') { begin_settings_search(); return; }
     const setting_def_t *d = g_app.settings.sel < N_SETTINGS ? &SETTINGS[g_app.settings.sel] : NULL;
+    int done = g_app.settings.page == settings_done_page();
     const char *const *names;
     int n;
-    int steps = d && (setting_options(d->id, &names, &n) >= 0 || d->id == SET_COLOUR);
+    int steps = d && !done && (setting_options(d->id, &names, &n) >= 0 || d->id == SET_COLOUR);
     int s = section_digit(key);
     if (s >= 0 && s < settings_n_sections()) settings_go_section(s);
     if (s >= 0) { g_app.dirty = 1; return; }
     switch (list_key(key)) {
         case LIST_UP:    settings_step(-1); break;
         case LIST_DOWN:  settings_step(1); break;
-        case LIST_FIRST: settings_select(section_row(g_app.settings.page, 1)); break;
-        case LIST_LAST:  g_app.settings.sel = SETTINGS_DONE; break;
+        case LIST_FIRST: settings_go_end(0); break;
+        case LIST_LAST:  settings_go_end(1); break;
         case LIST_NEXT_SECTION: settings_section_step(1); break;
         case LIST_PREV_SECTION: settings_section_step(-1); break;
         case LIST_LEFT:  if (steps) setting_step(d->id, -1); break;
         case LIST_RIGHT:
-            if (steps) setting_step(d->id, 1);
+            if (done && d) settings_select(g_app.settings.sel);
+            else if (steps) setting_step(d->id, 1);
             else if (d && d->id == SET_SIGN) begin_sign();
             else if (d && d->id == SET_SHADOW) begin_shadow();
             else if (d && d->id == SET_EXPORT_KEY) begin_key_export();
             break;
         case LIST_CHOOSE:
             if (!d) settings_done();
+            else if (done) settings_select(g_app.settings.sel);
             else if (steps && d->id != SET_COLOUR) setting_step(d->id, 1);
             else if (d->kind == K_TEXT || d->kind == K_SECRET) begin_setting_edit(d->id);
             else if (d->id == SET_SIGN) begin_sign();
@@ -174,18 +260,25 @@ static const char *page_label(const char *label, const char *group, char *out, s
 void render_settings(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar) {
     tui_row_t rows[N_SETTINGS];
     char values[N_SETTINGS][160], labels[N_SETTINGS][64];
-    int n_rows = 0, sel_row = -1, s = g_app.settings.page, end = section_begin(s + 1);
+    int n_rows = 0, sel_row = -1, s = g_app.settings.page, done = s == settings_done_page();
+    // The Done page has every section's rows, under the sections' names and with their whole labels.
+    int begin = done ? 0 : section_begin(s), end = done ? N_SETTINGS : section_begin(s + 1);
     const char *group = NULL, *heading = NULL;
-    for (int i = section_begin(s); i < end; i++) {
+    for (int i = begin; i < end; i++) {
         const setting_def_t *d = &SETTINGS[i];
-        if (d->group) group = heading = d->group;   // the heading goes on its group's first listed row
+        const char *starts = done ? d->section : d->group;
+        if (d->group) group = d->group;
+        if (starts) heading = starts;   // the heading goes on the first listed row under it
         if (!setting_shown(d->id)) continue;
         if (i == g_app.settings.sel) sel_row = n_rows;
         setting_value(d->id, values[n_rows], sizeof values[n_rows]);
         int greyed = row_greyed(d->id);
         if (greyed) copy_str(values[n_rows], "can't be used here", sizeof values[n_rows]);
-        rows[n_rows] = (tui_row_t){ heading, page_label(d->label, group, labels[n_rows], sizeof labels[n_rows]),
-                                    values[n_rows], setting_kind(d), d->id == SET_COLOUR ? g_app.color : NULL,
+        // h/l don't change anything on the Done page, so no row shows the arrows that say they do.
+        tui_value_kind_t kind = setting_kind(d);
+        if (done && (kind == TUI_V_CHOICE || kind == TUI_V_LINK)) kind = TUI_V_TEXT;
+        const char *label = done ? d->label : page_label(d->label, group, labels[n_rows], sizeof labels[n_rows]);
+        rows[n_rows] = (tui_row_t){ heading, label, values[n_rows], kind, d->id == SET_COLOUR ? g_app.color : NULL,
                                     NULL, 0, greyed };
         heading = NULL;
         n_rows++;
@@ -229,8 +322,9 @@ void render_settings(int rows_n, int cols_n, const char *clock, const tui_bar_t 
         else if (d->id == SET_EXPORT_KEY) copy_str(usage, ":exportkey", sizeof usage);
     }
     const char *nav[8];
+    int n_nav = settings_sections(nav, 8);
     char title[64];
-    snprintf(title, sizeof title, "Settings" CRUMB "%s", SETTINGS[section_begin(s)].section);
+    snprintf(title, sizeof title, "Settings" CRUMB "%s", nav[s]);
     tui_page_t page = {
         .title = title,
         .clock = clock,
@@ -238,10 +332,11 @@ void render_settings(int rows_n, int cols_n, const char *clock, const tui_bar_t 
             ? "chat is an end-to-end encrypted chat with no server. Check how it reaches peers, then press "
               "Start chatting. Nothing goes on the network before that."
             : NULL,
-        .nav = nav, .n_nav = settings_sections(nav, 8), .nav_sel = s,
+        .nav = nav, .n_nav = n_nav, .nav_sel = s,
         .rows = rows, .n_rows = n_rows, .selected = sel_row,
         .help = help, .usage = usage[0] ? usage : NULL,
-        .button = g_app.onboarding ? "Start chatting" : "Done",
+        .button = !done ? NULL : g_app.onboarding ? "Start chatting" : "Done",
+        .button_first = 1,
     };
     tui_render_page(rows_n, cols_n, &page, bar, g_app.color_enabled);
 }

@@ -262,6 +262,145 @@ size_t clean_text(const char *in, char *out, size_t max_len) {
     return o;
 }
 
+static int ascii_alnum(char c) { return (c >= '0' && c <= '9') || ((c | 0x20) >= 'a' && (c | 0x20) <= 'z'); }
+
+// What a link holds past its host: anything printable but a space and what RFC 3986 never leaves
+// unencoded, and the bytes of characters past ASCII, which clean_text has rid of controls and bidi marks.
+static int link_byte(unsigned char c) { return c >= 0x80 || (c > ' ' && c < 0x7f && !strchr("\"<>\\^`{|}", c)); }
+
+static size_t scheme_len(const char *s, size_t n) {
+    static const char *const SCHEMES[] = { "https://", "http://" };
+    for (size_t k = 0; k < COUNT_OF(SCHEMES); k++) {
+        const char *p = SCHEMES[k];
+        size_t i = 0;
+        while (p[i] && i < n && (s[i] == p[i] || (p[i] >= 'a' && s[i] == p[i] - 'a' + 'A'))) i++;
+        if (!p[i]) return i;
+    }
+    return 0;
+}
+
+// Two or more labels of letters, digits and '-' (not first or last), the last of them two or more
+// letters in one case, so "e.g", "v0.5.3" and "end.Next" aren't names. Its length, or 0.
+static size_t domain_len(const char *s, size_t n) {
+    size_t i = 0, last = 0, end = 0;
+    int labels = 0;
+    for (;;) {
+        size_t st = i;
+        while (i < n && (ascii_alnum(s[i]) || s[i] == '-')) i++;
+        if (i == st || s[st] == '-' || s[i - 1] == '-') break;
+        labels++;
+        last = st;
+        end = i;
+        if (i + 1 < n && s[i] == '.' && ascii_alnum(s[i + 1])) i++;
+        else break;
+    }
+    if (labels < 2 || end - last < 2) return 0;
+    int lower = 0, upper = 0;
+    for (size_t k = last; k < end; k++) {
+        if (s[k] >= 'a' && s[k] <= 'z') lower = 1;
+        else if (s[k] >= 'A' && s[k] <= 'Z') upper = 1;
+        else return 0;
+    }
+    return lower && upper ? 0 : end;
+}
+
+// A name starts a link only where it isn't the rest of a word, a path, an address or another link
+// ("ida@ieji.de", "~/notes.md"). Past ASCII, the character before could be a letter.
+static int name_starts(const char *s, size_t i) {
+    if (i == 0) return 1;
+    unsigned char c = (unsigned char)s[i - 1];
+    return c < 0x80 && !ascii_alnum((char)c) && !strchr("-_.@/\\:~#$%&+=", c);
+}
+
+static int name_ends(const char *s, size_t n, size_t e) {
+    if (e >= n) return 1;
+    if (strchr("@_-", s[e])) return 0;
+    return !(s[e] == '.' && e + 1 < n && (ascii_alnum(s[e + 1]) || strchr("_-", s[e + 1])));
+}
+
+// Leaves off what's around a link rather than in it: a sentence's punctuation after it, and a bracket
+// it didn't open, as in "(see example.com)". Never before min.
+static size_t link_trim(const char *s, size_t start, size_t end, size_t min) {
+    // ” ’ » … 。 ）
+    static const char *const CLOSERS[] = { "\xe2\x80\x9d", "\xe2\x80\x99", "\xc2\xbb", "\xe2\x80\xa6", "\xe3\x80\x82",
+                                           "\xef\xbc\x89" };
+    for (;;) {
+        if (end <= min) return end;
+        char c = s[end - 1];
+        if (strchr(".,;:!?'*", c)) { end--; continue; }
+        if (c == ')' || c == ']') {
+            char open = c == ')' ? '(' : '[';
+            int depth = 0;
+            for (size_t k = start; k < end; k++) depth += s[k] == open ? 1 : s[k] == c ? -1 : 0;
+            if (depth < 0) { end--; continue; }
+        }
+        size_t cut = 0;
+        for (size_t k = 0; k < COUNT_OF(CLOSERS) && !cut; k++) {
+            size_t l = strlen(CLOSERS[k]);
+            if (end - min >= l && memcmp(s + end - l, CLOSERS[k], l) == 0) cut = l;
+        }
+        if (!cut) return end;
+        end -= cut;
+    }
+}
+
+// What the address a link opens %-encodes: bytes past ASCII, and what a shell reads inside quotes,
+// since xdg-open can pass it through eval.
+static int target_encodes(unsigned char c) { return c >= 0x80 || c == '$' || c == '\''; }
+
+static size_t target_len(const char *link, size_t n) {
+    size_t len = scheme_len(link, n) ? 0 : sizeof "https://" - 1;
+    for (size_t i = 0; i < n; i++) len += target_encodes((unsigned char)link[i]) ? 3 : 1;
+    return len;
+}
+
+int link_next(const char *s, size_t n, size_t *from, size_t *at, size_t *len) {
+    for (size_t i = *from; i < n; i++) {
+        size_t e, sl = scheme_len(s + i, n - i);
+        if (sl && (i == 0 || !ascii_alnum(s[i - 1])) && i + sl < n && (ascii_alnum(s[i + sl]) || s[i + sl] == '[')) {
+            for (e = i + sl; e < n && link_byte((unsigned char)s[e]); e++) {}
+            e = link_trim(s, i, e, i + sl + 1);
+        } else if (ascii_alnum(s[i]) && name_starts(s, i)) {
+            size_t d = domain_len(s + i, n - i);
+            if (!d || !name_ends(s, n, i + d)) continue;
+            e = i + d;
+            if (e < n && strchr("/?#", s[e])) {
+                size_t p = e;
+                while (p < n && link_byte((unsigned char)s[p])) p++;
+                e = link_trim(s, i, p, e);
+            }
+        } else {
+            continue;
+        }
+        if (target_len(s + i, e - i) >= LINK_MAX) { i = e - 1; continue; }
+        *at = i;
+        *len = e - i;
+        *from = e;
+        return 1;
+    }
+    *from = n;
+    return 0;
+}
+
+int link_target(const char *link, size_t n, char *out, size_t cap) {
+    static const char HEX_UPPER[] = "0123456789ABCDEF";
+    if (target_len(link, n) >= cap) {
+        if (cap) out[0] = '\0';
+        return -1;
+    }
+    size_t o = 0;
+    if (!scheme_len(link, n)) for (const char *p = "https://"; *p; p++) out[o++] = *p;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)link[i];
+        if (!target_encodes(c)) { out[o++] = (char)c; continue; }
+        out[o++] = '%';
+        out[o++] = HEX_UPPER[c >> 4];
+        out[o++] = HEX_UPPER[c & 15];
+    }
+    out[o] = '\0';
+    return 0;
+}
+
 #define SESSION_ID_MAX 64
 
 static const char SID_ALPHABET[] = "23456789ABCDEFGHJKMNPQRSTVWXYZ";

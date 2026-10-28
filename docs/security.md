@@ -299,6 +299,11 @@ reach Tor relays, never a peer). Your terminal holds what's on screen while it i
 desktop's notification service gets each notification. Programs running as you can watch chat's
 files change, and can replace chat or tor before you next start them.
 
+A link you open leaves chat: your browser fetches it directly, so the site sees your IP address and
+when you opened it, whatever route chat takes. A peer can send a link to a site of their own to
+learn those. chat never fetches a link by itself, and asks first when you open one with `o` or
+`:open` (see [Links](usage.md#links)). On Linux the desktop portal opens it, outside the sandbox.
+
 ## See also
 
 [The protocol](protocol.md) describes what chat sends over the network, byte by byte.

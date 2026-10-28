@@ -45,7 +45,8 @@ colours are exact, but chat asks the terminal for its background colour and adju
 wouldn't be readable on it. `NO_COLOR` limits it to bold, faint and reverse.
 
 It starts on the settings page, so routing, nickname, colour, signing identity and the rest are
-all set up in one place. **Start chatting** at the bottom (or `Esc`) goes to your sessions.
+all set up in one place. **Start chatting**, on the **Start** page after the sections (or `Esc`),
+goes to your sessions.
 Nothing goes on the network before that: no tor is looked for or started, and no `--peer` name
 is looked up (in Tor mode it never is, since that would go around Tor). Once `:install` has
 saved your settings, it starts on your sessions, and `Ctrl+S` opens the page.
@@ -77,7 +78,7 @@ and so does the last: the way out of where you are, or to the help.
 
 The input line is a small vim. It starts in NORMAL (`h`/`l` move, `0`/`$` go to the ends, `x`
 deletes, `j`/`k` switch session, `s`/`c`/`C` toggle the sidebar/console/chat, `f` opens the
-files). `i`/`a`/`I`/`A` go to INSERT, where Enter sends, `Ctrl+W` deletes the word before the
+files, `o` the newest link). `i`/`a`/`I`/`A` go to INSERT, where Enter sends, `Ctrl+W` deletes the word before the
 cursor and `Ctrl+U`
 everything before it, and `Esc` goes back to NORMAL. The input box border is the mode's colour,
 and the box grows a row at a time as what you type wraps, up to six rows (fewer on a short
@@ -90,6 +91,28 @@ with what it's for and with its keys on the bottom edge. `Enter` confirms, `Esc`
 your draft comes back after. Yes/no questions take `y` or `n`.
 
 Typing `@` and the start of a nick shows the rest of the name dimmed, and `Tab` completes it.
+
+## Links
+
+Links in messages are underlined: `http://` and `https://` addresses, and domain names like
+`ieji.de/@ida` or `chat.vin.moe`, which open as `https://`. A file name that ends like a domain
+(`notes.md`, `chat.sh`) is underlined too.
+
+In a terminal that takes hyperlinks (OSC 8: kitty, WezTerm, foot, iTerm2, Windows Terminal, GNOME
+Terminal and others), a link can be clicked, the way that terminal opens links. chat has the
+terminal report the mouse, so most want `Shift` held as well. The terminal opens it, without asking
+chat.
+
+`o` in NORMAL (or `:open`) shows the newest link in a box: the whole address it opens, and who sent
+it when. `j` / `k` go to older and newer links, `y` opens it in your browser, `c` copies it, and
+`n` or `Esc` closes the box. `:open N` starts at the Nth newest, and `:open LINK` takes a link you
+type or paste. On Linux the desktop portal opens it, so the [sandbox](security.md#sandbox-linux)
+stays as it is; without a portal chat runs `xdg-open`, which the sandbox doesn't allow. macOS uses
+`open`, and Windows the browser it has set for links.
+
+However it's opened, your browser fetches the link directly, not through chat's Tor or relays: the
+site sees your IP address, and when you opened it. When the link comes from a peer, that site may
+be theirs.
 
 ## Pasting
 
@@ -149,6 +172,7 @@ terminal cuts off in the list.
 | `:saveto N [anyway]` | pick a folder in a file browser and save file N there |
 | `:show N [anyway]`, `:hide N` | draw picture N in the chat where it was offered (yours too), or hide it |
 | `:cancel N` | stop fetching file N or take it off the queue, or stop offering one of yours |
+| `:open [N\|LINK]` | the newest link in the chat (`o` in NORMAL), the Nth newest, or LINK, in a box that opens it in your browser or copies it (see [Links](#links)) |
 
 ## Settings
 
@@ -197,7 +221,9 @@ after a name. Under each row's help, the page shows the `:set` command that does
 | `betas` | `on` (`:update` installs betas too), `off` (only releases) |
 
 The settings page shows one section at a time (Network, Profile, Security and Chat, listed on the
-left), with its rows grouped under headings, and **Done** at the end of each. `j`/`k` go on from one
+left), with its rows grouped under headings. **Done** comes last in that list (**Start** on the page
+chat opens on): its button closes the page, and under it every setting chat is using is listed by
+section, where `Enter` on a row opens it in its own section. `j`/`k` go on from one
 section into the next. The settings page, the pages under it (the signing identity picker and the
 key file browser) and the help page all use the same keys: `j`/`k` move, `g`/`G` go to the
 top/bottom, `Tab` / `Shift+Tab` (or `PgDn` / `PgUp`) go to the next / previous section, round from
@@ -205,6 +231,11 @@ the last to the first, and `1`-`9` go to a section by its place in the list. On 
 that's the row you were on there last. `Enter` picks, `h`/`l` change a value or go out of / into a
 page, `Esc` goes back and `q` closes the page. In the file browser, `~` goes to the home folder, and
 in the key file browser `/` types a path instead.
+
+On the settings page, `/` searches every section: type part of a setting's name, its `:set` name or
+a word from its help, and the matches are listed best first, with where each one is. `Up`/`Down`
+(or `Tab` / `Shift+Tab`) pick one and `Enter` opens it in its section. A setting that doesn't apply
+right now (a Tor one with UDP routing) is marked hidden, and `Enter` on it says why.
 
 With `--simple`, `:set` only covers `nick`, `colour`, `notify`, `preview` and `net`.
 

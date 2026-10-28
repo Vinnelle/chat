@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
-// Text that reaches the terminal (message and nick cleaning, column widths), the input line
+// Text that reaches the terminal (message and nick cleaning, column widths, links), the input line
 // editor fed with arbitrary key bytes, and file names from peers on their way to the disk.
 #define _POSIX_C_SOURCE 200809L
 #include "core/chat.h"
@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 static void check(int ok) { if (!ok) abort(); }
@@ -232,6 +233,19 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     check_clean(fname);
     uint64_t sz;
     file_parse_size(s, &sz);
+
+    // Links in a message: inside it, in order, and opening an address of printable ASCII the
+    // terminal (OSC 8) and a shell take as it is.
+    size_t from = 0, at, len, prev = 0;
+    while (link_next(out, n, &from, &at, &len)) {
+        check(at >= prev && len > 0 && at + len <= n && from == at + len);
+        prev = from;
+        char target[LINK_MAX];
+        check(link_target(out + at, len, target, sizeof target) == 0);
+        check(strncasecmp(target, "http://", 7) == 0 || strncasecmp(target, "https://", 8) == 0);
+        for (const char *c = target; *c; c++) check(*c > ' ' && *c < 0x7f && !strchr("\"'$\\`", *c));
+    }
+    check(from == n);
 
     fuzz_editor(data, size);
     fuzz_render(s, data, size);

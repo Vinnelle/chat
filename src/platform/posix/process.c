@@ -111,9 +111,17 @@ void platform_hide_args(int argc, char **argv) {
 
 extern char **environ;
 
+// Where posix_spawn can't start a session, a process group of its own is enough to keep the
+// terminal's hang-up from reaching it.
+#ifdef POSIX_SPAWN_SETSID
+#define SPAWN_OWN_SESSION POSIX_SPAWN_SETSID
+#else
+#define SPAWN_OWN_SESSION POSIX_SPAWN_SETPGROUP
+#endif
+
 // How chat runs curl: standard handles on /dev/null, every signal reset to its default (chat
 // ignores SIGPIPE) and none blocked. path is absolute and never searched for.
-static int spawn_quiet(pid_t *pid, const char *path, char *const argv[]) {
+static int spawn_quiet(pid_t *pid, const char *path, char *const argv[], int own_session) {
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
     posix_spawn_file_actions_addopen(&fa, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
@@ -121,7 +129,7 @@ static int spawn_quiet(pid_t *pid, const char *path, char *const argv[]) {
     posix_spawn_file_actions_adddup2(&fa, STDOUT_FILENO, STDERR_FILENO);
     posix_spawnattr_t attr;
     posix_spawnattr_init(&attr);
-    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
+    posix_spawnattr_setflags(&attr, (short)(POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF | (own_session ? SPAWN_OWN_SESSION : 0)));
     sigset_t none, all;
     sigemptyset(&none);
     sigfillset(&all);
@@ -200,9 +208,22 @@ int platform_run_quiet(const char *const argv[]) {
     if (platform_find_program(argv[0], NULL, path, sizeof path) != 0) return -1;
     pid_t pid;
     int status = -1;
-    if (spawn_quiet(&pid, path, (char *const *)argv) != 0) return -1;
+    if (spawn_quiet(&pid, path, (char *const *)argv, 0) != 0) return -1;
     while (waitpid(pid, &status, 0) < 0) if (errno != EINTR) return -1;
     return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : -1;
+}
+
+// sh starts it in the background and exits, so it isn't left as chat's child (xdg-open can run the
+// browser until it's closed), in a session of its own, so closing the terminal doesn't end it.
+int posix_run_detached(const char *path, const char *arg) {
+    char sh[PATH_BUF];
+    if (platform_find_program("sh", NULL, sh, sizeof sh) != 0) return ENOENT;
+    const char *const argv[] = { "sh", "-c", "\"$0\" \"$1\" &", path, arg, NULL };
+    pid_t pid;
+    int status = -1, rc = spawn_quiet(&pid, sh, (char *const *)argv, 1);
+    if (rc != 0) return rc;
+    while (waitpid(pid, &status, 0) < 0) if (errno != EINTR) return errno;
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : ECHILD;
 }
 
 int platform_replace_exe(const char *new_path, const char *exe_path) {

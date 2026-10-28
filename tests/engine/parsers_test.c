@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
-// What comes from relays, routers and Tor, TOML, Bytewords and QR codes, all without a network.
+// What comes from relays, routers and Tor, TOML, Bytewords, QR codes and links in messages, all
+// without a network.
 #include "harness.h"
+#include "tui/tui.h"
 
 typedef struct { int n; char seen[10][160]; } toml_log_t;
 
@@ -127,6 +129,54 @@ void test_bytewords(double *t) {
     size_t n = strlen(every);
     CHECK(n == 256 * 4 + 192 + 63 * 4 && strncmp(every, "able acid also apex", 19) == 0 && strcmp(every + n - 4, "zoom") == 0,
           "the 256 words came out wrong (%zu bytes)", n);
+}
+
+// Where a link in a message starts and ends, what isn't one, the address it opens, and the chat's
+// links newest first.
+void test_links(double *t) {
+    (void)t;
+    static const struct { const char *text, *link; } CASES[] = {
+        { "@Jay finlay's ieji ID is @ida@ieji.de (ieji.de/@ida)", "ieji.de/@ida" },
+        { "see https://en.wikipedia.org/wiki/C_(language).", "https://en.wikipedia.org/wiki/C_(language)" },
+        { "<HTTP://Example.com/a?b=1&c=2>", "HTTP://Example.com/a?b=1&c=2" },
+        { "chat.vin.moe, then", "chat.vin.moe" },
+        { "is it www.example.com?", "www.example.com" },
+        { "main.go:42", "main.go" },
+        { "\xe2\x80\x9chttps://x.org/\xc3\xa9\xe2\x80\x9d", "https://x.org/\xc3\xa9" },
+        { "mail finlay@tuta.com, e.g. v0.5.3 or end.Next or ~/notes.md", NULL },
+        { "http:// https://", NULL },
+    };
+    for (size_t i = 0; i < COUNT_OF(CASES); i++) {
+        size_t from = 0, at = 0, len = 0, n = strlen(CASES[i].text);
+        int got = link_next(CASES[i].text, n, &from, &at, &len);
+        if (!CASES[i].link) {
+            CHECK(!got, "found a link in '%s': %.*s", CASES[i].text, (int)len, CASES[i].text + at);
+            continue;
+        }
+        CHECK(got && len == strlen(CASES[i].link) && memcmp(CASES[i].text + at, CASES[i].link, len) == 0,
+              "'%s' gave '%.*s', want '%s'", CASES[i].text, (int)len, CASES[i].text + at, CASES[i].link);
+    }
+    char out[LINK_MAX];
+    CHECK(link_target("ieji.de/@ida", 12, out, sizeof out) == 0 && strcmp(out, "https://ieji.de/@ida") == 0,
+          "a link without its https:// opens as %s", out);
+    static const char shell[] = "http://x.org/$(id)'\xc3\xa9";
+    CHECK(link_target(shell, sizeof shell - 1, out, sizeof out) == 0 && strcmp(out, "http://x.org/%24(id)%27%C3%A9") == 0,
+          "a link with what a shell reads opens as %s", out);
+    CHECK(link_target("x.org", 5, out, 8) == -1 && out[0] == '\0', "an address too long for its buffer wasn't refused");
+
+    static tui_scrollback_t sb;
+    tui_scrollback_clear(&sb);
+    tui_scrollback_push(&sb, "12:00", "ida: see x.org and https://y.org/z", NULL, 0, 4);
+    tui_scrollback_push(&sb, "12:01", "* bob.example joined", NULL, 0, 0);
+    tui_scrollback_push(&sb, "12:02", "bob: a.io", NULL, 0, 4);
+    unsigned upto = sb.total;
+    tui_scrollback_push(&sb, "12:03", "ida: later.org", NULL, 0, 4);
+    tui_link_t l = { .own = 0 };
+    static const char *const want[] = { "a.io", "https://y.org/z", "x.org" };
+    for (int i = 0; i < 3; i++)
+        CHECK(tui_chat_link(&sb, upto, i, &l) == 3 && strcmp(l.text, want[i]) == 0
+              && strcmp(l.from, i == 0 ? "bob" : "ida") == 0 && strcmp(l.hhmm, i == 0 ? "12:02" : "12:00") == 0,
+              "the chat's link %d came out as %s from %s at %s, want %s", i, l.text, l.from, l.hhmm, want[i]);
 }
 
 static int qr_at(const uint8_t *m, int size, int x, int y) { return m[y * size + x]; }

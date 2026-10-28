@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 finlay@tuta.com
-// Notifications, and the clipboard.
+// Notifications, the clipboard, and opening links.
 #include "posix.h"
 #include "crypto/crypto.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,6 +24,8 @@
 
 static int g_bus = -1;
 static uint32_t g_bus_serial;
+// A reply was left half read on it, so the next message goes on a new connection.
+static int g_bus_stale;
 
 // A D-Bus message: its header (byte order, type, flags, version, body length, serial, then the
 // header fields), padded to 8, then the body. A field is its code and a variant.
@@ -204,6 +207,20 @@ static int bus_drain(int fd) {
     }
 }
 
+// Once more on a new connection if the bus has dropped the old one.
+static int bus_send(const dmsg_t *m) {
+    if (g_bus >= 0 && g_bus_stale) { close(g_bus); g_bus = -1; }
+    g_bus_stale = 0;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (g_bus < 0) g_bus = bus_connect();
+        if (g_bus < 0) return -1;
+        if (bus_drain(g_bus) == 0 && send_all(g_bus, m->b, m->n) == 0) return 0;
+        close(g_bus);
+        g_bus = -1;
+    }
+    return -1;
+}
+
 // The bus drops a connection that sends malformed UTF-8, so such bytes become '?'.
 static void utf8_safe(const char *in, char *out, size_t cap) {
     size_t n = strlen(in), o = 0, adv = 1;
@@ -257,16 +274,8 @@ void platform_notify(const char *title, const char *body) {
     if (!args.bad) memcpy(args.b + hints_len_at, &hints_len, sizeof hints_len);
     d_u32(&args, UINT32_MAX);   // expire_timeout -1: the desktop's default
     if (d_call(&call, DBUS_NO_REPLY, "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
-               "org.freedesktop.Notifications", "Notify", "susssasa{sv}i", &args) == 0) {
-        // Once more on a new connection if the bus has dropped the old one.
-        for (int attempt = 0; attempt < 2; attempt++) {
-            if (g_bus < 0) g_bus = bus_connect();
-            if (g_bus < 0) break;
-            if (bus_drain(g_bus) == 0 && send_all(g_bus, call.b, call.n) == 0) break;
-            close(g_bus);
-            g_bus = -1;
-        }
-    }
+               "org.freedesktop.Notifications", "Notify", "susssasa{sv}i", &args) == 0)
+        bus_send(&call);
     crypto_wipe(t, sizeof t);
     crypto_wipe(esc, sizeof esc);
     crypto_wipe(b, sizeof b);
@@ -276,6 +285,127 @@ void platform_notify(const char *title, const char *body) {
 
 void platform_notify_shutdown(void) {
     if (g_bus >= 0) { close(g_bus); g_bus = -1; }
+}
+
+#ifndef __APPLE__
+// How long opening a link waits for the portal's answer, on the UI's thread. A portal still starting
+// gets the link once it's up, so no answer by then counts as taken.
+#define PORTAL_WAIT_MS 1500
+#define DBUS_HEAD 16
+enum { DBUS_METHOD_RETURN = 2, DBUS_ERROR = 3, DF_REPLY_SERIAL = 5 };
+enum { BUS_ANSWERED = 0, BUS_REFUSED = -1, BUS_BROKEN = -2, BUS_LATE = 1 };
+
+// len bytes by end, as now_seconds() counts.
+static int bus_read(int fd, uint8_t *buf, size_t len, double end) {
+    while (len > 0) {
+        int ms = (int)((end - now_seconds()) * 1000);
+        if (ms <= 0) return BUS_LATE;
+        struct pollfd pf = { fd, POLLIN, 0 };
+        int r = poll(&pf, 1, ms);
+        if (r < 0 && errno == EINTR) continue;
+        if (r == 0) return BUS_LATE;
+        ssize_t got = r < 0 ? -1 : recv(fd, buf, len, MSG_DONTWAIT);
+        if (got < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+        if (got <= 0) return BUS_BROKEN;
+        buf += got;
+        len -= (size_t)got;
+    }
+    return 0;
+}
+
+static uint32_t d_get32(const uint8_t *p, int big) {
+    return big ? load_be32(p) : (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+// The REPLY_SERIAL among a message's header fields (n bytes, from an 8 byte boundary), or 0.
+static uint32_t d_reply_serial(const uint8_t *f, size_t n, int big) {
+    for (size_t i = 0; i + 4 <= n; ) {
+        uint8_t code = f[i], sl = f[i + 1];
+        size_t v = i + 2 + sl + 1;
+        if (v > n) break;
+        char t = sl == 1 ? (char)f[i + 2] : 0;
+        if (t == 'u' || t == 's' || t == 'o') {
+            v = (v + 3) & ~(size_t)3;
+            if (v + 4 > n) break;
+            uint32_t x = d_get32(f + v, big);
+            if (t == 'u' && code == DF_REPLY_SERIAL) return x;
+            if (t != 'u' && x > n) break;
+            v += 4 + (t == 'u' ? 0 : (size_t)x + 1);
+        } else if (t == 'g') {
+            if (v >= n) break;
+            v += 1 + (size_t)f[v] + 1;
+        } else {
+            break;
+        }
+        i = (v + DBUS_ALIGN - 1) & ~(size_t)(DBUS_ALIGN - 1);
+    }
+    return 0;
+}
+
+// Reads what the bus sends until the answer to the call numbered serial.
+static int bus_reply(int fd, uint32_t serial, double end) {
+    uint8_t head[DBUS_HEAD], buf[DBUS_MSG_MAX];
+    for (;;) {
+        int r = bus_read(fd, head, sizeof head, end);
+        if (r != 0) return r;
+        int big = head[0] == 'B';
+        if (!big && head[0] != 'l') return BUS_BROKEN;
+        uint32_t body = d_get32(head + 4, big), fields = d_get32(head + 12, big);
+        uint64_t rest = (uint64_t)fields + (DBUS_ALIGN - (DBUS_HEAD + fields) % DBUS_ALIGN) % DBUS_ALIGN + body;
+        uint32_t answers = 0;
+        if (fields <= sizeof buf) {
+            if ((r = bus_read(fd, buf, fields, end)) != 0) return r;
+            answers = d_reply_serial(buf, fields, big);
+            rest -= fields;
+        }
+        while (rest > 0) {
+            size_t chunk = rest < sizeof buf ? (size_t)rest : sizeof buf;
+            if ((r = bus_read(fd, buf, chunk, end)) != 0) return r;
+            rest -= chunk;
+        }
+        if (answers == serial && head[1] == DBUS_METHOD_RETURN) return BUS_ANSWERED;
+        if (answers == serial && head[1] == DBUS_ERROR) return BUS_REFUSED;
+    }
+}
+
+// The desktop portal's OpenURI: the desktop opens it, outside chat and its sandbox.
+static int portal_open(const char *url) {
+    dmsg_t args = { .n = 0 }, call;
+    d_str(&args, "");    // parent_window
+    d_str(&args, url);
+    d_u32(&args, 0);     // options: none
+    d_pad(&args, DBUS_ALIGN);
+    if (d_call(&call, 0, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+               "org.freedesktop.portal.OpenURI", "OpenURI", "ssa{sv}", &args) != 0) return -1;
+    uint32_t serial = g_bus_serial;
+    if (bus_send(&call) != 0) return -1;
+    int r = bus_reply(g_bus, serial, now_seconds() + PORTAL_WAIT_MS / 1000.0);
+    if (r == BUS_LATE) g_bus_stale = 1;
+    if (r == BUS_BROKEN) { close(g_bus); g_bus = -1; }
+    return r == BUS_ANSWERED || r == BUS_LATE ? 0 : -1;
+}
+#endif
+
+// Linux: the portal, else xdg-open, which the sandbox doesn't let chat start.
+int platform_open_url(const char *url, char *why, size_t cap) {
+#ifdef __APPLE__
+    const char *const argv[] = { "open", url, NULL };
+    if (platform_run_quiet(argv) == 0) return 0;
+    copy_str(why, "macOS's open couldn't open it", cap);
+    return -1;
+#else
+    if (portal_open(url) == 0) return 0;
+    char path[PATH_BUF];
+    if (platform_find_program("xdg-open", NULL, path, sizeof path) != 0) {
+        copy_str(why, "no desktop portal answered, and there's no xdg-open", cap);
+        return -1;
+    }
+    int rc = posix_run_detached(path, url);
+    if (rc == 0) return 0;
+    snprintf(why, cap, "no desktop portal answered, and %s",
+             rc == EACCES || rc == EPERM ? "the sandbox keeps chat from starting xdg-open" : "xdg-open didn't start");
+    return -1;
+#endif
 }
 
 // The clipboard belongs to the desktop, which chat doesn't talk to, so the terminal sets it.

@@ -36,6 +36,7 @@ static const struct { const char *section, *keys, *what; } HELP_KEYS[] = {
     { NULL,          "G",               "back to the newest message and console line" },
     { NULL,          "s  c  C",         "show or hide the sidebar / console / chat" },
     { NULL,          "f",               "the files" },
+    { NULL,          "o",               "open or copy the newest link in the chat (j k: older ones)" },
     { NULL,          ":  /",            "the command line" },
     { NULL,          "?",               "this page" },
     { "Files",       "ctrl+f",          "the files offered here, and yours (f in NORMAL)" },
@@ -50,12 +51,13 @@ static const struct { const char *section, *keys, *what; } HELP_KEYS[] = {
     { NULL,          "h  l  enter",     "change a value, go in, choose" },
     { NULL,          "tab  shift+tab",  "next / previous section (pgdn / pgup too)" },
     { NULL,          "1 - 9",           "the first to ninth section" },
+    { NULL,          "/",               "in the settings: search them all" },
     { NULL,          "esc  q",          "back / close" },
 };
 
 #define N_HELP_KEYS ((int)COUNT_OF(HELP_KEYS))
 
-#define MAX_HELP_COMMANDS 32
+#define MAX_HELP_COMMANDS 48
 
 #define MAX_HELP_ROWS (N_HELP_KEYS + MAX_HELP_COMMANDS)
 
@@ -405,6 +407,7 @@ const command_t APP_COMMANDS[] = {
     { "show",    NULL,                  "N [anyway]", "show picture N in the chat, where it was offered", app_show },
     { "hide",    NULL,                  "N",      "tuck picture N away again",                       app_hide },
     { "saveto",  NULL,                  "N [anyway]", "pick a folder in a file browser and save file N there", app_saveto },
+    { "open",    NULL,                  "[N | LINK]", "open a link from the chat in your browser, or copy it; N counts from the newest (o)", app_open },
     { NULL, NULL, NULL, NULL, NULL }
 };
 

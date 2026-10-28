@@ -3,6 +3,27 @@
 All notable changes to chat, newest first. Each beta (`X.Y.Z-beta.N`) has a section of its own until
 its release, which folds them into one. A release's notes on GitHub are its section here.
 
+## Unreleased
+
+### Added
+- `/` on the settings page searches every section, by name, `:set` name or a word from the help,
+  and `Enter` opens the match in its section.
+- Links in messages are underlined: `http://` and `https://` addresses, and domain names like
+  `ieji.de/@ida`. A terminal that takes hyperlinks (OSC 8) opens one when it's clicked. `o` in
+  NORMAL, or `:open [N|LINK]`, shows the newest link in a box with the whole address, who sent it
+  and when (`j` / `k` for older ones): `y` opens it in your browser, `c` copies it. The box says
+  first that the browser fetches it directly, so the site sees your IP address. On Linux the
+  desktop portal opens it, so the sandbox stays as it is.
+
+### Fixed
+- The help page lists every command again: `:port`, `:send`, `:download` and `:cancel` were cut off
+  its end.
+
+### Changed
+- The settings page's **Done** button (**Start chatting** on the page chat opens on) has a page of
+  its own after Chat in the list on the left, so `Tab` from Chat, then `Enter`, closes it. Under the
+  button, every setting chat is using is listed by section, and `Enter` on one opens it in its own.
+
 ## 0.5.3
 
 ### Changed

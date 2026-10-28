@@ -179,6 +179,7 @@ static const mode_keys_t MODE_KEYS[] = {
     [MODE_CHANGELOG]         = OWN(changelog_key),
     [MODE_SETTINGS]          = OWN(settings_key),
     [MODE_SETTINGS_EDIT]     = FIELD(commit_setting_edit, end_setting_edit),
+    [MODE_SETTINGS_SEARCH]   = OWN_FIELD(settings_search_key),
     [MODE_SIGN_CHOICE]       = OWN(sign_picker_key),
     [MODE_SIGN_BROWSE]       = OWN(browser_key),
     [MODE_SEND_BROWSE]       = OWN(send_browser_key),
@@ -219,6 +220,7 @@ static const mode_keys_t MODE_KEYS[] = {
     [MODE_MOVE]              = QUESTION(move_yes, move_no),
     [MODE_MOVE_ASK]          = OWN(move_ask_key),
     [MODE_TOR_STATE]         = QUESTION(tor_state_yes, tor_state_no),
+    [MODE_OPEN_LINK]         = OWN(open_link_key),
     [MODE_ROOMS]             = OWN(rooms_key),
 };
 _Static_assert(COUNT_OF(MODE_KEYS) == MODE_ROOMS + 1, "every mode says how it takes keys");
@@ -322,8 +324,8 @@ void handle_key(const tui_key_t *key) {
     }
 
     // NORMAL leaves these to the app: j and k switch sessions, like moving through a list, G goes back
-    // to the newest message and console line, ? opens the help, f the files, and c, C and s show or
-    // hide the console, the chat and the sidebar.
+    // to the newest message and console line, ? opens the help, f the files, o the newest link, and c,
+    // C and s show or hide the console, the chat and the sidebar.
     if (key->type == TUI_KEY_CHAR && input->mode == TUI_IMODE_NORMAL) {
         switch (key->ch[0]) {
             case 'j': select_step(1); break;
@@ -331,6 +333,7 @@ void handle_key(const tui_key_t *key) {
             case 'G': scroll_chat(0, 0); scroll_console(0); break;
             case '?': begin_help(); break;
             case 'f': begin_files(); break;
+            case 'o': app_open(NULL, ""); break;
             case 'c': g_app.show.console = !g_app.show.console; g_app.dirty = 1; break;
             case 'C': g_app.show.chat = !g_app.show.chat; g_app.dirty = 1; break;
             case 's': g_app.show.sidebar = !g_app.show.sidebar; g_app.dirty = 1; break;

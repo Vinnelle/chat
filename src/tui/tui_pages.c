@@ -123,12 +123,17 @@ static void draw_button(wbuf_t *w, int row, int left, int iw, const tui_page_t *
     inner_end(&p);
 }
 
-// The rows, by section, then the button, in nrows rows from top, scrolled so the selected row is
-// visible with its heading and as much of the rest of its section as fits. The help is drawn over
-// the rest, so its length doesn't move anything.
+// The rows, by section, and the button after them or before them, in nrows rows from top, scrolled
+// so the selected row is visible with its heading and as much of the rest of its section as fits.
+// The help is drawn over the rest, so its length doesn't move anything.
 static void draw_list(wbuf_t *w, int top, int left, int iw, int view, int nrows, const tui_page_t *pg) {
     static int kind[PAGE_LINES], arg[PAGE_LINES];
     int n = 0, sel_line = -1, head_line = -1, end_line = -1, head = -1;
+    if (pg->button && pg->button_first) {
+        if (pg->selected >= pg->n_rows) sel_line = head_line = end_line = n;
+        kind[n] = PL_BUTTON; n++;
+        kind[n] = PL_BLANK; n++;
+    }
     for (int i = 0; i < pg->n_rows && n < PAGE_LINES - 5; i++) {
         if (pg->rows[i].section) {
             if (sel_line >= 0 && end_line < 0) end_line = n - 1;
@@ -141,7 +146,7 @@ static void draw_list(wbuf_t *w, int top, int left, int iw, int view, int nrows,
         kind[n] = PL_ROW; arg[n] = i; n++;
     }
     if (end_line < 0) end_line = n - 1;
-    if (pg->button) {
+    if (pg->button && !pg->button_first) {
         kind[n] = PL_BLANK; n++;
         if (pg->selected >= pg->n_rows) sel_line = head_line = end_line = n;
         kind[n] = PL_BUTTON; n++;

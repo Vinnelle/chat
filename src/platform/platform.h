@@ -43,6 +43,10 @@ void platform_notify(const char *title, const char *body);
 
 void platform_notify_shutdown(void);
 
+// Hands an http:// or https:// address to the desktop, for the browser to open outside chat. 0 once
+// something took it, otherwise -1 with why saying what's missing.
+int platform_open_url(const char *url, char *why, size_t cap);
+
 // Puts text on the clipboard where chat can do that itself (Windows), and keeps it out of the
 // clipboard's history and cloud sync, and returns 0. -1 where the terminal has to (OSC 52).
 int platform_clipboard_set(const char *text);

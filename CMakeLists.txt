@@ -244,6 +244,7 @@ add_executable(chat
     src/app/screen/files_page.c
     src/app/screen/browser.c
     src/app/screen/clipboard.c
+    src/app/screen/links.c
     src/app/screen/lock.c
     src/app/saves/saves.c
     src/app/saves/spare.c

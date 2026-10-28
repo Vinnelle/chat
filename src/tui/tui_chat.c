@@ -210,13 +210,53 @@ static void draw_progress(pen_t *p, const tui_progress_t *pg) {
     pell(p, S_FAINT, pg->text, p->room - p->used);
 }
 
-// A chat line's text in style st, with each @nick that matches self highlighted, the same way the
-// chat matches them: any case, followed by anything.
-static void draw_body(pen_t *p, style_t st, const char *t, const char *self) {
-    size_t sl = self ? strlen(self) : 0;
+// The links in a chat line's text, after its quote.
+#define LINE_LINKS_MAX 16
+typedef struct { const char *text; size_t at[LINE_LINKS_MAX], len[LINE_LINKS_MAX]; int n; } line_links_t;
+
+static void find_links(line_links_t *lk, const char *text, size_t n, size_t from) {
+    lk->text = text;
+    lk->n = 0;
+    while (lk->n < LINE_LINKS_MAX && link_next(text, n, &from, &lk->at[lk->n], &lk->len[lk->n])) lk->n++;
+}
+
+// What a row needs besides a link's address to open and close OSC 8 around it, and its styles.
+#define OSC8_ROOM 64
+
+// Part of a link (len bytes of t), underlined, and for terminals that take OSC 8, something to click
+// that opens the whole link. Only while the row has room for both: an escape cut off would swallow
+// the rest of the screen.
+static void draw_link(pen_t *p, style_t st, const char *t, size_t len, const char *link, size_t link_len) {
+    char piece[TUI_LINE_MAX + 1], target[LINK_MAX];
+    copy_slice(piece, sizeof piece, t, len);
+    wbuf_t *w = p->w;
+    int osc = link_target(link, link_len, target, sizeof target) == 0 && w->len + strlen(target) + len + OSC8_ROOM < w->cap;
+    if (osc) wapp(w, "\x1b]8;;%s\x1b\\", target);
+    sty(w, st);
+    wapp(w, "\x1b[4m");
+    p->used += wapp_trunc(w, piece, p->room - p->used);
+    if (osc) wapp(w, "\x1b]8;;\x1b\\");
+}
+
+// A chat line's text in style st (t, from off in lk->text on), its links underlined, and each @nick
+// that matches self highlighted, the same way the chat matches them: any case, followed by anything.
+static void draw_body(pen_t *p, style_t st, const char *t, size_t off, const line_links_t *lk, const char *self) {
+    size_t sl = self ? strlen(self) : 0, tn = strlen(t);
     char run[TUI_LINE_MAX + 1];
     size_t rn = 0;
-    for (size_t i = 0; t[i]; ) {
+    for (size_t i = 0; i < tn; ) {
+        int li = 0;
+        while (li < lk->n && !(off + i >= lk->at[li] && off + i < lk->at[li] + lk->len[li])) li++;
+        if (li < lk->n) {
+            size_t end = lk->at[li] + lk->len[li] - off;
+            if (end > tn) end = tn;
+            run[rn] = '\0';
+            ptext(p, st, run);
+            rn = 0;
+            draw_link(p, st, t + i, end - i, lk->text + lk->at[li], lk->len[li]);
+            i = end;
+            continue;
+        }
         int at = sl > 0 && t[i] == '@';
         for (size_t k = 0; at && k < sl; k++)
             if (tolower((unsigned char)t[i + 1 + k]) != tolower((unsigned char)self[k])) at = 0;
@@ -317,6 +357,9 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
             copy_str(text, body, sizeof text);
         size_t off[WRAP_ROWS_MAX], len[WRAP_ROWS_MAX];
         int nch = wrap_rows(text, W - first_pre, W - rest_pre, off, len, WRAP_ROWS_MAX);
+        size_t qend = chat && l->quote > 0 && (size_t)l->quote <= body_len ? (size_t)l->quote : 0;
+        line_links_t lk = { .n = 0 };
+        if (chat) find_links(&lk, body, body_len, qend);
         // A picture shown under the line that offers it, lined up with the text.
         const tui_image_t *im = chat && l->file && v && v->image ? v->image(v->image_ctx, l->file) : NULL;
         int img_cols = W - rest_pre - 1 < TUI_IMAGE_MAX_W ? W - rest_pre - 1 : TUI_IMAGE_MAX_W;
@@ -396,7 +439,6 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
             }
             // A reply's quote is faint, then the text, then your message's mark.
             size_t from = off[c], to = off[c] + len[c];
-            size_t qend = chat && l->quote > 0 && (size_t)l->quote <= body_len ? (size_t)l->quote : 0;
             size_t q = qend < from ? from : qend > to ? to : qend;
             size_t cut = body_len < q ? q : body_len > to ? to : body_len;
             char piece[sizeof text];
@@ -409,7 +451,7 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
                 sty_rgb(p->w, l->rgb, 0, 0);
                 p->used += wapp_trunc(p->w, piece, p->room - p->used);
             } else if (chat) {
-                draw_body(p, body_style, piece, self);
+                draw_body(p, body_style, piece, q, &lk, self);
             } else {
                 ptext(p, body_style, piece);
             }
@@ -422,6 +464,32 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
         bottom -= nch + under + head;
         if (k + 1 == fresh && bottom >= first && bottom < g->rows) draw_new_rule(g, bottom--, fresh);
     }
+}
+
+int tui_chat_link(const tui_scrollback_t *sb, unsigned upto, int nth, tui_link_t *out) {
+    int found = 0;
+    for (int k = 0; k < sb->count; k++) {
+        if (sb->total - 1 - (unsigned)k >= upto) continue;
+        const tui_line_t *l = SB_AT(sb, k);
+        char name[NAME_BUF];
+        const char *body;
+        if (!split_chat_line(sb, l, name, sizeof name, &body)) continue;
+        size_t n = strlen(body);
+        line_links_t lk;
+        find_links(&lk, body, n, l->quote > 0 && (size_t)l->quote <= n ? (size_t)l->quote : 0);
+        for (int i = lk.n - 1; i >= 0; i--, found++) {
+            if (found != nth) continue;
+            copy_slice(out->text, sizeof out->text, body + lk.at[i], lk.len[i]);
+            chat_name_t cn;
+            split_name(name, &cn);
+            copy_str(out->from, cn.nick, sizeof out->from);
+            size_t fl = strlen(out->from);
+            copy_str(out->from + fl, cn.extra, sizeof out->from - fl);
+            memcpy(out->hhmm, l->hhmm, HHMM_LEN);
+            out->own = l->own != 0;
+        }
+    }
+    return found;
 }
 
 // Splits text at its newlines into at most max lines. Returns how many.

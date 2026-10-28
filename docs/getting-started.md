@@ -55,7 +55,8 @@ This depends on your system, and doesn't matter if you never plan on updating.
 ## Your first session
 
 1. Run `chat`. It opens on the settings page, where routing, your nick, colour and signing identity
-   are set up in one place (see [Settings](usage.md#settings)). **Start chatting** at the bottom, or
+   are set up in one place (see [Settings](usage.md#settings)). **Start chatting**, on the **Start**
+   page after the sections (`Tab` from Chat), or
    `Esc`, goes to your sessions. Nothing goes on the network before that.
 2. `Ctrl+N` starts a new session, with a random password filled in. Until someone joins, the chat
    shows the session's id. `:invite` copies the id and password together as one invite, which comes

@@ -99,6 +99,7 @@ typedef enum {
     MODE_CHANGELOG,
     MODE_SETTINGS,
     MODE_SETTINGS_EDIT,
+    MODE_SETTINGS_SEARCH,
     MODE_SIGN_CHOICE,
     MODE_SIGN_BROWSE,
     MODE_SEND_BROWSE,
@@ -139,6 +140,7 @@ typedef enum {
     MODE_MOVE,
     MODE_MOVE_ASK,
     MODE_TOR_STATE,
+    MODE_OPEN_LINK,
     MODE_ROOMS
 } app_mode_t;
 
@@ -187,8 +189,9 @@ typedef struct {
     uint16_t default_port;
     struct {
         int sel;
-        int page;      // the section shown: sel's, or the one whose Done button it is
+        int page;      // the section shown, sel's, or the Done page after the last
         int rows[8];   // each section's row selected last, which Tab goes back to
+        int found;     // the search box's selected match
     } settings;
     int help_sel;
     struct { int scroll, most; } changelog;
@@ -348,6 +351,15 @@ typedef struct {
         int num, ask, ask_num;
         app_mode_t back;
     } files;
+    // OPEN LINK's box: the nth newest of the n links in the chat as it stood at upto (sb.total), or
+    // nth -1 for one typed after :open, and the address it opens. why: it couldn't, and why not.
+    struct {
+        int nth, n;
+        unsigned upto;
+        tui_link_t shown;
+        char target[LINK_MAX];
+        char why[160];
+    } links;
     struct {
         char buf[16384];
         size_t len;
@@ -437,8 +449,9 @@ typedef struct {
 // What a row's edit line holds.
 #define ROW_TEXT_MAX TUI_LINE_MAX
 
-// The page shows one section at a time, its listed rows and then a Done button.
-#define SETTINGS_DONE N_SETTINGS   // g_app.settings.sel of the Done button, on g_app.settings.page
+// The page shows one section at a time, then a Done page: its button, and under it every listed row
+// of every section, where a row is only a way to its own section.
+#define SETTINGS_DONE N_SETTINGS   // g_app.settings.sel of the Done button, on the Done page
 
 // ---- the signing identity, chosen on a page under the settings ----
 
@@ -542,14 +555,18 @@ void setting_apply_text(setting_id_t id, const char *typed);
 void commit_setting_edit(void);
 // What goes between the items of the list being edited (bridges, relays), or NULL for a single value.
 const char *setting_edit_separator(void);
+void setting_place(int i, char *out, size_t cap);
+int settings_search(const char *query, int *out, int cap);
 int settings_sections(const char **out, int cap);
 int settings_section_index(setting_id_t id);
 int section_begin(int s);
 int section_row(int s, int dir);
 int settings_n_sections(void);
+int settings_done_page(void);
 void settings_select(int sel);
 void settings_go_section(int s);
 void settings_step(int dir);
+void settings_go_end(int last);
 void settings_fix_sel(void);
 void settings_section_step(int dir);
 void begin_settings(void);

@@ -34,6 +34,16 @@ size_t clean_text(const char *in, char *out, size_t max_len);
 // True if the text holds any character clean_text strips: control, C1 or bidi controls.
 int has_control_chars(const char *in);
 
+// Links in a message: http:// and https:// addresses, and domain names, with a path or without.
+// LINK_MAX holds the address one opens, with its NUL; a longer one isn't a link.
+#define LINK_MAX 1024
+// The first link in s (n bytes) from *from on: where it starts (*at) and its length. *from goes
+// past it. 0 once there are no more.
+int link_next(const char *s, size_t n, size_t *from, size_t *at, size_t *len);
+// The address a link opens: as written with http:// or https://, otherwise https:// before it, with
+// each byte past ASCII, '$' and '\'' %-encoded. 0, or -1 (and "") if it doesn't fit in cap.
+int link_target(const char *link, size_t n, char *out, size_t cap);
+
 void random_session_id(char *out, size_t len);
 // A session id in the same letters from n, for one worked out rather than made up.
 void session_id_from(uint64_t n, char *out, size_t len);

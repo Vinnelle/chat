@@ -58,6 +58,8 @@ list_key_t list_key(const tui_key_t *key);
 int section_digit(const tui_key_t *key);
 void list_move(list_key_t k, int *sel, int n);
 void settings_key(const tui_key_t *key);
+void settings_search_key(const tui_key_t *key);
+void settings_search_box(tui_dialog_t *d, tui_para_t *paras);
 void sign_picker_key(const tui_key_t *key);
 void paste_key(const tui_key_t *key);
 void render_settings(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar);
@@ -112,6 +114,10 @@ void clipboard_clear_now(void);
 void clipboard_tick(double now);
 void copy_session_id(session_slot_t *s);
 void copy_invite(session_slot_t *s);
+
+// links.c
+cmd_result_t app_open(void *ctx, const char *arg);
+void open_link_key(const tui_key_t *key);
 
 // lock.c
 #define N_LOCK_AFTER 5
