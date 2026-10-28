@@ -372,9 +372,14 @@ void tui_render_page(int rows, int cols, const tui_page_t *page, const tui_bar_t
         for (int i = 0; i < hl && row < end; i++, row++) {
             char piece[TUI_LINE_MAX];
             copy_slice(piece, sizeof piece, page->help + hoff[i], hlen[i]);
+            // Help that goes on past its last row says so.
+            const char *rest = page->help + hoff[i] + hlen[i];
+            while (*rest == ' ') rest++;
+            if (*rest && (i == hl - 1 || row + 1 == end) && strlen(piece) + sizeof G_ELLIPSIS <= sizeof piece)
+                strcat(piece, G_ELLIPSIS);
             pen_t p;
             inner_begin(&w, &p, row, left, iw);
-            ptext(&p, S_PLAIN, piece);
+            pell(&p, S_PLAIN, piece, p.room);
             inner_end(&p);
         }
         if (ul && row < end) {

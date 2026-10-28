@@ -502,9 +502,12 @@ void render_help(int rows_n, int cols_n, const char *clock, const tui_bar_t *bar
     int n = help_rows(rows, cmds);
     if (g_app.help_sel >= n) g_app.help_sel = n - 1;
     const command_t *c = cmds[g_app.help_sel];
-    char help[200] = "";
-    if (c) {
-        size_t p = (size_t)snprintf(help, sizeof help, "Enter puts it on the command line.");
+    // The row in full, since a narrow screen cuts it off in the list.
+    const char *what = rows[g_app.help_sel].value ? rows[g_app.help_sel].value : "";
+    char help[400] = "";
+    size_t p = what[0] ? (size_t)snprintf(help, sizeof help, "%c%s.", toupper((unsigned char)what[0]), what + 1) : 0;
+    if (c && p < sizeof help) {
+        p += (size_t)snprintf(help + p, sizeof help - p, "%sEnter puts it on the command line.", p ? " " : "");
         const char *sep = " Also";
         for (const char *a = c->aliases; a && *a && p < sizeof help; ) {
             size_t len = strcspn(a, " ");

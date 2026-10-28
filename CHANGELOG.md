@@ -11,6 +11,8 @@ its release, which folds them into one. A release's notes on GitHub are its sect
   the frame on a narrow terminal, where its margin used to cover the frame's sides.
 - The files page keeps its shape while nothing's been offered, and says so in the middle, as the
   chat does before its first message. A folder browser in an empty folder keeps its left column too.
+- The help page's pane shows the selected key or command in full, which a narrow terminal cuts off
+  in the list. A setting's help that's longer than its pane ends in `…` instead of mid-sentence.
 
 ## 0.5.2
 

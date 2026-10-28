@@ -110,7 +110,8 @@ whatever the menu has picked, so `/se` runs `/set`) and `Esc` goes back. A line 
 `/` that can't be a command (`/shrug`, `/usr/bin`) turns back into text as you type, and
 `Enter` sends it like a normal message. `//` does the same straight away. Anything else is sent
 as a message. `:help` opens a page with every key and command, and `Enter` on a command there
-puts it on the command line.
+puts it on the command line. The pane under the list shows the selected one in full, which a narrow
+terminal cuts off in the list.
 
 | Command | Action |
 | --- | --- |
