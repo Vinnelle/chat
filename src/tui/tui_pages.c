@@ -198,9 +198,7 @@ static void draw_list(wbuf_t *w, int top, int left, int iw, int view, int nrows,
 #define SIDE_MIN 20
 #define SIDE_MAX 36
 #define ROWS_COLS_MIN 60
-// The nav takes a fifth of the screen, within these, if the page keeps PAGE_COLS_MIN.
-#define NAV_MIN 20
-#define NAV_MAX 26
+// The nav is the left hand box, as wide as the chat's sidebar, if the page keeps PAGE_COLS_MIN.
 #define PAGE_COLS_MIN 56
 
 // The side column's width for rows iw columns wide, its rule included, or 0 if it doesn't fit.
@@ -211,12 +209,7 @@ static int side_width(int iw) {
     return iw - w >= ROWS_COLS_MIN ? w : 0;
 }
 
-static int nav_width(int cols) {
-    int navw = cols / 5;
-    if (navw < NAV_MIN) navw = NAV_MIN;
-    if (navw > NAV_MAX) navw = NAV_MAX;
-    return cols - navw < PAGE_COLS_MIN ? 0 : navw;
-}
+static int nav_width(int cols) { return left_width(cols, PAGE_COLS_MIN); }
 
 // The page's width inside its border, as tui_render_page works it out.
 static int page_inner_width(int cols, int with_nav) {

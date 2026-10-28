@@ -949,9 +949,7 @@ static void draw_sidebar(wbuf_t *w, rect_t r, const tui_session_row_t *sessions,
 // The input box's height in the last full chat frame, or 0 after anything else was drawn.
 int g_input_h;
 
-// The sidebar takes a quarter of the screen, within these, if the chat keeps CHAT_COLS_MIN.
-#define SIDEBAR_MIN 24
-#define SIDEBAR_MAX 32
+// The sidebar is the left hand box, if the chat keeps CHAT_COLS_MIN.
 #define CHAT_COLS_MIN 44
 
 // One frame, split by lines: the sidebar's right side is the chat's left, and the chat's bottom
@@ -960,13 +958,7 @@ int g_input_h;
 static void chat_layout(int rows, int cols, const tui_view_t *v, const tui_bar_t *bar, rect_t *side, rect_t *main_r,
                         rect_t *input, int *boxed) {
     *boxed = rows >= BOXED_ROWS && cols >= BOXED_COLS;
-    int sbw = 0;
-    if (*boxed && v->sidebar) {
-        sbw = cols / 4;
-        if (sbw < SIDEBAR_MIN) sbw = SIDEBAR_MIN;
-        if (sbw > SIDEBAR_MAX) sbw = SIDEBAR_MAX;
-        if (cols - sbw < CHAT_COLS_MIN) sbw = 0;
-    }
+    int sbw = *boxed && v->sidebar ? left_width(cols, CHAT_COLS_MIN) : 0;
     *side = (rect_t){ 1, 1, rows - 1, sbw };
     int x = sbw > 0 ? sbw : 1, ih = 1;
     if (*boxed) {

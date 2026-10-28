@@ -123,6 +123,7 @@ const char *top_left(rect_t r);
 const char *bottom_left(rect_t r);
 void box(wbuf_t *w, rect_t r, const char *bs, const span_t *title, const span_t *right, const span_t *foot);
 void brand(span_t *title, span_t *right, int width);
+int left_width(int cols, int right_min);
 void begin_frame(wbuf_t *w);
 void end_frame(wbuf_t *w, int whole);
 void place_cursor(wbuf_t *w, int row, int col, const tui_input_t *in);

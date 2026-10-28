@@ -423,6 +423,18 @@ void brand(span_t *title, span_t *right, int width) {
     ptext(&title->p, S_ACCENT_BOLD, BRAND);
 }
 
+// The left hand box is as wide on every screen, so its edge stays put going from the chat to a page:
+// a quarter of the screen, within these, or none if what's right of it would get under right_min.
+#define LEFT_MIN 24
+#define LEFT_MAX 32
+
+int left_width(int cols, int right_min) {
+    int w = cols / 4;
+    if (w < LEFT_MIN) w = LEFT_MIN;
+    if (w > LEFT_MAX) w = LEFT_MAX;
+    return cols - w < right_min ? 0 : w;
+}
+
 // The last whole frame sent, by its hash.
 static uint8_t g_last_frame[SHA256_LEN];
 static int g_last_frame_valid;

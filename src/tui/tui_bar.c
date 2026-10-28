@@ -351,13 +351,21 @@ static style_t log_style(tui_log_kind_t k) {
 #define CONSOLE_ROWS 12
 #define CONSOLE_DIALOG_MAX_W 100
 #define DIALOG_MAX_W 76
+#define DIALOG_MX 2
+
+// A box's width, at most max: its backdrop stays inside the frame's sides, so the frame is whole on
+// a narrow screen too.
+static int dialog_fit(int cols, int max) {
+    int w = cols - 2 - 2 * DIALOG_MX;
+    return w < max ? w : max;
+}
 
 // Something in progress: its console in its own frame with the last lines that fit, then a progress
 // bar as wide as the console with the percentage on its right, then the current step. The console
 // loses rows on a short screen, but the rest is always shown.
 static void draw_console_dialog(wbuf_t *w, int rows, int cols, const tui_dialog_t *d) {
     int avail = rows - 1;
-    int bw = cols - 4 < CONSOLE_DIALOG_MAX_W ? cols - 4 : CONSOLE_DIALOG_MAX_W, my = 1;
+    int bw = dialog_fit(cols, CONSOLE_DIALOG_MAX_W), my = 1;
     // A blank, the console's top edge, its rows, its bottom edge, a blank, the bar, a blank, the
     // step and a blank.
     const int fixed = 8;
@@ -365,7 +373,7 @@ static void draw_console_dialog(wbuf_t *w, int rows, int cols, const tui_dialog_
     if (con + fixed + 2 + 2 * my > avail) my = 0;
     if (con + fixed + 2 > avail) con = avail - fixed - 2;
     if (con < 1) con = 1;
-    rect_t in = dialog_frame(w, rows, cols, bw, con + fixed, 2, my, d);
+    rect_t in = dialog_frame(w, rows, cols, bw, con + fixed, DIALOG_MX, my, d);
     int x = in.left, iw = in.w, row = in.top, end = in.top + in.h;
     int cx = x + 2, cw = iw - 4;
 
@@ -419,9 +427,7 @@ static void draw_console_dialog(wbuf_t *w, int rows, int cols, const tui_dialog_
 }
 
 // What doesn't fit is cut from the end of the text, then from the note. The field is always shown.
-static int dialog_width(int cols) {
-    return cols - 4 < DIALOG_MAX_W ? cols - 4 : DIALOG_MAX_W;
-}
+static int dialog_width(int cols) { return dialog_fit(cols, DIALOG_MAX_W); }
 
 int tui_dialog_rows(int cols, const tui_dialog_t *d) {
     int tw = dialog_width(cols) - 6;
@@ -441,7 +447,7 @@ static void draw_dialog(wbuf_t *w, int rows, int cols, const tui_dialog_t *d, in
         return;
     }
     int avail = rows - 1;
-    int bw = dialog_width(cols), mx = 2, my = 1;
+    int bw = dialog_width(cols), mx = DIALOG_MX, my = 1;
     int iw = bw - 2, tw = iw - 4;
     int text_n = d->n_text > 0 ? layout_text(d->text, d->n_text, tw, NULL, NULL) : 0;
     static size_t noff[DIALOG_NOTE_ROWS], nlen[DIALOG_NOTE_ROWS];
