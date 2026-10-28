@@ -18,6 +18,22 @@ its release, which folds them into one. A release's notes on GitHub are its sect
 - The sidebar's NETWORK values are all lowercase (`dht off`, `tor connected`), the files page no
   longer offers `d download` next to `enter download`, and the quit box names the session it
   leaves and says nobody else is online rather than `0 peers`.
+- The network log is shorter. `:net` gives a line each to the route and its peers, the DHT or
+  tor, the relays, port mapping, what has arrived, and from where, with `·` between the parts
+  instead of run-on `|` lists. A peer over the relays shows as its short id (`e58bb589 over the
+  relays`) instead of a 40-character address, the hellos to Tor's room slots are one line instead
+  of six, a stream to a room slot says which slot, and chat's own tor says why it starts in the
+  same line that starts it. Tor's bootstrap steps (25%, 50%...) are verbose only, as the sidebar
+  shows them.
+
+### Fixed
+- With the DHT on, its answers counted as unreadable packets, so `:net` could diagnose a session
+  nobody had joined yet as the wrong id or password. They're counted apart, and left out of the
+  senders.
+- The DHT's lookup line called the nodes it asked "reached", and counted a peer again for every
+  node that gave its address. It now says how many of them answered, and counts each address once.
+- The note about using a running tor while bridges are set said "which torlaunch never doesn't
+  start". It says that torlaunch never keeps chat's own tor from starting.
 
 ## 0.5.2
 

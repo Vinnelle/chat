@@ -274,7 +274,8 @@ static int keep_tor_state(void) {
     return g_app.tor.keep_state && g_app.installed && !g_app.locked && !g_panic;
 }
 
-static void tor_link_start_own(double now) {
+// cause says what led to it ("no tor running"), or NULL.
+static void tor_link_start_own(double now, const char *cause) {
     char program[1024], err[160];
     if (platform_find_program("tor", g_app.tor.path, program, sizeof program) != 0) {
         if (g_app.tor.path[0])
@@ -313,9 +314,9 @@ static void tor_link_start_own(double now) {
     g_tor.boot_told = -1;
     g_tor.bridged = o.hold_network;
     if (g_app.net_log != NET_LOG_OFF)
-        push_log("* tor: starting chat's own tor (%s)%s - its control port only takes a password made at random for "
-                 "this run, which only chat knows (tor is given its hash), and its data is kept in a private temporary "
-                 "folder, deleted when chat exits%s", program, o.hold_network ? " with your bridges" : "",
+        push_log("* tor: %s%sstarting chat's own (%s%s): a control password made for this run, which only chat knows, "
+                 "and its data in a private temporary folder deleted on exit%s", cause ? cause : "", cause ? ", so " : "",
+                 program, o.hold_network ? ", with your bridges" : "",
                  o.state ? ". It starts from the guards and directory kept in the save" : "");
 }
 
@@ -326,7 +327,7 @@ void tor_link_ensure(double now) {
     if (g_tor.state != TL_OFF) return;
     // A tor that's running may not use the bridges.
     if (g_app.tor.launch == TOR_LAUNCH_ALWAYS || (g_app.tor.launch == TOR_LAUNCH_AUTO && g_app.tor.bridges[0])) {
-        tor_link_start_own(now);
+        tor_link_start_own(now, NULL);
         return;
     }
     g_tor.probe = tor_probe_new(&g_app.route.tor);
@@ -348,7 +349,7 @@ void tor_link_step(double now) {
                 if (g_app.net_log != NET_LOG_OFF)
                     push_log("* tor: using the tor that's already running (control port %s) - it keeps its entry "
                              "guards and any bridges it's set up with%s", g_tor.control, g_app.tor.bridges[0]
-                             ? ". Your bridges are only for chat's own tor, which torlaunch never doesn't start" : "");
+                             ? ". Your bridges are only for chat's own tor, and torlaunch never keeps it from starting" : "");
                 tor_link_apply();
             } else if (g_app.tor.launch == TOR_LAUNCH_NEVER) {
                 if (r == -2) push_log("* tor: the running tor won't let chat in: %s", why);
@@ -356,11 +357,10 @@ void tor_link_step(double now) {
                               "own (:set torlaunch auto)", g_app.route.tor.control);
                 tor_link_fail(now, TOR_RETRY);
             } else {
-                if (g_app.net_log != NET_LOG_OFF) {
-                    if (r == -2) push_log("* tor: a tor is running but won't let chat in (%s) - starting chat's own", why);
-                    else push_log("* tor: no tor running - starting chat's own");
-                }
-                tor_link_start_own(now);
+                char reason[224];
+                if (r == -2) snprintf(reason, sizeof reason, "a tor is running but won't let chat in (%s)", why);
+                else copy_str(reason, "no tor running", sizeof reason);
+                tor_link_start_own(now, reason);
             }
             return;
         }
@@ -375,7 +375,7 @@ void tor_link_step(double now) {
                 torproc_stop(g_tor.proc);
                 g_tor.proc = NULL;
                 // Most likely another program took a port first, so try new ones a couple of times.
-                if (++g_tor.starts < OWN_STARTS) { g_tor.state = TL_OFF; tor_link_start_own(now); }
+                if (++g_tor.starts < OWN_STARTS) { g_tor.state = TL_OFF; tor_link_start_own(now, NULL); }
                 else tor_link_fail(now, OWN_TOR_RETRY);
                 return;
             }
@@ -399,19 +399,20 @@ void tor_link_step(double now) {
                 copy_str(g_tor.control, torproc_control(g_tor.proc), sizeof g_tor.control);
                 const char *v = torproc_version(g_tor.proc);
                 if (g_app.net_log != NET_LOG_OFF)
-                    push_log("* tor: %s is up on %s, connecting to the Tor network...", v[0] ? v : "tor", g_tor.control);
+                    push_log("* tor: %s is up (control port %s), connecting to the Tor network", v[0] ? v : "tor",
+                             g_tor.control);
                 tor_link_apply();
             }
             int b = torproc_bootstrap(g_tor.proc);
             if (g_tor.state == TL_READY && b >= 0
                 && (b == BOOT_DONE ? g_tor.boot_told < BOOT_DONE : b >= g_tor.boot_told + BOOT_STEP)) {
                 g_tor.boot_told = b;
-                int news = g_app.net_log != NET_LOG_OFF;
+                // The sidebar shows how far it's got, so the steps on the way are details.
                 if (b == BOOT_DONE) {
                     g_tor.starts = 0;
-                    if (news) push_log("* tor: connected to the Tor network");
+                    if (g_app.net_log != NET_LOG_OFF) push_log("* tor: connected to the Tor network");
                     tor_link_connected();
-                } else if (news) {
+                } else if (g_app.net_log == NET_LOG_VERBOSE) {
                     push_log("* tor: connecting to the Tor network: %d%%", b);
                 }
             }

@@ -281,15 +281,20 @@ static void note_source(chat_t *c, addr_t a) {
 // passed to the DHT unchanged, since DHT messages are never masked.
 static void on_udp(chat_t *c, const uint8_t *raw, size_t len, addr_t addr, double now) {
     c->st.rx++;
-    note_source(c, addr);
     uint8_t d[FRAME_BUF_LEN];
     if (len <= sizeof d) {
         memcpy(d, raw, len);
-        if (udp_mask(c->udp_key, d, len) == 0 && (on_chunk(c, d, len, addr, now) || on_frame(c, d, len, addr, now)))
+        if (udp_mask(c->udp_key, d, len) == 0 && (on_chunk(c, d, len, addr, now) || on_frame(c, d, len, addr, now))) {
+            note_source(c, addr);
             return;
+        }
     }
+    if (c->dht_on && addr.kind == ADDR_UDP && dht_on_packet(&c->dht, raw, len, addr, dht_candidate_cb, c)) {
+        c->st.dht++;
+        return;
+    }
+    note_source(c, addr);
     c->st.other++;
-    if (c->dht_on && addr.kind == ADDR_UDP) dht_on_packet(&c->dht, raw, len, addr, dht_candidate_cb, c);
 }
 
 // A datagram through the relays or Tor, which carry whole frames, unmasked.

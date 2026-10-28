@@ -349,9 +349,11 @@ static void dht_tick(chat_t *c, double now) {
         c->dht.peers_now = live_count(c) > 0;
         if (dht_step(&c->dht, now) && !c->dht_summary_printed) {
             c->dht_summary_printed = 1;
-            if (!c->net_quiet)
-                ui_print(c, "* internet lookup done: %d nodes reached, %d peers found",
-                         dht_queried_count(&c->dht), dht_found_count(&c->dht));
+            if (!c->net_quiet) {
+                int found = dht_found_count(&c->dht);
+                ui_print(c, "* dht: lookup done - %d of %d nodes answered, %d address%s found for this room",
+                         dht_answered_count(&c->dht), dht_queried_count(&c->dht), found, found == 1 ? "" : "es");
+            }
         }
     }
 }
@@ -368,8 +370,8 @@ static void try_candidates(chat_t *c, double now) {
             cd->next_try = now + retry_delay(cd->tries);
             cd->tries++;
             if (c->net_verbose) {
-                char as[ADDR_STR_LEN]; addr_to_string(cd->addr, as);
-                ui_print(c, "* hi -> candidate %s (try %d/%d)", as, cd->tries, CAND_MAX_TRIES);
+                char w[WHERE_LEN]; where_str(cd->addr, NULL, w);
+                ui_print(c, "* hi to %s (candidate, try %d/%d)", w, cd->tries, CAND_MAX_TRIES);
             }
             if (cd->tries >= CAND_MAX_TRIES) cd->used = 0;
         }
@@ -398,14 +400,11 @@ static void hello_pending(chat_t *c, double now) {
             p->next_hello = now + retry_delay(p->hello_tries);
             p->hello_tries++;
             send_room(c, c->hi_msg, p->addr, c->sock);
-            char shortid[SHORT_ID_HEX + 1]; short_id(p->id, shortid);
-            if (c->net_verbose) {
-                char as[ADDR_STR_LEN]; addr_to_string(p->addr, as);
-                ui_print(c, "* hi retry -> pending peer %s at %s", shortid, as);
-            }
+            char w[WHERE_LEN] = "";
+            if (c->net_verbose) { where_str(p->addr, p->id, w); ui_print(c, "* hi to %s (again, no session yet)", w); }
             if (p->send_chain.started && we_initiate(c, p)) {
                 send_kx(c, p, p->addr);
-                if (c->net_verbose) ui_print(c, "* kx retry -> pending peer %s", shortid);
+                if (c->net_verbose) ui_print(c, "* kx to %s (again)", w);
             }
         }
     }
@@ -435,7 +434,7 @@ static void keep_paths(chat_t *c, double now) {
         if ((quiet || stuck) && now >= p->next_rehello && !room_queued(c, peer_slot(c, p))) {
             p->next_rehello = now + jittered(REHELLO_EVERY);
             send_room(c, c->hi_msg, p->addr, c->sock);
-            if (c->net_verbose) ui_print(c, "* hi -> %s (%s)", p->nick, stuck ? "re-handshake" : "quiet");
+            if (c->net_verbose) ui_print(c, "* hi to %s (%s)", p->nick, stuck ? "re-handshake" : "quiet");
         }
     }
 }
@@ -451,7 +450,7 @@ static void alive_tick(chat_t *c, double now) {
 static void lan_tick(chat_t *c, double now) {
     if (c->lan_sock != SOCK_INVALID && now >= c->next_lan) {
         c->next_lan = now + LAN_EVERY + jitter(LAN_SPREAD);
-        if (c->net_verbose) ui_print(c, "* lan beacon sent");
+        if (c->net_verbose) ui_print(c, "* lan: beacon sent");
         char beacon[64]; snprintf(beacon, sizeof beacon, "lan\t%s\t%u", c->my_idhex, (unsigned)c->port);
         send_room(c, beacon, addr_broadcast_lan(c->lan_port), c->lan_sock);
         send_room(c, beacon, addr_loopback(c->lan_port), c->lan_sock);
@@ -563,47 +562,82 @@ void chat_tick(chat_t *c, double now) {
     lonely_hint(c, now);
 }
 
+// The lookup running or the last one, by family: how many of the nodes asked answered, the addresses
+// found for the room (yours among them once it's announced), and when the next lookup is.
+static void dht_report(chat_t *c) {
+    const dht_state_t *d = &c->dht;
+    char fam[DHT_FAMILIES][48], when[40];
+    for (int f = 0; f < DHT_FAMILIES; f++) {
+        const char *name = f == DHT_V4 ? "IPv4" : "IPv6";
+        int asked = dht_queried_count_fam(d, f);
+        if (!d->want[f]) snprintf(fam[f], sizeof fam[f], "%s off", name);
+        else if (!asked) snprintf(fam[f], sizeof fam[f], "%s no nodes yet", name);
+        else snprintf(fam[f], sizeof fam[f], "%s %d of %d nodes answered", name, dht_answered_count_fam(d, f), asked);
+    }
+    double left = dht_next_lookup(d) - c->now;
+    if (dht_looking(d)) copy_str(when, "looking now", sizeof when);
+    else if (left < 1) copy_str(when, "starting a lookup", sizeof when);
+    else if (left < 60) snprintf(when, sizeof when, "next lookup in %d s", (int)left);
+    else snprintf(when, sizeof when, "next lookup in %d min", (int)((left + 59) / 60));
+    int found = dht_found_count(d);
+    ui_print(c, "* dht: %s" DOT_SEP "%s" DOT_SEP "%d address%s found for this room" DOT_SEP "%s", fam[DHT_V4], fam[DHT_V6],
+             found, found == 1 ? "" : "es", when);
+}
+
 void net_report(chat_t *c) {
     net_stats_t *st = &c->st;
     int cands = chat_candidate_count(c);
-    if (c->route.mode == ROUTE_TOR) {
+    int tor = c->route.mode == ROUTE_TOR;
+    char route[24] = "tor";
+    if (!tor) snprintf(route, sizeof route, "udp/%u", (unsigned)c->port);
+    ui_print(c, "* net: %s" DOT_SEP "%d connected" DOT_SEP "%d handshaking" DOT_SEP "%d to try", route, live_count(c),
+             pending_peer_count(c), cands);
+    if (tor) {
         char ts[300] = "not running";
         if (c->tor) tor_status(c->tor, ts, sizeof ts);
-        ui_print(c, "* net: tor | %s | candidates to try: %d | handshakes in progress: %d | connected: %d",
-                 ts, cands, pending_peer_count(c), live_count(c));
-        char ns[300] = "off - members using UDP routing can't reach this session";
-        if (c->nostr) nostr_status(c->nostr, ns, sizeof ns);
-        ui_print(c, "* nostr relays through Tor: %s | peers through relays: %d", ns, relayed_count(c));
+        ui_print(c, "* tor: %s", ts);
     } else if (c->dht_on) {
-        ui_print(c, "* net: udp/%u | internet lookup: IPv4 %s%d nodes, %d peers | IPv6 %s%d nodes, %d peers | candidates to try: %d | handshakes in progress: %d | connected: %d",
-                 (unsigned)c->port, c->dht.want[DHT_V4] ? "" : "(off) ", dht_queried_count_fam(&c->dht, DHT_V4),
-                 dht_found_count_fam(&c->dht, DHT_V4), c->dht.want[DHT_V6] ? "" : "(off) ",
-                 dht_queried_count_fam(&c->dht, DHT_V6), dht_found_count_fam(&c->dht, DHT_V6),
-                 cands, pending_peer_count(c), live_count(c));
+        dht_report(c);
     } else {
-        ui_print(c, "* net: udp/%u | internet lookup: off | candidates to try: %d | handshakes in progress: %d | connected: %d",
-                 (unsigned)c->port, cands, pending_peer_count(c), live_count(c));
+        ui_print(c, "* dht: off");
     }
-    if (c->route.mode != ROUTE_TOR) {
-        char pm[160] = "off", ns[300] = "off";
+    char ns[300] = "off";
+    if (c->nostr) nostr_status(c->nostr, ns, sizeof ns);
+    else if (tor) copy_str(ns, "off - members using UDP routing can't reach this session", sizeof ns);
+    int relayed = relayed_count(c);
+    if (c->nostr) {
+        size_t n = strlen(ns);
+        snprintf(ns + n, sizeof ns - n, DOT_SEP "%d peer%s reached through them", relayed, relayed == 1 ? "" : "s");
+    }
+    ui_print(c, "* nostr%s: %s", tor && c->nostr ? " (through Tor)" : "", ns);
+    if (!tor) {
+        char pm[160] = "off";
         if (c->pm) portmap_status(c->pm, pm, sizeof pm);
-        if (c->nostr) nostr_status(c->nostr, ns, sizeof ns);
-        ui_print(c, "* port mapping: %s | lan: %s | nostr fallback: %s | peers through relays: %d", pm,
-                 c->lan_sock != SOCK_INVALID ? "on" : "off", ns, relayed_count(c));
+        ui_print(c, "* port mapping: %s" DOT_SEP "lan: %s", pm, c->lan_sock != SOCK_INVALID ? "on" : "off");
     }
-    ui_print(c, "* rx: %u datagrams | readable with this room's key: %u (hi %u, ck %u, hi2 %u of which %u bad-cookie, kx %u, lan %u) | from connected peers: %u | unreadable: %u | handshake pieces: %u (%u rebuilt)",
-             st->rx, st->room_ok, st->hi, st->ck, st->hi2, st->hi2_bad, st->kx, st->lan, st->session_ok, st->other, st->rx_chunks, st->rx_chunk_done);
+    char bad[48] = "", lan[32] = "", from_dht[32] = "", pieces[96] = "";
+    if (st->hi2_bad) snprintf(bad, sizeof bad, " (%u with a bad cookie)", st->hi2_bad);
+    if (c->lan_sock != SOCK_INVALID) snprintf(lan, sizeof lan, ", lan %u", st->lan);
+    if (c->dht_on) snprintf(from_dht, sizeof from_dht, DOT_SEP "%u dht", st->dht);
+    if (st->rx_chunks) snprintf(pieces, sizeof pieces, DOT_SEP "%u handshake pieces (%u messages rebuilt)", st->rx_chunks,
+                                st->rx_chunk_done);
+    ui_print(c, "* rx: %u datagram%s" DOT_SEP "%u with the room's key (hi %u, ck %u, hi2 %u%s, kx %u%s)" DOT_SEP
+             "%u from connected peers%s" DOT_SEP "%u unreadable%s", st->rx, st->rx == 1 ? "" : "s", st->room_ok, st->hi,
+             st->ck, st->hi2, bad, st->kx, lan, st->session_ok, from_dht, st->other, pieces);
     if (st->n_src > 0) {
-        char list[400]; size_t pos = 0;
-        for (int i = 0; i < st->n_src && pos < sizeof list - 60; i++) {
-            char as[ADDR_STR_LEN]; addr_to_string(st->src[i], as);
-            pos += (size_t)snprintf(list + pos, sizeof list - pos, "%s%s (%u)", i ? ", " : "", as, st->src_n[i]);
+        char list[800]; size_t pos = 0;
+        for (int i = 0; i < st->n_src && pos + WHERE_LEN + 16 < sizeof list; i++) {
+            char w[WHERE_LEN]; where_str(st->src[i], NULL, w);
+            pos += (size_t)snprintf(list + pos, sizeof list - pos, "%s%s (%u)", i ? ", " : "", w, st->src_n[i]);
         }
-        ui_print(c, "* recent senders: %s", list);
+        ui_print(c, "* senders: %s", list);
     }
+    // DHT answers come back through any NAT, so only what came for the room says it can be reached.
+    unsigned heard = st->rx - st->dht;
     const char *why;
-    if (st->rx == 0 && c->route.mode == ROUTE_TOR) why = "nothing has reached this session through Tor yet - publishing and finding onion services takes a minute or two";
-    else if (st->rx == 0) why = "nothing at all has reached this session's port - a firewall/NAT is blocking inbound UDP, or nobody is sending to you yet";
+    if (heard == 0 && tor) why = "nothing has reached this session through Tor yet - publishing and finding onion services takes a minute or two";
+    else if (heard == 0) why = st->dht ? "nothing but DHT answers has reached this session - a firewall or NAT is blocking inbound UDP, or nobody is sending to you yet"
+                                       : "nothing at all has reached this session - a firewall or NAT is blocking inbound UDP, or nobody is sending to you yet";
     else if (st->room_ok == 0 && st->other > 0) why = "packets arrive but none are readable - wrong session id or password, or the other side runs an incompatible build";
     else if (st->hi > 0 && st->connects == 0) why = "a handshake started but never finished - typically a NAT that can't be hole-punched, or handshake pieces being lost";
     else if (st->connects > 0) why = "connected to at least one peer";
@@ -709,12 +743,19 @@ static void module_deliver(void *ctx, const uint8_t *data, size_t len, addr_t fr
 // slots only find each other by trying them. Each hi opens a stream: Tor's backoff paces the slots
 // nobody publishes, and a stream that's open already took a hi, which either got an answer or won't.
 static void knock_room_slots(chat_t *c, double now) {
+    char slots[TOR_ROOM_SLOTS * 8] = "";
+    size_t n = 0;
+    int k = 0;
     for (int i = 0; i < TOR_ROOM_SLOTS; i++) {
         addr_t a = tor_room_target(c->tor, i);
         if (i == tor_hosted_slot(c->tor) || known_addr(c, a) || !tor_can_open(c->tor, a, now)) continue;
-        if (c->net_verbose && !tor_failing(c->tor, a)) ui_print(c, "* hi -> room slot %d", i);
+        if (c->net_verbose && !tor_failing(c->tor, a) && n < sizeof slots) {
+            n += (size_t)snprintf(slots + n, sizeof slots - n, "%s%d", k ? ", " : "", i);
+            k++;
+        }
         send_room(c, c->hi_msg, a, c->sock);
     }
+    if (k) ui_print(c, "* hi to room slot%s %s", k > 1 ? "s" : "", slots);
 }
 
 static void start_dht(chat_t *c) {

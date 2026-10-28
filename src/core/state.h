@@ -149,6 +149,7 @@ typedef struct {
     unsigned room_ok;
     unsigned hi, ck, hi2, hi2_bad, kx, lan;
     unsigned session_ok;
+    unsigned dht;      // DHT messages on the room's port, apart from what can't be read at all (other)
     unsigned other;
     unsigned connects;
     addr_t src[NET_SOURCES];

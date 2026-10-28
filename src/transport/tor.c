@@ -673,13 +673,24 @@ static stream_t *new_stream(tor_t *t, int *index) {
     return NULL;
 }
 
+// A target as the console names it: the room's slot, or the start of its onion address.
+static void target_name(const tor_t *t, int target, char *out, size_t cap) {
+    for (int i = 0; i < TOR_ROOM_SLOTS; i++)
+        if (t->room_targets[i] == target) { snprintf(out, cap, "room slot %d", i); return; }
+    snprintf(out, cap, "%.16s\xe2\x80\xa6", t->targets[target].host);
+}
+
 static void stream_fail(tor_t *t, int i, double now, const char *why) {
     stream_t *s = t->streams[i];
     if (s->target >= 0) {
         target_t *g = &t->targets[s->target];
         g->next_try = now + backoff(g->fails, TARGET_RETRY_BASE, TARGET_RETRY_SHIFT, TARGET_RETRY_MAX);
         // Room slots nobody publishes fail every time they're tried, so only the first is news.
-        if (!g->room || g->fails == 0) logf_(t, 1, "* tor: stream to %.16s... %s", g->host, why);
+        if (!g->room || g->fails == 0) {
+            char name[32];
+            target_name(t, s->target, name, sizeof name);
+            logf_(t, 1, "* tor: no stream to %s: %s", name, why);
+        }
         g->fails++;
     }
     close_stream(t, i);
@@ -762,7 +773,9 @@ static void stream_step(tor_t *t, int i, double now) {
                 target_t *g = &t->targets[s->target];
                 g->fails = 0;
                 g->opened = 1;
-                logf_(t, 1, "* tor: stream open to %.16s...", g->host);
+                char name[32];
+                target_name(t, s->target, name, sizeof name);
+                logf_(t, 1, "* tor: stream open to %s", name);
             } else {
                 if (s->rx_len < FRAME_LEN_PREFIX) break;
                 size_t flen = load_be16(s->rx);
@@ -930,10 +943,11 @@ void tor_status(const tor_t *t, char *out, size_t cap) {
         case C_CONNECTING: st = "looking for Tor"; break;
         default:       st = "logging in to Tor"; break;
     }
-    char slot[32] = "";
+    char slot[32] = "", more[24] = "";
     if (t->room_up) snprintf(slot, sizeof slot, ", room slot %d published", t->host_slot);
-    snprintf(out, cap, "%s%s%s, %d stream%s open, %d opening%s", st, slot,
-             t->use_browser_ports ? " (Tor Browser's tor)" : "", open, open == 1 ? "" : "s", opening,
+    if (opening) snprintf(more, sizeof more, ", %d opening", opening);
+    snprintf(out, cap, "%s%s%s, %d stream%s open%s%s", st, slot,
+             t->use_browser_ports ? " (Tor Browser's tor)" : "", open, open == 1 ? "" : "s", more,
              t->last_error[0] && t->ctl_state != C_READY ? " - last problem: " : "");
     size_t n = strlen(out);
     if (t->last_error[0] && t->ctl_state != C_READY && n < cap) snprintf(out + n, cap - n, "%s", t->last_error);

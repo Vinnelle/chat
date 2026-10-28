@@ -66,6 +66,10 @@ void ui_direct(chat_t *c, const uint8_t rgb[3], int to_me, const char *name, con
 int nick_ieq(const char *a, const char *b);
 void color_to_hex(const uint8_t rgb[3], char out[COLOR_HEX_LEN + 1]);
 void short_id(const uint8_t id[ID_LEN], char out[SHORT_ID_HEX + 1]);
+// Where a packet came from or went, for the console: a peer's short id when it's known (over the
+// relays the address holds it), then at an IP and port, over the relays or over Tor.
+#define WHERE_LEN (ADDR_STR_LEN + 32)
+void where_str(addr_t a, const uint8_t *id, char out[WHERE_LEN]);
 void nick_skeleton(const char *nick, char *out, size_t cap);
 void set_peer_nick(peer_t *p, const char *nick);
 void set_own_nick(chat_t *c, const char *nick);

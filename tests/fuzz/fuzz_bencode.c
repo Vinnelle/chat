@@ -61,8 +61,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     d.lk[DHT_V4].inflight[0].used = 1;
     g_candidates = 0;
     dht_on_packet(&d, data, size, from, on_candidate, NULL);
-    // Every peer a reply names is counted, and handed on as a candidate.
-    check(g_candidates == d.lk[DHT_V4].found + d.lk[DHT_V6].found);
+    // Every peer a reply names is handed on as a candidate, and counted once however often it's named.
+    int found = d.lk[DHT_V4].found + d.lk[DHT_V6].found;
+    check(found <= g_candidates && (found > 0) == (g_candidates > 0));
+    check(d.lk[DHT_V4].answered <= 1 && d.lk[DHT_V6].answered == 0);
     check(d.lk[DHT_V4].n_cands <= DHT_MAX_CANDS);
     check(d.lk[DHT_V6].n_cands <= DHT_MAX_CANDS);
     for (int i = 0; i < d.lk[DHT_V6].n_cands; i++) check(d.lk[DHT_V6].cands[i].addr.is_v6);

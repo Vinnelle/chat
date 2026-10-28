@@ -59,12 +59,17 @@ typedef struct {
     double ok_at;
 } dht_known_t;
 
+// The most peer addresses a lookup tells apart: past these, any more count without checking.
+#define DHT_FOUND_MAX 16
+
 typedef struct {
     dht_cand_t cands[DHT_MAX_CANDS];
     int n_cands;
     dht_inflight_t inflight[DHT_MAX_INFLIGHT];
     double t0;
-    int found;
+    int found;       // peer addresses, each once however many nodes give it
+    addr_t found_addr[DHT_FOUND_MAX];
+    int answered;    // nodes that answered a query
     int active;
     int top[DHT_RANK_TOP];
     int n_top;
@@ -126,14 +131,21 @@ void dht_rebootstrap(dht_state_t *d);
 
 int dht_step(dht_state_t *d, double now);
 
-void dht_on_packet(dht_state_t *d, const uint8_t *data, size_t len, addr_t from,
-                    void (*on_candidate)(void *ctx, addr_t a), void *ctx);
+// 1 if the datagram is a DHT message (whether it answers one of this lookup's queries or not), so the
+// caller can tell it from one it can't read.
+int dht_on_packet(dht_state_t *d, const uint8_t *data, size_t len, addr_t from,
+                  void (*on_candidate)(void *ctx, addr_t a), void *ctx);
 
-// Totals over both families, or one family's with dht_*_count_fam.
+// The current or last lookup's totals over both families, or one family's with dht_*_count_fam.
 int dht_queried_count(const dht_state_t *d);
+int dht_answered_count(const dht_state_t *d);
 int dht_found_count(const dht_state_t *d);
 int dht_queried_count_fam(const dht_state_t *d, int fam);
+int dht_answered_count_fam(const dht_state_t *d, int fam);
 int dht_found_count_fam(const dht_state_t *d, int fam);
+// Whether a lookup is running, and when the next one starts once none is.
+int dht_looking(const dht_state_t *d);
+double dht_next_lookup(const dht_state_t *d);
 // Nodes that have answered and not since gone quiet, over both families: 0 until the DHT is reached.
 int dht_known_count(const dht_state_t *d);
 

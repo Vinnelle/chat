@@ -950,7 +950,7 @@ static void relay_plan(nostr_t *n, relay_t *r, double now) {
         if (!c->used) continue;
         int keep = c->epoch == e || (c->epoch == e + 1) || (c->epoch == e - 1 && wall < r->close_last_at);
         if (!keep) {
-            logf_(n, 1, "* nostr: %s: closing the last ten minutes' connection", r->host);
+            logf_(n, 1, "* nostr: %s: closing the previous ten minutes' connection (each ten minutes has its own)", r->host);
             close_conn(c);
         }
     }
@@ -1088,19 +1088,24 @@ int nostr_relays_up(const nostr_t *n) {
 
 int nostr_relay_total(const nostr_t *n) { return n->n_relays; }
 
+// "2/3 relays up (a, b read-only), c connecting": those up by name, then the rest with what they're doing.
 void nostr_status(const nostr_t *n, char *out, size_t cap) {
     double now = now_seconds();
     if (!n->active) {
-        snprintf(out, cap, "0/%d relays up (not connected: nothing needs them now)", n->n_relays);
+        snprintf(out, cap, "not connected - nothing needs them now (%d relay%s)", n->n_relays, n->n_relays == 1 ? "" : "s");
         return;
     }
-    size_t p = (size_t)snprintf(out, cap, "%d/%d relays up", nostr_relays_up(n), n->n_relays);
-    for (int i = 0; i < n->n_relays && p < cap; i++) {
-        const relay_t *r = &n->relays[i];
-        int open = relay_open(r), trying = r->conns[0].used || r->conns[1].used;
-        const char *st = !open ? (trying ? "connecting" : "waiting")
-                       : r->read_only ? "read-only" : now < r->paused_until ? "paused" : "up";
-        p += (size_t)snprintf(out + p, cap - p, "%s%s %s", i ? ", " : " (", r->host, st);
+    int up = nostr_relays_up(n);
+    size_t p = (size_t)snprintf(out, cap, "%d/%d relays up", up, n->n_relays);
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0, k = 0; i < n->n_relays && p < cap; i++) {
+            const relay_t *r = &n->relays[i];
+            int open = relay_open(r), trying = r->conns[0].used || r->conns[1].used;
+            if (open != !pass) continue;
+            const char *st = !open ? (trying ? " connecting" : " waiting")
+                           : r->read_only ? " read-only" : now < r->paused_until ? " paused" : "";
+            p += (size_t)snprintf(out + p, cap - p, "%s%s%s", pass ? ", " : k++ ? ", " : " (", r->host, st);
+        }
+        if (!pass && up && p + 1 < cap) { out[p++] = ')'; out[p] = '\0'; }
     }
-    if (n->n_relays > 0 && p + 1 < cap) { out[p++] = ')'; out[p] = '\0'; }
 }

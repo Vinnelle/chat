@@ -506,8 +506,8 @@ void on_room(chat_t *c, char *plain, addr_t addr, double now) {
         char addr_str[ADDR_STR_LEN]; addr_to_string(addr, addr_str);
         peer_t *existing = find_peer_by_id(c, peer_id);
         if (c->net_verbose) {
-            char shortid[SHORT_ID_HEX + 1]; short_id(peer_id, shortid);
-            ui_print(c, "* hi from %s, peer %s%s", addr_str, shortid, existing ? " (known)" : " (new)");
+            char w[WHERE_LEN]; where_str(addr, peer_id, w);
+            ui_print(c, "* hi from %s (%s)", w, existing ? "known" : "new");
         }
         // Anyone who recorded a hi can replay it from anywhere. Only accept one without a check if it
         // changes nothing. New keys, or a new address mid-handshake, must answer a cookie first.
@@ -525,13 +525,13 @@ void on_room(chat_t *c, char *plain, addr_t addr, double now) {
             char msg[8 + ID_HEX + COOKIE_HEX];
             snprintf(msg, sizeof msg, "ck\t%s\t%s", f[1], cookiehex);
             send_room(c, msg, addr, c->sock);
-            if (c->net_verbose) ui_print(c, "* sent cookie challenge to %s", addr_str);
+            if (c->net_verbose) { char w[WHERE_LEN]; where_str(addr, peer_id, w); ui_print(c, "* cookie challenge to %s", w); }
         }
     } else if (n == 3 && strcmp(f[0], "ck") == 0 && strcmp(f[1], my_idhex) == 0 && strlen(f[2]) == COOKIE_HEX) {
         c->st.ck++;
         if (c->net_verbose) {
-            char addr_str[ADDR_STR_LEN]; addr_to_string(addr, addr_str);
-            ui_print(c, "* cookie challenge from %s - answering with hi2", addr_str);
+            char w[WHERE_LEN]; where_str(addr, NULL, w);
+            ui_print(c, "* cookie challenge from %s - answering with hi2", w);
         }
         char pubhex[PUB_HEX + 1]; hex_encode(c->keys.pub, PUB_LEN, pubhex);
         char kemhex[KEM_PUB_LEN * 2 + 1]; hex_encode(c->kem_keys.pub, KEM_PUB_LEN, kemhex);
@@ -553,8 +553,8 @@ void on_room(chat_t *c, char *plain, addr_t addr, double now) {
         c->st.hi2++;
         int cookie_ok = crypto_equal(given, expect, COOKIE_LEN) == 0;
         if (c->net_verbose) {
-            char shortid[SHORT_ID_HEX + 1]; short_id(peer_id, shortid);
-            ui_print(c, "* hi2 from %s, peer %s - cookie %s", addr_str, shortid, cookie_ok ? "ok" : "MISMATCH");
+            char w[WHERE_LEN]; where_str(addr, peer_id, w);
+            ui_print(c, "* hi2 from %s - cookie %s", w, cookie_ok ? "ok" : "MISMATCH");
         }
         if (cookie_ok) connect_peer(c, peer_id, addr, pub, kem_pub, now);
         else c->st.hi2_bad++;
@@ -564,9 +564,8 @@ void on_room(chat_t *c, char *plain, addr_t addr, double now) {
         c->st.kx++;
         peer_t *p = find_peer_by_id(c, peer_id);
         if (c->net_verbose) {
-            char addr_str[ADDR_STR_LEN]; addr_to_string(addr, addr_str);
-            char shortid[SHORT_ID_HEX + 1]; short_id(peer_id, shortid);
-            ui_print(c, "* kx from %s, peer %s%s", addr_str, shortid, p ? "" : " (unknown peer, ignored)");
+            char w[WHERE_LEN]; where_str(addr, peer_id, w);
+            ui_print(c, "* kx from %s%s", w, p ? "" : " (unknown peer, ignored)");
         }
         if (p) finish_kem_decap(c, p, ct);
     } else if (n == 2 && strcmp(f[0], "nb") == 0 && addr.kind == ADDR_NOSTR && strlen(f[1]) == ID_HEX
@@ -586,7 +585,7 @@ void on_room(chat_t *c, char *plain, addr_t addr, double now) {
         if (port > 0 && port <= UINT16_MAX) {
             addr_t a = addr; a.port = (uint16_t)port;
             add_candidate(c, a);
-            if (c->net_verbose) { char as[ADDR_STR_LEN]; addr_to_string(a, as); ui_print(c, "* lan beacon - candidate %s added", as); }
+            if (c->net_verbose) { char as[ADDR_STR_LEN]; addr_to_string(a, as); ui_print(c, "* lan: beacon from %s - trying it", as); }
         }
     }
 }

@@ -54,6 +54,23 @@ void color_to_hex(const uint8_t rgb[3], char out[COLOR_HEX_LEN + 1]) { hex_encod
 
 void short_id(const uint8_t id[ID_LEN], char out[SHORT_ID_HEX + 1]) { hex_encode(id, SHORT_ID_LEN, out); }
 
+void where_str(addr_t a, const uint8_t *id, char out[WHERE_LEN]) {
+    char sid[SHORT_ID_HEX + 1] = "";
+    if (a.kind == ADDR_NOSTR && !id) id = a.ip;
+    if (id) short_id(id, sid);
+    if (a.kind == ADDR_NOSTR) {
+        snprintf(out, WHERE_LEN, "%s over the relays", sid);
+    } else if (a.kind == ADDR_TOR) {
+        if (!id) short_id(a.ip, sid);
+        snprintf(out, WHERE_LEN, id ? "%s over Tor" : "Tor stream %s", sid);
+    } else {
+        char as[ADDR_STR_LEN];
+        addr_to_string(a, as);
+        if (id) snprintf(out, WHERE_LEN, "%s at %s", sid, as);
+        else copy_str(out, as, WHERE_LEN);
+    }
+}
+
 // Characters that render as nothing, or next to nothing.
 static int is_invisible(uint32_t cp) {
     return cp == 0xad || cp == 0x34f || cp == 0x61c || cp == 0x115f || cp == 0x1160 || cp == 0x17b4

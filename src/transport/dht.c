@@ -419,10 +419,22 @@ int dht_step(dht_state_t *d, double now) {
 }
 
 int dht_queried_count_fam(const dht_state_t *d, int fam) { return queried_in(&d->lk[fam]); }
+int dht_answered_count_fam(const dht_state_t *d, int fam) { return d->lk[fam].answered; }
 int dht_found_count_fam(const dht_state_t *d, int fam) { return d->lk[fam].found; }
 int dht_queried_count(const dht_state_t *d) { return dht_queried_count_fam(d, DHT_V4) + dht_queried_count_fam(d, DHT_V6); }
+int dht_answered_count(const dht_state_t *d) { return d->lk[DHT_V4].answered + d->lk[DHT_V6].answered; }
 int dht_found_count(const dht_state_t *d) { return d->lk[DHT_V4].found + d->lk[DHT_V6].found; }
 int dht_known_count(const dht_state_t *d) { return known_count(d, DHT_V4) + known_count(d, DHT_V6); }
+int dht_looking(const dht_state_t *d) { return d->lk[DHT_V4].active || d->lk[DHT_V6].active; }
+double dht_next_lookup(const dht_state_t *d) { return d->next_lookup; }
+
+// Counts a peer address once, however many nodes give it.
+static void count_found(dht_lookup_t *lk, addr_t a) {
+    int known = lk->found < DHT_FOUND_MAX ? lk->found : DHT_FOUND_MAX;
+    for (int i = 0; i < known; i++) if (addr_equal(lk->found_addr[i], a)) return;
+    if (lk->found < DHT_FOUND_MAX) lk->found_addr[lk->found] = a;
+    lk->found++;
+}
 
 // A compact address (BEP 5, BEP 32): the IP, then the port. -1 for port 0.
 static int compact_addr(const uint8_t *e, size_t iplen, addr_t *a) {
@@ -456,16 +468,18 @@ static void add_nodes(dht_state_t *d, const be_value *nodes, int fam) {
     }
 }
 
-void dht_on_packet(dht_state_t *d, const uint8_t *data, size_t len, addr_t from,
-                    void (*on_candidate)(void *ctx, addr_t a), void *ctx) {
-    if ((!d->lk[DHT_V4].active && !d->lk[DHT_V6].active) || len == 0 || data[0] != 'd') return;
+int dht_on_packet(dht_state_t *d, const uint8_t *data, size_t len, addr_t from,
+                  void (*on_candidate)(void *ctx, addr_t a), void *ctx) {
+    if (len == 0 || data[0] != 'd') return 0;
     be_arena arena;
     const be_value *msg = be_parse(data, len, &arena);
-    if (!msg || msg->type != BE_DICT) return;
+    if (!msg || msg->type != BE_DICT) return 0;
+    // Every KRPC message says what it is in y. Answers come late, and other nodes ask things too.
     const be_value *y = be_dict_get(msg, "y");
     const be_value *t = be_dict_get(msg, "t");
-    if (!y || y->type != BE_STR || y->slen != 1 || y->s[0] != 'r') return;
-    if (!t || t->type != BE_STR || t->slen != DHT_TID_LEN) return;
+    if (!y || y->type != BE_STR || y->slen != 1) return 0;
+    if (y->s[0] != 'r' || (!d->lk[DHT_V4].active && !d->lk[DHT_V6].active)) return 1;
+    if (!t || t->type != BE_STR || t->slen != DHT_TID_LEN) return 1;
 
     dht_lookup_t *lk = NULL;
     int slot = -1;
@@ -477,13 +491,14 @@ void dht_on_packet(dht_state_t *d, const uint8_t *data, size_t len, addr_t from,
                 (l->inflight[i].named || addr_equal(l->inflight[i].addr, from))) { slot = i; lk = l; break; }
         }
     }
-    if (slot < 0) return;
+    if (slot < 0) return 1;
     lk->inflight[slot].used = 0;
 
     const be_value *r = be_dict_get(msg, "r");
-    if (!r || r->type != BE_DICT) return;
+    if (!r || r->type != BE_DICT) return 1;
+    lk->answered++;
     dht_cand_t *c = find_or_add_cand(lk, from);
-    if (!c) return;
+    if (!c) return 1;
     // A server asked by name answers from an address, so that address has already been asked.
     c->queried = 1;
     const be_value *id = be_dict_get(r, "id");
@@ -508,8 +523,9 @@ void dht_on_packet(dht_state_t *d, const uint8_t *data, size_t len, addr_t from,
             if (v->type != BE_STR || (v->slen != IP4_LEN + PORT_LEN && v->slen != IP6_LEN + PORT_LEN)) continue;
             addr_t a;
             if (compact_addr((const uint8_t *)v->s, v->slen - PORT_LEN, &a) != 0) continue;
-            lk->found++;
+            count_found(lk, a);
             if (on_candidate) on_candidate(ctx, a);
         }
     }
+    return 1;
 }
