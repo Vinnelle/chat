@@ -3,7 +3,7 @@
 All notable changes to chat, newest first. Each beta (`X.Y.Z-beta.N`) has a section of its own until
 its release, which folds them into one. A release's notes on GitHub are its section here.
 
-## Unreleased
+## 0.5.3
 
 ### Changed
 - The sidebar and the left column of the settings, help and files pages are one width, so the line
