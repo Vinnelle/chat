@@ -282,7 +282,11 @@ void draw_status(wbuf_t *w, int row, int cols, const tui_bar_t *bar) {
         ptext(&p, S_BOLD, bar->message);
     }
     // As many of the hints as fit, starting from the first, since they're ordered most useful first.
+    // The last one stays whatever the width: it's the way out, or to the help.
     if (bar->hint && bar->hint[0]) {
+        const char *last = bar->hint;
+        for (const char *e; (e = strstr(last, DOT_SEP)); ) last = e + sizeof DOT_SEP - 1;
+        int last_w = last > bar->hint ? utf8_str_cols(DOT_SEP) + utf8_str_cols(last) : 0;
         char fit[256] = "";
         for (const char *s = bar->hint; ; ) {
             const char *end = strstr(s, DOT_SEP);
@@ -291,11 +295,15 @@ void draw_status(wbuf_t *w, int row, int cols, const tui_bar_t *bar) {
             if (upto >= sizeof part) break;
             memcpy(part, bar->hint, upto);
             part[upto] = '\0';
-            if (p.used + 3 + utf8_str_cols(part) > cols) break;
+            if (p.used + 3 + utf8_str_cols(part) + (end ? last_w : 0) > cols) break;
             copy_str(fit, part, sizeof fit);
             if (!end) break;
             s = end + sizeof DOT_SEP - 1;
         }
+        size_t f = strlen(fit);
+        if (f < strlen(bar->hint) && last > bar->hint &&
+            p.used + 3 + utf8_str_cols(fit) + (f ? last_w : utf8_str_cols(last)) <= cols)
+            snprintf(fit + f, sizeof fit - f, "%s%s", f ? DOT_SEP : "", last);
         if (fit[0]) {
             pspace(&p, cols - utf8_str_cols(fit) - 1);
             draw_hint(&p, fit);

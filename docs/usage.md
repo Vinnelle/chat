@@ -72,7 +72,8 @@ saved your settings, it starts on your sessions, and `Ctrl+S` opens the page.
 
 The bottom row is the same on every screen: a chip for where you are (`INSERT`, `NORMAL`,
 `COMMAND`, `SETTINGS`, ...), whether you're signing, your nick, the reply to what you just did
-(until your next key), and what the keys do there.
+(until your next key), and what the keys do there. When the keys don't all fit, the first ones stay,
+and so does the last: the way out of where you are, or to the help.
 
 The input line is a small vim. It starts in NORMAL (`h`/`l` move, `0`/`$` go to the ends, `x`
 deletes, `j`/`k` switch session, `s`/`c`/`C` toggle the sidebar/console/chat, `f` opens the

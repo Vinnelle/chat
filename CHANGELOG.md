@@ -13,6 +13,8 @@ its release, which folds them into one. A release's notes on GitHub are its sect
   chat does before its first message. A folder browser in an empty folder keeps its left column too.
 - The help page's pane shows the selected key or command in full, which a narrow terminal cuts off
   in the list. A setting's help that's longer than its pane ends in `…` instead of mid-sentence.
+- When the bottom row's keys don't all fit, the last one stays (the way out, such as `esc start` on
+  the first settings page, or `? help`) and the ones before it go first.
 
 ## 0.5.2
 
