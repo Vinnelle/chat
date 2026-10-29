@@ -10,7 +10,7 @@ static void knock_room_slots(chat_t *c, double now);
 
 static const char *const DEFAULT_RELAYS[] = {
     "wss://relay.primal.net",
-    "wss://nostr.mom",
+    "wss://relay.snort.social",
     "wss://relay.nostr.net",
 };
 

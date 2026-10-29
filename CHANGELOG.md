@@ -3,6 +3,12 @@
 All notable changes to chat, newest first. Each beta (`X.Y.Z-beta.N`) has a section of its own until
 its release, which folds them into one. A release's notes on GitHub are its section here.
 
+## Unreleased
+
+### Changed
+- `wss://relay.snort.social` replaces `wss://nostr.mom` among the default relays, as nostr.mom turns
+  away connections over Tor. A relay list you've saved yourself keeps what's in it.
+
 ## 0.5.4
 
 ### Added

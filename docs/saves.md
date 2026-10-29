@@ -24,7 +24,7 @@ not the key's public half, so neither file can be linked to the fingerprint peer
   [network]
   routing = "tor"
   lan = false
-  relays = ["wss://relay.primal.net", "wss://nostr.mom"]
+  relays = ["wss://relay.primal.net", "wss://relay.snort.social"]
 
   [profile]
   nick = "alice"

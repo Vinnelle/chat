@@ -78,7 +78,7 @@ minutes start and closes a minute or two after they end, to allow for clock diff
 still sees the address each connection comes from (the same one every ten minutes, unless it's a Tor
 exit), when events come and go, and the tag, which every member of the room asks for. The events
 have their own size and shape, so anyone who can subscribe to a relay can pick out chat's events and
-count them per tag. The defaults are `wss://relay.primal.net`, `wss://nostr.mom` and
+count them per tag. The defaults are `wss://relay.primal.net`, `wss://relay.snort.social` and
 `wss://relay.nostr.net`. Use `--relay` or the settings page to pick others. A relay that rate limits
 gets fewer events. A relay that refuses throwaway keys (web of trust, payment, proof of work) is
 only read from.
