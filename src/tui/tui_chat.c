@@ -279,20 +279,26 @@ static void draw_body(pen_t *p, style_t st, const char *t, size_t off, const lin
     ptext(p, st, run);
 }
 
-// The line above the n messages that came in while the session wasn't on screen.
-static void draw_new_rule(grid_t *g, int row, int n) {
+// A divider across the pane with label on it, lead columns in, or in the middle if lead is -1.
+static void draw_rule(grid_t *g, int row, const char *label, int lead, style_t line, style_t text) {
     gpen_t gp;
     grid_open(g, row, &gp);
     pen_t *p = &gp.p;
-    char label[24];
-    snprintf(label, sizeof label, " %d new ", n);
-    int lw = (int)strlen(label), lead = 4;
-    sty(p->w, S_ACCENT);
+    int lw = (int)strlen(label);
+    if (lead < 0) lead = (p->room - lw) / 2;
+    sty(p->w, line);
     for (; p->used < lead && p->used < p->room; p->used++) wapp(p->w, G_H);
-    if (p->used + lw <= p->room) ptext(p, S_ACCENT_BOLD, label);
-    sty(p->w, S_ACCENT);
+    if (p->used + lw <= p->room) ptext(p, text, label);
+    sty(p->w, line);
     for (; p->used < p->room; p->used++) wapp(p->w, G_H);
     grid_close(g, row, &gp);
+}
+
+// The line above the n messages that came in while the session wasn't on screen.
+static void draw_new_rule(grid_t *g, int row, int n) {
+    char label[24];
+    snprintf(label, sizeof label, " %d new ", n);
+    draw_rule(g, row, label, 4, S_ACCENT, S_ACCENT_BOLD);
 }
 
 // The time column, "HH:MM" and a gap, in a pane at least TIME_MIN_W wide.
@@ -329,6 +335,14 @@ static void draw_lines(grid_t *g, int first, int nrows, const tui_scrollback_t *
     int bottom = first + nrows - 1;
     for (int k = skip; k < sb->count && bottom >= first; k++) {
         const tui_line_t *l = SB_AT(sb, k);
+        if (l->rule) {
+            char label[TUI_LINE_MAX + 3];
+            snprintf(label, sizeof label, " %s ", tui_line_text(sb, l));
+            if (bottom < g->rows) draw_rule(g, bottom, label, -1, S_FAINT, S_PLAIN);
+            bottom--;
+            if (k + 1 == fresh && bottom >= first && bottom < g->rows) draw_new_rule(g, bottom--, fresh);
+            continue;
+        }
         char name[NAME_BUF];
         const char *body = tui_line_text(sb, l);
         int chat = split_chat_line(sb, l, name, sizeof name, &body);

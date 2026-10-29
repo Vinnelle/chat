@@ -31,7 +31,8 @@ typedef struct {
     int delivery;      // TUI_SENDING, TUI_REACHED or TUI_MISSED, for own
     char mark[TUI_MARK_MAX];   // with TUI_MISSED: "not reached: bob, carol"
     int quote;         // a reply: how much of its text, from the start, quotes what it answers
-    double at;         // when it came (now_seconds), for the message timer
+    int rule;          // drawn as a divider across the pane, its text in the middle
+    double at;        // when it came (now_seconds), for the message timer
 } tui_line_t;
 
 typedef struct {
@@ -55,6 +56,7 @@ void tui_scrollback_mark_file(tui_scrollback_t *sb, int file);
 // with NULL, settled. 1 if its line is still there.
 void tui_scrollback_mark_own(tui_scrollback_t *sb, unsigned own);
 void tui_scrollback_mark_quote(tui_scrollback_t *sb, int quote);
+void tui_scrollback_mark_rule(tui_scrollback_t *sb);
 // Wipes the lines that came before before, oldest first, and lists the files they offered (up to
 // max). How many went.
 int tui_scrollback_expire(tui_scrollback_t *sb, double before, int *files, int *n_files, int max);

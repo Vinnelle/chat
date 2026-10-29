@@ -110,7 +110,10 @@ static void history_show(session_slot_t *s) {
         hhmm[HHMM_LEN - 1] = '\0';
         tui_scrollback_push(&s->sb, hhmm, f[H_TEXT], has_rgb ? rgb : NULL, f[H_MENTION][0] == '1', atoi(f[H_COLOUR_LEN]));
     }
-    if (shown) tui_scrollback_push(&s->sb, "", "* new from here", NULL, 0, 0);
+    if (shown) {
+        tui_scrollback_push(&s->sb, "", "New from here", NULL, 0, 0);
+        tui_scrollback_mark_rule(&s->sb);
+    }
     crypto_wipe(line, sizeof line);
 }
 
