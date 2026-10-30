@@ -23,6 +23,19 @@ elseif(APPLE)
     set(CHAT_OS macos)
     set(CHAT_OS_BASE posix)
     add_compile_definitions(_POSIX_C_SOURCE=200809L _DARWIN_C_SOURCE)
+elseif(ANDROID)
+    # Android 9 has posix_spawn, which the platform code starts programs with. The NDK's legacy
+    # toolchain file, its default, keeps the API level in ANDROID_PLATFORM_LEVEL.
+    set(CHAT_ANDROID_API ${CMAKE_SYSTEM_VERSION})
+    if(DEFINED ANDROID_PLATFORM_LEVEL)
+        set(CHAT_ANDROID_API ${ANDROID_PLATFORM_LEVEL})
+    endif()
+    if(CHAT_ANDROID_API LESS 28)
+        message(FATAL_ERROR "chat needs Android 9 (API 28) or later: configure with -DANDROID_PLATFORM=android-28")
+    endif()
+    set(CHAT_OS android)
+    set(CHAT_OS_BASE posix)
+    add_compile_definitions(_POSIX_C_SOURCE=200809L)
 else()
     set(CHAT_OS linux)
     set(CHAT_OS_BASE posix)
@@ -46,6 +59,18 @@ if(CMAKE_CROSSCOMPILING)
     # Absolute: the dependencies configure in their own directories, where a relative path breaks.
     get_filename_component(CHAT_TOOLCHAIN_FILE "${CMAKE_TOOLCHAIN_FILE}" ABSOLUTE BASE_DIR "${CMAKE_SOURCE_DIR}")
     set(OQS_CROSS_ARGS -DCMAKE_TOOLCHAIN_FILE=${CHAT_TOOLCHAIN_FILE})
+    if(ANDROID)
+        # The NDK's clang builds for whatever --target says, so libsodium's configure gets it as part
+        # of CC, and the others the same ABI and Android version through the NDK's toolchain file.
+        if(ANDROID_ABI STREQUAL "armeabi-v7a")
+            set(CHAT_HOST_TRIPLE armv7a-linux-androideabi)
+        else()
+            set(CHAT_HOST_TRIPLE ${CMAKE_SYSTEM_PROCESSOR}-linux-android)
+        endif()
+        set(DEP_CC_ARGS "CC=${CMAKE_C_COMPILER} --target=${CMAKE_C_COMPILER_TARGET}" AR=${CMAKE_AR}
+                        RANLIB=${CMAKE_RANLIB} --host=${CHAT_HOST_TRIPLE})
+        list(APPEND OQS_CROSS_ARGS -DANDROID_ABI=${ANDROID_ABI} -DANDROID_PLATFORM=${ANDROID_PLATFORM})
+    endif()
 endif()
 
 set(SODIUM_VERSION 1.0.20-stable)
@@ -341,6 +366,9 @@ if(WIN32)
 elseif(APPLE)
     find_package(Threads REQUIRED)
     target_link_libraries(chat PRIVATE Threads::Threads)
+elseif(ANDROID)
+    find_package(Threads REQUIRED)
+    target_link_libraries(chat PRIVATE Threads::Threads m)
 else()
     # A device lock without systemd's credential service speaks to the TPM itself, and chat speaks
     # CTAP to a security key itself.
@@ -396,7 +424,8 @@ if(NOT MSVC)
 
     chat_try_compile_flag(-fcf-protection=full)
 
-    if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+    # The NDK sets its own level.
+    if((CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo") AND NOT ANDROID)
         chat_try_compile_flag(-D_FORTIFY_SOURCE=3)
     endif()
 

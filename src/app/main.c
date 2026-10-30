@@ -758,6 +758,10 @@ static void app_defaults(void) {
     g_app.show.sidebar = g_app.show.console = g_app.show.chat = 1;
     g_app.lock.key = g_app.panic.key = 1;
     g_app.sandbox = g_app.updater = 1;
+#ifdef __ANDROID__
+    // The app that carries chat updates it.
+    g_app.updater = 0;
+#endif
     g_app.picture_noise = 1;
     note_setting_defaults();
     trust_on_change(save_verified);
@@ -791,6 +795,10 @@ static int pick_save(const options_t *o) {
 
 // --update: what chat exits with.
 static int run_update(int saved) {
+#ifdef __ANDROID__
+    fprintf(stderr, "chat: on Android, chat updates with the app that carries it\n");
+    return 1;
+#endif
     // What :install saved may route the download through Tor, so it isn't skipped silently.
     if (saved) unlock_at_start(0);
     if (g_app.locked && !g_app.route_chosen) {

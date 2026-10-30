@@ -425,7 +425,7 @@ static int move_ask_paras(tui_para_t *p) {
 
 // The address in full, as it opens, since what a message shows can differ from it.
 static int open_link_paras(tui_para_t *p) {
-    static char addr[LINK_MAX + 2], who[sizeof g_app.links.shown.from * 2 + 40], failed[sizeof g_app.links.why + 64];
+    static char addr[LINK_URL_MAX + 2], who[sizeof g_app.links.shown.from * 2 + 40], failed[sizeof g_app.links.why + 64];
     const tui_link_t *l = &g_app.links.shown;
     snprintf(addr, sizeof addr, "`%s`", g_app.links.target);
     int n = add_para(p, 0, TUI_P_TEXT, addr);

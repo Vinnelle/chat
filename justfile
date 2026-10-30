@@ -13,9 +13,10 @@ default:
 #   just build linux                 static musl Linux binary in build-static/ (needs zig)
 #   just build windows               Windows binary in build-win/ (needs zig; win works too)
 #   just build macos                 macOS binaries in build-macos-aarch64/ and -x86_64/ (needs zig)
+#   just build android               Android binaries in build-android-arm64-v8a/ and -x86_64/ (needs the NDK)
 #   just build all                   native and Windows binaries
 #   just build test [system] [args]  test builds, see _build-test
-# Build chat: native (default), linux, windows, macos, all, or test [all|linux|windows]
+# Build chat: native (default), linux, windows, macos, android, all, or test [all|linux|windows]
 [group('build')]
 build what="native" *args:
     #!/bin/sh
@@ -58,12 +59,29 @@ build what="native" *args:
                 cmake --build build-macos-$arch -j {{num_cpus()}}
             done
             ;;
+        android)
+            # The NDK named, else the newest in an SDK: named, Android Studio's, or chat-gui's
+            ndk="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
+            for sdk in "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}" "$HOME/Android/Sdk" "$HOME/.local/share/android-sdk"; do
+                [ -z "$ndk" ] && [ -n "$sdk" ] && ndk=$(ls -d "$sdk"/ndk/*/ 2>/dev/null | sort -V | tail -n 1)
+            done
+            toolchain="${ndk%/}/build/cmake/android.toolchain.cmake"
+            if [ -z "$ndk" ] || [ ! -f "$toolchain" ]; then
+                echo "no Android NDK: set ANDROID_NDK_HOME, or ANDROID_HOME to an SDK with one" >&2
+                exit 1
+            fi
+            for abi in arm64-v8a x86_64; do
+                drop_stale build-android-$abi
+                cmake -B build-android-$abi -DCMAKE_TOOLCHAIN_FILE="$toolchain" -DANDROID_ABI=$abi -DANDROID_PLATFORM=android-28
+                cmake --build build-android-$abi -j {{num_cpus()}}
+            done
+            ;;
         all)
             "$just" build
             "$just" build windows
             ;;
         test) exec "$just" _build-test "$@" ;;
-        *) echo "just build takes native, linux, windows, macos, all or test, not $what" >&2; exit 1 ;;
+        *) echo "just build takes native, linux, windows, macos, android, all or test, not $what" >&2; exit 1 ;;
     esac
 
 # just build test [all|linux|windows] [chat args], all by default. This system's binary builds
@@ -160,7 +178,7 @@ run *args: build
 # Remove build directories, test builds and release output
 [group('build')]
 clean:
-    rm -rf build build-static build-win build-macos-aarch64 build-macos-x86_64 build-test build-fuzz build-asan build-win-test test-builds dist
+    rm -rf build build-static build-win build-macos-aarch64 build-macos-x86_64 build-android-arm64-v8a build-android-x86_64 build-test build-fuzz build-asan build-win-test test-builds dist
 
 # ---------------------------------------------------------------------------------------------
 # Test

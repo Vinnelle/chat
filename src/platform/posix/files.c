@@ -181,6 +181,17 @@ FILE *platform_create_new(const char *utf8_path) {
 }
 
 int platform_move_new(const char *from, const char *to) {
+#ifdef __ANDROID__
+    // Android's SELinux policy refuses hard links, and an app's own filter kills a process for
+    // renameat2 before Android 11. So the name is taken with a new empty file first, which fails if
+    // it's already taken, and the rename only replaces that.
+    int fd = open(to, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0) return -1;
+    close(fd);
+    if (rename(from, to) == 0) return 0;
+    unlink(to);
+    return -1;
+#else
     // A hard link fails if the name is taken, so nothing is ever replaced.
     if (link(from, to) == 0) { unlink(from); return 0; }
     if (errno == EEXIST) return -1;
@@ -189,6 +200,7 @@ int platform_move_new(const char *from, const char *to) {
     if (syscall(SYS_renameat2, AT_FDCWD, from, AT_FDCWD, to, RENAME_NOREPLACE) == 0) return 0;
 #endif
     return -1;
+#endif
 }
 
 int platform_config_dir(char *out, size_t cap, int create) {
@@ -275,6 +287,23 @@ int platform_default_gateway(uint8_t ip[IP4_LEN]) {
     return found;
 }
 
+#ifdef __ANDROID__
+// Android keeps its roots one to a file. How many of dir's were added.
+static int add_cert_dir(const char *dir, int (*add_file)(void *ctx, const char *path), void *ctx) {
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    int n = 0;
+    char path[PATH_BUF];
+    for (struct dirent *e; (e = readdir(d)) != NULL;) {
+        if (e->d_name[0] == '.') continue;
+        int len = snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+        if (len > 0 && (size_t)len < sizeof path && add_file(ctx, path) == 0) n++;
+    }
+    closedir(d);
+    return n;
+}
+#endif
+
 void platform_ca_roots(void (*add_der)(void *ctx, const uint8_t *der, size_t len),
                        int (*add_file)(void *ctx, const char *path), void *ctx) {
     (void)add_der;
@@ -288,6 +317,13 @@ void platform_ca_roots(void (*add_der)(void *ctx, const uint8_t *der, size_t len
     };
     const char *env = getenv("SSL_CERT_FILE");
     if (env && env[0] && add_file(ctx, env) == 0) return;
+#ifdef __ANDROID__
+    // Since Android 14 the roots kept up to date come with the Conscrypt module, and the system's
+    // own can be out of date.
+    static const char *const DIRS[] = { "/apex/com.android.conscrypt/cacerts", "/system/etc/security/cacerts" };
+    for (size_t i = 0; i < COUNT_OF(DIRS); i++)
+        if (add_cert_dir(DIRS[i], add_file, ctx) > 0) return;
+#endif
     for (size_t i = 0; i < COUNT_OF(BUNDLES); i++)
         if (add_file(ctx, BUNDLES[i]) == 0) return;
 }

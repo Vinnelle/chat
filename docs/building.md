@@ -43,6 +43,33 @@ desktop notifications, and asking the router for a port over PCP or NAT-PMP (UPn
 settings page greys the first two out and says why. A debugger can't attach to chat there
 (`PT_DENY_ATTACH`), and the machine id a native signing key is made with is the Mac's hardware UUID.
 
+## Android
+
+Android's NDK builds chat as a program for Android 9 (API 28) and later, for an app to start and
+drive with [`--json`](json.md): the app keeps the save, and the screens are its own. The NDK's
+CMake toolchain file sets the compiler, and chat passes the ABI and Android version on to the
+dependencies, libsodium's `configure` included.
+
+```sh
+cmake -B build-android-arm64-v8a -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+      -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28
+cmake --build build-android-arm64-v8a
+```
+
+Android keeps apps apart itself, and some of what chat does on Linux isn't open to an app there,
+so `posix/` does it another way on Android:
+
+- An app's seccomp filter kills a process that makes a call Android doesn't expect, rather than
+  failing it. So chat makes no Landlock calls (the files are kept apart by the app's own sandbox),
+  puts its seccomp filter up with `prctl`, and lets the child pictures are decoded in name the
+  memory Android's `malloc` maps.
+- SELinux refuses apps hard links, so a file is saved under its name by taking the name with a new
+  empty file and renaming over that, which still never replaces anything.
+- The CA roots are one to a file, in the Conscrypt module's folder (kept up to date since Android
+  14), then the system's.
+- A save can't be locked to the device or need a security key, `:update` is off (the app carries
+  chat and updates it), and there's no machine id, so a signing key comes as a key, not a password.
+
 ## With just
 
 The [`justfile`](../justfile) wraps the commands above:
@@ -51,6 +78,7 @@ The [`justfile`](../justfile) wraps the commands above:
 just build              # native binary in build/
 just build windows      # Windows binary in build-win/ (needs zig)
 just build macos        # macOS binaries in build-macos-aarch64/ and build-macos-x86_64/ (needs zig)
+just build android      # Android binaries in build-android-arm64-v8a/ and build-android-x86_64/ (needs the NDK)
 just run --nick you     # build, then run
 just build test         # Linux and Windows binaries in test-builds/<date>-<time>/, offer to run this system's
 just build test linux   # the same for one system (or: windows); the other system's needs zig

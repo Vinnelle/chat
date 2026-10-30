@@ -619,6 +619,10 @@ cmd_result_t app_invite(void *ctx, const char *arg) {
 
 cmd_result_t app_update(void *ctx, const char *arg) {
     (void)ctx; (void)arg;
+#ifdef __ANDROID__
+    note("on Android, chat updates with the app that carries it");
+    return CMD_OK;
+#endif
     if ((g_app.sandboxed & PLATFORM_SANDBOX_FILES) && !update_helper_running()) {
         if (g_app.updater)
             note("the sandbox keeps chat from replacing itself, and the updater isn't running - quit and run chat "

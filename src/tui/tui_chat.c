@@ -227,7 +227,7 @@ static void find_links(line_links_t *lk, const char *text, size_t n, size_t from
 // that opens the whole link. Only while the row has room for both: an escape cut off would swallow
 // the rest of the screen.
 static void draw_link(pen_t *p, style_t st, const char *t, size_t len, const char *link, size_t link_len) {
-    char piece[TUI_LINE_MAX + 1], target[LINK_MAX];
+    char piece[TUI_LINE_MAX + 1], target[LINK_URL_MAX];
     copy_slice(piece, sizeof piece, t, len);
     wbuf_t *w = p->w;
     int osc = link_target(link, link_len, target, sizeof target) == 0 && w->len + strlen(target) + len + OSC8_ROOM < w->cap;

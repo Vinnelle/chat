@@ -12,6 +12,8 @@ its release, which folds them into one. A release's notes on GitHub are its sect
   them. A picture comes as pixels, decoded by chat's own readers in their sandbox, so the program
   showing it parses nothing a peer made. It opens no save, and takes the room's password and any
   signing key on stdin, never in its arguments. [JSON interface](docs/json.md) has every object.
+- chat builds for Android 9 and later with the NDK (`just build android`), for an app to drive with
+  `--json`. [Building](docs/building.md#android) says what it does differently there.
 
 ### Fixed
 - With `--simple`, a line longer than 1023 bytes was split into more than one message, and lines

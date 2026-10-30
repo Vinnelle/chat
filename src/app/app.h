@@ -357,7 +357,7 @@ typedef struct {
         int nth, n;
         unsigned upto;
         tui_link_t shown;
-        char target[LINK_MAX];
+        char target[LINK_URL_MAX];
         char why[160];
     } links;
     struct {

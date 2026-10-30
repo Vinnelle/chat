@@ -156,7 +156,7 @@ void test_links(double *t) {
         CHECK(got && len == strlen(CASES[i].link) && memcmp(CASES[i].text + at, CASES[i].link, len) == 0,
               "'%s' gave '%.*s', want '%s'", CASES[i].text, (int)len, CASES[i].text + at, CASES[i].link);
     }
-    char out[LINK_MAX];
+    char out[LINK_URL_MAX];
     CHECK(link_target("ieji.de/@ida", 12, out, sizeof out) == 0 && strcmp(out, "https://ieji.de/@ida") == 0,
           "a link without its https:// opens as %s", out);
     static const char shell[] = "http://x.org/$(id)'\xc3\xa9";

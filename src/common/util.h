@@ -35,8 +35,8 @@ size_t clean_text(const char *in, char *out, size_t max_len);
 int has_control_chars(const char *in);
 
 // Links in a message: http:// and https:// addresses, and domain names, with a path or without.
-// LINK_MAX holds the address one opens, with its NUL; a longer one isn't a link.
-#define LINK_MAX 1024
+// LINK_URL_MAX holds the address one opens, with its NUL; a longer one isn't a link.
+#define LINK_URL_MAX 1024
 // The first link in s (n bytes) from *from on: where it starts (*at) and its length. *from goes
 // past it. 0 once there are no more.
 int link_next(const char *s, size_t n, size_t *from, size_t *at, size_t *len);

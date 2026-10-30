@@ -240,7 +240,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     while (link_next(out, n, &from, &at, &len)) {
         check(at >= prev && len > 0 && at + len <= n && from == at + len);
         prev = from;
-        char target[LINK_MAX];
+        char target[LINK_URL_MAX];
         check(link_target(out + at, len, target, sizeof target) == 0);
         check(strncasecmp(target, "http://", 7) == 0 || strncasecmp(target, "https://", 8) == 0);
         for (const char *c = target; *c; c++) check(*c > ' ' && *c < 0x7f && !strchr("\"'$\\`", *c));

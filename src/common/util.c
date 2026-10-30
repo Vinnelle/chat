@@ -372,7 +372,7 @@ int link_next(const char *s, size_t n, size_t *from, size_t *at, size_t *len) {
         } else {
             continue;
         }
-        if (target_len(s + i, e - i) >= LINK_MAX) { i = e - 1; continue; }
+        if (target_len(s + i, e - i) >= LINK_URL_MAX) { i = e - 1; continue; }
         *at = i;
         *len = e - i;
         *from = e;

@@ -408,8 +408,9 @@ static int sc_apply(void) {
     f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
     f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM);
     struct sock_fprog prog = { (unsigned short)n, f };
-#ifdef SYS_seccomp
-    // Every thread, if the kernel can.
+#if defined(SYS_seccomp) && !defined(__ANDROID__)
+    // Every thread, if the kernel can. An Android app's own filter may kill a process for this call,
+    // so there it's prctl's, for this thread and the ones it starts.
     if (syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_TSYNC, &prog) == 0) return 0;
 #endif
     return prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog, 0, 0) == 0 ? 0 : -1;
@@ -423,12 +424,18 @@ unsigned platform_sandbox(const char *const run[], int n_run, const char *write_
     copy_str(g_sb.write_only, write_only ? write_only : "", sizeof g_sb.write_only);
     g_sb.n_run = 0;
     for (int i = 0; i < n_run; i++) if (run[i] && run[i][0]) sb_run(run[i], 0);
+    unsigned up = 0;
+#ifdef __ANDROID__
+    // An Android app's own seccomp filter, which chat runs under, kills a process for Landlock's calls.
+    g_sb.abi = 0;
+    snprintf(why, cap, "Android apps can't use Landlock");
+#else
     long abi = syscall(SYS_landlock_create_ruleset, NULL, 0, LL_CREATE_RULESET_VERSION);
     g_sb.abi = abi > 0 ? (int)abi : 0;
-    unsigned up = 0;
     if (!g_sb.abi) snprintf(why, cap, "this kernel has no Landlock (it needs Linux 5.13 or later, with Landlock on)");
     else if (ll_apply() == 0) up |= PLATFORM_SANDBOX_FILES;
     else snprintf(why, cap, "Landlock refused its rules (%s)", strerror(g_sb.err));
+#endif
     if (sc_apply() == 0) up |= PLATFORM_SANDBOX_CALLS;
     else if (cap && !why[0]) snprintf(why, cap, "seccomp refused its filter (%s)", strerror(errno));
     return up;
@@ -491,6 +498,9 @@ void platform_link_close(int link) { close(link); }
 #endif
 // The child's own exit code when it couldn't put its filter up.
 #define ISOLATE_NO_FILTER 3
+#if defined(__ANDROID__) && !defined(PR_SET_VMA)
+#define PR_SET_VMA 0x53564d41
+#endif
 
 #ifdef SB_AUDIT_ARCH
 // What the child may call: the memory calls malloc makes, never for executable memory, write to its
@@ -518,6 +528,14 @@ static int isolate_filter(int fd) {
     f[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (unsigned)fd, 0, 1);
     f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
     f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
+#ifdef __ANDROID__
+    // Bionic's malloc names the memory it maps, and that's all prctl may do here.
+    f[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_prctl, 0, 4);
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0]));
+    f[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, PR_SET_VMA, 0, 1);
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
+#endif
 #ifdef __NR_mmap2
     f[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mmap2, 2, 0);
 #else

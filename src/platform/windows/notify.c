@@ -173,7 +173,7 @@ int platform_clipboard_clear(void) {
 }
 
 int platform_open_url(const char *url, char *why, size_t cap) {
-    wchar_t w[LINK_MAX];
+    wchar_t w[LINK_URL_MAX];
     if (!to_wide(url, w, COUNT_OF(w))) { copy_str(why, "Windows couldn't read it", cap); return -1; }
     if ((INT_PTR)ShellExecuteW(NULL, L"open", w, NULL, NULL, SW_SHOWNORMAL) > 32) return 0;
     copy_str(why, "Windows has no browser set to open it with", cap);
