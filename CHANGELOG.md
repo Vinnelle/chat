@@ -3,6 +3,21 @@
 All notable changes to chat, newest first. Each beta (`X.Y.Z-beta.N`) has a section of its own until
 its release, which folds them into one. A release's notes on GitHub are its section here.
 
+## Unreleased
+
+### Added
+- `--json` runs one session for another program to drive, with JSON Lines both ways: messages with
+  who wrote them and their ids, replies, direct messages, peers with their verify codes and builds,
+  files, delivery, notifications and the network come out as objects, and commands go in to answer
+  them. A picture comes as pixels, decoded by chat's own readers in their sandbox, so the program
+  showing it parses nothing a peer made. It opens no save, and takes the room's password and any
+  signing key on stdin, never in its arguments. [JSON interface](docs/json.md) has every object.
+
+### Fixed
+- With `--simple`, a line longer than 1023 bytes was split into more than one message, and lines
+  that came faster than chat read them could be dropped. Now a line stays whole, and the rest wait
+  their turn.
+
 ## 0.5.5
 
 ### Changed

@@ -69,6 +69,7 @@ with a header of what the rest of the app uses from it (`sessions/sessions.h`, `
 | --- | --- |
 | `main.c` | Starting up, the full-screen UI's main loop, and the panic key |
 | `plain.c` | `--simple` |
+| `json.c` | `--json`: a session another program drives, over JSON Lines |
 | `settings.c` | The settings rows, `:set`, and the settings file |
 | `identity.c` | The signing identity: made from a password, or read from a key file or a paste |
 | `update.c` | `:update` |

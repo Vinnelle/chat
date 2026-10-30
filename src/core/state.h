@@ -435,6 +435,8 @@ struct chat_s {
     int recent_next;
     // While a reply's line is printed: how much of its text, from the start, is the quote.
     int line_quote;
+    // While a message's line is printed: what chat_line gives.
+    chat_line_t line;
     sendq_t sendq[SENDQ_MAX];
     roomq_t roomq[ROOMQ_MAX];
     uint32_t queue_seq;

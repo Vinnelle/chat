@@ -326,7 +326,9 @@ void chat_send_file(chat_t *c, const char *path, int asis) {
     char who[MAX_NICK + 8]; snprintf(who, sizeof who, "%s (you)", c->nick);
     char text[FILE_NAME_MAX + 96];
     snprintf(text, sizeof text, "offered %s as file %d", desc, e->num);
+    c->line = (chat_line_t){ NULL, c->my_id, c->nick, NULL };
     ui_chat_file(c, c->my_color, 0, who, text, e->num);
+    c->line = (chat_line_t){ 0 };
     if (clean) say_cleaned(c, e->num, (unsigned)took, renamed ? old_name : NULL);
     const char *cannot = image ? NULL : clean_cannot(head, got_head, old_name);
     if (cannot)
@@ -909,7 +911,9 @@ void file_on_record(chat_t *c, peer_t *p, char **f, int n, double now) {
                      over ? " (over your limit)" : "");
         char via[CHAT_NAME_LEN]; chat_peer_name(c, p, via);
         snprintf(shown, sizeof shown, "%s%s", via, code_mark(c, p));
+        c->line = (chat_line_t){ NULL, e->owner, p->nick, p };
         ui_chat_file(c, p->color, 0, shown, text, e->num);
+        c->line = (chat_line_t){ 0 };
         if (c->notify && c->notify_mode == NOTIFY_ALL)
             c->notify(c->ui, c->notify_preview >= PREVIEW_NICK ? shown : NULL,
                       c->notify_preview == PREVIEW_MESSAGE ? "offered a file" : NULL, 0);

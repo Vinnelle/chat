@@ -180,6 +180,8 @@ typedef void (*chat_print_fn)(void *ui, const char *hhmm, const char *text, cons
 #define LINE_WARN 4u
 // A message of ours, numbered as chat_own_seq says while it's printed, for chat_delivery_fn.
 #define LINE_OWN 8u
+// A direct message, to one peer or from one (chat_line says which).
+#define LINE_DIRECT 16u
 
 // What became of a message of ours: a peer it went to never acked it (name says who), or there's
 // nothing left to hear about it. Settled with nobody missed, every peer it went to has it. Copies
@@ -300,6 +302,9 @@ int chat_submit_line(chat_t *c, const char *line, double now);
 // Runs "name args" (no leading ':') from CHAT_COMMANDS against this session.
 cmd_result_t chat_run_command(chat_t *c, const char *line);
 void chat_send_text(chat_t *c, const char *text, double now);
+// Sends text as an answer to the message with id mid (chat_line's), quoting the start of it. -1 if
+// that message is no longer among the recent ones a reply can answer.
+int chat_send_reply(chat_t *c, const char *mid, const char *text, double now);
 // Offers the file at path (used as is: ~ and quotes aren't expanded) to everyone here, like :send.
 // A picture offered is cleaned first (common/image/clean.h), unless asis.
 void chat_send_file(chat_t *c, const char *path, int asis);
@@ -469,6 +474,17 @@ const file_entry_t *chat_file_at(const chat_t *c, int i);
 // text, from the start, is the quote (0 for any other line).
 unsigned chat_own_seq(const chat_t *c);
 int chat_line_quote(const chat_t *c);
+// While a message's line is printed: its id (hex), who wrote it (their id and nick: ours for our
+// own, and for a relayed one what the peer passing it on says), and the peer it came from, or a
+// direct one is to or from (NULL for ours to everyone). A file's offer has no id, and any other
+// line has none of them.
+typedef struct {
+    const char *mid;
+    const uint8_t *origin;
+    const char *nick;
+    const peer_t *peer;
+} chat_line_t;
+const chat_line_t *chat_line(const chat_t *c);
 // The session this one moved to (:move), or NULL.
 const chat_t *chat_moved_to(const chat_t *c);
 
@@ -498,6 +514,12 @@ verify_state_t chat_peer_verify_state(const peer_t *p);
 build_state_t chat_peer_build_state(const peer_t *p);
 // Whether its "k" says it keeps a history of the session.
 int chat_peer_keeps_history(const peer_t *p);
+// Its verify code (VERIFY_LEN bytes), or NULL until the handshake has made one, and its signing
+// identity's fingerprint (ID_FP_LEN bytes), or NULL if it signs with none.
+const uint8_t *chat_peer_verify_code(const peer_t *p);
+const uint8_t *chat_peer_fingerprint(const peer_t *p);
+// Whether its build reads direct messages (:msg).
+int chat_peer_can_dm(const peer_t *p);
 
 // ---- what the app sets ----
 

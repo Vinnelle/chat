@@ -125,7 +125,9 @@ int term_read_password(const char *prompt, char *out, size_t outlen) {
 }
 
 #define QUEUE_SLOTS 16
-#define READER_LINE_MAX 1024
+// Long enough for a --json command carrying a whole message or a key.
+#define READER_LINE_MAX 16384
+#define READER_FULL_WAIT_MS 10
 
 struct stdin_reader {
     pthread_mutex_t lock;
@@ -146,6 +148,12 @@ static void *reader_main(void *arg) {
             break;
         }
         pthread_mutex_lock(&r->lock);
+        // A full queue waits for the loop to take some, so no line is lost.
+        while (r->count >= QUEUE_SLOTS && !r->stop) {
+            pthread_mutex_unlock(&r->lock);
+            platform_sleep_ms(READER_FULL_WAIT_MS);
+            pthread_mutex_lock(&r->lock);
+        }
         if (r->count < QUEUE_SLOTS) {
             copy_str(r->lines[r->tail], buf, sizeof r->lines[r->tail]);
             r->tail = (r->tail + 1) % QUEUE_SLOTS;

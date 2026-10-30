@@ -261,7 +261,9 @@ void send_text(chat_t *c, const char *text_in, const recent_msg_t *reply, double
     unsigned own = ++c->own_seq;
     snprintf(shown_text, sizeof shown_text, "%s%s", prefix, line);
     c->line_quote = (int)strlen(prefix);
+    c->line = (chat_line_t){ mid, c->my_id, c->nick, NULL };
     ui_own(c, who, shown_text);
+    c->line = (chat_line_t){ 0 };
     c->line_quote = 0;
     recent_add(c, mid, c->my_id, c->nick, line, now);
     int sent = 0, held = 0;
@@ -290,6 +292,17 @@ void send_text(chat_t *c, const char *text_in, const recent_msg_t *reply, double
 void chat_send_text(chat_t *c, const char *text_in, double now) {
     c->now = now;
     send_text(c, text_in, NULL, now);
+}
+
+int chat_send_reply(chat_t *c, const char *mid, const char *text, double now) {
+    c->now = now;
+    const recent_msg_t *r = recent_find(c, mid);
+    if (!r) return -1;
+    // A copy, as cmd_reply makes: sending adds to the recent messages r is one of.
+    recent_msg_t answered = *r;
+    send_text(c, text, &answered, now);
+    crypto_wipe(&answered, sizeof answered);
+    return 0;
 }
 
 int chat_submit_line(chat_t *c, const char *line_in, double now) {

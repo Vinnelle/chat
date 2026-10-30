@@ -183,7 +183,9 @@ static void on_message(chat_t *c, peer_t *p, char **f, int n, double now) {
         else snprintf(shown, sizeof shown, "%s#%.*s (via %s%s)", nick, SHORT_ID_HEX, f[2], via, mark);
         snprintf(line, sizeof line, "%s%s", prefix, text);
         c->line_quote = (int)strlen(prefix);
+        c->line = (chat_line_t){ f[1], origin, nick, p };
         ui_chat(c, direct ? p->color : NULL, mentioned, shown, line);
+        c->line = (chat_line_t){ 0 };
         c->line_quote = 0;
         recent_add(c, f[1], origin, nick, text, now);
         // Only as much as the preview setting allows, since desktops keep what a notification shows.
@@ -210,7 +212,9 @@ static void on_direct(chat_t *c, peer_t *p, char **f) {
     clean_text(f[2], text, MAX_TEXT);
     chat_peer_name(c, p, via);
     snprintf(shown, sizeof shown, "%s (" DM_ARROW " you)%s", via, code_mark(c, p));
+    c->line = (chat_line_t){ f[1], p->id, p->nick, p };
     ui_direct(c, p->color, 1, shown, text);
+    c->line = (chat_line_t){ 0 };
     // It's for us, so it counts as a mention.
     if (c->notify && c->notify_mode != NOTIFY_NONE)
         c->notify(c->ui, c->notify_preview >= PREVIEW_NICK ? shown : NULL,

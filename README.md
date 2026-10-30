@@ -77,6 +77,7 @@ page](https://github.com/Vinnelle/chat/releases) and check it against
 | [Files and pictures](docs/files.md) | Sending, fetching and showing files, and what a picture says about you |
 | [Saving settings and keys](docs/saves.md) | `:install`: saves, device locks, security keys and authenticator apps, histories, kept rooms, and the shadow passphrase |
 | [Wire protocol](docs/protocol.md) | What chat sends over the network, byte by byte |
+| [JSON interface](docs/json.md) | `--json`, for another program to drive a session |
 | [Building](docs/building.md) | Building from source, cross builds for Windows and macOS, and the tests |
 | [Releasing](docs/releasing.md) | How releases are made, signed and reproduced, and the backup key |
 | [Architecture](docs/architecture.md) | How the source is laid out |

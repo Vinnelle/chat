@@ -18,6 +18,7 @@ For using chat:
 For reviewing or working on it:
 
 - [Wire protocol](protocol.md): what chat sends over the network, byte by byte.
+- [JSON interface](json.md): `--json`, for another program to drive a session.
 - [Architecture](architecture.md): how the source is laid out.
 - [Building](building.md): building from source, cross builds for Windows and macOS, and the tests.
 - [Releasing](releasing.md): how releases are made, signed and reproduced, and the backup key.

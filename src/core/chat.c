@@ -170,6 +170,7 @@ const file_entry_t *chat_file_at(const chat_t *c, int i) {
 
 unsigned chat_own_seq(const chat_t *c) { return c->own_seq; }
 int chat_line_quote(const chat_t *c) { return c->line_quote; }
+const chat_line_t *chat_line(const chat_t *c) { return &c->line; }
 const chat_t *chat_moved_to(const chat_t *c) { return c->move_to; }
 
 void chat_net(const chat_t *c, chat_net_t *out) {
@@ -205,6 +206,11 @@ identity_source_t chat_peer_identity_source(const peer_t *p) { return p->identit
 verify_state_t chat_peer_verify_state(const peer_t *p) { return p->identity_state; }
 build_state_t chat_peer_build_state(const peer_t *p) { return p->build_state; }
 int chat_peer_keeps_history(const peer_t *p) { return p->persists; }
+const uint8_t *chat_peer_verify_code(const peer_t *p) { return p->vfy_set ? p->vfy : NULL; }
+const uint8_t *chat_peer_fingerprint(const peer_t *p) {
+    return p->identity_source != IDENT_NONE ? p->identity_fp : NULL;
+}
+int chat_peer_can_dm(const peer_t *p) { return p->can_pm; }
 
 void chat_set_verify_required(chat_t *c, int on) { c->verify_required = on; }
 void chat_set_notify_mode(chat_t *c, notify_mode_t mode) { c->notify_mode = mode; }
@@ -1043,5 +1049,5 @@ void ui_direct(chat_t *c, const uint8_t rgb[3], int to_me, const char *name, con
     char msg[UI_LINE_MAX];
     int head = snprintf(msg, sizeof msg, "%s:", name);
     snprintf(msg + head, sizeof msg - (size_t)head, " %s", text);
-    emit(c, msg, rgb, LINE_CHAT | (to_me ? LINE_MENTION : LINE_OWN), head, 0);
+    emit(c, msg, rgb, LINE_CHAT | LINE_DIRECT | (to_me ? LINE_MENTION : LINE_OWN), head, 0);
 }

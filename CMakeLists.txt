@@ -228,6 +228,7 @@ add_executable(chat
     ${CHAT_CORE_SOURCES}
     src/app/main.c
     src/app/plain.c
+    src/app/json.c
     src/app/settings.c
     src/app/identity.c
     src/app/update.c

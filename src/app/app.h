@@ -387,7 +387,7 @@ typedef struct {
     uint16_t port;
     char peers[MAX_PEER_ARGS][PEER_ARG_LEN];
     int n_peers;
-    int simple, update, has_color, nosandbox;
+    int simple, json, update, has_color, nosandbox;
     uint8_t color[3];
 } options_t;
 
@@ -510,6 +510,11 @@ int panic_key_is(const tui_key_t *key);
 extern chat_t *g_plain_engine;
 int run_plain(const char *session_name, const char *password, uint16_t port,
               const char peer_args[][PEER_ARG_LEN], int n_peer_args);
+
+// json.c
+extern int g_json;
+int run_json(const options_t *o);
+void json_log(const char *hhmm, const char *text);
 
 // settings.c
 extern const setting_def_t SETTINGS[N_SETTING_IDS];

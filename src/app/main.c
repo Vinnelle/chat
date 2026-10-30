@@ -4,7 +4,7 @@
 
 static const char *USAGE =
     "usage: chat [--nick NAME] [--colour NAME|#HEX] [--identity age|pgp[-nonick|:KEYFILE]]\n"
-    "            [--simple] [--save NAME]\n"
+    "            [--simple | --json] [--save NAME]\n"
     "            [--routing udp|tor] [--nodht] [--noipv6] [--nolan] [--noportmap]\n"
     "            [--nostr off|fallback|always] [--relay wss://HOST ...]\n"
     "            [--tor-launch auto|always|never] [--tor-path PATH] [--tor-socks HOST:PORT]\n"
@@ -177,6 +177,10 @@ static const char *USAGE =
     "              starting with : is a command (:help lists them). For scripts and basic\n"
     "              terminals. This is also used automatically when stdout isn't a tty.\n"
     "              Typed in a terminal, Ctrl+C quits on a second press within 3 seconds.\n"
+    "  --json      one session for another program to drive: JSON Lines both ways,\n"
+    "              what happens on stdout and commands on stdin (docs/json.md).\n"
+    "              It opens no save, and the room, its password and any signing key\n"
+    "              come in its \"start\" command\n"
     "  --session   join this session at startup (needs --port; \"chat --session ID\" alone\n"
     "              still opens the TUI so you can join yourself)\n"
     "  --update    install the latest release from GitHub and exit, without opening chat\n"
@@ -271,6 +275,7 @@ void push_log(const char *fmt, ...) {
     char msg[TUI_LINE_MAX];
     va_list ap; va_start(ap, fmt); vsnprintf(msg, sizeof msg, fmt, ap); va_end(ap);
     char hhmm[HHMM_LEN]; current_hhmm(hhmm);
+    if (g_json) { json_log(hhmm, msg); return; }
     if (g_plain) { printf("[%s] %s\n", hhmm, msg); fflush(stdout); return; }
     session_slot_t *s = g_app.selected;
     push_console(s ? &s->console : &g_app.log, s ? &s->console_scroll : &g_app.log_scroll, hhmm, msg, NULL);
@@ -706,6 +711,8 @@ static int read_options(int argc, char **argv, options_t *o) {
             copy_str(strcmp(key, "tor-socks") == 0 ? g_app.route.tor.socks : g_app.route.tor.control, v, TOR_HOST_MAX);
         } else if (strcmp(key, "simple") == 0) {
             o->simple = 1;
+        } else if (strcmp(key, "json") == 0) {
+            o->json = 1;
         } else if (strcmp(key, "nosandbox") == 0) {
             o->nosandbox = 1;
         } else if ((strcmp(key, "colour") == 0 || strcmp(key, "color") == 0) && i + 1 < argc) {
@@ -864,6 +871,15 @@ int main(int argc, char **argv) {
     device_check();
     update_self_build(&g_self_build);
     lock_app_secrets();
+
+    // No save: the program driving it keeps what it wants kept.
+    if (o->json) {
+        net_startup();
+        if (o->has_color) memcpy(g_app.color, o->color, 3);
+        else chat_random_colour(g_app.color);
+        if (o->nick[0]) chat_clean_nick(o->nick, g_app.nick);
+        return run_json(o);
+    }
 
     int saved = pick_save(o);
     if (o->update) return run_update(saved);

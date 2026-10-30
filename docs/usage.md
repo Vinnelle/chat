@@ -1,7 +1,7 @@
 # Usage
 
 ```
-chat [--nick NAME] [--colour NAME|#HEX] [--identity age|pgp[-nonick|:KEYFILE]] [--simple]
+chat [--nick NAME] [--colour NAME|#HEX] [--identity age|pgp[-nonick|:KEYFILE]] [--simple | --json]
      [--routing udp|tor] [--nodht] [--noipv6] [--nolan] [--noportmap]
      [--nostr off|fallback|always] [--relay wss://HOST ...]
      [--tor-launch auto|always|never] [--tor-path PATH] [--tor-socks HOST:PORT]
@@ -282,6 +282,7 @@ Options given here override what `:install` saved, for that run.
 | `--identity ...` | `age` or `pgp` for a key made from a password (asked for, or `CHAT_SIGN_PASSWORD`) and your nick, `age-nonick` or `pgp-nonick` for one made from the password alone, or `age:KEYFILE` or `pgp:KEYFILE` for your own (see [Security](security.md#signing-identities)); for that run, instead of a key `:install` saved |
 | `--save NAME` | Open the save called NAME, without the list of saves (`default` is the one in `~/.config/chat` itself); if there isn't one, start from the defaults and let `:install` make it (see [Installing](saves.md)) |
 | `--simple` | Plain `[HH:MM] ...` lines, one session, stdin, `:name` runs a command. Used automatically when stdout isn't a tty |
+| `--json` | One session for another program to drive, with JSON Lines on stdin and stdout (see [JSON interface](json.md)). It opens no save |
 | `--nosandbox` | Don't put the sandbox up for that run (Linux; `:set sandbox off` keeps it down) |
 | `--session ID` | Join a session at startup (with `--port`, `--peer`) |
 | `--update` | Install the latest release and exit, without opening chat (see [Updating](#updating)) |

@@ -413,7 +413,9 @@ static cmd_result_t cmd_msg(void *ctx, const char *arg) {
     unsigned own = ++c->own_seq;
     track_message(c, p, mid, record, own, c->now);
     snprintf(shown, sizeof shown, "%s (" DM_ARROW " %s) (you)", c->nick, name);
+    c->line = (chat_line_t){ mid, c->my_id, c->nick, p };
     ui_direct(c, c->my_color, 0, shown, line);
+    c->line = (chat_line_t){ 0 };
     return CMD_OK;
 }
 
